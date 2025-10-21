@@ -59,57 +59,63 @@ cargo clean
 
 ## 🏗️ Step 2: Build Router Program
 
-### **2.1 Run cargo build-sbf (NO --release flag)**
+### **2.1 Run cargo build-sbf (NO package flag!)**
 ```bash
-cargo build-sbf --package percolator_router
+cargo build-sbf
 ```
 
 **Expected output:**
 ```
+   Compiling percolator_common v0.1.0
    Compiling percolator_router v0.1.0
-    Finished sbf-solana-solana/debug profile [unoptimized + debuginfo] target(s) in 45s
-    
-    To deploy this program:
-      $ solana program deploy ./target/sbf-solana-solana/debug/percolator_router.so
+   Compiling percolator_slab v0.1.0
+    Finished sbf-solana-solana/debug profile [unoptimized + debuginfo] target(s) in 120s
 ```
 
 ### **2.2 Verify Build Success**
 ```bash
-ls target/sbf-solana-solana/debug/percolator_router.so
+dir target/sbf-solana-solana/debug/percolator_router.so
+dir target/sbf-solana-solana/debug/percolator_slab.so
 ```
 
-Should show: `percolator_router.so` exists
+Should show: Both `.so` files exist
 
 ---
 
-## 🏗️ Step 3: Build Slab Program
+## ✅ Step 3: Verify Build Success
 
-### **3.1 Build Slab Program**
 ```bash
-cargo build-sbf --package percolator_slab
+ls target/sbf-solana-solana/debug/*.so
 ```
 
 **Expected output:**
 ```
-   Compiling percolator_slab v0.1.0
-    Finished sbf-solana-solana/debug profile [unoptimized + debuginfo] target(s) in 45s
-    
-    To deploy this program:
-      $ solana program deploy ./target/sbf-solana-solana/release/percolator_slab.so
+percolator_router.so  (~400 KB)
+percolator_slab.so    (~380 KB)
 ```
-
-### **3.2 Verify Build Success**
-```bash
-ls target/sbf-solana-solana/debug/percolator_slab.so
-```
-
-Should show: `percolator_slab.so` exists
 
 ---
 
 ## ✅ Troubleshooting: Common Errors
 
-### **Error 1: "Can't get home directory path: environment variable not found"**
+### **Error 1: "Found argument '--package' which wasn't expected"**
+
+**Cause**: `cargo build-sbf` doesn't accept `--package`. It builds the entire workspace automatically.
+
+**Fix**:
+```bash
+# WRONG:
+cargo build-sbf --package percolator_router
+
+# CORRECT:
+cargo build-sbf
+```
+
+This will build Router, Slab, and Common all at once.
+
+---
+
+### **Error 2: "Can't get home directory path: environment variable not found"**
 
 **Cause**: HOME environment variable not set on Windows
 
@@ -120,11 +126,11 @@ $env:HOME = "$env:USERPROFILE"
 Write-Host "HOME is: $env:HOME"
 ```
 
-Then retry: `cargo build-sbf --package percolator_router`
+Then retry: `cargo build-sbf`
 
 ---
 
-### **Error 2: "lock file version 4 was found, but this version of Cargo does not understand this lock file"**
+### **Error 3: "lock file version 4 was found, but this version of Cargo does not understand this lock file"**
 
 **Cause**: Cargo version mismatch
 
@@ -138,28 +144,7 @@ cargo update
 
 # Clean and retry
 cargo clean
-cargo build-sbf --package percolator_router
-```
-
----
-
-### **Error 3: "the argument '--release' cannot be used multiple times"**
-
-**Cause**: Using `-- --release` syntax (which is wrong)
-
-**Fix**: 
-```bash
-# WRONG:
-cargo build-sbf -- --release
-
-# CORRECT:
-cargo build-sbf --package percolator_router
-```
-
-For release builds, use:
-```bash
-# Builds in release mode automatically
-cargo build-sbf --package percolator_router
+cargo build-sbf
 ```
 
 ---
@@ -176,7 +161,7 @@ $env:HOME = "$env:USERPROFILE"
 
 # Then run the command
 cd C:\Users\Rey\Desktop\percolator-fork
-cargo build-sbf --package percolator_router
+cargo build-sbf
 ```
 
 ---
@@ -329,8 +314,7 @@ solana cluster-version
 - [ ] **HOME environment variable set** (`$env:HOME = "$env:USERPROFILE"`)
 - [ ] **Percolator forked & cloned** locally
 - [ ] **Cargo.lock valid** (version = 4)
-- [ ] **Router built successfully** (`cargo build-sbf --package percolator_router`)
-- [ ] **Slab built successfully** (`cargo build-sbf --package percolator_slab`)
+- [ ] **Run cargo build-sbf** (builds Router, Slab, Common all together)
 - [ ] **Router .so file exists** (`target/sbf-solana-solana/debug/percolator_router.so`)
 - [ ] **Slab .so file exists** (`target/sbf-solana-solana/debug/percolator_slab.so`)
 - [ ] **Validator running** (in separate terminal)
@@ -342,40 +326,11 @@ solana cluster-version
 
 ---
 
-## 🎯 Next Steps
-
-Once both programs are deployed:
-
-1. **Update Dashboard Environment Variables**
-   ```env
-   NEXT_PUBLIC_ROUTER_PROGRAM=RoutR1VdCpHqj89WEMJhb6TkGT9cPfr1rVjhM3e2YQr
-   NEXT_PUBLIC_SLAB_PROGRAM=SLabZ6PsDLh2X6HzEoqxFDMqCVcJXDKCNEYuPzUvGPk
-   NEXT_PUBLIC_RPC_ENDPOINT=http://localhost:8899
-   ```
-
-2. **Run Unit Tests**
-   ```bash
-   cargo test --lib
-   ```
-
-3. **Create Integration Tests**
-   - Test reserve-commit flow
-   - Test order matching
-   - Test liquidation
-
-4. **Connect Dashboard**
-   - Update `hooks/use-trading.ts` to call programs
-   - Test wallet signing
-   - Display on-chain state
-
----
-
 ## 📞 Quick Reference
 
 | Command | Purpose |
 |---------|---------|
-| `cargo build-sbf --package percolator_router` | Build Router |
-| `cargo build-sbf --package percolator_slab` | Build Slab |
+| `cargo build-sbf` | Build all programs (Router, Slab, Common) |
 | `solana-test-validator` | Start local validator |
 | `solana config set --url http://localhost:8899` | Configure for local |
 | `solana program deploy target/sbf-solana-solana/debug/percolator_router.so` | Deploy Router |
@@ -386,8 +341,9 @@ Once both programs are deployed:
 
 ## 🎉 Success Criteria
 
-✅ Router .so file built  
-✅ Slab .so file built  
+✅ All programs built  
+✅ Router .so file created  
+✅ Slab .so file created  
 ✅ Router deployed to local validator  
 ✅ Slab deployed to local validator  
 ✅ Both programs verified with `solana program show`  
