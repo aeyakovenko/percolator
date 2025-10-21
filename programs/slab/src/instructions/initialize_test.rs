@@ -19,6 +19,8 @@ mod initialize_v0_tests {
         let taker_fee_bps = 20i64; // 0.2%
         let bump = 255;
 
+        let contract_size = 1_000_000i64; // 1.0
+
         let header = SlabHeader::new(
             program_id,
             lp_owner,
@@ -26,6 +28,7 @@ mod initialize_v0_tests {
             instrument,
             mark_px,
             taker_fee_bps,
+            contract_size,
             bump,
         );
 
@@ -41,6 +44,7 @@ mod initialize_v0_tests {
         assert_eq!(header.instrument, instrument);
         assert_eq!(header.mark_px, mark_px);
         assert_eq!(header.taker_fee_bps, taker_fee_bps);
+        assert_eq!(header.contract_size, contract_size);
         assert_eq!(header.bump, bump);
 
         // Verify seqno starts at 0

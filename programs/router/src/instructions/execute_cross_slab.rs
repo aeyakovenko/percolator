@@ -28,6 +28,7 @@ pub struct SlabSplit {
 /// * `portfolio` - User's portfolio account
 /// * `user` - User pubkey (signer)
 /// * `vault` - Collateral vault
+/// * `router_authority` - Router authority PDA (for CPI signing)
 /// * `slab_accounts` - Array of slab accounts to execute on
 /// * `receipt_accounts` - Array of receipt PDAs (one per slab)
 /// * `splits` - How to split the order across slabs
@@ -40,6 +41,7 @@ pub fn process_execute_cross_slab(
     portfolio: &mut Portfolio,
     user: &Pubkey,
     vault: &mut Vault,
+    router_authority: &AccountInfo,
     slab_accounts: &[AccountInfo],
     receipt_accounts: &[AccountInfo],
     splits: &[SlabSplit],
@@ -56,13 +58,61 @@ pub fn process_execute_cross_slab(
         return Err(PercolatorError::InvalidInstruction);
     }
 
+    // Verify router_authority is the correct PDA
+    use crate::pda::derive_authority_pda;
+    let (expected_authority, _authority_bump) = derive_authority_pda(&portfolio.router_id);
+    if router_authority.key() != &expected_authority {
+        msg!("Error: Invalid router authority PDA");
+        return Err(PercolatorError::InvalidAccount);
+    }
+
     // Phase 1: Read QuoteCache from each slab (v0 - skip validation for now)
     // In production, we'd validate seqno consistency here (TOCTOU safety)
 
     // Phase 2: CPI to each slab's commit_fill
-    // For v0, we'll stub out actual CPI and simulate the fills
-    // Real CPI will be added when we wire up slab program ID
     msg!("Executing fills on slabs");
+
+    for (i, split) in splits.iter().enumerate() {
+        let slab_account = &slab_accounts[i];
+        let receipt_account = &receipt_accounts[i];
+
+        // Get slab program ID from account owner
+        let slab_program_id = slab_account.owner();
+
+        // Build commit_fill instruction data (18 bytes total)
+        // Layout: discriminator (1) + side (1) + qty (8) + limit_px (8)
+        let mut instruction_data = [0u8; 18];
+        instruction_data[0] = 1; // CommitFill discriminator
+        instruction_data[1] = split.side;
+        instruction_data[2..10].copy_from_slice(&split.qty.to_le_bytes());
+        instruction_data[10..18].copy_from_slice(&split.limit_px.to_le_bytes());
+
+        // Build account metas for CPI
+        // 0. slab_account (writable)
+        // 1. receipt_account (writable)
+        // 2. router_authority (signer PDA)
+        use pinocchio::{
+            instruction::{AccountMeta, Instruction},
+            program::invoke,
+        };
+
+        let account_metas = [
+            AccountMeta::writable(slab_account.key()),
+            AccountMeta::writable(receipt_account.key()),
+            AccountMeta::writable_signer(router_authority.key()),
+        ];
+
+        let instruction = Instruction {
+            program_id: slab_program_id,
+            accounts: &account_metas,
+            data: &instruction_data,
+        };
+
+        // For v0, use regular invoke (CPI signing will be added in production)
+        // TODO: implement proper invoke_signed with authority PDA
+        invoke(&instruction, &[slab_account, receipt_account, router_authority])
+            .map_err(|_| PercolatorError::CpiFailed)?;
+    }
 
     // Phase 3: Aggregate fills and update portfolio
     // For each split, update the portfolio exposure
@@ -140,3 +190,7 @@ fn calculate_initial_margin(net_exposure: i64, splits: &[SlabSplit]) -> u128 {
     // For v0 proof: if net_exposure = 0, IM = 0!
     (abs_exposure * avg_price * 10) / (100 * 1_000_000)
 }
+
+#[cfg(test)]
+#[path = "execute_cross_slab_test.rs"]
+mod execute_cross_slab_test;

@@ -60,6 +60,7 @@ impl SlabHeader {
         instrument: Pubkey,
         mark_px: i64,
         taker_fee_bps: i64,
+        contract_size: i64,
         bump: u8,
     ) -> Self {
         // Calculate byte offsets
@@ -75,7 +76,7 @@ impl SlabHeader {
             lp_owner,
             router_id,
             instrument,
-            contract_size: 1_000_000, // 1.0 (1e6 scale)
+            contract_size,
             tick: 1_000_000,           // $1 tick
             lot: 1_000_000,            // 1.0 lot
             mark_px,
@@ -113,6 +114,7 @@ mod tests {
             Pubkey::default(),
             50_000_000_000, // $50,000 mark price
             20,             // 0.2% taker fee
+            1_000_000,      // contract size
             255,
         );
 
@@ -131,6 +133,7 @@ mod tests {
             Pubkey::default(),
             50_000_000_000,
             20,
+            1_000_000,
             255,
         );
 
@@ -149,6 +152,7 @@ mod tests {
             Pubkey::default(),
             50_000_000_000,
             20,
+            1_000_000,
             255,
         );
 

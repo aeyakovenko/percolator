@@ -1,0 +1,26 @@
+[package]
+name = "percolator-oracle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "percolator_oracle"
+
+[dependencies]
+pinocchio.workspace = true
+pinocchio-log.workspace = true
+
+[dev-dependencies]
+solana-program-test.workspace = true
+solana-sdk.workspace = true
+tokio.workspace = true
+
+[features]
+default = []
+test-sbf = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

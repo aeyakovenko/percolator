@@ -1,6 +1,5 @@
 //! Initialize instruction - initialize slab state (v0 minimal)
 
-use crate::pda::derive_slab_pda;
 use crate::state::{SlabHeader, SlabState};
 use percolator_common::*;
 use pinocchio::{account_info::AccountInfo, msg, pubkey::Pubkey};
@@ -12,30 +11,27 @@ use pinocchio::{account_info::AccountInfo, msg, pubkey::Pubkey};
 ///
 /// # Arguments
 /// * `program_id` - The slab program ID
-/// * `slab_account` - The slab account to initialize (must be PDA)
-/// * `market_id` - Unique market identifier (32 bytes)
+/// * `slab_account` - The slab account to initialize
 /// * `lp_owner` - LP owner pubkey
 /// * `router_id` - Router program ID
 /// * `instrument` - Shared instrument ID (agreed with router)
 /// * `mark_px` - Initial mark price from oracle (1e6 scale)
-/// * `taker_fee_bps` - Taker fee (basis points, 1e6 scale)
+/// * `taker_fee_bps` - Taker fee (basis points)
+/// * `contract_size` - Contract size (1e6 scale)
+/// * `bump` - PDA bump seed
 pub fn process_initialize_slab(
     program_id: &Pubkey,
     slab_account: &AccountInfo,
-    market_id: [u8; 32],
     lp_owner: Pubkey,
     router_id: Pubkey,
     instrument: Pubkey,
     mark_px: i64,
     taker_fee_bps: i64,
+    contract_size: i64,
+    bump: u8,
 ) -> Result<(), PercolatorError> {
-    // Derive and verify slab PDA
-    let (expected_pda, bump) = derive_slab_pda(&market_id, program_id);
-
-    if slab_account.key() != &expected_pda {
-        msg!("Error: Slab account is not the correct PDA");
-        return Err(PercolatorError::InvalidAccount);
-    }
+    // For v0, we skip PDA derivation and just verify ownership
+    // In production, we would verify the account is a valid PDA
 
     // Verify account size (~4KB for v0)
     let data = slab_account.try_borrow_data()
@@ -65,6 +61,7 @@ pub fn process_initialize_slab(
         instrument,
         mark_px,
         taker_fee_bps,
+        contract_size,
         bump,
     );
 

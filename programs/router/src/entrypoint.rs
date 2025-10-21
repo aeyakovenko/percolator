@@ -216,21 +216,23 @@ fn process_initialize_portfolio_inner(program_id: &Pubkey, accounts: &[AccountIn
 /// 0. `[writable]` Portfolio account
 /// 1. `[signer]` User authority
 /// 2. `[writable]` Vault account
-/// 3..N. `[writable]` Slab accounts
+/// 3. `[]` Router authority PDA
+/// 4..N. `[writable]` Slab accounts
 /// N+1..M. `[writable]` Receipt PDAs
 ///
 /// Expected data layout: TBD
 /// - num_splits: u8
 /// - splits: [SlabSplit; num_splits]
 fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 3 {
-        msg!("Error: ExecuteCrossSlab requires at least 3 accounts");
+    if accounts.len() < 4 {
+        msg!("Error: ExecuteCrossSlab requires at least 4 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
     let portfolio_account = &accounts[0];
     let user_account = &accounts[1];
     let vault_account = &accounts[2];
+    let router_authority = &accounts[3];
 
     // Validate accounts
     validate_owner(portfolio_account, program_id)?;
@@ -254,6 +256,7 @@ fn process_execute_cross_slab_inner(program_id: &Pubkey, accounts: &[AccountInfo
         portfolio,
         user_account.key(),
         vault,
+        router_authority,
         slab_accounts,
         receipt_accounts,
         splits,

@@ -175,11 +175,23 @@ But **none of that is needed to prove the thesis**.
   - [x] IM calculation based on net exposure (IM = 0 when net = 0!)
   - [x] Margin requirement checking
 
+**Phase 3: CPI integration** (Current session)
+- [x] Slab entrypoint simplified to v0 instruction set
+  - [x] 2 instructions: Initialize, CommitFill
+  - [x] Removed 4 complex instructions (Reserve, Commit, Cancel, BatchOpen, AddInstrument)
+  - [x] Added contract_size parameter to slab initialization
+- [x] Router authority PDA for CPI signing
+  - [x] Added derive_authority_pda() function (seeds: ["authority"])
+  - [x] Router authority used for signing CPIs to slabs
+- [x] CPI implementation in execute_cross_slab
+  - [x] Build commit_fill instruction data (discriminator + side + qty + limit_px)
+  - [x] Account validation (router_authority must match PDA)
+  - [x] CPI invocation to slab's commit_fill
+  - [x] Error handling (CpiFailed error added)
+
 ### 🚧 In Progress
 
 - [ ] Add 7 critical v0 tests
-- [ ] Wire up real CPI to slab program (currently stubbed)
-- [ ] Add slab program ID configuration
 
 ### 📊 Code Reduction
 

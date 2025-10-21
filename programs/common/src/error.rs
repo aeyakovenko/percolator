@@ -24,6 +24,7 @@ pub enum PercolatorError {
     EscrowInsufficientBalance = 106,
     PortfolioInsufficientMargin = 107,
     InvalidPortfolio = 108,
+    CpiFailed = 109,
 
     // Slab errors (200-299)
     InvalidInstrument = 200,

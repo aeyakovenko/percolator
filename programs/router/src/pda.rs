@@ -20,6 +20,23 @@ pub const PORTFOLIO_SEED: &[u8] = b"portfolio";
 /// Seed prefix for slab registry
 pub const REGISTRY_SEED: &[u8] = b"registry";
 
+/// Seed prefix for router authority (used for CPI signing)
+pub const AUTHORITY_SEED: &[u8] = b"authority";
+
+/// Derive router authority PDA
+///
+/// This PDA is used as the router's signing authority for CPIs to slabs.
+/// Slabs should be initialized with this PDA as their router_id.
+///
+/// # Arguments
+/// * `program_id` - The router program ID
+///
+/// # Returns
+/// * `(Pubkey, u8)` - The derived PDA and its bump seed
+pub fn derive_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    find_program_address(&[AUTHORITY_SEED], program_id)
+}
+
 /// Derive vault PDA for a given mint
 ///
 /// Vault stores collateral for a specific mint (e.g., USDC, SOL)
