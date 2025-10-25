@@ -1,0 +1,46 @@
+name: Verify
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run tests
+        run: cargo test --all-features
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  kani:
+    name: Kani Proofs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+
+      - name: Verify crisis module
+        run: |
+          cargo kani -p model_safety --harness proof_c2_scales_monotone
+          cargo kani -p model_safety --harness proof_c3_no_overburn
+          cargo kani -p model_safety --harness proof_c5_vesting_conserves_sum
+          cargo kani -p model_safety --harness proof_c8_loss_waterfall_ordering

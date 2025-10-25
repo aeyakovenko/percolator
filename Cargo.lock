@@ -179,6 +179,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "amm_model"
+version = "0.1.0"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2971,6 +2975,7 @@ dependencies = [
 name = "percolator-amm"
 version = "0.1.0"
 dependencies = [
+ "amm_model",
  "percolator-common",
  "pinocchio",
  "pinocchio-log",
@@ -3268,6 +3273,7 @@ dependencies = [
 name = "proofs-kani"
 version = "0.1.0"
 dependencies = [
+ "amm_model",
  "arrayvec",
  "model_safety",
 ]

@@ -6,11 +6,17 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(kani)]
+extern crate kani;
+
 pub mod state;
 pub mod math;
 pub mod warmup;
 pub mod helpers;
 pub mod transitions;
+pub mod lp_bucket;
+pub mod adaptive_warmup;
+pub mod crisis;
 
 // Re-export commonly used types
 pub use state::*;

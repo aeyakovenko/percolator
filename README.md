@@ -520,12 +520,78 @@ For now, the project focuses on comprehensive unit testing (53 tests passing) wh
 - [Surfpool](https://github.com/txtx/surfpool)
 - [Solana Cookbook](https://solanacookbook.com/)
 
+## Crisis Loss Socialization
+
+The `model_safety::crisis` module implements O(1) loss socialization for insolvency events.
+
+### Key Features
+- **O(1) Crisis Resolution**: Updates global scale factors instead of iterating over users
+- **Lazy Materialization**: Users reconcile losses on their next action
+- **Loss Waterfall**: Warming PnL → Insurance Fund → Equity (principal + realized)
+- **Formally Verified**: Kani proofs for critical invariants
+- **no_std Compatible**: Works in Solana BPF environment
+
+### Module Structure
+```
+crates/model_safety/src/crisis/
+├── mod.rs          - Public API & integration tests
+├── amount.rs       - Q64.64 fixed-point arithmetic
+├── accums.rs       - Global state & user portfolios
+├── haircut.rs      - Crisis resolution logic
+├── materialize.rs  - Lazy user reconciliation
+└── proofs.rs       - Kani formal verification proofs
+```
+
+### Testing
+```bash
+# Run all crisis module tests (33 unit tests)
+cargo test --package model_safety
+
+# Run Kani formal verification proofs
+cargo kani --package model_safety --harness proof_c2_scales_monotone
+cargo kani --package model_safety --harness proof_c3_no_overburn
+cargo kani --package model_safety --harness proof_c5_vesting_conserves_sum
+cargo kani --package model_safety --harness proof_c8_loss_waterfall_ordering
+
+# Install Kani (if not already installed)
+cargo install --locked kani-verifier
+cargo kani setup
+```
+
+### Verified Invariants
+- C2: Scales monotonic (never increase)
+- C3: No over-burn (never burn more than available)
+- C4: Materialization idempotent (safe to call twice)
+- C5: Vesting conservation (sum preserved)
+- C8: Loss waterfall ordering enforced
+
+### Usage Example
+```rust
+use model_safety::crisis::*;
+
+// Crisis occurs
+let mut accums = Accums::new();
+accums.sigma_principal = 1_000_000;
+accums.sigma_collateral = 800_000; // 200k deficit
+
+let outcome = crisis_apply_haircuts(&mut accums);
+
+// Later, user touches system
+let mut user = UserPortfolio::new();
+user.principal = 100_000;
+
+materialize_user(&mut user, &mut accums, MaterializeParams::default());
+// User's balance now reflects haircut
+```
+
+See `crates/model_safety/src/crisis/mod.rs` for detailed documentation.
+
 ## License
 
 Apache-2.0
 
 ---
 
-**Status**: Core infrastructure complete ✅ | 53 unit tests passing ✅ | Phase 1 (instruction handlers) next 🚀
+**Status**: Core infrastructure complete ✅ | Crisis module verified ✅ | 86 tests passing ✅
 
-**Last Updated**: October 20, 2025
+**Last Updated**: October 25, 2025
