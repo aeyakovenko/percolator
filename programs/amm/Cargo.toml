@@ -13,6 +13,7 @@ name = "percolator_amm"
 pinocchio.workspace = true
 pinocchio-log.workspace = true
 percolator-common = { path = "../common" }
+amm_model = { path = "../../crates/amm_model" }
 
 [dev-dependencies]
 solana-program-test.workspace = true

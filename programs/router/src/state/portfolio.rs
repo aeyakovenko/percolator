@@ -357,6 +357,35 @@ impl Portfolio {
     pub fn is_above_maintenance_venue_aware(&self) -> bool {
         self.equity >= self.calculate_total_mm() as i128
     }
+
+    /// Calculate maximum withdrawable amount considering adaptive warmup throttling
+    ///
+    /// Returns the total amount that can be withdrawn, factoring in:
+    /// 1. Principal (always fully withdrawable - sacrosanct)
+    /// 2. Vested PnL multiplied by the adaptive warmup unlocked_frac
+    ///
+    /// # Arguments
+    /// * `unlocked_frac` - Unlocked fraction from adaptive warmup system (Q32.32 fixed-point)
+    ///
+    /// # Returns
+    /// Maximum withdrawable amount = principal + (vested_pnl * unlocked_frac)
+    ///
+    /// # Safety
+    ///
+    /// Uses formally verified calculate_withdrawable_pnl() which applies Q32.32
+    /// arithmetic from model_safety::adaptive_warmup (proven correct by Kani P5).
+    pub fn max_withdrawable_with_warmup(
+        &self,
+        unlocked_frac: model_safety::adaptive_warmup::I,
+    ) -> i128 {
+        use crate::state::pnl_vesting::calculate_withdrawable_pnl;
+
+        // Principal is always fully withdrawable (never throttled)
+        let withdrawable_pnl = calculate_withdrawable_pnl(self.vested_pnl, unlocked_frac);
+
+        // Total = principal + (vested_pnl * unlocked_frac)
+        self.principal.saturating_add(withdrawable_pnl)
+    }
 }
 
 #[cfg(test)]
@@ -702,5 +731,86 @@ mod tests {
         // Actual burn_lp_shares() API will implement the proportional math
         let expected_mm_after_partial = (5_000 * 700) / 1000;
         assert_eq!(expected_mm_after_partial, 3_500);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ADAPTIVE WARMUP INTEGRATION TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_max_withdrawable_fully_unlocked() {
+        use model_safety::adaptive_warmup::q1;
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000;
+        portfolio.vested_pnl = 50_000;
+
+        let unlocked_frac = q1(); // 100% unlocked
+
+        let max = portfolio.max_withdrawable_with_warmup(unlocked_frac);
+
+        // Should be able to withdraw principal + all vested PnL
+        assert_eq!(max, 150_000);
+    }
+
+    #[test]
+    fn test_max_withdrawable_half_unlocked() {
+        use model_safety::adaptive_warmup::q1;
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000;
+        portfolio.vested_pnl = 50_000;
+
+        let unlocked_frac = q1() / 2; // 50% unlocked
+
+        let max = portfolio.max_withdrawable_with_warmup(unlocked_frac);
+
+        // Should be: principal + (vested_pnl * 0.5)
+        // = 100_000 + 25_000 = 125_000
+        assert_eq!(max, 125_000);
+    }
+
+    #[test]
+    fn test_max_withdrawable_zero_unlocked() {
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000;
+        portfolio.vested_pnl = 50_000;
+
+        let unlocked_frac = 0; // 0% unlocked (frozen)
+
+        let max = portfolio.max_withdrawable_with_warmup(unlocked_frac);
+
+        // Should only be able to withdraw principal
+        assert_eq!(max, 100_000);
+    }
+
+    #[test]
+    fn test_max_withdrawable_negative_pnl() {
+        use model_safety::adaptive_warmup::q1;
+
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 100_000;
+        portfolio.vested_pnl = -20_000; // Losses
+
+        let unlocked_frac = q1(); // 100% unlocked
+
+        let max = portfolio.max_withdrawable_with_warmup(unlocked_frac);
+
+        // Negative PnL contributes 0, so only principal is withdrawable
+        assert_eq!(max, 100_000);
+    }
+
+    #[test]
+    fn test_max_withdrawable_principal_sacrosanct() {
+        let mut portfolio = Portfolio::new(Pubkey::default(), Pubkey::default(), 0);
+        portfolio.principal = 200_000;
+        portfolio.vested_pnl = 100_000;
+
+        let unlocked_frac = 0; // 0% unlocked (completely frozen)
+
+        let max = portfolio.max_withdrawable_with_warmup(unlocked_frac);
+
+        // Principal is always fully withdrawable regardless of freeze
+        assert_eq!(max, 200_000);
     }
 }

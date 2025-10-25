@@ -80,6 +80,17 @@ pub struct SlabRegistry {
     /// Global haircut state (runtime tracking)
     pub global_haircut: crate::state::pnl_vesting::GlobalHaircut,
 
+    // Adaptive warmup configuration and state
+    /// Adaptive warmup configuration (configurable by governance)
+    pub warmup_config: model_safety::adaptive_warmup::AdaptiveWarmupConfig,
+    /// Adaptive warmup state (runtime tracking of deposit drain and unlock fraction)
+    pub warmup_state: model_safety::adaptive_warmup::AdaptiveWarmupState,
+    /// Total deposits across all portfolios (used for warmup drain calculation)
+    /// Updated on deposit/withdraw operations
+    pub total_deposits: i128,
+    /// Padding for alignment
+    pub _padding3: [u8; 8],
+
     /// Registered slabs
     pub slabs: [SlabEntry; MAX_SLABS],
 }
@@ -117,6 +128,12 @@ impl SlabRegistry {
         self.pnl_vesting_params = crate::state::pnl_vesting::PnlVestingParams::default();
         self.global_haircut = crate::state::pnl_vesting::GlobalHaircut::default();
 
+        // Initialize adaptive warmup with defaults
+        self.warmup_config = model_safety::adaptive_warmup::AdaptiveWarmupConfig::default();
+        self.warmup_state = model_safety::adaptive_warmup::AdaptiveWarmupState::default();
+        self.total_deposits = 0;
+        self._padding3 = [0; 8];
+
         // Zero out the slabs array using ptr::write_bytes (efficient and stack-safe)
         unsafe {
             core::ptr::write_bytes(
@@ -150,6 +167,10 @@ impl SlabRegistry {
             insurance_state: crate::state::insurance::InsuranceState::default(),
             pnl_vesting_params: crate::state::pnl_vesting::PnlVestingParams::default(),
             global_haircut: crate::state::pnl_vesting::GlobalHaircut::default(),
+            warmup_config: model_safety::adaptive_warmup::AdaptiveWarmupConfig::default(),
+            warmup_state: model_safety::adaptive_warmup::AdaptiveWarmupState::default(),
+            total_deposits: 0,
+            _padding3: [0; 8],
             slabs: [SlabEntry {
                 slab_id: Pubkey::default(),
                 version_hash: [0; 32],
@@ -263,6 +284,76 @@ impl SlabRegistry {
         self.preliq_band_bps = preliq_band_bps;
         self.router_cap_per_slab = router_cap_per_slab;
         self.oracle_tolerance_bps = oracle_tolerance_bps;
+    }
+
+    /// Track deposit (increment total_deposits)
+    pub fn track_deposit(&mut self, amount: i128) {
+        self.total_deposits = self.total_deposits.saturating_add(amount);
+    }
+
+    /// Track withdrawal (decrement total_deposits)
+    pub fn track_withdrawal(&mut self, amount: i128) {
+        self.total_deposits = self.total_deposits.saturating_sub(amount);
+    }
+
+    /// Update adaptive warmup state using current total deposits
+    ///
+    /// Convenience method that uses the tracked total_deposits value.
+    /// Call this periodically (e.g., once per slot on first user interaction).
+    ///
+    /// # Arguments
+    /// * `oracle_spread_bps` - Current oracle spread in basis points
+    /// * `insurance_utilization_bps` - Current insurance utilization in basis points (0-10000)
+    pub fn update_warmup_from_current_state(
+        &mut self,
+        oracle_spread_bps: u64,
+        insurance_utilization_bps: u64,
+    ) {
+        use model_safety::adaptive_warmup::q32;
+
+        // Convert total deposits to Q32.32
+        // Clamp to i64 range (should never overflow in practice - would require >9 trillion dollars)
+        let total_deposits_i64: i64 = self.total_deposits.max(0)
+            .try_into()
+            .unwrap_or(i64::MAX);
+        let total_deposits_q32 = q32(total_deposits_i64);
+
+        // Check tripwires
+        let oracle_gap_large = oracle_spread_bps > 50;
+        let insurance_util_high = insurance_utilization_bps > 8000; // 80%
+
+        // Update warmup state
+        model_safety::adaptive_warmup::step(
+            &mut self.warmup_state,
+            &self.warmup_config,
+            total_deposits_q32,
+            oracle_gap_large,
+            insurance_util_high,
+        );
+    }
+
+    /// Update adaptive warmup state (called once per slot)
+    ///
+    /// Uses the formally verified adaptive_warmup::step() function to update
+    /// the PnL unlock fraction based on deposit drain stress.
+    ///
+    /// # Arguments
+    /// * `total_deposits_q32` - Total system deposits in Q32.32 fixed-point format
+    /// * `oracle_gap_large` - True if oracle spread > threshold (e.g., 50 bps)
+    /// * `insurance_util_high` - True if insurance utilization > 80%
+    pub fn update_warmup_state(
+        &mut self,
+        total_deposits_q32: model_safety::adaptive_warmup::I,
+        oracle_gap_large: bool,
+        insurance_util_high: bool,
+    ) {
+        model_safety::adaptive_warmup::step(
+            &mut self.warmup_state,
+            &self.warmup_config,
+            total_deposits_q32,
+            oracle_gap_large,
+            insurance_util_high,
+        );
     }
 }
 

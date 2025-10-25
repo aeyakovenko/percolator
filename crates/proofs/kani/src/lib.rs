@@ -38,3 +38,21 @@ pub mod liquidation;
 
 #[cfg(kani)]
 pub mod properties;
+
+#[cfg(kani)]
+pub mod adaptive_warmup;
+
+#[cfg(kani)]
+pub mod amm;
+
+#[cfg(kani)]
+pub mod venue_isolation;
+
+#[cfg(kani)]
+pub mod pnl_vesting;
+
+#[cfg(kani)]
+pub mod portfolio;
+
+#[cfg(kani)]
+pub mod liq_planner;

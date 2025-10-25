@@ -364,6 +364,10 @@ mod tests {
             insurance_state: crate::state::insurance::InsuranceState::default(),
             pnl_vesting_params: crate::state::pnl_vesting::PnlVestingParams::default(),
             global_haircut: crate::state::pnl_vesting::GlobalHaircut::default(),
+            warmup_config: model_safety::adaptive_warmup::AdaptiveWarmupConfig::default(),
+            warmup_state: model_safety::adaptive_warmup::AdaptiveWarmupState::default(),
+            total_deposits: 0,
+            _padding3: [0; 8],
             slabs: [SlabEntry {
                 slab_id: Pubkey::default(),
                 version_hash: [0; 32],

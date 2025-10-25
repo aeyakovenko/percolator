@@ -2,6 +2,10 @@
 
 A formally-verified perpetual exchange protocol for Solana with O(1) crisis loss socialization.
 
+> **⚠️ EDUCATIONAL USE ONLY**
+>
+> This code is provided for educational and research purposes only. It has not been audited for production use and should not be deployed to handle real funds. Use at your own risk.
+
 ## Quick Start
 
 ```bash

@@ -129,7 +129,12 @@ pub fn process_commit_fill(
                 amm.pool.fee_bps,
                 qty,
                 amm.pool.min_liquidity,
-            )
+            ).map_err(|e| match e {
+                crate::math::amm_model::AmmError::InvalidReserves => PercolatorError::InvalidAccount,
+                crate::math::amm_model::AmmError::InvalidAmount => PercolatorError::InvalidQuantity,
+                crate::math::amm_model::AmmError::InsufficientLiquidity => PercolatorError::InsufficientLiquidity,
+                crate::math::amm_model::AmmError::Overflow => PercolatorError::InvalidInstruction,
+            })?
         }
         Side::Sell => {
             // User sells qty contracts to AMM (AMM buys)
@@ -139,9 +144,14 @@ pub fn process_commit_fill(
                 amm.pool.fee_bps,
                 qty,
                 amm.pool.min_liquidity,
-            )
+            ).map_err(|e| match e {
+                crate::math::amm_model::AmmError::InvalidReserves => PercolatorError::InvalidAccount,
+                crate::math::amm_model::AmmError::InvalidAmount => PercolatorError::InvalidQuantity,
+                crate::math::amm_model::AmmError::InsufficientLiquidity => PercolatorError::InsufficientLiquidity,
+                crate::math::amm_model::AmmError::Overflow => PercolatorError::InvalidInstruction,
+            })?
         }
-    }?;
+    };
 
     // Check limit price
     match side {

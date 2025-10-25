@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 model_safety = { path = "../../model_safety", default-features = false }
+amm_model = { path = "../../amm_model", default-features = false }
 arrayvec = { version = "0.7", default-features = false }
 
 [features]

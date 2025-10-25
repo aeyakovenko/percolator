@@ -292,6 +292,38 @@ pub fn calculate_haircut_fraction(
     sub_i128(FP_ONE, haircut)
 }
 
+/// Calculate withdrawable PnL amount factoring in adaptive warmup throttling
+///
+/// Applies the unlocked_frac from adaptive warmup to the vested PnL amount
+/// to determine how much can actually be withdrawn.
+///
+/// # Arguments
+/// * `vested_pnl` - Vested PnL amount (already passed through time-decay vesting)
+/// * `unlocked_frac` - Unlocked fraction from adaptive warmup (Q32.32 fixed-point, range [0, 2^32])
+///
+/// # Returns
+/// Withdrawable amount = vested_pnl * unlocked_frac / 2^32
+///
+/// # Safety
+///
+/// Uses formally verified Q32.32 arithmetic from model_safety::adaptive_warmup.
+/// The unlocked_frac is guaranteed to be in [0, 1] by Kani proof P5.
+pub fn calculate_withdrawable_pnl(
+    vested_pnl: i128,
+    unlocked_frac: model_safety::adaptive_warmup::I,
+) -> i128 {
+    use model_safety::adaptive_warmup::{qmul, F};
+
+    if vested_pnl <= 0 {
+        return 0; // No withdrawable PnL if none is vested
+    }
+
+    // Scale vested_pnl to Q32.32, multiply by unlocked_frac, then scale back
+    let vested_q32 = vested_pnl * F;
+    let withdrawable_q32 = qmul(vested_q32, unlocked_frac);
+    withdrawable_q32 / F
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,5 +750,78 @@ mod tests {
 
         // Should be very close to 1.0 (>99.99%)
         assert!(result2 > (FP_ONE * 9999) / 10000);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ADAPTIVE WARMUP INTEGRATION TESTS
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_withdrawable_pnl_fully_unlocked() {
+        use model_safety::adaptive_warmup::q1;
+
+        let vested_pnl = 1_000_000_i128;
+        let unlocked_frac = q1(); // Fully unlocked (1.0)
+
+        let withdrawable = calculate_withdrawable_pnl(vested_pnl, unlocked_frac);
+
+        // Should be able to withdraw all vested PnL
+        assert_eq!(withdrawable, vested_pnl);
+    }
+
+    #[test]
+    fn test_withdrawable_pnl_half_unlocked() {
+        use model_safety::adaptive_warmup::{q1, F};
+
+        let vested_pnl = 1_000_000_i128;
+        let unlocked_frac = q1() / 2; // 50% unlocked (0.5)
+
+        let withdrawable = calculate_withdrawable_pnl(vested_pnl, unlocked_frac);
+
+        // Should be able to withdraw half of vested PnL
+        let expected = vested_pnl / 2;
+        let tolerance = vested_pnl / 1000; // 0.1% tolerance for rounding
+        assert!((withdrawable - expected).abs() < tolerance,
+                "withdrawable={}, expected={}", withdrawable, expected);
+    }
+
+    #[test]
+    fn test_withdrawable_pnl_zero_unlocked() {
+        let vested_pnl = 1_000_000_i128;
+        let unlocked_frac = 0; // 0% unlocked (frozen)
+
+        let withdrawable = calculate_withdrawable_pnl(vested_pnl, unlocked_frac);
+
+        // Should not be able to withdraw any PnL
+        assert_eq!(withdrawable, 0);
+    }
+
+    #[test]
+    fn test_withdrawable_pnl_negative_pnl() {
+        use model_safety::adaptive_warmup::q1;
+
+        let vested_pnl = -500_000_i128; // Losses
+        let unlocked_frac = q1(); // Fully unlocked
+
+        let withdrawable = calculate_withdrawable_pnl(vested_pnl, unlocked_frac);
+
+        // Negative PnL should return 0 (can't withdraw losses)
+        assert_eq!(withdrawable, 0);
+    }
+
+    #[test]
+    fn test_withdrawable_pnl_ten_percent_unlocked() {
+        use model_safety::adaptive_warmup::{q1, F};
+
+        let vested_pnl = 10_000_000_i128;
+        let unlocked_frac = q1() / 10; // 10% unlocked (0.1)
+
+        let withdrawable = calculate_withdrawable_pnl(vested_pnl, unlocked_frac);
+
+        // Should be able to withdraw 10% of vested PnL
+        let expected = vested_pnl / 10;
+        let tolerance = vested_pnl / 1000; // 0.1% tolerance for rounding
+        assert!((withdrawable - expected).abs() < tolerance,
+                "withdrawable={}, expected={}", withdrawable, expected);
     }
 }

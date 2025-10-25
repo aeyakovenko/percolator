@@ -157,30 +157,41 @@ fn process_deposit_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[
 ///
 /// Expected accounts:
 /// 0. `[writable]` Vault account
-/// 1. `[writable]` User token account
-/// 2. `[signer]` User authority
-/// 3. `[]` Token program
+/// 1. `[]` Portfolio account (for warmup check)
+/// 2. `[]` Registry account (for warmup state)
+/// 3. `[writable]` User token account
+/// 4. `[signer]` User authority
+/// 5. `[]` Token program
 ///
 /// Expected data layout (16 bytes):
 /// - amount: u128 (16 bytes)
 fn process_withdraw_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 1 {
-        msg!("Error: Withdraw instruction requires at least 1 account");
+    if accounts.len() < 3 {
+        msg!("Error: Withdraw instruction requires at least 3 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
     let vault_account = &accounts[0];
+    let portfolio_account = &accounts[1];
+    let registry_account = &accounts[2];
+
+    // Validate accounts
     validate_owner(vault_account, program_id)?;
     validate_writable(vault_account)?;
+    validate_owner(portfolio_account, program_id)?;
+    validate_owner(registry_account, program_id)?;
 
+    // Borrow account data
     let vault = unsafe { borrow_account_data_mut::<Vault>(vault_account)? };
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
+    let registry = unsafe { borrow_account_data_mut::<SlabRegistry>(registry_account)? };
 
     // Parse instruction data
     let mut reader = InstructionReader::new(data);
     let amount = reader.read_u128()?;
 
     // Call the instruction handler
-    process_withdraw(vault, amount)?;
+    process_withdraw(vault, portfolio, registry, amount)?;
 
     msg!("Withdraw processed successfully");
     Ok(())
