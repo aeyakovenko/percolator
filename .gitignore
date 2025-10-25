@@ -63,3 +63,4 @@ desktop.ini
 .env
 .env.local
 tests/e2e/test-ledger/
+target/

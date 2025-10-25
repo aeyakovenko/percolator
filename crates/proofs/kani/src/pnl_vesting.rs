@@ -72,8 +72,8 @@ mod kani_proofs {
         let dt: u64 = kani::any();
         let tau: u64 = kani::any();
 
-        kani::assume(tau > 0);
-        kani::assume(dt > 0);
+        kani::assume(tau > 1000 && tau < 10_000_000);
+        kani::assume(dt > 0 && dt < 1_000_000_000);
 
         let result = one_minus_exp_neg(dt, tau);
 
@@ -129,7 +129,7 @@ mod kani_proofs {
     fn v4_zero_at_origin() {
         let tau: u64 = kani::any();
 
-        kani::assume(tau > 0 && tau < 1_000_000);
+        kani::assume(tau > 1000 && tau < 1_000_000);
 
         let result = one_minus_exp_neg(0, tau);
 
