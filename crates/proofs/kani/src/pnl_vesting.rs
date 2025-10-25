@@ -28,8 +28,8 @@ fn one_minus_exp_neg(dt: u64, tau: u64) -> i128 {
 
     // Saturate for x >= 3
     if x >= 3 * FP_ONE {
-        // For x >= 3: 1 - e^(-x) ≈ 0.95 (close to 1)
-        return (FP_ONE * 95) / 100;
+        // For x >= 3: 1 - e^(-x) approaches 1.0 (e^(-3) ≈ 0.05)
+        return FP_ONE;
     }
 
     // Taylor series: x - x²/2 + x³/6
@@ -146,7 +146,8 @@ mod kani_proofs {
         let vested_pnl: i128 = kani::any();
         let unlocked_frac: i128 = kani::any();
 
-        kani::assume(vested_pnl > 0 && vested_pnl < i128::MAX / 2);
+        // Constrain to avoid overflow in Q32.32 multiplication
+        kani::assume(vested_pnl > 0 && vested_pnl < (i128::MAX >> 33));
         kani::assume(unlocked_frac >= 0 && unlocked_frac <= (1i128 << 32)); // Q32.32 [0, 1]
 
         let withdrawable = calculate_withdrawable_pnl(vested_pnl, unlocked_frac);
@@ -182,7 +183,8 @@ mod kani_proofs {
     fn v7_full_unlock() {
         let vested_pnl: i128 = kani::any();
 
-        kani::assume(vested_pnl > 0 && vested_pnl < i128::MAX / 2);
+        // Constrain to avoid overflow in Q32.32 multiplication
+        kani::assume(vested_pnl > 0 && vested_pnl < (i128::MAX >> 33));
 
         let full_unlock = 1i128 << 32; // Q32.32 representation of 1.0
         let withdrawable = calculate_withdrawable_pnl(vested_pnl, full_unlock);
@@ -239,7 +241,8 @@ mod kani_proofs {
         let frac1: i128 = kani::any();
         let frac2: i128 = kani::any();
 
-        kani::assume(vested_pnl > 10000 && vested_pnl < i128::MAX / 4);
+        // Constrain to avoid overflow in Q32.32 multiplication
+        kani::assume(vested_pnl > 10000 && vested_pnl < (i128::MAX >> 33));
         kani::assume(frac1 > 0 && frac1 < (1i128 << 32));
         kani::assume(frac2 > frac1 && frac2 < (1i128 << 32)); // frac2 > frac1
 
