@@ -317,13 +317,151 @@ pub async fn withdraw_collateral(
     Ok(())
 }
 
-pub async fn show_margin_account(_config: &NetworkConfig, user: Option<String>) -> Result<()> {
+pub async fn show_margin_account(config: &NetworkConfig, user_arg: Option<String>) -> Result<()> {
     println!("{}", "=== Margin Account ===".bright_green().bold());
-    if let Some(u) = user {
-        println!("{} {}", "User:".bright_cyan(), u);
+    println!("{} {}", "Network:".bright_cyan(), config.network);
+
+    // Get RPC client and determine user
+    let rpc_client = client::create_rpc_client(config);
+    let user = if let Some(u) = user_arg {
+        Pubkey::try_from(u.as_str())
+            .context("Invalid user public key")?
+    } else {
+        config.keypair.pubkey()
+    };
+
+    println!("{} {}\n", "User:".bright_cyan(), user);
+
+    // Derive portfolio account address
+    let portfolio_seed = "portfolio";
+    let portfolio_address = Pubkey::create_with_seed(
+        &user,
+        portfolio_seed,
+        &config.router_program_id,
+    )?;
+
+    println!("{} {}", "Portfolio Address:".bright_cyan(), portfolio_address);
+
+    // Fetch portfolio account
+    let portfolio_account = rpc_client.get_account(&portfolio_address)
+        .context("Portfolio account not found - run 'margin init' first")?;
+
+    // Verify account owner
+    if portfolio_account.owner != config.router_program_id {
+        anyhow::bail!("Portfolio account has incorrect owner");
     }
 
-    println!("\n{}", "Account info not yet implemented".yellow());
+    // Verify account size
+    let expected_size = percolator_router::state::Portfolio::LEN;
+    if portfolio_account.data.len() != expected_size {
+        anyhow::bail!(
+            "Portfolio account has incorrect size: {} (expected {})",
+            portfolio_account.data.len(),
+            expected_size
+        );
+    }
+
+    // SAFETY: Portfolio has #[repr(C)] and we verified the size matches exactly
+    let portfolio = unsafe {
+        &*(portfolio_account.data.as_ptr() as *const percolator_router::state::Portfolio)
+    };
+
+    // Display portfolio state
+    println!("\n{}", "== Account State ==".bright_yellow().bold());
+
+    println!("{} {} lamports ({:.4} SOL)",
+        "Account Balance:".bright_cyan(),
+        portfolio_account.lamports,
+        portfolio_account.lamports as f64 / 1e9
+    );
+
+    println!("\n{}", "== Financial State ==".bright_yellow().bold());
+
+    println!("{} {} ({:.4} SOL)",
+        "Equity:".bright_cyan(),
+        portfolio.equity,
+        portfolio.equity as f64 / 1e9
+    );
+
+    println!("{} {} ({:.4} SOL)",
+        "Principal:".bright_cyan(),
+        portfolio.principal,
+        portfolio.principal as f64 / 1e9
+    );
+
+    println!("{} {} ({:.4} SOL)",
+        "PnL:".bright_cyan(),
+        portfolio.pnl,
+        portfolio.pnl as f64 / 1e9
+    );
+
+    println!("{} {} ({:.4} SOL)",
+        "Vested PnL:".bright_cyan(),
+        portfolio.vested_pnl,
+        portfolio.vested_pnl as f64 / 1e9
+    );
+
+    println!("\n{}", "== Margin ==".bright_yellow().bold());
+
+    println!("{} {}",
+        "Initial Margin (IM):".bright_cyan(),
+        portfolio.im
+    );
+
+    println!("{} {}",
+        "Maintenance Margin (MM):".bright_cyan(),
+        portfolio.mm
+    );
+
+    println!("{} {} ({:.4} SOL)",
+        "Free Collateral:".bright_cyan(),
+        portfolio.free_collateral,
+        portfolio.free_collateral as f64 / 1e9
+    );
+
+    println!("{} {} ({:.4} SOL)",
+        "Health:".bright_cyan(),
+        portfolio.health,
+        portfolio.health as f64 / 1e9
+    );
+
+    // Health indicator
+    let health_status = if portfolio.health >= 0 {
+        format!("{}", "HEALTHY".bright_green())
+    } else {
+        format!("{}", "UNDERWATER".bright_red())
+    };
+    println!("{} {}", "Status:".bright_cyan(), health_status);
+
+    println!("\n{}", "== Positions ==".bright_yellow().bold());
+
+    println!("{} {}",
+        "Active Exposures:".bright_cyan(),
+        portfolio.exposure_count
+    );
+
+    println!("{} {}",
+        "LP Buckets:".bright_cyan(),
+        portfolio.lp_bucket_count
+    );
+
+    println!("\n{}", "== Timestamps ==".bright_yellow().bold());
+
+    println!("{} {}",
+        "Last Mark:".bright_cyan(),
+        portfolio.last_mark_ts
+    );
+
+    println!("{} {}",
+        "Last Slot:".bright_cyan(),
+        portfolio.last_slot
+    );
+
+    println!("{} {}",
+        "Last Liquidation:".bright_cyan(),
+        portfolio.last_liquidation_ts
+    );
+
     Ok(())
 }
 
