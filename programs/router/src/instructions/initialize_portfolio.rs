@@ -30,9 +30,16 @@ pub fn process_initialize_portfolio(
     payer: &AccountInfo,
     user: &Pubkey,
 ) -> Result<(), PercolatorError> {
-    // TODO(security): Add create_with_seed address verification
-    // Verify portfolio_account matches: Pubkey::create_with_seed(user, "portfolio", program_id)
-    // For now, we verify ownership, size, and initialization state which provides baseline security
+    // SECURITY: Verify portfolio_account address matches expected create_with_seed derivation
+    // This prevents address spoofing attacks where an attacker provides a malicious account
+    let expected_address = Pubkey::create_with_seed(payer.key(), "portfolio", program_id)
+        .map_err(|_| PercolatorError::InvalidAccount)?;
+
+    if portfolio_account.key() != &expected_address {
+        msg!("Error: Portfolio account address does not match expected derivation");
+        msg!("Expected: {}, Got: {}", expected_address, portfolio_account.key());
+        return Err(PercolatorError::InvalidAccount);
+    }
 
     // SECURITY: Verify payer is signer
     if !payer.is_signer() {
