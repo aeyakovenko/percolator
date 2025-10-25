@@ -30,6 +30,7 @@ pub enum PercolatorError {
     InvalidAmount = 112,
     InsufficientBalance = 113,
     StalePrice = 114,
+    AlreadyInitialized = 115,
 
     // Slab errors (200-299)
     InvalidInstrument = 200,

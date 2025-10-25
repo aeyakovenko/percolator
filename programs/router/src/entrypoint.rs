@@ -10,7 +10,7 @@ use pinocchio::{
 
 use crate::instructions::{RouterInstruction, process_deposit, process_withdraw, process_initialize_registry, process_initialize_portfolio, process_execute_cross_slab, process_liquidate_user, process_burn_lp_shares, process_cancel_lp_orders};
 use crate::state::{Vault, Portfolio, SlabRegistry};
-use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data_mut, InstructionReader};
+use percolator_common::{PercolatorError, validate_owner, validate_writable, borrow_account_data, borrow_account_data_mut, InstructionReader};
 
 entrypoint!(process_instruction);
 
@@ -84,8 +84,8 @@ pub fn process_instruction(
 /// Process initialize instruction
 ///
 /// Expected accounts:
-/// 0. `[writable]` Registry account (PDA)
-/// 1. `[signer]` Governance authority
+/// 0. `[writable]` Registry account (PDA, must be pre-created)
+/// 1. `[signer, writable]` Payer account
 ///
 /// Expected data layout (32 bytes):
 /// - governance: Pubkey (32 bytes)
@@ -96,102 +96,99 @@ fn process_initialize_inner(program_id: &Pubkey, accounts: &[AccountInfo], data:
     }
 
     let registry_account = &accounts[0];
-    let governance_account = &accounts[1];
+    let payer_account = &accounts[1];
 
     // Validate accounts
-    validate_owner(registry_account, program_id)?;
     validate_writable(registry_account)?;
+    validate_writable(payer_account)?;
 
     // Parse instruction data - governance pubkey
     let mut reader = InstructionReader::new(data);
     let governance_bytes = reader.read_bytes::<32>()?;
     let governance = Pubkey::from(governance_bytes);
 
-    // Verify governance signer matches instruction data
-    if governance_account.key() != &governance {
-        msg!("Error: Governance account does not match instruction data");
-        return Err(PercolatorError::InvalidAccount.into());
-    }
-
     // Call the initialization logic
-    process_initialize_registry(program_id, registry_account, &governance)?;
+    process_initialize_registry(program_id, registry_account, payer_account, &governance)?;
 
     msg!("Router initialized successfully");
     Ok(())
 }
 
-/// Process deposit instruction
+/// Process deposit instruction (SOL only for MVP)
 ///
 /// Expected accounts:
-/// 0. `[writable]` Vault account
-/// 1. `[writable]` User token account
-/// 2. `[signer]` User authority
-/// 3. `[]` Token program
+/// 0. `[writable]` Portfolio account (receives SOL)
+/// 1. `[signer, writable]` User account (sends SOL)
+/// 2. `[]` System program
 ///
-/// Expected data layout (16 bytes):
-/// - amount: u128 (16 bytes)
+/// Expected data layout (8 bytes):
+/// - amount: u64 (8 bytes, lamports)
 fn process_deposit_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 1 {
-        msg!("Error: Deposit instruction requires at least 1 account");
+    if accounts.len() < 3 {
+        msg!("Error: Deposit instruction requires at least 3 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    let vault_account = &accounts[0];
-    validate_owner(vault_account, program_id)?;
-    validate_writable(vault_account)?;
+    let portfolio_account = &accounts[0];
+    let user_account = &accounts[1];
+    let system_program = &accounts[2];
 
-    let vault = unsafe { borrow_account_data_mut::<Vault>(vault_account)? };
+    // Validate accounts
+    validate_owner(portfolio_account, program_id)?;
+    validate_writable(portfolio_account)?;
+    validate_writable(user_account)?;
+
+    // Borrow portfolio data
+    let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
 
     // Parse instruction data
     let mut reader = InstructionReader::new(data);
-    let amount = reader.read_u128()?;
+    let amount = reader.read_u64()?;
 
     // Call the instruction handler
-    process_deposit(vault, amount)?;
+    process_deposit(portfolio_account, portfolio, user_account, system_program, amount)?;
 
     msg!("Deposit processed successfully");
     Ok(())
 }
 
-/// Process withdraw instruction
+/// Process withdraw instruction (SOL only for MVP)
 ///
 /// Expected accounts:
-/// 0. `[writable]` Vault account
-/// 1. `[]` Portfolio account (for warmup check)
-/// 2. `[]` Registry account (for warmup state)
-/// 3. `[writable]` User token account
-/// 4. `[signer]` User authority
-/// 5. `[]` Token program
+/// 0. `[writable]` Portfolio account (sends SOL)
+/// 1. `[signer, writable]` User account (receives SOL)
+/// 2. `[]` System program
+/// 3. `[]` Registry account (for warmup state)
 ///
-/// Expected data layout (16 bytes):
-/// - amount: u128 (16 bytes)
+/// Expected data layout (8 bytes):
+/// - amount: u64 (8 bytes, lamports)
 fn process_withdraw_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if accounts.len() < 3 {
-        msg!("Error: Withdraw instruction requires at least 3 accounts");
+    if accounts.len() < 4 {
+        msg!("Error: Withdraw instruction requires at least 4 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    let vault_account = &accounts[0];
-    let portfolio_account = &accounts[1];
-    let registry_account = &accounts[2];
+    let portfolio_account = &accounts[0];
+    let user_account = &accounts[1];
+    let system_program = &accounts[2];
+    let registry_account = &accounts[3];
 
     // Validate accounts
-    validate_owner(vault_account, program_id)?;
-    validate_writable(vault_account)?;
     validate_owner(portfolio_account, program_id)?;
+    validate_writable(portfolio_account)?;
+    validate_writable(user_account)?;
     validate_owner(registry_account, program_id)?;
 
     // Borrow account data
-    let vault = unsafe { borrow_account_data_mut::<Vault>(vault_account)? };
     let portfolio = unsafe { borrow_account_data_mut::<Portfolio>(portfolio_account)? };
-    let registry = unsafe { borrow_account_data_mut::<SlabRegistry>(registry_account)? };
+    let registry = unsafe { borrow_account_data::<SlabRegistry>(registry_account)? };
 
     // Parse instruction data
     let mut reader = InstructionReader::new(data);
-    let amount = reader.read_u128()?;
+    let amount = reader.read_u64()?;
 
     // Call the instruction handler
-    process_withdraw(vault, portfolio, registry, amount)?;
+    process_withdraw(portfolio_account, portfolio, user_account, system_program, registry, amount)?;
 
     msg!("Withdraw processed successfully");
     Ok(())
@@ -200,37 +197,47 @@ fn process_withdraw_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &
 /// Process initialize portfolio instruction
 ///
 /// Expected accounts:
-/// 0. `[writable]` Portfolio account (PDA)
-/// 1. `[signer]` User
+/// 0. `[writable]` Portfolio account (created with seed "portfolio")
+/// 1. `[signer, writable]` Payer (user funding the account)
 ///
-/// Expected data layout (32 bytes):
-/// - user: Pubkey (32 bytes)
+/// Instruction data: user pubkey (32 bytes)
 fn process_initialize_portfolio_inner(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if accounts.len() < 2 {
         msg!("Error: InitializePortfolio instruction requires at least 2 accounts");
         return Err(PercolatorError::InvalidInstruction.into());
     }
 
-    let portfolio_account = &accounts[0];
-    let user_account = &accounts[1];
+    // Parse user pubkey from instruction data (32 bytes)
+    if data.len() < 32 {
+        msg!("Error: InitializePortfolio instruction requires user pubkey in data");
+        return Err(PercolatorError::InvalidInstruction.into());
+    }
 
-    // Validate accounts
-    validate_owner(portfolio_account, program_id)?;
-    validate_writable(portfolio_account)?;
-
-    // Parse instruction data - user pubkey
-    let mut reader = InstructionReader::new(data);
-    let user_bytes = reader.read_bytes::<32>()?;
+    let user_bytes: [u8; 32] = data[0..32].try_into()
+        .map_err(|_| PercolatorError::InvalidInstruction)?;
     let user = Pubkey::from(user_bytes);
 
-    // Verify user signer matches instruction data
-    if user_account.key() != &user {
-        msg!("Error: User account does not match instruction data");
+    let portfolio_account = &accounts[0];
+    let payer = &accounts[1];
+
+    // Validate accounts
+    if !portfolio_account.is_writable() {
+        msg!("Error: Portfolio account must be writable");
+        return Err(PercolatorError::InvalidAccount.into());
+    }
+
+    if !payer.is_signer() {
+        msg!("Error: Payer must be a signer");
+        return Err(PercolatorError::Unauthorized.into());
+    }
+
+    if !payer.is_writable() {
+        msg!("Error: Payer must be writable");
         return Err(PercolatorError::InvalidAccount.into());
     }
 
     // Call the initialization logic
-    process_initialize_portfolio(program_id, portfolio_account, &user)?;
+    process_initialize_portfolio(program_id, portfolio_account, payer, &user)?;
 
     msg!("Portfolio initialized successfully");
     Ok(())

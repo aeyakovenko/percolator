@@ -9,6 +9,7 @@ members = [
     "tests/integration",
     "tests/e2e",
     "keeper",
+    "cli",
     "crates/model_safety",
     "crates/amm_model",
     "crates/proofs/kani",
