@@ -465,10 +465,166 @@ pub async fn show_margin_account(config: &NetworkConfig, user_arg: Option<String
     Ok(())
 }
 
-pub async fn show_margin_requirements(_config: &NetworkConfig, user: String) -> Result<()> {
+pub async fn show_margin_requirements(config: &NetworkConfig, user_str: String) -> Result<()> {
     println!("{}", "=== Margin Requirements ===".bright_green().bold());
-    println!("{} {}", "User:".bright_cyan(), user);
+    println!("{} {}", "Network:".bright_cyan(), config.network);
 
-    println!("\n{}", "Margin calculations not yet implemented".yellow());
+    // Parse user public key
+    let user = Pubkey::try_from(user_str.as_str())
+        .context("Invalid user public key")?;
+
+    println!("{} {}\n", "User:".bright_cyan(), user);
+
+    // Get RPC client
+    let rpc_client = client::create_rpc_client(config);
+
+    // Derive portfolio account address
+    let portfolio_seed = "portfolio";
+    let portfolio_address = Pubkey::create_with_seed(
+        &user,
+        portfolio_seed,
+        &config.router_program_id,
+    )?;
+
+    println!("{} {}\n", "Portfolio Address:".bright_cyan(), portfolio_address);
+
+    // Fetch portfolio account
+    let portfolio_account = rpc_client.get_account(&portfolio_address)
+        .context("Portfolio account not found - run 'margin init' first")?;
+
+    // Verify account owner and size
+    if portfolio_account.owner != config.router_program_id {
+        anyhow::bail!("Portfolio account has incorrect owner");
+    }
+
+    let expected_size = percolator_router::state::Portfolio::LEN;
+    if portfolio_account.data.len() != expected_size {
+        anyhow::bail!(
+            "Portfolio account has incorrect size: {} (expected {})",
+            portfolio_account.data.len(),
+            expected_size
+        );
+    }
+
+    // SAFETY: Portfolio has #[repr(C)] and we verified the size matches exactly
+    let portfolio = unsafe {
+        &*(portfolio_account.data.as_ptr() as *const percolator_router::state::Portfolio)
+    };
+
+    // Display margin requirements breakdown
+    println!("{}", "== Margin Overview ==".bright_yellow().bold());
+
+    println!("{} {} ({:.4} SOL)",
+        "Equity:".bright_cyan(),
+        portfolio.equity,
+        portfolio.equity as f64 / 1e9
+    );
+
+    println!("{} {}",
+        "Initial Margin (IM):".bright_cyan(),
+        portfolio.im
+    );
+
+    println!("{} {}",
+        "Maintenance Margin (MM):".bright_cyan(),
+        portfolio.mm
+    );
+
+    println!("\n{}", "== Available Margin ==".bright_yellow().bold());
+
+    println!("{} {} ({:.4} SOL)",
+        "Free Collateral (Equity - IM):".bright_cyan(),
+        portfolio.free_collateral,
+        portfolio.free_collateral as f64 / 1e9
+    );
+
+    println!("{} {} ({:.4} SOL)",
+        "Health (Equity - MM):".bright_cyan(),
+        portfolio.health,
+        portfolio.health as f64 / 1e9
+    );
+
+    println!("\n{}", "== Risk Metrics ==".bright_yellow().bold());
+
+    // Calculate utilization ratios
+    let im_utilization = if portfolio.equity > 0 {
+        (portfolio.im as f64 / portfolio.equity as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let mm_utilization = if portfolio.equity > 0 {
+        (portfolio.mm as f64 / portfolio.equity as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    println!("{} {:.2}%",
+        "IM Utilization:".bright_cyan(),
+        im_utilization
+    );
+
+    println!("{} {:.2}%",
+        "MM Utilization:".bright_cyan(),
+        mm_utilization
+    );
+
+    // Liquidation distance
+    if portfolio.mm > 0 {
+        let distance_to_liquidation = if portfolio.equity > portfolio.mm as i128 {
+            ((portfolio.equity - portfolio.mm as i128) as f64 / portfolio.mm as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        println!("{} {:.2}%",
+            "Distance to Liquidation:".bright_cyan(),
+            distance_to_liquidation
+        );
+    }
+
+    // Account status
+    println!("\n{}", "== Account Status ==".bright_yellow().bold());
+
+    let can_trade = portfolio.free_collateral > 0;
+    let at_risk = portfolio.health < (portfolio.mm as i128 / 10); // Less than 10% buffer
+    let liquidatable = portfolio.health < 0;
+
+    println!("{} {}",
+        "Can Open New Positions:".bright_cyan(),
+        if can_trade { "Yes".bright_green() } else { "No (insufficient free collateral)".bright_red() }
+    );
+
+    println!("{} {}",
+        "At Risk:".bright_cyan(),
+        if at_risk { "Yes (low health buffer)".bright_yellow() } else { "No".bright_green() }
+    );
+
+    println!("{} {}",
+        "Liquidatable:".bright_cyan(),
+        if liquidatable { "YES - IMMEDIATE RISK".bright_red().bold() } else { "No".bright_green() }
+    );
+
+    println!("\n{}", "== Position Summary ==".bright_yellow().bold());
+
+    println!("{} {}",
+        "Active Exposures:".bright_cyan(),
+        portfolio.exposure_count
+    );
+
+    println!("{} {}",
+        "LP Buckets:".bright_cyan(),
+        portfolio.lp_bucket_count
+    );
+
+    // Risk warnings
+    if liquidatable {
+        println!("\n{}", "⚠️  WARNING: Account is underwater and subject to liquidation!".bright_red().bold());
+        println!("{}", "    Close positions or add collateral immediately.".bright_red());
+    } else if at_risk {
+        println!("\n{}", "⚠️  CAUTION: Account health is low.".bright_yellow());
+        println!("{}", "    Consider reducing risk or adding collateral.".yellow());
+    }
+
     Ok(())
 }
