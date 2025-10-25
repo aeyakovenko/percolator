@@ -34,9 +34,16 @@ pub fn process_initialize_registry(
     // Derive the authority PDA that will be stored in the registry
     let (authority_pda, bump) = derive_registry_pda(program_id);
 
-    // TODO: Add seed address verification here
-    // For now, we verify ownership, size, and initialization state which provides basic security
-    msg!("Note: Seed address verification temporarily skipped - will be added in next iteration");
+    // SECURITY: Verify registry_account address matches expected create_with_seed derivation
+    // This prevents address spoofing attacks where an attacker provides a malicious account
+    let expected_address = Pubkey::create_with_seed(payer.key(), "registry", program_id)
+        .map_err(|_| PercolatorError::InvalidAccount)?;
+
+    if registry_account.key() != &expected_address {
+        msg!("Error: Registry account address does not match expected derivation");
+        msg!("Expected: {}, Got: {}", expected_address, registry_account.key());
+        return Err(PercolatorError::InvalidAccount);
+    }
 
     // SECURITY: Verify payer is signer
     if !payer.is_signer() {
@@ -60,12 +67,10 @@ pub fn process_initialize_registry(
     let data = registry_account.try_borrow_data()
         .map_err(|_| PercolatorError::InvalidAccount)?;
 
-    // TODO: Re-enable size check after investigating BPF vs native size_of differences
-    // Temporarily disabled to test initialization flow
-    // if data.len() != SlabRegistry::LEN {
-    //     msg!("Error: Registry account has incorrect size");
-    //     return Err(PercolatorError::InvalidAccount);
-    // }
+    if data.len() != SlabRegistry::LEN {
+        msg!("Error: Registry account has incorrect size");
+        return Err(PercolatorError::InvalidAccount);
+    }
 
     // SECURITY: Check if already initialized (router_id should be zero)
     // We check the first 32 bytes which should be the router_id field
