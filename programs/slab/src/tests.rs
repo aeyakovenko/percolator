@@ -141,6 +141,8 @@ mod slab_orderbook_tests {
             Side::Buy,
             1_200_000,
             5_000_000,
+            false,
+            false
         ).unwrap();
 
         assert_eq!(slab.book.num_bids, 1);
@@ -177,6 +179,8 @@ mod slab_orderbook_tests {
             Side::Sell,
             1_500_000,
             3_000_000,
+            false,
+            false
         ).unwrap();
 
         // Try to cancel with owner2 (should fail)
