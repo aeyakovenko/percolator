@@ -238,7 +238,7 @@ pub async fn list_matchers(config: &NetworkConfig, registry_address: String) -> 
     }
 
     let registry_data = unsafe {
-        &*(account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(account.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     // Note: Slab whitelist removed - slabs are now permissionless

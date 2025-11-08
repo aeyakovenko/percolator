@@ -3149,7 +3149,6 @@ dependencies = [
  "log",
  "model_safety",
  "percolator-common",
- "percolator-router",
  "serde",
  "serde_json",
  "shellexpand",
@@ -3168,6 +3167,7 @@ dependencies = [
 name = "percolator-common"
 version = "0.1.0"
 dependencies = [
+ "model_safety",
  "pinocchio",
  "proptest",
 ]

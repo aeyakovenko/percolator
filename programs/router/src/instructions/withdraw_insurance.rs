@@ -79,7 +79,8 @@ pub fn process_withdraw_insurance(
     Ok(())
 }
 
+// Tests for withdraw_insurance are in integration tests
 // Exclude test module from BPF builds
-#[cfg(all(test, not(target_os = "solana")))]
-#[path = "withdraw_insurance_test.rs"]
-mod withdraw_insurance_test;
+// #[cfg(all(test, not(target_os = "solana")))]
+// #[path = "withdraw_insurance_test.rs"]
+// mod withdraw_insurance_test;

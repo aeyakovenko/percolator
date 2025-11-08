@@ -1,22 +1,9 @@
-pub mod vault;
-pub mod portfolio;
-pub mod registry;
-pub mod lp_bucket;
-pub mod lp_seat;
-pub mod venue_pnl;
-pub mod insurance;
-pub mod pnl_vesting;
+// Re-export state types from percolator_common
+pub use percolator_common::state::*;
+
+// Router-specific model bridge (BPF-specific conversion logic)
 pub mod model_bridge;
+pub use model_bridge::*;
 
 #[cfg(test)]
 pub mod withdrawal_limits_test;
-
-pub use vault::*;
-pub use portfolio::*;
-pub use registry::*;
-pub use lp_bucket::*;
-pub use lp_seat::*;
-pub use venue_pnl::*;
-pub use insurance::*;
-pub use pnl_vesting::*;
-pub use model_bridge::*;

@@ -1525,7 +1525,7 @@ async fn test_insurance_fund_usage(config: &NetworkConfig) -> Result<()> {
         .context("Failed to fetch registry")?;
 
     let registry = unsafe {
-        &*(registry_account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_account.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     let initial_insurance_balance = registry.insurance_state.vault_balance;
@@ -1624,7 +1624,7 @@ async fn test_insurance_fund_usage(config: &NetworkConfig) -> Result<()> {
         .context("Failed to fetch registry after topup")?;
 
     let registry = unsafe {
-        &*(registry_account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_account.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     let insurance_balance_after_topup = registry.insurance_state.vault_balance;
@@ -1737,7 +1737,7 @@ async fn test_loss_socialization_integration(config: &NetworkConfig) -> Result<(
         .context("Failed to fetch registry")?;
 
     let registry = unsafe {
-        &*(registry_account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_account.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     let initial_insurance_balance = registry.insurance_state.vault_balance;
@@ -1823,7 +1823,7 @@ async fn test_loss_socialization_integration(config: &NetworkConfig) -> Result<(
     // Query state after topup
     let registry_account = rpc_client.get_account(&registry_address)?;
     let registry = unsafe {
-        &*(registry_account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_account.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     let post_topup_balance = registry.insurance_state.vault_balance;
@@ -1951,7 +1951,7 @@ async fn test_loss_socialization(config: &NetworkConfig) -> Result<()> {
         .context("Failed to fetch registry")?;
 
     let registry = unsafe {
-        &*(registry_account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_account.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     let insurance_balance = registry.insurance_state.vault_balance;
@@ -2902,7 +2902,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
         .context("Failed to fetch registry after topup")?;
 
     let registry = unsafe {
-        &*(registry_account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_account.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     println!("{}", format!("      Vault balance: {} lamports ({:.4} SOL)",
@@ -2977,7 +2977,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
     let registry_before_crisis = rpc_client.get_account(&registry_address)
         .context("Failed to fetch registry before crisis")?;
     let registry_pre = unsafe {
-        &*(registry_before_crisis.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_before_crisis.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
     let insurance_balance_before = registry_pre.insurance_state.vault_balance;
     let total_payouts_before = registry_pre.insurance_state.total_payouts;
@@ -3022,7 +3022,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
     let registry_check = rpc_client.get_account(&registry_address)
         .context("Failed to fetch registry for params check")?;
     let registry_params = unsafe {
-        &*(registry_check.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_check.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     println!("{}", "  ⚙️  Insurance Parameters (from registry.insurance_params):".cyan().bold());
@@ -3074,7 +3074,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
     let registry_before_crisis = rpc_client.get_account(&registry_address)
         .context("Failed to fetch registry before crisis")?;
     let registry_pre_crisis = unsafe {
-        &*(registry_before_crisis.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_before_crisis.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
     let insurance_balance_before_crisis = registry_pre_crisis.insurance_state.vault_balance;
     let total_payouts_before_crisis = registry_pre_crisis.insurance_state.total_payouts;
@@ -3270,7 +3270,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
     let dave_portfolio_account = rpc_client.get_account(&dave_portfolio_pda)
         .context("Failed to fetch Dave's portfolio after withdrawal")?;
     let dave_portfolio = unsafe {
-        &*(dave_portfolio_account.data.as_ptr() as *const percolator_router::state::Portfolio)
+        &*(dave_portfolio_account.data.as_ptr() as *const percolator_common::state::Portfolio)
     };
 
     println!("{}", format!("    Dave's equity: {} lamports ({:.4} SOL)",
@@ -3375,14 +3375,14 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
     let registry_after = rpc_client.get_account(&registry_address)
         .context("Failed to fetch registry after Phase 7 actions")?;
     let registry_post = unsafe {
-        &*(registry_after.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_after.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     // Fetch Dave's current portfolio
     let dave_portfolio_final = rpc_client.get_account(&dave_portfolio_pda)
         .context("Failed to fetch Dave's final portfolio")?;
     let dave_portfolio_after = unsafe {
-        &*(dave_portfolio_final.data.as_ptr() as *const percolator_router::state::Portfolio)
+        &*(dave_portfolio_final.data.as_ptr() as *const percolator_common::state::Portfolio)
     };
     let dave_final_equity = dave_portfolio_after.equity;
 
@@ -3671,7 +3671,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
 
     let registry_before_crash = rpc_client.get_account(&registry_address)?;
     let registry_before_crash_data = unsafe {
-        &*(registry_before_crash.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_before_crash.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
     let insurance_before_crash = registry_before_crash_data.insurance_state.vault_balance;
     let haircut_before_crash = registry_before_crash_data.global_haircut.pnl_index;
@@ -3773,7 +3773,7 @@ async fn test_kitchen_sink_e2e(config: &NetworkConfig) -> Result<()> {
 
     let registry_after_crash = rpc_client.get_account(&registry_address)?;
     let registry_after_crash_data = unsafe {
-        &*(registry_after_crash.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_after_crash.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     let insurance_after_crash = registry_after_crash_data.insurance_state.vault_balance;

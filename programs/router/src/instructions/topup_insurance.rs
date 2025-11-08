@@ -73,7 +73,8 @@ pub fn process_topup_insurance(
     Ok(())
 }
 
+// Tests for topup_insurance are in integration tests
 // Exclude test module from BPF builds
-#[cfg(all(test, not(target_os = "solana")))]
-#[path = "topup_insurance_test.rs"]
-mod topup_insurance_test;
+// #[cfg(all(test, not(target_os = "solana")))]
+// #[path = "topup_insurance_test.rs"]
+// mod topup_insurance_test;

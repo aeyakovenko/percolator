@@ -8,6 +8,7 @@ pub mod instruction;
 pub mod header;
 pub mod quote_cache;
 pub mod fill_receipt;
+pub mod state;
 
 #[cfg(test)]
 mod tests;
@@ -20,3 +21,4 @@ pub use instruction::*;
 pub use header::*;
 pub use quote_cache::*;
 pub use fill_receipt::*;
+pub use state::*;

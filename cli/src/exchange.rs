@@ -188,7 +188,7 @@ pub async fn query_registry_status(
     // Deserialize registry data
     // SAFETY: We've verified the account owner and size
     let registry = unsafe {
-        &*(account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(account.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     println!("\n{}", "=== Basic Information ===".bright_yellow());

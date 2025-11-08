@@ -69,7 +69,7 @@ pub async fn execute_liquidation(
         .context("Failed to fetch portfolio account - does it exist?")?;
 
     // Verify account size
-    let expected_size = percolator_router::state::Portfolio::LEN;
+    let expected_size = percolator_common::state::Portfolio::LEN;
     if account.data.len() != expected_size {
         return Err(anyhow!(
             "Invalid portfolio account size: expected {}, got {}",
@@ -80,7 +80,7 @@ pub async fn execute_liquidation(
 
     // SAFETY: Portfolio has #[repr(C)] and we verified the size matches exactly
     let portfolio = unsafe {
-        &*(account.data.as_ptr() as *const percolator_router::state::Portfolio)
+        &*(account.data.as_ptr() as *const percolator_common::state::Portfolio)
     };
 
     // Display portfolio state
@@ -119,13 +119,13 @@ pub async fn execute_liquidation(
 
         // Check venue kind
         match bucket.venue.venue_kind {
-            percolator_router::state::VenueKind::Slab => {
+            percolator_common::state::VenueKind::Slab => {
                 // Convert pinocchio Pubkey to solana_sdk Pubkey
                 let market_id = Pubkey::new_from_array(bucket.venue.market_id);
                 slab_accounts.push(market_id);
                 println!("  {} Slab venue: {}", "•".bright_cyan(), market_id);
             }
-            percolator_router::state::VenueKind::Amm => {
+            percolator_common::state::VenueKind::Amm => {
                 // Convert pinocchio Pubkey to solana_sdk Pubkey
                 let market_id = Pubkey::new_from_array(bucket.venue.market_id);
                 amm_accounts.push(market_id);
@@ -281,14 +281,14 @@ pub async fn list_liquidatable(config: &NetworkConfig, _exchange: String) -> Res
 
     for (pubkey, account) in accounts {
         // Verify account size matches Portfolio
-        let expected_size = percolator_router::state::Portfolio::LEN;
+        let expected_size = percolator_common::state::Portfolio::LEN;
         if account.data.len() != expected_size {
             continue; // Skip non-portfolio accounts
         }
 
         // SAFETY: Portfolio has #[repr(C)] and we verified the size matches exactly
         let portfolio = unsafe {
-            &*(account.data.as_ptr() as *const percolator_router::state::Portfolio)
+            &*(account.data.as_ptr() as *const percolator_common::state::Portfolio)
         };
 
         // Check if liquidatable (health < 0)

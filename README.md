@@ -26,7 +26,7 @@ Percolator is a high-assurance decentralized exchange (DEX) protocol built on So
 ```bash
 # Build all programs and CLI
 cargo build-sbf
-cargo build --release --bin percolator
+cargo build --release -p percolator-cli
 
 # Run unit tests (257 passing)
 cargo test --lib
@@ -254,7 +254,7 @@ cargo build-sbf
 cargo build-sbf --manifest-path programs/router/Cargo.toml
 
 # Build CLI
-cargo build --release --bin percolator
+cargo build --release -p percolator-cli
 
 # Install CLI globally
 cargo install --path cli

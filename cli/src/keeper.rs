@@ -53,14 +53,14 @@ pub async fn run_keeper(
         // 2. Calculate margin requirements and 3. Identify liquidatable accounts
         for (pubkey, account) in accounts {
             // Verify account size matches Portfolio
-            let expected_size = percolator_router::state::Portfolio::LEN;
+            let expected_size = percolator_common::state::Portfolio::LEN;
             if account.data.len() != expected_size {
                 continue; // Skip non-portfolio accounts
             }
 
             // SAFETY: Portfolio has #[repr(C)] and we verified the size matches exactly
             let portfolio = unsafe {
-                &*(account.data.as_ptr() as *const percolator_router::state::Portfolio)
+                &*(account.data.as_ptr() as *const percolator_common::state::Portfolio)
             };
 
             // Check if liquidatable (health < 0)
@@ -165,7 +165,7 @@ fn query_active_slabs_and_oracles(
         .context("Failed to fetch registry account")?;
 
     // SAFETY: SlabRegistry has #[repr(C)] and we verify size matches
-    let expected_size = percolator_router::state::SlabRegistry::LEN;
+    let expected_size = percolator_common::state::SlabRegistry::LEN;
     if registry_account.data.len() != expected_size {
         return Err(anyhow::anyhow!(
             "Registry account size mismatch: expected {}, got {}",
@@ -175,7 +175,7 @@ fn query_active_slabs_and_oracles(
     }
 
     let registry = unsafe {
-        &*(registry_account.data.as_ptr() as *const percolator_router::state::SlabRegistry)
+        &*(registry_account.data.as_ptr() as *const percolator_common::state::SlabRegistry)
     };
 
     // Note: Slab whitelist was removed - slabs are now permissionless
@@ -331,14 +331,14 @@ pub async fn show_stats(config: &NetworkConfig, _exchange: String) -> Result<()>
     // Analyze portfolio states
     for (_pubkey, account) in &accounts {
         // Verify account size matches Portfolio
-        let expected_size = percolator_router::state::Portfolio::LEN;
+        let expected_size = percolator_common::state::Portfolio::LEN;
         if account.data.len() != expected_size {
             continue;
         }
 
         // SAFETY: Portfolio has #[repr(C)] and we verified the size matches exactly
         let portfolio = unsafe {
-            &*(account.data.as_ptr() as *const percolator_router::state::Portfolio)
+            &*(account.data.as_ptr() as *const percolator_common::state::Portfolio)
         };
 
         total_equity = total_equity.saturating_add(portfolio.equity);

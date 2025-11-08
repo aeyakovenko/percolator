@@ -10,6 +10,7 @@ doctest = false
 
 [dependencies]
 pinocchio = { workspace = true }
+model_safety = { path = "../../crates/model_safety", default-features = false }
 
 [dev-dependencies]
 proptest = { workspace = true }

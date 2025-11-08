@@ -256,7 +256,7 @@ pub async fn list_orders(config: &NetworkConfig, user: Option<String>) -> Result
         .context("Failed to fetch portfolio account - does it exist?")?;
 
     // Verify account size
-    let expected_size = percolator_router::state::Portfolio::LEN;
+    let expected_size = percolator_common::state::Portfolio::LEN;
     if account.data.len() != expected_size {
         return Err(anyhow!(
             "Invalid portfolio account size: expected {}, got {}",
@@ -267,7 +267,7 @@ pub async fn list_orders(config: &NetworkConfig, user: Option<String>) -> Result
 
     // SAFETY: Portfolio has #[repr(C)] and we verified the size matches exactly
     let portfolio = unsafe {
-        &*(account.data.as_ptr() as *const percolator_router::state::Portfolio)
+        &*(account.data.as_ptr() as *const percolator_common::state::Portfolio)
     };
 
     println!("\n{}", "Portfolio Exposures:".bright_yellow().bold());

@@ -50,7 +50,7 @@ pub async fn initialize_portfolio(config: &NetworkConfig) -> Result<()> {
     println!("{} {}", "Portfolio Address:".bright_cyan(), portfolio_address);
 
     // Get account size from router program
-    let portfolio_size = percolator_router::state::Portfolio::LEN;
+    let portfolio_size = percolator_common::state::Portfolio::LEN;
     println!("{} {} bytes", "Portfolio Size:".bright_cyan(), portfolio_size);
 
     // Calculate rent for portfolio account
@@ -358,7 +358,7 @@ pub async fn show_margin_account(config: &NetworkConfig, user_arg: Option<String
     }
 
     // Verify account size
-    let expected_size = percolator_router::state::Portfolio::LEN;
+    let expected_size = percolator_common::state::Portfolio::LEN;
     if portfolio_account.data.len() != expected_size {
         anyhow::bail!(
             "Portfolio account has incorrect size: {} (expected {})",
@@ -369,7 +369,7 @@ pub async fn show_margin_account(config: &NetworkConfig, user_arg: Option<String
 
     // SAFETY: Portfolio has #[repr(C)] and we verified the size matches exactly
     let portfolio = unsafe {
-        &*(portfolio_account.data.as_ptr() as *const percolator_router::state::Portfolio)
+        &*(portfolio_account.data.as_ptr() as *const percolator_common::state::Portfolio)
     };
 
     // Display portfolio state
@@ -503,7 +503,7 @@ pub async fn show_margin_requirements(config: &NetworkConfig, user_str: String) 
         anyhow::bail!("Portfolio account has incorrect owner");
     }
 
-    let expected_size = percolator_router::state::Portfolio::LEN;
+    let expected_size = percolator_common::state::Portfolio::LEN;
     if portfolio_account.data.len() != expected_size {
         anyhow::bail!(
             "Portfolio account has incorrect size: {} (expected {})",
@@ -514,7 +514,7 @@ pub async fn show_margin_requirements(config: &NetworkConfig, user_str: String) 
 
     // SAFETY: Portfolio has #[repr(C)] and we verified the size matches exactly
     let portfolio = unsafe {
-        &*(portfolio_account.data.as_ptr() as *const percolator_router::state::Portfolio)
+        &*(portfolio_account.data.as_ptr() as *const percolator_common::state::Portfolio)
     };
 
     // Display margin requirements breakdown
