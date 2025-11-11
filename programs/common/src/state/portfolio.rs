@@ -141,7 +141,7 @@ impl Portfolio {
 
     /// Initialize new portfolio (for tests only - uses stack)
     /// Excluded from BPF builds to avoid stack overflow
-    #[cfg(all(test, not(target_os = "solana")))]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn new(router_id: Pubkey, user: Pubkey, bump: u8) -> Self {
         // Create a zero-initialized LP bucket for array initialization
         let zero_bucket: LpBucket = unsafe { core::mem::zeroed() };

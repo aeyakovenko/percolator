@@ -792,6 +792,7 @@ mod tests {
         let registry = SlabRegistry {
             router_id: Pubkey::default(),
             governance: Pubkey::default(),
+            insurance_authority: Pubkey::default(),
             bump: 0,
             _padding: [0; 7],
             imr: 500,
