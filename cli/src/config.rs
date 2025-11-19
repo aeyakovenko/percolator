@@ -1,6 +1,7 @@
 //! Network configuration and keypair management
 
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::{Keypair, Signer},
@@ -8,6 +9,24 @@ use solana_sdk::{
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+#[derive(Debug, Deserialize)]
+struct LocalConfig {
+    #[serde(default)]
+    localnet: Option<NetworkProgramIds>,
+    #[serde(default)]
+    devnet: Option<NetworkProgramIds>,
+    #[serde(default)]
+    mainnet_beta: Option<NetworkProgramIds>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NetworkProgramIds {
+    router_program_id: String,
+    slab_program_id: String,
+    amm_program_id: String,
+    oracle_program_id: String,
+}
 
 pub struct NetworkConfig {
     pub network: String,
@@ -52,15 +71,9 @@ impl NetworkConfig {
 
         let keypair = load_keypair(&keypair_path)?;
 
-        // Use deployed program IDs (localnet addresses)
-        let router_program_id = Pubkey::from_str("FqyPRML6ccZdH1xjMbe5CePx81wVJfZXxGANKfageW5Q")
-            .expect("Invalid router program ID");
-        let slab_program_id = Pubkey::from_str("2qQsQvBDQCCBm3sULZhczQWgQekxxbgtvrJFmLGs1csJ")
-            .expect("Invalid slab program ID");
-        let amm_program_id = Pubkey::from_str("H8pmyp9Dixgkmmw3m7h8Y9SbwJmKgRoeejRBWrunrJJ7")
-            .expect("Invalid AMM program ID");
-        let oracle_program_id = Pubkey::from_str("BaB5cSBUFe47i1NQ5V3ijaGWmx6BCdW8yJB65hHcQRtX")
-            .expect("Invalid oracle program ID");
+        // Load program IDs from config file or use defaults
+        let (router_program_id, slab_program_id, amm_program_id, oracle_program_id) =
+            load_program_ids(network)?;
 
         Ok(Self {
             network: network.to_string(),
@@ -78,6 +91,55 @@ impl NetworkConfig {
     pub fn pubkey(&self) -> solana_sdk::pubkey::Pubkey {
         self.keypair.pubkey()
     }
+}
+
+/// Load program IDs from .percolator-local.toml or use defaults
+fn load_program_ids(network: &str) -> Result<(Pubkey, Pubkey, Pubkey, Pubkey)> {
+    // Try to load from local config file
+    let config_path = PathBuf::from(".percolator-local.toml");
+
+    if config_path.exists() {
+        let config_str = fs::read_to_string(&config_path)
+            .context("Failed to read .percolator-local.toml")?;
+
+        let config: LocalConfig = toml::from_str(&config_str)
+            .context("Failed to parse .percolator-local.toml")?;
+
+        let program_ids = match network {
+            "localnet" | "local" => config.localnet,
+            "devnet" => config.devnet,
+            "mainnet-beta" | "mainnet" => config.mainnet_beta,
+            _ => None,
+        };
+
+        if let Some(ids) = program_ids {
+            let router = Pubkey::from_str(&ids.router_program_id)
+                .context("Invalid router_program_id in config")?;
+            let slab = Pubkey::from_str(&ids.slab_program_id)
+                .context("Invalid slab_program_id in config")?;
+            let amm = Pubkey::from_str(&ids.amm_program_id)
+                .context("Invalid amm_program_id in config")?;
+            let oracle = Pubkey::from_str(&ids.oracle_program_id)
+                .context("Invalid oracle_program_id in config")?;
+
+            return Ok((router, slab, amm, oracle));
+        }
+    }
+
+    // Fallback to default hardcoded IDs (these are the old defaults)
+    log::warn!("Using default program IDs. Create .percolator-local.toml for custom deployment.");
+    log::warn!("Copy .percolator-local.toml.example and update with your deployed program IDs.");
+
+    let router = Pubkey::from_str("FqyPRML6ccZdH1xjMbe5CePx81wVJfZXxGANKfageW5Q")
+        .expect("Invalid default router program ID");
+    let slab = Pubkey::from_str("2qQsQvBDQCCBm3sULZhczQWgQekxxbgtvrJFmLGs1csJ")
+        .expect("Invalid default slab program ID");
+    let amm = Pubkey::from_str("H8pmyp9Dixgkmmw3m7h8Y9SbwJmKgRoeejRBWrunrJJ7")
+        .expect("Invalid default AMM program ID");
+    let oracle = Pubkey::from_str("BaB5cSBUFe47i1NQ5V3ijaGWmx6BCdW8yJB65hHcQRtX")
+        .expect("Invalid default oracle program ID");
+
+    Ok((router, slab, amm, oracle))
 }
 
 /// Load a keypair from a JSON file

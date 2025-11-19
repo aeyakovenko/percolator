@@ -63,6 +63,7 @@ desktop.ini
 .env
 .env.local
 .percolator/
+.percolator-local.toml
 tests/e2e/test-ledger/
 test-ledger/
 target/
