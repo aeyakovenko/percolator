@@ -1,0 +1,6 @@
+# ALL keypairs should be generated locally by each organization/developer
+# DO NOT commit keypairs to version control
+*.json
+
+# Exception: Allow example/template files if needed in the future
+# !*-example.json

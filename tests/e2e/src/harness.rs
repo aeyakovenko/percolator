@@ -130,10 +130,10 @@ impl TestContext {
         let router_path = workspace_root.join("target/deploy/percolator_router.so");
         let oracle_path = workspace_root.join("target/deploy/percolator_oracle.so");
 
-        let slab_keypair_path = workspace_root.join("target/deploy/percolator_slab-keypair.json");
-        let amm_keypair_path = workspace_root.join("target/deploy/percolator_amm-keypair.json");
-        let router_keypair_path = workspace_root.join("target/deploy/percolator_router-keypair.json");
-        let oracle_keypair_path = workspace_root.join("target/deploy/percolator_oracle-keypair.json");
+        let slab_keypair_path = workspace_root.join("keys/percolator_slab-keypair.json");
+        let amm_keypair_path = workspace_root.join("keys/percolator_amm-keypair.json");
+        let router_keypair_path = workspace_root.join("keys/percolator_router-keypair.json");
+        let oracle_keypair_path = workspace_root.join("keys/percolator_oracle-keypair.json");
 
         let slab_program_id = Self::deploy_program(&client, &payer, slab_path.to_str().unwrap(), slab_keypair_path.to_str().unwrap())?;
         let amm_program_id = Self::deploy_program(&client, &payer, amm_path.to_str().unwrap(), amm_keypair_path.to_str().unwrap())?;

@@ -4,11 +4,12 @@
 
 [localnet]
 # Program IDs for your localnet deployment
-# Get these from running: ./target/release/percolator -n localnet deploy --router --slab --amm
-router_program_id = "AuKvwsRLBxEUf4gMWMTQf7MiCYGL7RPfNPR5kD38ayNV"
-slab_program_id = "AAuGWF3Yh2D7ii5f24ds28HayjnmQPiUsDgdrPSxAVnE"
-amm_program_id = "EcdMqqmGmm4WHRopzE4Sa6BUYRDa5aeQj3EYnDnaYoGN"
-oracle_program_id = "BaB5cSBUFe47i1NQ5V3ijaGWmx6BCdW8yJB65hHcQRtX"
+# Generate keypairs first (see keys/README.md for instructions)
+# Then get program IDs by running: solana-keygen pubkey keys/percolator_<program>-keypair.json
+router_program_id = ""
+slab_program_id = ""
+amm_program_id = ""
+oracle_program_id = ""
 
 [devnet]
 # Program IDs for devnet (optional)

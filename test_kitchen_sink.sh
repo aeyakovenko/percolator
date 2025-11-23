@@ -54,10 +54,10 @@ echo "✓ Airdrop complete"
 echo ""
 
 # Get program IDs from keypair files
-ROUTER_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_router-keypair.json)
-SLAB_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_slab-keypair.json)
-AMM_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_amm-keypair.json)
-ORACLE_PROGRAM_ID=$(solana-keygen pubkey target/deploy/percolator_oracle-keypair.json)
+ROUTER_PROGRAM_ID=$(solana-keygen pubkey keys/percolator_router-keypair.json)
+SLAB_PROGRAM_ID=$(solana-keygen pubkey keys/percolator_slab-keypair.json)
+AMM_PROGRAM_ID=$(solana-keygen pubkey keys/percolator_amm-keypair.json)
+ORACLE_PROGRAM_ID=$(solana-keygen pubkey keys/percolator_oracle-keypair.json)
 
 # Close any existing programs to allow fresh deployment
 echo "🧹 Closing any existing program deployments..."
@@ -72,7 +72,7 @@ echo ""
 echo "📦 Deploying programs to validator..."
 echo ""
 echo "  Deploying router program..."
-solana program deploy target/deploy/percolator_router.so --upgrade-authority ~/.config/solana/id.json --program-id target/deploy/percolator_router-keypair.json
+solana program deploy target/deploy/percolator_router.so --upgrade-authority ~/.config/solana/id.json --program-id keys/percolator_router-keypair.json
 if [ $? -ne 0 ]; then
     echo "✗ Router deployment failed"
     exit 1
@@ -80,7 +80,7 @@ fi
 echo ""
 
 echo "  Deploying slab program..."
-solana program deploy target/deploy/percolator_slab.so --upgrade-authority ~/.config/solana/id.json --program-id target/deploy/percolator_slab-keypair.json
+solana program deploy target/deploy/percolator_slab.so --upgrade-authority ~/.config/solana/id.json --program-id keys/percolator_slab-keypair.json
 if [ $? -ne 0 ]; then
     echo "✗ Slab deployment failed"
     exit 1
@@ -88,7 +88,7 @@ fi
 echo ""
 
 echo "  Deploying AMM program..."
-solana program deploy target/deploy/percolator_amm.so --upgrade-authority ~/.config/solana/id.json --program-id target/deploy/percolator_amm-keypair.json
+solana program deploy target/deploy/percolator_amm.so --upgrade-authority ~/.config/solana/id.json --program-id keys/percolator_amm-keypair.json
 if [ $? -ne 0 ]; then
     echo "✗ AMM deployment failed"
     exit 1
@@ -96,7 +96,7 @@ fi
 echo ""
 
 echo "  Deploying oracle program..."
-solana program deploy target/deploy/percolator_oracle.so --upgrade-authority ~/.config/solana/id.json --program-id target/deploy/percolator_oracle-keypair.json
+solana program deploy target/deploy/percolator_oracle.so --upgrade-authority ~/.config/solana/id.json --program-id keys/percolator_oracle-keypair.json
 if [ $? -ne 0 ]; then
     echo "✗ Oracle deployment failed"
     exit 1

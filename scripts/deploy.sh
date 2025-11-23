@@ -34,19 +34,29 @@ echo
 
 # Deploy slab program
 echo ">>> Deploying slab program..."
-SLAB_PROGRAM_ID=$(solana program deploy target/deploy/percolator_slab.so | grep "Program Id:" | awk '{print $3}')
+solana program deploy target/deploy/percolator_slab.so --program-id keys/percolator_slab-keypair.json
+SLAB_PROGRAM_ID=$(solana-keygen pubkey keys/percolator_slab-keypair.json)
 echo "Slab Program ID: $SLAB_PROGRAM_ID"
 echo
 
 # Deploy router program
 echo ">>> Deploying router program..."
-ROUTER_PROGRAM_ID=$(solana program deploy target/deploy/percolator_router.so | grep "Program Id:" | awk '{print $3}')
+solana program deploy target/deploy/percolator_router.so --program-id keys/percolator_router-keypair.json
+ROUTER_PROGRAM_ID=$(solana-keygen pubkey keys/percolator_router-keypair.json)
 echo "Router Program ID: $ROUTER_PROGRAM_ID"
+echo
+
+# Deploy AMM program
+echo ">>> Deploying AMM program..."
+solana program deploy target/deploy/percolator_amm.so --program-id keys/percolator_amm-keypair.json
+AMM_PROGRAM_ID=$(solana-keygen pubkey keys/percolator_amm-keypair.json)
+echo "AMM Program ID: $AMM_PROGRAM_ID"
 echo
 
 # Deploy oracle program
 echo ">>> Deploying oracle program..."
-ORACLE_PROGRAM_ID=$(solana program deploy target/deploy/percolator_oracle.so | grep "Program Id:" | awk '{print $3}')
+solana program deploy target/deploy/percolator_oracle.so --program-id keys/percolator_oracle-keypair.json
+ORACLE_PROGRAM_ID=$(solana-keygen pubkey keys/percolator_oracle-keypair.json)
 echo "Oracle Program ID: $ORACLE_PROGRAM_ID"
 echo
 
@@ -58,6 +68,7 @@ cat > deployed_programs.json <<EOF
   "programs": {
     "slab": "$SLAB_PROGRAM_ID",
     "router": "$ROUTER_PROGRAM_ID",
+    "amm": "$AMM_PROGRAM_ID",
     "oracle": "$ORACLE_PROGRAM_ID"
   }
 }
