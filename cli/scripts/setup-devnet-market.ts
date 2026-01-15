@@ -60,9 +60,9 @@ import { buildIx } from "../src/runtime/tx.js";
 // Chainlink SOL/USD on devnet (actively updated!)
 const CHAINLINK_SOL_USD = new PublicKey("99B2bTijsU6f1GCT73HmdR7HCFFjGMBcPZY6jZ96ynrR");
 
-// Program IDs
-const PROGRAM_ID = new PublicKey("AT2XFGzcQ2vVHkW5xpnqhs8NvfCUq5EmEcky5KE9EhnA");
-const MATCHER_PROGRAM_ID = new PublicKey("4HcGCsyjAqnFua5ccuXyt8KRRQzKFbGTJkVChpS7Yfzy");
+// Program IDs - Our deployed programs
+const PROGRAM_ID = new PublicKey("FjawyjMgQcuRZHaSvnxyB6N6pKD7waNTxXGSfFBQinzP");
+const MATCHER_PROGRAM_ID = new PublicKey("DcNN5mqdeGq7ZWnyNXT9j3ZkGcamyirGYVNnnJQjUfcR");
 const MATCHER_CTX_SIZE = 320;
 
 // Market parameters
@@ -105,7 +105,7 @@ async function main() {
   console.log("Market uses Chainlink's live SOL/USD oracle for price feeds.\n");
 
   // Setup connection and wallet
-  const walletPath = process.env.WALLET_PATH || `${process.env.HOME}/.config/solana/id.json`;
+  const walletPath = process.env.WALLET_PATH || "../devnet-deployer-array.json";
   const payer = Keypair.fromSecretKey(
     new Uint8Array(JSON.parse(fs.readFileSync(walletPath, "utf-8")))
   );

@@ -1,3 +1,7 @@
+[workspace]
+members = ["prog", "match"]
+exclude = ["cli"]
+
 [package]
 name = "percolator"
 version = "0.1.0"

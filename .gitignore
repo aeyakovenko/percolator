@@ -39,3 +39,8 @@ desktop.ini
 .env
 .env.local
 test-ledger/
+
+# Solana keypairs (NEVER commit private keys)
+devnet-deployer.json
+*-keypair.json
+*.keypair

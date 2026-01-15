@@ -19,6 +19,8 @@ unsafe_close = []  # Skip all validation in CloseSlab instruction
 
 [dependencies]
 solana-program = "1.18"
+# Pin blake3 to avoid edition2024 requirement
+blake3 = "=1.8.2"
 spl-token = { version = "4.0", features = ["no-entrypoint"] }
 thiserror = "1.0"
 bytemuck = { version = "1.14", features = ["derive", "min_const_generics"] }
@@ -27,7 +29,7 @@ pinocchio = "0.6"
 arrayref = "0.3"
 num-derive = "0.4"
 num-traits = "0.2"
-percolator = { path = "../percolator" }
+percolator = { path = ".." }
 
 [dev-dependencies]
 bincode = "1"

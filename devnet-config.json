@@ -1,0 +1,26 @@
+{
+  "network": "devnet",
+  "rpcUrl": "https://api.devnet.solana.com",
+  "programId": "FjawyjMgQcuRZHaSvnxyB6N6pKD7waNTxXGSfFBQinzP",
+  "matcherProgramId": "DcNN5mqdeGq7ZWnyNXT9j3ZkGcamyirGYVNnnJQjUfcR",
+  "slab": "7RkyJSarWThR5sZDJihZfV22rS3mbg538nHtcaTnkrec",
+  "vault": "55hLrPTEc6XMSkmgQU7gyzCRv2ZoErmWaaDeRKBHcoQB",
+  "vaultPda": "4wD4Lw9HwhGtcYdsHjU88C924wbcyVwwP9pzKEzpWWbz",
+  "oracle": "99B2bTijsU6f1GCT73HmdR7HCFFjGMBcPZY6jZ96ynrR",
+  "oracleType": "chainlink",
+  "inverted": true,
+  "pair": "SOL-PERP",
+  "maxLeverage": 10,
+  "initialMarginBps": 1000,
+  "maintenanceMarginBps": 500,
+  "mint": "So11111111111111111111111111111111111111112",
+  "lp": {
+    "index": 0,
+    "pda": "5Jbcoky4qz9rvdoGHK4s9KcFrLM536syjm56GvFziEDw",
+    "matcherContext": "4bN3B3Epf1odSh6FmeGGwX7sXqHS7xur2tknYjRjt4pk",
+    "collateral": 1
+  },
+  "insuranceFund": 1,
+  "admin": "6yzQ3Vryi8f9Xhp3ik3a77CbuNXAB1LrdoeCupFVs8aw",
+  "adminAta": "CPrGoPF1N5r53cTgPzPQ3thoucUPBupqkzQapY5dPbff"
+}
