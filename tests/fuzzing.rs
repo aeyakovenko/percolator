@@ -46,6 +46,9 @@ use proptest::prelude::*;
 
 const MATCHER: NoOpMatcher = NoOpMatcher;
 
+// Default oracle price for conservation checks
+const DEFAULT_ORACLE: u64 = 1_000_000;
+
 // ============================================================================
 // SECTION 1: HELPER FUNCTIONS
 // ============================================================================
@@ -91,10 +94,10 @@ fn funding_payment(position: i128, delta_f: i128) -> i128 {
 /// Assert all global invariants hold
 /// IMPORTANT: This function is PURE - it does NOT mutate the engine.
 /// Invariant checks must reflect on-chain semantics (funding is lazy).
-fn assert_global_invariants(engine: &RiskEngine, context: &str) {
+fn assert_global_invariants(engine: &RiskEngine, context: &str, oracle_price: u64) {
     // 1. Conservation
-    // Note: check_conservation now accounts for lazy funding internally
-    if !engine.check_conservation() {
+    // Note: check_conservation now accounts for lazy funding internally and includes mark PnL
+    if !engine.check_conservation(oracle_price) {
         // Compute details for debugging (using settled PNL like check_conservation does)
         let mut total_capital = 0u128;
         let mut net_settled_pnl: i128 = 0;
@@ -529,7 +532,7 @@ impl FuzzState {
                         );
                         self.account_ids.push(new_id);
                         self.live_accounts.push(idx);
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback - restore engine and harness state
@@ -575,7 +578,7 @@ impl FuzzState {
                         if self.lp_idx.is_none() {
                             self.lp_idx = Some(idx);
                         }
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback - restore engine and harness state
@@ -592,7 +595,7 @@ impl FuzzState {
                 let before = (*self.engine).clone();
                 let vault_before = self.engine.vault;
 
-                let result = self.engine.deposit(idx, *amount);
+                let result = self.engine.deposit(idx, *amount, 0);
 
                 match result {
                     Ok(()) => {
@@ -603,7 +606,7 @@ impl FuzzState {
                             "{}: vault didn't increase correctly",
                             context
                         );
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -628,7 +631,7 @@ impl FuzzState {
                             "{}: vault didn't decrease correctly",
                             context
                         );
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -646,7 +649,7 @@ impl FuzzState {
                     "{}: current_slot went backwards",
                     context
                 );
-                assert_global_invariants(&self.engine, &context);
+                assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
             }
 
             Action::AccrueFunding {
@@ -672,7 +675,7 @@ impl FuzzState {
                                 context
                             );
                         }
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -696,7 +699,7 @@ impl FuzzState {
                             "{}: funding_index not synced",
                             context
                         );
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -728,7 +731,7 @@ impl FuzzState {
                 match result {
                     Ok(_) => {
                         // Trade succeeded - positions modified, that's fine
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -767,7 +770,7 @@ impl FuzzState {
                                 );
                             }
                         }
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -805,7 +808,7 @@ impl FuzzState {
                                 );
                             }
                         }
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -846,7 +849,7 @@ impl FuzzState {
                                 context
                             );
                         }
-                        assert_global_invariants(&self.engine, &context);
+                        assert_global_invariants(&self.engine, &context, DEFAULT_ORACLE);
                     }
                     Err(_) => {
                         // Simulate Solana rollback
@@ -897,7 +900,7 @@ proptest! {
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit(idx, 10_000);
+            let _ = state.engine.deposit(idx, 10_000, 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
@@ -936,7 +939,7 @@ proptest! {
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit(idx, 10_000);
+            let _ = state.engine.deposit(idx, 10_000, 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
@@ -1075,7 +1078,7 @@ proptest! {
 
         engine.insurance_fund.balance = 100_000;
         engine.vault = 100_000;
-        engine.deposit(user_idx, capital).unwrap();
+        engine.deposit(user_idx, capital, 0).unwrap();
         engine.accounts[user_idx as usize].pnl = pnl;
         engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
         engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
@@ -1117,7 +1120,7 @@ proptest! {
 
         engine.insurance_fund.balance = 100_000;
         engine.vault = 100_000;
-        engine.deposit(user_idx, capital).unwrap();
+        engine.deposit(user_idx, capital, 0).unwrap();
         engine.accounts[user_idx as usize].pnl = pnl;
         engine.accounts[user_idx as usize].warmup_slope_per_step = slope;
         engine.accounts[user_idx as usize].warmup_started_at_slot = 0;
@@ -1532,7 +1535,7 @@ fn run_deterministic_fuzzer(
 
         // Initial deposits
         for &idx in &state.live_accounts.clone() {
-            let _ = state.engine.deposit(idx, rng.u128(5_000, 50_000));
+            let _ = state.engine.deposit(idx, rng.u128(5_000, 50_000), 0);
         }
 
         // Top up insurance using proper API (maintains conservation)
@@ -1544,7 +1547,7 @@ fn run_deterministic_fuzzer(
         }
 
         // Verify conservation after setup
-        if !state.engine.check_conservation() {
+        if !state.engine.check_conservation(DEFAULT_ORACLE) {
             eprintln!("Conservation failed after setup for seed {}", seed);
             eprintln!(
                 "  vault={}, insurance={}",
@@ -1660,7 +1663,7 @@ proptest! {
         let vault_before = engine.vault;
         let principal_before = engine.accounts[user_idx as usize].capital;
 
-        let _ = engine.deposit(user_idx, amount);
+        let _ = engine.deposit(user_idx, amount, 0);
 
         prop_assert_eq!(engine.vault, vault_before + amount);
         prop_assert_eq!(engine.accounts[user_idx as usize].capital, principal_before + amount);
@@ -1675,7 +1678,7 @@ proptest! {
         let mut engine = Box::new(RiskEngine::new(params_regime_a()));
         let user_idx = engine.add_user(1).unwrap();
 
-        engine.deposit(user_idx, deposit_amount).unwrap();
+        engine.deposit(user_idx, deposit_amount, 0).unwrap();
 
         // Snapshot for rollback simulation
         let before = (*engine).clone();
@@ -1703,16 +1706,16 @@ proptest! {
         let user_idx = engine.add_user(1).unwrap();
 
         for amount in deposits {
-            let _ = engine.deposit(user_idx, amount);
+            let _ = engine.deposit(user_idx, amount, 0);
         }
 
-        prop_assert!(engine.check_conservation());
+        prop_assert!(engine.check_conservation(DEFAULT_ORACLE));
 
         for amount in withdrawals {
             let _ = engine.withdraw(user_idx, amount, 0, 1_000_000);
         }
 
-        prop_assert!(engine.check_conservation());
+        prop_assert!(engine.check_conservation(DEFAULT_ORACLE));
     }
 
     // Test funding idempotence
@@ -1791,8 +1794,8 @@ proptest! {
         let user_idx = engine.add_user(1).unwrap();
         let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
 
-        engine.deposit(user_idx, user_capital).unwrap();
-        engine.deposit(lp_idx, lp_capital).unwrap();
+        engine.deposit(user_idx, user_capital, 0).unwrap();
+        engine.deposit(lp_idx, lp_capital, 0).unwrap();
 
         engine.accounts[user_idx as usize].position_size = position;
         engine.accounts[user_idx as usize].entry_price = entry_price;
@@ -1803,11 +1806,11 @@ proptest! {
         engine.insurance_fund.balance = insurance;
         engine.vault = total_capital + insurance;
 
-        prop_assert!(engine.check_conservation(), "Before panic_settle");
+        prop_assert!(engine.check_conservation(DEFAULT_ORACLE), "Before panic_settle");
 
         let _ = engine.panic_settle_all(oracle_price);
 
-        prop_assert!(engine.check_conservation(), "After panic_settle");
+        prop_assert!(engine.check_conservation(DEFAULT_ORACLE), "After panic_settle");
 
         prop_assert_eq!(engine.accounts[user_idx as usize].position_size, 0);
         prop_assert_eq!(engine.accounts[lp_idx as usize].position_size, 0);
@@ -1828,8 +1831,8 @@ fn panic_settle_preserves_conservation_with_lazy_funding() {
     // Create LP and user with positions
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
     let user_idx = engine.add_user(1).unwrap();
-    engine.deposit(lp_idx, 100_000).unwrap();
-    engine.deposit(user_idx, 100_000).unwrap();
+    engine.deposit(lp_idx, 100_000, 0).unwrap();
+    engine.deposit(user_idx, 100_000, 0).unwrap();
 
     // Execute a trade to create positions
     engine
@@ -1841,7 +1844,7 @@ fn panic_settle_preserves_conservation_with_lazy_funding() {
 
     // Verify conservation holds before panic settle (uses settled_pnl)
     assert!(
-        engine.check_conservation(),
+        engine.check_conservation(DEFAULT_ORACLE),
         "Conservation should hold before panic_settle"
     );
 
@@ -1850,7 +1853,7 @@ fn panic_settle_preserves_conservation_with_lazy_funding() {
 
     // Verify conservation still holds
     assert!(
-        engine.check_conservation(),
+        engine.check_conservation(DEFAULT_ORACLE),
         "Conservation must hold after panic_settle"
     );
 
@@ -1868,8 +1871,8 @@ fn conservation_uses_settled_pnl_regression() {
     // Create LP and user with positions
     let lp_idx = engine.add_lp([0u8; 32], [0u8; 32], 1).unwrap();
     let user_idx = engine.add_user(1).unwrap();
-    engine.deposit(lp_idx, 100_000).unwrap();
-    engine.deposit(user_idx, 100_000).unwrap();
+    engine.deposit(lp_idx, 100_000, 0).unwrap();
+    engine.deposit(user_idx, 100_000, 0).unwrap();
 
     // Execute trade to create positions
     engine
@@ -1916,7 +1919,7 @@ fn conservation_uses_settled_pnl_regression() {
 
     // Verify our manual computation matches engine's check
     assert!(
-        engine.check_conservation(),
+        engine.check_conservation(DEFAULT_ORACLE),
         "check_conservation failed: actual={}, expected={}, diff={}",
         actual,
         expected,
@@ -1947,7 +1950,7 @@ fn harness_rollback_simulation_test() {
 
     // Create user with some capital
     let user_idx = engine.add_user(1).unwrap();
-    engine.deposit(user_idx, 1000).unwrap();
+    engine.deposit(user_idx, 1000, 0).unwrap();
 
     // Accrue some funding to create state that could be mutated
     engine.accrue_funding(100, 1_000_000, 100).unwrap();
@@ -2004,7 +2007,7 @@ fn harness_rollback_simulation_test() {
 
     // Conservation must still hold after rollback
     assert!(
-        engine.check_conservation(),
+        engine.check_conservation(DEFAULT_ORACLE),
         "Conservation must hold after harness rollback"
     );
 }

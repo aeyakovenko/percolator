@@ -10,14 +10,14 @@ fn default_params() -> RiskParams {
         initial_margin_bps: 1000,    // 10%
         trading_fee_bps: 10,         // 0.1%
         max_accounts: 1000,
-        new_account_fee: 0,          // Zero fee for tests
-        risk_reduction_threshold: 0, // Default: only trigger on full depletion
-        maintenance_fee_per_slot: 0, // No maintenance fee by default
+        new_account_fee: U128::new(0),          // Zero fee for tests
+        risk_reduction_threshold: U128::new(0), // Default: only trigger on full depletion
+        maintenance_fee_per_slot: U128::new(0), // No maintenance fee by default
         max_crank_staleness_slots: u64::MAX,
-        liquidation_fee_bps: 50,     // 0.5% liquidation fee
-        liquidation_fee_cap: 100_000, // Cap at 100k units
-        liquidation_buffer_bps: 100, // 1% buffer above maintenance
-        min_liquidation_abs: 100_000, // Minimum 0.1 units
+        liquidation_fee_bps: 50,                 // 0.5% liquidation fee
+        liquidation_fee_cap: U128::new(100_000), // Cap at 100k units
+        liquidation_buffer_bps: 100,             // 1% buffer above maintenance
+        min_liquidation_abs: U128::new(100_000), // Minimum 0.1 units
     }
 }
 
@@ -64,21 +64,21 @@ fn test_e2e_complete_user_journey() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
 
     // Initialize insurance fund
-    engine.insurance_fund.balance = 50_000;
+    engine.insurance_fund.balance = U128::new(50_000);
 
     // Add LP with capital (LP takes leveraged position opposite to users)
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.accounts[lp as usize].capital = 100_000;
-    engine.vault = 100_000;
+    engine.accounts[lp as usize].capital = U128::new(100_000);
+    engine.vault = U128::new(100_000);
 
     // Add two users
     let alice = engine.add_user(10_000).unwrap();
     let bob = engine.add_user(10_000).unwrap();
 
     // Users deposit principal
-    engine.deposit(alice, 10_000).unwrap();
-    engine.deposit(bob, 15_000).unwrap();
-    engine.vault = 125_000; // 100k LP + 10k Alice + 15k Bob
+    engine.deposit(alice, 10_000, 0).unwrap();
+    engine.deposit(bob, 15_000, 0).unwrap();
+    engine.vault = U128::new(125_000); // 100k LP + 10k Alice + 15k Bob
 
     // === Phase 1: Trading ===
 
@@ -94,9 +94,9 @@ fn test_e2e_complete_user_journey() {
         .unwrap();
 
     // Check positions
-    assert_eq!(engine.accounts[alice as usize].position_size, 5_000);
-    assert_eq!(engine.accounts[bob as usize].position_size, -3_000);
-    assert_eq!(engine.accounts[lp as usize].position_size, -2_000); // Net opposite to users
+    assert_eq!(engine.accounts[alice as usize].position_size.get(), 5_000);
+    assert_eq!(engine.accounts[bob as usize].position_size.get(), -3_000);
+    assert_eq!(engine.accounts[lp as usize].position_size.get(), -2_000); // Net opposite to users
 
     // === Phase 2: Price Movement & Unrealized PNL ===
 
@@ -104,13 +104,14 @@ fn test_e2e_complete_user_journey() {
     let new_price = 1_200_000;
 
     // Alice closes half her position, realizing profit
+    let slot = engine.current_slot;
     engine
-        .execute_trade(&MATCHER, lp, alice, 0, new_price, -2_500)
+        .execute_trade(&MATCHER, lp, alice, slot, new_price, -2_500)
         .unwrap();
 
     // Alice should have positive PNL from the closed portion
     // Profit = (1.20 - 1.00) × 2500 = 500
-    assert!(engine.accounts[alice as usize].pnl > 0);
+    assert!(engine.accounts[alice as usize].pnl.is_positive());
     let alice_pnl = engine.accounts[alice as usize].pnl;
 
     // === Phase 3: Funding Accrual ===
@@ -127,7 +128,7 @@ fn test_e2e_complete_user_journey() {
 
     // Alice (long) should have paid funding, Bob (short) should have received
     assert!(engine.accounts[alice as usize].pnl < alice_pnl); // PNL reduced by funding
-    assert!(engine.accounts[bob as usize].pnl > 0); // Received funding
+    assert!(engine.accounts[bob as usize].pnl.is_positive()); // Received funding
 
     // === Phase 4: PNL Warmup ===
 
@@ -149,14 +150,15 @@ fn test_e2e_complete_user_journey() {
     // === Phase 5: Withdrawal ===
 
     // Alice closes her remaining position first
+    let slot = engine.current_slot;
     engine
         .execute_trade(
             &MATCHER,
             lp,
             alice,
-            0,
+            slot,
             new_price,
-            -engine.accounts[alice as usize].position_size,
+            -engine.accounts[alice as usize].position_size.get(),
         )
         .unwrap();
 
@@ -165,15 +167,18 @@ fn test_e2e_complete_user_journey() {
 
     // Now Alice can withdraw her warmed PNL + principal
     let alice_final_withdrawable = engine.withdrawable_pnl(&engine.accounts[alice as usize]);
-    let alice_withdrawal = engine.accounts[alice as usize].capital + alice_final_withdrawable;
+    let alice_withdrawal = engine.accounts[alice as usize].capital.get() + alice_final_withdrawable;
 
     if alice_withdrawal > 0 {
-        engine.withdraw(alice, alice_withdrawal, 0, 1_000_000).unwrap();
+        let slot = engine.current_slot;
+        engine
+            .withdraw(alice, alice_withdrawal, slot, 1_000_000)
+            .unwrap();
 
         // Alice should have minimal remaining balance
         assert!(
-            engine.accounts[alice as usize].capital
-                + clamp_pos_i128(engine.accounts[alice as usize].pnl)
+            engine.accounts[alice as usize].capital.get()
+                + clamp_pos_i128(engine.accounts[alice as usize].pnl.get())
                 < 100
         );
     }
@@ -188,15 +193,18 @@ fn test_e2e_complete_user_journey() {
 
     // All positions should be closed
     assert_eq!(
-        engine.accounts[alice as usize].position_size, 0,
+        engine.accounts[alice as usize].position_size.get(),
+        0,
         "Alice position should be closed"
     );
     assert_eq!(
-        engine.accounts[bob as usize].position_size, 0,
+        engine.accounts[bob as usize].position_size.get(),
+        0,
         "Bob position should be closed"
     );
     assert_eq!(
-        engine.accounts[lp as usize].position_size, 0,
+        engine.accounts[lp as usize].position_size.get(),
+        0,
         "LP position should be closed"
     );
 
@@ -208,15 +216,15 @@ fn test_e2e_complete_user_journey() {
 
     // All PNLs should be >= 0 (negative PNL clamped and socialized)
     assert!(
-        engine.accounts[alice as usize].pnl >= 0,
+        engine.accounts[alice as usize].pnl.get() >= 0,
         "Alice PNL should be >= 0"
     );
     assert!(
-        engine.accounts[bob as usize].pnl >= 0,
+        engine.accounts[bob as usize].pnl.get() >= 0,
         "Bob PNL should be >= 0"
     );
     assert!(
-        engine.accounts[lp as usize].pnl >= 0,
+        engine.accounts[lp as usize].pnl.get() >= 0,
         "LP PNL should be >= 0"
     );
 
@@ -232,20 +240,20 @@ fn test_e2e_multi_user_with_adl() {
     // Scenario: Multiple users trade, one causes loss requiring ADL
 
     let mut engine = Box::new(RiskEngine::new(default_params()));
-    engine.insurance_fund.balance = 10_000;
+    engine.insurance_fund.balance = U128::new(10_000);
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.accounts[lp as usize].capital = 200_000;
-    engine.vault = 200_000;
+    engine.accounts[lp as usize].capital = U128::new(200_000);
+    engine.vault = U128::new(200_000);
 
     // Add 5 users
     let mut users = Vec::new();
     for _ in 0..5 {
         let user = engine.add_user(10_000).unwrap();
-        engine.deposit(user, 10_000).unwrap();
+        engine.deposit(user, 10_000, 0).unwrap();
         users.push(user);
     }
-    engine.vault = 250_000;
+    engine.vault = U128::new(250_000);
 
     // Users 0-3 open long positions at $1000
     for i in 0..4 {
@@ -271,7 +279,7 @@ fn test_e2e_multi_user_with_adl() {
 
     // Users 0-3 should have positive PNL
     for i in 0..4 {
-        assert!(engine.accounts[users[i] as usize].pnl > 0);
+        assert!(engine.accounts[users[i] as usize].pnl.is_positive());
     }
 
     // Simulate a large loss event requiring ADL (e.g., LP underwater)
@@ -285,14 +293,17 @@ fn test_e2e_multi_user_with_adl() {
         // Capital may be slightly reduced by trading fees that were settled
         // but principal (minus fees) should be protected by I1
         assert!(
-            engine.accounts[users[i] as usize].capital >= 9_990,
+            engine.accounts[users[i] as usize].capital.get() >= 9_990,
             "Principal should be mostly intact (minus fees): got {}",
             engine.accounts[users[i] as usize].capital
         );
     }
 
     // Total PNL should be reduced by ADL
-    let total_pnl_after: i128 = users.iter().map(|&u| engine.accounts[u as usize].pnl).sum();
+    let total_pnl_after: i128 = users
+        .iter()
+        .map(|&u| engine.accounts[u as usize].pnl.get())
+        .sum();
 
     // Some PNL should remain (not all haircutted)
     println!("Total PNL after ADL: {}", total_pnl_after);
@@ -313,20 +324,20 @@ fn test_e2e_warmup_rate_limiting_stress() {
     let mut engine = Box::new(RiskEngine::new(default_params()));
 
     // Small insurance fund to test capacity limits
-    engine.insurance_fund.balance = 20_000;
+    engine.insurance_fund.balance = U128::new(20_000);
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.accounts[lp as usize].capital = 500_000;
-    engine.vault = 500_000;
+    engine.accounts[lp as usize].capital = U128::new(500_000);
+    engine.vault = U128::new(500_000);
 
     // Add 10 users
     let mut users = Vec::new();
     for _ in 0..10 {
         let user = engine.add_user(10_000).unwrap();
-        engine.deposit(user, 5_000).unwrap();
+        engine.deposit(user, 5_000, 0).unwrap();
         users.push(user);
     }
-    engine.vault = 550_000;
+    engine.vault = U128::new(550_000);
 
     // All users open large long positions
     for &user in &users {
@@ -345,8 +356,8 @@ fn test_e2e_warmup_rate_limiting_stress() {
     // Each user should have large positive PNL (~5000 each = 50k total)
     let mut total_pnl = 0i128;
     for &user in &users {
-        assert!(engine.accounts[user as usize].pnl > 1_000);
-        total_pnl += engine.accounts[user as usize].pnl;
+        assert!(engine.accounts[user as usize].pnl.get() > 1_000);
+        total_pnl += engine.accounts[user as usize].pnl.get();
     }
     println!("Total realized PNL across all users: {}", total_pnl);
 
@@ -411,18 +422,18 @@ fn test_e2e_funding_complete_cycle() {
     // Scenario: Users trade, funding accrues over time, positions flip, funding reverses
 
     let mut engine = Box::new(RiskEngine::new(default_params()));
-    engine.insurance_fund.balance = 50_000;
+    engine.insurance_fund.balance = U128::new(50_000);
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.accounts[lp as usize].capital = 100_000;
-    engine.vault = 100_000;
+    engine.accounts[lp as usize].capital = U128::new(100_000);
+    engine.vault = U128::new(100_000);
 
     let alice = engine.add_user(10_000).unwrap();
     let bob = engine.add_user(10_000).unwrap();
 
-    engine.deposit(alice, 20_000).unwrap();
-    engine.deposit(bob, 20_000).unwrap();
-    engine.vault = 140_000;
+    engine.deposit(alice, 20_000, 0).unwrap();
+    engine.deposit(bob, 20_000, 0).unwrap();
+    engine.vault = U128::new(140_000);
 
     // Alice goes long, Bob goes short
     engine
@@ -442,8 +453,8 @@ fn test_e2e_funding_complete_cycle() {
     engine.touch_account(alice).unwrap();
     engine.touch_account(bob).unwrap();
 
-    let alice_pnl_after_funding = engine.accounts[alice as usize].pnl;
-    let bob_pnl_after_funding = engine.accounts[bob as usize].pnl;
+    let alice_pnl_after_funding = engine.accounts[alice as usize].pnl.get();
+    let bob_pnl_after_funding = engine.accounts[bob as usize].pnl.get();
 
     // Alice (long) paid, Bob (short) received
     assert!(alice_pnl_after_funding < 0); // Paid funding
@@ -469,8 +480,8 @@ fn test_e2e_funding_complete_cycle() {
         .unwrap();
 
     // Now Alice is short and Bob is long
-    assert!(engine.accounts[alice as usize].position_size < 0);
-    assert!(engine.accounts[bob as usize].position_size > 0);
+    assert!(engine.accounts[alice as usize].position_size.is_negative());
+    assert!(engine.accounts[bob as usize].position_size.is_positive());
 
     // Advance time and accrue more funding (now Alice receives, Bob pays)
     engine.advance_slot(20);
@@ -482,8 +493,8 @@ fn test_e2e_funding_complete_cycle() {
     engine.touch_account(bob).unwrap();
 
     // Now funding should have reversed
-    let alice_final = engine.accounts[alice as usize].pnl;
-    let bob_final = engine.accounts[bob as usize].pnl;
+    let alice_final = engine.accounts[alice as usize].pnl.get();
+    let bob_final = engine.accounts[bob as usize].pnl.get();
 
     // Alice (now short) should have received some funding back
     assert!(alice_final > alice_pnl_after_funding);
@@ -505,20 +516,20 @@ fn test_e2e_oracle_attack_protection() {
     // Scenario: Attacker tries to exploit oracle manipulation but gets limited by warmup + ADL
 
     let mut engine = Box::new(RiskEngine::new(default_params()));
-    engine.insurance_fund.balance = 30_000;
+    engine.insurance_fund.balance = U128::new(30_000);
 
     let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.accounts[lp as usize].capital = 200_000;
-    engine.vault = 200_000;
+    engine.accounts[lp as usize].capital = U128::new(200_000);
+    engine.vault = U128::new(200_000);
 
     // Honest user
     let honest_user = engine.add_user(10_000).unwrap();
-    engine.deposit(honest_user, 20_000).unwrap();
+    engine.deposit(honest_user, 20_000, 0).unwrap();
 
     // Attacker
     let attacker = engine.add_user(10_000).unwrap();
-    engine.deposit(attacker, 10_000).unwrap();
-    engine.vault = 230_000;
+    engine.deposit(attacker, 10_000, 0).unwrap();
+    engine.vault = U128::new(230_000);
 
     // === Phase 1: Normal Trading ===
 
@@ -538,7 +549,7 @@ fn test_e2e_oracle_attack_protection() {
     // execute_trade automatically calls update_warmup_slope() after realizing PNL
 
     // Attacker has massive fake PNL
-    let attacker_fake_pnl = clamp_pos_i128(engine.accounts[attacker as usize].pnl);
+    let attacker_fake_pnl = clamp_pos_i128(engine.accounts[attacker as usize].pnl.get());
     assert!(attacker_fake_pnl > 10_000); // Huge profit from manipulation
 
     // === Phase 3: Warmup Limiting ===
@@ -582,7 +593,7 @@ fn test_e2e_oracle_attack_protection() {
     engine.apply_adl(attacker_fake_pnl).unwrap();
 
     // Attacker's unwrapped (still warming) PNL gets haircutted
-    let attacker_after_adl = clamp_pos_i128(engine.accounts[attacker as usize].pnl);
+    let attacker_after_adl = clamp_pos_i128(engine.accounts[attacker as usize].pnl.get());
 
     // Most of the fake PNL should be gone
     assert!(attacker_after_adl < attacker_fake_pnl / 2,
@@ -591,7 +602,7 @@ fn test_e2e_oracle_attack_protection() {
     // === Phase 5: Honest User Protected ===
 
     // Honest user's principal should be intact
-    assert_eq!(engine.accounts[honest_user as usize].capital, 20_000, "I1: Principal never reduced");
+    assert_eq!(engine.accounts[honest_user as usize].capital.get(), 20_000, "I1: Principal never reduced");
 
     // Insurance fund took some hit, but limited
     assert!(engine.insurance_fund.balance >= 20_000,
