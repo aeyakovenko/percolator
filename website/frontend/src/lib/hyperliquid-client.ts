@@ -62,22 +62,19 @@ class HyperliquidClient {
       if (endTime) params.append('to', endTime.toString());
 
       const response = await fetch(`${API_URL}/api/dashboard/${symbol}/candles?${params}`);
-      
-      console.log(`Fetching candles: ${API_URL}/api/dashboard/${symbol}/candles?${params}`);
-      
+
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`API error: ${response.status} - ${errorText}`);
+        console.error(`Chart API error: ${response.status}`);
         throw new Error(`API error: ${response.status}`);
       }
 
       const data = await response.json();
-      console.log(`API response received: ${Array.isArray(data) ? data.length : 'not array'} items`);
-      
+
       // Transform data from dashboard format to our format
       // Dashboard returns: [{ time, open, high, low, close, volume }]
       if (Array.isArray(data)) {
-        const transformed = data.map((c: any) => ({
+        return data.map((c: any) => ({
           time: c.time || c.timestamp || Date.now(),
           open: c.open,
           high: c.high,
@@ -85,11 +82,8 @@ class HyperliquidClient {
           close: c.close,
           volume: c.volume || 0,
         }));
-        console.log(`Transformed ${transformed.length} candles, sample:`, transformed[0]);
-        return transformed;
       }
-      
-      console.warn('API returned non-array data:', data);
+
       return [];
     } catch (error) {
       console.error(`Failed to fetch candles for ${coin} ${interval}:`, error);
@@ -130,20 +124,24 @@ class HyperliquidClient {
 
   /**
    * Connect to WebSocket for real-time updates
+   * NOTE: Disabled for now - WebSocket endpoint not fully implemented
    */
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
+      // WebSocket disabled - charts work fine with polling
+      resolve();
+      return;
+
+      /* Commented out until WebSocket server is properly configured
       try {
         if (this.ws?.readyState === WebSocket.OPEN) {
           resolve();
           return;
         }
 
-        console.log(`Connecting to WebSocket: ${WS_URL}`);
         this.ws = new WebSocket(WS_URL);
 
         this.ws.onopen = () => {
-          console.log('WebSocket connected');
           this.reconnectAttempts = 0;
           resolve();
         };
@@ -151,11 +149,11 @@ class HyperliquidClient {
         this.ws.onmessage = (event) => {
           try {
             const message = JSON.parse(event.data);
-            
+
             if (message.type === 'candle' && message.data) {
               const candle: CandlestickData = message.data;
               const key = `${message.coin}-${message.interval}`;
-              
+
               const handler = this.subscriptions.get(key);
               if (handler) {
                 handler(candle);
@@ -172,14 +170,12 @@ class HyperliquidClient {
         };
 
         this.ws.onclose = () => {
-          console.log('WebSocket closed');
           this.ws = null;
-          
+
           // Attempt to reconnect
           if (this.reconnectAttempts < this.maxReconnectAttempts) {
             this.reconnectAttempts++;
             const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-            console.log(`Reconnecting in ${delay}ms...`);
             setTimeout(() => {
               this.connect().catch(console.error);
             }, delay);
@@ -189,6 +185,7 @@ class HyperliquidClient {
         console.error('Failed to create WebSocket:', error);
         reject(error);
       }
+      */
     });
   }
 

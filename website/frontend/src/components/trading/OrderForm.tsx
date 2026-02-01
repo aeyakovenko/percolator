@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { Transaction, Connection, clusterApiUrl } from '@solana/web3.js';
 import { toast } from '@/components/ui/use-toast';
-import { Clock, AlertCircle } from 'lucide-react';
+import { Clock, AlertCircle, TrendingUp, TrendingDown, Wallet } from 'lucide-react';
 
 type OrderSide = 'buy' | 'sell';
 type OrderType = 'limit' | 'market';
@@ -12,6 +12,17 @@ type OrderType = 'limit' | 'market';
 interface OrderFormProps {
   coin: "ethereum" | "bitcoin" | "solana" | "jupiter" | "bonk" | "dogwifhat";
   currentPrice: number;
+}
+
+interface UserBalance {
+  success: boolean;
+  hasAccount: boolean;
+  balance: number;
+  position?: {
+    size: string;
+    side: 'long' | 'short' | 'flat';
+    entryPrice: string;
+  };
 }
 
 interface ReservedOrder {
@@ -42,10 +53,130 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
   const [price, setPrice] = useState(currentPrice > 0 ? currentPrice.toFixed(2) : '');
   const [size, setSize] = useState('');
   const [loading, setLoading] = useState(false);
+  const [depositLoading, setDepositLoading] = useState(false);
+  const [depositAmount, setDepositAmount] = useState('0.5');
+  const [showDeposit, setShowDeposit] = useState(false);
   const [reservedOrder, setReservedOrder] = useState<ReservedOrder | null>(null);
   const [timeRemaining, setTimeRemaining] = useState(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const connection = new Connection(clusterApiUrl('devnet'), 'confirmed');
+  const [userBalance, setUserBalance] = useState<UserBalance | null>(null);
+  const [balanceLoading, setBalanceLoading] = useState(false);
+
+  // Handle deposit
+  const handleDeposit = async () => {
+    if (!publicKey || !signTransaction) {
+      toast({
+        type: 'warning',
+        title: 'Wallet Required',
+        message: 'Please connect your wallet'
+      });
+      return;
+    }
+
+    const amount = parseFloat(depositAmount);
+    if (amount <= 0) {
+      toast({
+        type: 'error',
+        title: 'Invalid Amount',
+        message: 'Please enter a valid deposit amount'
+      });
+      return;
+    }
+
+    setDepositLoading(true);
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+
+      const response = await fetch(`${API_URL}/api/trade/deposit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user: publicKey.toBase58(),
+          amount: amount,
+        })
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || result.message || 'Failed to create deposit transaction');
+      }
+
+      toast({
+        type: 'info',
+        title: 'Depositing',
+        message: `Depositing ${amount} SOL to your trading account...`
+      });
+
+      // Sign and send the deposit transaction
+      const depositTx = Transaction.from(Buffer.from(result.transaction, 'base64'));
+      const signedTx = await signTransaction(depositTx);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+
+      toast({
+        type: 'info',
+        title: 'Confirming',
+        message: 'Waiting for confirmation...'
+      });
+
+      await connection.confirmTransaction(signature, 'confirmed');
+
+      toast({
+        type: 'success',
+        title: 'Deposit Complete!',
+        message: `Successfully deposited ${amount} SOL. You can now trade larger positions!`
+      });
+
+      // Refresh balance
+      await fetchUserBalance();
+
+      setShowDeposit(false);
+      setDepositAmount('0.5');
+
+    } catch (error: any) {
+      console.error('Deposit failed:', error);
+      toast({
+        type: 'error',
+        title: 'Deposit Failed',
+        message: error.message || 'Failed to deposit'
+      });
+    } finally {
+      setDepositLoading(false);
+    }
+  };
+
+  // Fetch user balance and position
+  const fetchUserBalance = async () => {
+    if (!publicKey) return;
+
+    setBalanceLoading(true);
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+      const response = await fetch(`${API_URL}/api/user/balance?user=${publicKey.toBase58()}`);
+      const data = await response.json();
+
+      if (data.success) {
+        setUserBalance(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch balance:', error);
+    } finally {
+      setBalanceLoading(false);
+    }
+  };
+
+  // Fetch balance on mount and when wallet changes
+  useEffect(() => {
+    if (publicKey) {
+      fetchUserBalance();
+      // Refresh every 10 seconds
+      const interval = setInterval(fetchUserBalance, 10000);
+      return () => clearInterval(interval);
+    } else {
+      setUserBalance(null);
+    }
+  }, [publicKey]);
 
   // Update price when currentPrice changes
   useEffect(() => {
@@ -124,13 +255,79 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
         throw new Error(result.error || 'Failed to reserve order');
       }
 
-      // Create transaction from API response (already has blockhash and fee payer set)
-      const transaction = Transaction.from(Buffer.from(result.transaction, 'base64'));
+      // Handle init_user step (user doesn't have an account yet)
+      if (result.step === 'init_user') {
+        toast({
+          type: 'info',
+          title: 'Creating Account',
+          message: 'Creating your trading account on-chain...'
+        });
 
-      // Use expiry from API response, or default to 30 seconds
+        // Sign and send the InitUser transaction
+        const initTx = Transaction.from(Buffer.from(result.transaction, 'base64'));
+        const signedInitTx = await signTransaction(initTx);
+        const initSignature = await connection.sendRawTransaction(signedInitTx.serialize());
+
+        toast({
+          type: 'info',
+          title: 'Confirming',
+          message: 'Waiting for account creation to confirm...'
+        });
+
+        await connection.confirmTransaction(initSignature, 'confirmed');
+
+        toast({
+          type: 'success',
+          title: 'Account Created',
+          message: 'Your account is ready! Placing your trade now...'
+        });
+
+        // Now call reserve again to get the actual trade transaction
+        const tradeResponse = await fetch(`${API_URL}/api/trade/reserve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user: publicKey.toBase58(),
+            slice: coinV2,
+            side: orderSide,
+            orderType: orderType,
+            price: orderPrice,
+            quantity: orderSize,
+          })
+        });
+
+        const tradeResult = await tradeResponse.json();
+
+        if (!tradeResponse.ok || !tradeResult.success) {
+          throw new Error(tradeResult.error || 'Failed to create trade after account init');
+        }
+
+        // Now we should have the trade transaction
+        const transaction = Transaction.from(Buffer.from(tradeResult.transaction, 'base64'));
+        const expiryMs = tradeResult.expiryMs || (Date.now() + 30000);
+
+        const reservation: ReservedOrder = {
+          side: orderSide,
+          price: orderPrice,
+          size: orderSize,
+          expiresAt: expiryMs,
+          transaction,
+          holdId: tradeResult.holdId,
+        };
+
+        setReservedOrder(reservation);
+        toast({
+          type: 'success',
+          title: 'Trade Ready',
+          message: 'Trade is ready! Click Commit to execute.'
+        });
+        return;
+      }
+
+      // Handle trade step (normal case - user has an account)
+      const transaction = Transaction.from(Buffer.from(result.transaction, 'base64'));
       const expiryMs = result.expiryMs || (Date.now() + 30000);
 
-      // Create reservation
       const reservation: ReservedOrder = {
         side: orderSide,
         price: orderPrice,
@@ -143,8 +340,8 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
       setReservedOrder(reservation);
       toast({
         type: 'success',
-        title: 'Order Reserved',
-        message: 'Order reserved! You have 30 seconds to commit.'
+        title: 'Trade Ready',
+        message: `Price locked at $${orderPrice.toFixed(2)}. Click Commit to execute on-chain.`
       });
       
     } catch (error: any) {
@@ -159,7 +356,7 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
     }
   };
 
-  // Step 2: Commit the reserved order (two-phase commit)
+  // Step 2: Execute the trade (TradeNoCpi - single transaction)
   const handleCommit = async () => {
     if (!reservedOrder || !signTransaction || !publicKey) return;
 
@@ -167,46 +364,49 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
     try {
       const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
 
-      // Phase 1: Sign and send the RESERVE transaction first
-      console.log('Phase 1: Signing reserve transaction...');
-      const signedReserve = await signTransaction(reservedOrder.transaction);
-      const reserveSignature = await connection.sendRawTransaction(signedReserve.serialize());
+      // Sign and send the trade transaction
+      console.log('🔐 Signing trade transaction...');
+      console.log('   Transaction has', reservedOrder.transaction.signatures.length, 'signatures before user signs');
+
+      const signedTx = await signTransaction(reservedOrder.transaction);
+
+      console.log('   Transaction has', signedTx.signatures.length, 'signatures after user signs');
+      console.log('   Signatures:', signedTx.signatures.map(s => s.signature ? 'Present' : 'Missing'));
+
+      // Check if transaction is properly signed
+      const allSigned = signedTx.signatures.every(s => s.signature !== null);
+      if (!allSigned) {
+        throw new Error('Transaction not fully signed - missing signatures');
+      }
+
+      console.log('📡 Sending transaction to Solana devnet...');
+      const signature = await connection.sendRawTransaction(signedTx.serialize(), {
+        skipPreflight: false, // Run simulation first
+        preflightCommitment: 'confirmed',
+      });
+
+      console.log('✅ Transaction sent! Signature:', signature);
+      console.log('   View on explorer: https://explorer.solana.com/tx/' + signature + '?cluster=devnet');
 
       toast({
         type: 'info',
-        title: 'Processing',
-        message: 'Reserve transaction sent, waiting for confirmation...'
+        title: 'Transaction Sent',
+        message: 'Executing on Solana devnet... Position will update in ~2 seconds.'
       });
 
-      await connection.confirmTransaction(reserveSignature, 'confirmed');
-      console.log('Reserve transaction confirmed:', reserveSignature);
+      await connection.confirmTransaction(signature, 'confirmed');
+      console.log('✅ Trade transaction confirmed:', signature);
 
-      // Phase 2: Call the commit API to get the commit transaction
-      console.log('Phase 2: Requesting commit transaction...');
-
-      const commitResponse = await fetch(`${API_URL}/api/trade/commit`, {
+      // Notify server that trade was executed
+      await fetch(`${API_URL}/api/trade/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           user: publicKey.toBase58(),
           holdId: reservedOrder.holdId,
+          signature: signature,
         })
       });
-
-      const commitResult = await commitResponse.json();
-
-      if (!commitResponse.ok || !commitResult.success) {
-        throw new Error(commitResult.error || 'Failed to get commit transaction');
-      }
-
-      // Sign and send the commit transaction
-      const commitTx = Transaction.from(Buffer.from(commitResult.transaction, 'base64'));
-      console.log('Phase 2: Signing commit transaction...');
-      const signedCommit = await signTransaction(commitTx);
-      const commitSignature = await connection.sendRawTransaction(signedCommit.serialize());
-
-      await connection.confirmTransaction(commitSignature, 'confirmed');
-      console.log('Commit transaction confirmed:', commitSignature);
 
       // Record the fill on the server
       await fetch(`${API_URL}/api/trade/record-fill`, {
@@ -215,17 +415,21 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
         body: JSON.stringify({
           user: publicKey.toBase58(),
           side: reservedOrder.side,
-          price: commitResult.vwapPrice || reservedOrder.price,
-          quantity: commitResult.filledQty || reservedOrder.size,
-          signature: commitSignature,
+          price: reservedOrder.price,
+          quantity: reservedOrder.size,
+          signature: signature,
         })
       });
 
+      const positionChange = reservedOrder.side === 'buy' ? '+' : '-';
       toast({
         type: 'success',
-        title: 'Order Executed',
-        message: `${reservedOrder.side.toUpperCase()} order executed! ${reservedOrder.size} ${coinToV2(coin)} @ $${reservedOrder.price.toFixed(2)}`
+        title: '✅ Trade Executed On-Chain!',
+        message: `Position ${positionChange}${reservedOrder.size} ${coinToV2(coin)} @ $${reservedOrder.price.toFixed(2)}. Your collateral stays in vault.`
       });
+
+      // Refresh balance to show new position
+      await fetchUserBalance();
 
       // Reset form
       setReservedOrder(null);
@@ -234,11 +438,11 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
       if (timerRef.current) clearInterval(timerRef.current);
 
     } catch (error: any) {
-      console.error('Failed to commit order:', error);
+      console.error('Failed to execute trade:', error);
       toast({
         type: 'error',
-        title: 'Commit Failed',
-        message: `Failed to commit: ${error.message || error.toString()}`
+        title: 'Trade Failed',
+        message: `Failed to execute: ${error.message || error.toString()}`
       });
     } finally {
       setLoading(false);
@@ -264,6 +468,134 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
 
   return (
     <div className="bg-zinc-900/50 rounded-xl p-3 border border-white/5">
+      {/* Account Status Banner */}
+      {publicKey && userBalance && (
+        <div className="mb-3 p-3 bg-zinc-950 rounded-lg border border-white/5">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Wallet className="w-4 h-4 text-blue-400" />
+              <span className="text-xs font-bold text-zinc-400">Your Account</span>
+            </div>
+            {balanceLoading && (
+              <span className="text-[10px] text-zinc-600">Updating...</span>
+            )}
+          </div>
+
+          {/* Collateral Balance */}
+          <div className="space-y-2">
+            <div className="flex justify-between items-center">
+              <span className="text-[10px] text-zinc-500">Collateral in Vault</span>
+              <span className="text-sm font-mono font-bold text-emerald-400">
+                {userBalance.balance.toFixed(4)} SOL
+              </span>
+            </div>
+
+            {/* Current Position */}
+            {userBalance.position && parseFloat(userBalance.position.size) !== 0 && (
+              <div className="pt-2 border-t border-white/5">
+                <div className="flex justify-between items-center">
+                  <span className="text-[10px] text-zinc-500">Open Position</span>
+                  <div className="flex items-center gap-2">
+                    {userBalance.position.side === 'long' ? (
+                      <TrendingUp className="w-3 h-3 text-emerald-400" />
+                    ) : (
+                      <TrendingDown className="w-3 h-3 text-red-400" />
+                    )}
+                    <span className={`text-sm font-mono font-bold ${
+                      userBalance.position.side === 'long' ? 'text-emerald-400' : 'text-red-400'
+                    }`}>
+                      {userBalance.position.side === 'long' ? 'LONG' : 'SHORT'} {Math.abs(parseFloat(userBalance.position.size)).toFixed(4)} SOL
+                    </span>
+                  </div>
+                </div>
+                <div className="flex justify-between items-center mt-1">
+                  <span className="text-[10px] text-zinc-600">Entry Price</span>
+                  <span className="text-[10px] font-mono text-zinc-500">
+                    ${(1e6 / parseFloat(userBalance.position.entryPrice)).toFixed(2)}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* No Position Message */}
+            {(!userBalance.position || parseFloat(userBalance.position.size) === 0) && (
+              <div className="pt-2 border-t border-white/5">
+                <span className="text-[10px] text-zinc-600">No open position</span>
+              </div>
+            )}
+          </div>
+
+          {/* Info about how it works */}
+          <div className="mt-2 pt-2 border-t border-white/5">
+            <p className="text-[9px] text-zinc-600 leading-relaxed">
+              💡 Your collateral stays in the Percolator vault. Trading changes your position, not your wallet balance.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Deposit Collateral Section */}
+      <div className="mb-3">
+        <button
+          type="button"
+          onClick={() => setShowDeposit(!showDeposit)}
+          className="w-full flex items-center justify-between px-3 py-2 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 rounded-lg text-xs text-blue-400 transition-colors"
+        >
+          <span className="font-medium">Deposit Collateral</span>
+          <span className="text-[10px]">{showDeposit ? '▲' : '▼'}</span>
+        </button>
+
+        {showDeposit && (
+          <div className="mt-2 p-3 bg-zinc-950 rounded-lg border border-white/5 space-y-3">
+            <div className="p-2 bg-blue-500/5 rounded border border-blue-500/10">
+              <p className="text-[10px] text-blue-400 leading-relaxed">
+                💡 <strong>How it works:</strong> Your SOL goes into the Percolator vault as collateral. You can then open positions (long/short) using this collateral. The money stays in the vault until you withdraw.
+              </p>
+            </div>
+            <p className="text-[10px] text-zinc-500">
+              Deposit SOL as collateral to trade larger positions. At 10x max leverage, 0.5 SOL lets you trade ~5 SOL notional.
+            </p>
+            <div className="relative">
+              <label className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-zinc-500 pointer-events-none">Amount</label>
+              <input
+                type="number"
+                step="0.1"
+                min="0.01"
+                value={depositAmount}
+                onChange={(e) => setDepositAmount(e.target.value)}
+                placeholder="0.5"
+                className="w-full pl-16 pr-12 py-2 bg-zinc-900 border border-white/5 rounded-lg text-sm text-right text-zinc-100 placeholder-zinc-700 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-zinc-600 pointer-events-none">SOL</span>
+            </div>
+            <div className="flex gap-1">
+              {[0.1, 0.5, 1, 2].map((amt) => (
+                <button
+                  key={amt}
+                  type="button"
+                  onClick={() => setDepositAmount(amt.toString())}
+                  className={`flex-1 py-1 text-[10px] font-medium rounded transition-colors ${
+                    depositAmount === amt.toString()
+                      ? 'bg-blue-500/20 text-blue-400'
+                      : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'
+                  }`}
+                >
+                  {amt} SOL
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={handleDeposit}
+              disabled={depositLoading || !publicKey}
+              className="w-full py-2 bg-blue-500 hover:bg-blue-600 text-white font-bold text-xs rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {depositLoading ? 'Depositing...' : !publicKey ? 'Connect Wallet' : `Deposit ${depositAmount} SOL`}
+            </button>
+          </div>
+        )}
+      </div>
+
       {!reservedOrder ? (
         <form onSubmit={handleReserve} className="space-y-3">
           {/* Order Side */}

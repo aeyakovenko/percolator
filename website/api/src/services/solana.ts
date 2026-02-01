@@ -1,14 +1,18 @@
 import { Connection, PublicKey, Keypair } from '@solana/web3.js';
 import { AnchorProvider, Program, Wallet } from '@coral-xyz/anchor';
 import fs from 'fs';
+import { startCrankKeeper } from './crank-keeper';
 
 let connection: Connection;
 let provider: AnchorProvider;
 let slabProgram: Program | null = null;
 let wallet: Wallet;
+let lpKeypair: Keypair | null = null;
 
 export async function initializeSolana() {
-  const rpcUrl = process.env.SOLANA_RPC_URL || 'http://localhost:8899';
+  // Use devnet by default
+  const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
+  console.log('✅ Solana RPC URL:', rpcUrl);
   connection = new Connection(rpcUrl, 'confirmed');
 
   // Load wallet (for signing transactions if needed)
@@ -41,6 +45,49 @@ export async function initializeSolana() {
   // TODO: Load slab program IDL and initialize Program
   // const slabProgramId = new PublicKey(process.env.SLAB_PROGRAM_ID!);
   // slabProgram = new Program(IDL, slabProgramId, provider);
+
+  // Load LP keypair for crank operations
+  try {
+    const path = require('path');
+
+    // Get LP keypair path - support both absolute and relative paths
+    let lpKeypairPath: string;
+    if (process.env.LP_KEYPAIR_PATH) {
+      // Check if it's an absolute path
+      if (path.isAbsolute(process.env.LP_KEYPAIR_PATH)) {
+        lpKeypairPath = process.env.LP_KEYPAIR_PATH;
+      } else {
+        // Relative path from project root
+        const projectRoot = path.resolve(__dirname, '../../../../');
+        lpKeypairPath = path.join(projectRoot, process.env.LP_KEYPAIR_PATH);
+      }
+    } else {
+      // Default: devnet-deployer.json in project root
+      const projectRoot = path.resolve(__dirname, '../../../../');
+      lpKeypairPath = path.join(projectRoot, 'devnet-deployer.json');
+    }
+
+    console.log('🔍 Looking for LP keypair at:', lpKeypairPath);
+
+    if (!fs.existsSync(lpKeypairPath)) {
+      throw new Error(`LP keypair not found at ${lpKeypairPath}`);
+    }
+
+    const lpKeypairData = JSON.parse(fs.readFileSync(lpKeypairPath, 'utf-8'));
+    lpKeypair = Keypair.fromSecretKey(new Uint8Array(lpKeypairData));
+    console.log('✅ Loaded LP keypair:', lpKeypair.publicKey.toBase58());
+
+    // Start automated crank keeper if slab address is configured
+    const slabAddress = process.env.NEXT_PUBLIC_SLAB_ACCOUNT;
+    if (slabAddress) {
+      console.log('🔄 Starting automated crank keeper...');
+      startCrankKeeper(connection, new PublicKey(slabAddress), lpKeypair);
+    } else {
+      console.warn('⚠️  NEXT_PUBLIC_SLAB_ACCOUNT not set, crank keeper disabled');
+    }
+  } catch (error: any) {
+    console.warn('⚠️  LP keypair not found, crank keeper disabled:', error.message);
+  }
 }
 
 export function getConnection(): Connection {
@@ -61,6 +108,11 @@ export function getSlabProgram(): Program {
 export function getWallet(): Wallet {
   if (!wallet) throw new Error('Wallet not initialized');
   return wallet;
+}
+
+export function getLpKeypair(): Keypair {
+  if (!lpKeypair) throw new Error('LP keypair not initialized');
+  return lpKeypair;
 }
 
 // Helper to fetch slab state

@@ -153,10 +153,6 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
 
         const startTime = now - (daysBack * 24 * 60 * 60 * 1000);
         
-        console.log(`Loading ${coin} chart data for ${selectedTimeframe} timeframe...`);
-        console.log(`API URL: ${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001'}`);
-        console.log(`Requesting: ${coin} with timeframe ${selectedTimeframe}`);
-        
         const candles = await hyperliquidClient.getCandles(
           coin,
           selectedTimeframe,
@@ -164,20 +160,15 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
           now
         );
 
-        console.log(`Received ${candles?.length || 0} candles from API`);
-
         if (!isMounted) {
-          console.log('Component unmounted, skipping data update');
           return;
         }
 
         if (!candles || candles.length === 0) {
-          console.warn(`No candles received for ${coin} ${selectedTimeframe}`);
+          console.warn(`No chart data available for ${coin}`);
           setLoading(false);
           return;
         }
-
-        console.log(`Processing ${candles.length} candles for ${coin}`);
 
         // Convert to chart format
         // Backend returns time in seconds (from Hyperliquid API)
@@ -199,23 +190,7 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
           
           // Validate price ranges (prevent obviously wrong data)
           if (isNaN(open) || isNaN(high) || isNaN(low) || isNaN(close)) {
-            console.warn(`Invalid price data in candle:`, c);
             return null;
-          }
-          
-          // Log if prices seem unusually high (might indicate format issue)
-          // But don't filter - accept Hyperliquid's data format
-          const expectedMaxPrice: Record<Coin, number> = {
-            'SOL': 500,
-            'ETH': 15000,
-            'BTC': 250000,
-            'JUP': 10,
-            'BONK': 1,
-            'WIF': 100,
-          };
-          
-          if (close > expectedMaxPrice[coin] * 100) {
-            console.warn(`Price ${close} for ${coin} is very high - checking if conversion needed`);
           }
           
           return {
@@ -231,38 +206,32 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
         });
 
         if (chartData.length === 0) {
-          console.error('No valid candles after filtering');
+          console.error('No valid chart data');
           setLoading(false);
           return;
         }
 
-        console.log(`Setting ${chartData.length} candles on chart. Price range: $${Math.min(...chartData.map(c => c.low)).toFixed(2)} - $${Math.max(...chartData.map(c => c.high)).toFixed(2)}`);
-        
         candlestickSeries.setData(chartData);
-        console.log('Chart data set successfully');
 
         // Update price display
         if (chartData.length > 0) {
           const lastCandle = chartData[chartData.length - 1];
           const firstCandle = chartData[0];
-          
+
           const lastPrice = lastCandle.close;
           const firstPrice = firstCandle.close;
           const change = lastPrice - firstPrice;
           const changePercent = (change / firstCandle.open) * 100;
-          
-          console.log(`${coin} price: $${lastPrice.toFixed(2)}, change: ${changePercent.toFixed(2)}%`);
-          
+
           setCurrentPrice(lastPrice);
           setPriceChange(changePercent);
-          
+
           if (onPriceUpdate) {
             onPriceUpdate(lastPrice);
           }
         }
 
         setLoading(false);
-        console.log('Chart data loading complete');
 
         // Connect WebSocket for real-time updates
         if (!hyperliquidClient.isConnected()) {
@@ -298,12 +267,30 @@ export default function TradingChart({ coin, onPriceUpdate, onCoinChange }: Trad
 
       } catch (error) {
         console.error('Failed to load chart data:', error);
+
+        // Try to fetch fallback price from backend API
+        try {
+          const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+          const response = await fetch(`${API_URL}/api/trade/price?coin=${coin}`);
+          const data = await response.json();
+
+          if (data.success && data.price > 0) {
+            console.log(`Using fallback price for ${coin}: $${data.price}`);
+            setCurrentPrice(data.price);
+            if (onPriceUpdate) {
+              onPriceUpdate(data.price);
+            }
+          }
+        } catch (priceError) {
+          console.error('Failed to fetch fallback price:', priceError);
+        }
+
         setLoading(false);
         // Show error message to user
         if (chartContainerRef.current) {
           const errorDiv = document.createElement('div');
           errorDiv.className = 'absolute inset-0 flex items-center justify-center bg-gray-900/80 z-10 text-red-400 text-sm';
-          errorDiv.textContent = 'Failed to load chart data. Please check your connection.';
+          errorDiv.textContent = 'Chart data unavailable. Using fallback pricing.';
           chartContainerRef.current.appendChild(errorDiv);
         }
       }
