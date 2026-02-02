@@ -1,10 +1,11 @@
 import { Router } from 'express';
-import { PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
+import { PublicKey, Transaction, TransactionInstruction, SystemProgram, LAMPORTS_PER_SOL, Keypair } from '@solana/web3.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
   buildInitUserInstruction,
   buildDepositInstruction,
+  buildWithdrawInstruction,
   buildTradeNoCpiInstruction,
   buildTradeCpiInstruction,
   buildCreateAtaInstruction,
@@ -694,6 +695,131 @@ tradingRouter.post('/deposit', async (req, res) => {
 });
 
 /**
+ * POST /api/trade/withdraw
+ * Withdraw collateral from trading account back to wallet
+ * User must have an account and sufficient available balance
+ */
+tradingRouter.post('/withdraw', async (req, res) => {
+  try {
+    const { user, amount } = req.body;
+
+    if (!user || !amount) {
+      return res.status(400).json({ error: 'Missing required fields: user, amount (in SOL)' });
+    }
+
+    const userPubkey = new PublicKey(user);
+    const slabPubkey = getSlabPubkey();
+    const connection = getConnection();
+
+    // Find user's account index
+    let userIdx: number = -1;
+    let userCapital: number = 0;
+    let userPosition: bigint = 0n;
+    try {
+      const slabData = await fetchSlabRaw(connection, slabPubkey);
+      const accounts = parseAllAccounts(slabData);
+      const found = findAccountByOwner(accounts, userPubkey.toBase58());
+
+      if (found) {
+        userIdx = found.idx;
+        userCapital = Number(found.account.capital) / 1e9;
+        userPosition = found.account.positionSize;
+        console.log(`✅ Found user account at index ${userIdx} for withdraw`);
+        console.log(`   Capital: ${userCapital} SOL, Position: ${userPosition}`);
+      }
+    } catch (error) {
+      console.warn('⚠️ Could not fetch slab state:', error);
+    }
+
+    if (userIdx === -1) {
+      return res.status(400).json({
+        error: 'No trading account found',
+        message: 'You need to create a trading account first.',
+      });
+    }
+
+    // Check if user has open position
+    if (userPosition !== 0n) {
+      return res.status(400).json({
+        error: 'Cannot withdraw with open position',
+        message: 'Close your position first before withdrawing collateral.',
+      });
+    }
+
+    // Check if user has sufficient balance
+    if (amount > userCapital) {
+      return res.status(400).json({
+        error: 'Insufficient balance',
+        message: `You only have ${userCapital.toFixed(4)} SOL available to withdraw.`,
+        available: userCapital,
+      });
+    }
+
+    // Build withdraw transaction
+    const transaction = new Transaction();
+    const mint = new PublicKey(config.mint);
+    const vaultAccount = new PublicKey(config.vault);
+    const userAta = getAssociatedTokenAddress(mint, userPubkey);
+
+    // Derive vault authority PDA
+    const [vaultAuthority] = PublicKey.findProgramAddressSync(
+      [slabPubkey.toBuffer()],
+      new PublicKey(config.programId)
+    );
+
+    // Convert SOL to lamports
+    const lamports = Math.floor(amount * LAMPORTS_PER_SOL);
+
+    // Build withdraw instruction
+    const withdrawIx = buildWithdrawInstruction({
+      slabAccount: slabPubkey,
+      userAuthority: userPubkey,
+      userAta: userAta,
+      vaultAccount: vaultAccount,
+      vaultAuthority: vaultAuthority,
+      userIdx: userIdx,
+      amount: lamports,
+    });
+    transaction.add(withdrawIx);
+
+    // Add close wSOL account instruction to get native SOL back
+    // CloseAccount instruction - closes the ATA and sends lamports to owner
+    const closeAtaIx = new TransactionInstruction({
+      keys: [
+        { pubkey: userAta, isSigner: false, isWritable: true },
+        { pubkey: userPubkey, isSigner: false, isWritable: true },
+        { pubkey: userPubkey, isSigner: true, isWritable: false },
+      ],
+      programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+      data: Buffer.from([9]), // CloseAccount = 9
+    });
+    transaction.add(closeAtaIx);
+
+    // Set blockhash and fee payer
+    const blockhash = await getRecentBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = userPubkey;
+
+    const serializedTx = serializeTransaction(transaction);
+
+    console.log(`📝 Built withdraw tx: ${amount} SOL for user ${userIdx}`);
+
+    res.json({
+      success: true,
+      transaction: serializedTx,
+      needsSigning: true,
+      amount: amount,
+      lamports: lamports,
+      userIdx: userIdx,
+      message: `Sign to withdraw ${amount} SOL from your trading account`,
+    });
+  } catch (error: any) {
+    console.error('Withdraw error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * POST /api/trade/test-transfer
  * Test endpoint - builds a simple SOL transfer transaction
  * This will ALWAYS succeed (no program deployment needed)
@@ -701,13 +827,13 @@ tradingRouter.post('/deposit', async (req, res) => {
 tradingRouter.post('/test-transfer', async (req, res) => {
   try {
     const { user } = req.body;
-    
+
     if (!user) {
       return res.status(400).json({ error: 'Missing user wallet address' });
     }
 
     const userPubkey = new PublicKey(user);
-    
+
     // Create a simple transfer instruction (0.001 SOL to yourself)
     const transferInstruction = SystemProgram.transfer({
       fromPubkey: userPubkey,

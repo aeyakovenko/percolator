@@ -235,6 +235,49 @@ export function buildDepositInstruction(params: {
 }
 
 /**
+ * Build WithdrawCollateral instruction
+ * Tag 4: WithdrawCollateral { user_idx: u16, amount: u64 }
+ *
+ * Required accounts (5 total):
+ * 0. User (signer)
+ * 1. Slab (writable)
+ * 2. User ATA (token account)
+ * 3. Vault (token account)
+ * 4. Token Program
+ */
+export function buildWithdrawInstruction(params: {
+  slabAccount: PublicKey;
+  userAuthority: PublicKey;
+  userAta: PublicKey;
+  vaultAccount: PublicKey;
+  vaultAuthority: PublicKey;
+  userIdx: number;
+  amount: number; // lamports
+}): TransactionInstruction {
+  const { slabAccount, userAuthority, userAta, vaultAccount, vaultAuthority, userIdx, amount } = params;
+
+  // Format: [tag(1), user_idx(2), amount(8)]
+  const data = Buffer.alloc(11);
+  data.writeUInt8(PercolatorInstruction.WithdrawCollateral, 0);
+  data.writeUInt16LE(userIdx, 1);
+  const amountBN = new BN(amount);
+  amountBN.toArrayLike(Buffer, 'le', 8).copy(data, 3);
+
+  return new TransactionInstruction({
+    keys: [
+      { pubkey: userAuthority, isSigner: true, isWritable: false },  // 0: User (signer)
+      { pubkey: slabAccount, isSigner: false, isWritable: true },    // 1: Slab (writable)
+      { pubkey: userAta, isSigner: false, isWritable: true },        // 2: User ATA
+      { pubkey: vaultAccount, isSigner: false, isWritable: true },   // 3: Vault
+      { pubkey: vaultAuthority, isSigner: false, isWritable: false }, // 4: Vault Authority (PDA)
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // 5: Token Program
+    ],
+    programId: SLAB_PROGRAM_ID,
+    data,
+  });
+}
+
+/**
  * Build TradeNoCpi instruction - execute trade against LP without CPI
  * Tag 6: TradeNoCpi { lp_idx: u16, user_idx: u16, size: i128 }
  *

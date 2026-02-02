@@ -18,10 +18,12 @@ interface UserBalance {
   success: boolean;
   hasAccount: boolean;
   balance: number;
+  available: number;
   position?: {
     size: string;
     side: 'long' | 'short' | 'flat';
     entryPrice: string;
+    markPrice: string;
   };
 }
 
@@ -54,8 +56,11 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
   const [size, setSize] = useState('');
   const [loading, setLoading] = useState(false);
   const [depositLoading, setDepositLoading] = useState(false);
+  const [withdrawLoading, setWithdrawLoading] = useState(false);
   const [depositAmount, setDepositAmount] = useState('0.5');
+  const [withdrawAmount, setWithdrawAmount] = useState('');
   const [showDeposit, setShowDeposit] = useState(false);
+  const [showWithdraw, setShowWithdraw] = useState(false);
   const [reservedOrder, setReservedOrder] = useState<ReservedOrder | null>(null);
   const [timeRemaining, setTimeRemaining] = useState(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -143,6 +148,93 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
       });
     } finally {
       setDepositLoading(false);
+    }
+  };
+
+  // Handle withdraw
+  const handleWithdraw = async () => {
+    if (!publicKey || !signTransaction) {
+      toast({
+        type: 'warning',
+        title: 'Wallet Required',
+        message: 'Please connect your wallet'
+      });
+      return;
+    }
+
+    const amount = parseFloat(withdrawAmount);
+    if (amount <= 0) {
+      toast({
+        type: 'error',
+        title: 'Invalid Amount',
+        message: 'Please enter a valid withdraw amount'
+      });
+      return;
+    }
+
+    // Check if user has open position
+    if (userBalance?.position && parseFloat(userBalance.position.size) !== 0) {
+      toast({
+        type: 'error',
+        title: 'Close Position First',
+        message: 'You must close your position before withdrawing collateral'
+      });
+      return;
+    }
+
+    setWithdrawLoading(true);
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001';
+
+      const response = await fetch(`${API_URL}/api/trade/withdraw`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user: publicKey.toBase58(),
+          amount: amount,
+        })
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || result.message || 'Failed to create withdraw transaction');
+      }
+
+      // Sign and send transaction
+      const transaction = Transaction.from(Buffer.from(result.transaction, 'base64'));
+      const signedTx = await signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTx.serialize());
+
+      toast({
+        type: 'info',
+        title: 'Processing',
+        message: 'Withdraw transaction sent, waiting for confirmation...'
+      });
+
+      await connection.confirmTransaction(signature, 'confirmed');
+
+      toast({
+        type: 'success',
+        title: 'Withdraw Complete!',
+        message: `Successfully withdrew ${amount} SOL to your wallet!`
+      });
+
+      // Refresh balance
+      await fetchUserBalance();
+
+      setShowWithdraw(false);
+      setWithdrawAmount('');
+
+    } catch (error: any) {
+      console.error('Withdraw failed:', error);
+      toast({
+        type: 'error',
+        title: 'Withdraw Failed',
+        message: error.message || 'Failed to withdraw'
+      });
+    } finally {
+      setWithdrawLoading(false);
     }
   };
 
@@ -508,12 +600,33 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
                     </span>
                   </div>
                 </div>
-                <div className="flex justify-between items-center mt-1">
-                  <span className="text-[10px] text-zinc-600">Entry Price</span>
-                  <span className="text-[10px] font-mono text-zinc-500">
-                    ${(1e6 / parseFloat(userBalance.position.entryPrice)).toFixed(2)}
-                  </span>
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <div>
+                    <span className="text-[10px] text-zinc-600">Entry</span>
+                    <p className="text-xs font-mono text-zinc-400">${userBalance.position.entryPrice}</p>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-zinc-600">Mark</span>
+                    <p className="text-xs font-mono text-zinc-300">${userBalance.position.markPrice}</p>
+                  </div>
                 </div>
+                {/* P&L Display */}
+                {(() => {
+                  const entry = parseFloat(userBalance.position.entryPrice);
+                  const mark = parseFloat(userBalance.position.markPrice);
+                  const size = parseFloat(userBalance.position.size);
+                  const isLong = userBalance.position.side === 'long';
+                  const pnl = isLong ? (mark - entry) * size : (entry - mark) * size;
+                  const pnlPct = entry > 0 ? (pnl / (entry * size)) * 100 : 0;
+                  return (
+                    <div className="flex justify-between items-center mt-2 pt-2 border-t border-white/5">
+                      <span className="text-[10px] text-zinc-500">Unrealized P&L</span>
+                      <span className={`text-xs font-mono font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)} USD ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%)
+                      </span>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -595,6 +708,90 @@ export function OrderForm({ coin, currentPrice }: OrderFormProps) {
           </div>
         )}
       </div>
+
+      {/* Withdraw Collateral Section */}
+      {userBalance && userBalance.hasAccount && userBalance.balance > 0 && (
+        <div className="mb-3">
+          <button
+            type="button"
+            onClick={() => setShowWithdraw(!showWithdraw)}
+            className="w-full flex items-center justify-between px-3 py-2 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 rounded-lg text-xs text-amber-400 transition-colors"
+          >
+            <span className="font-medium">Withdraw Collateral</span>
+            <span className="text-[10px]">{showWithdraw ? '▲' : '▼'}</span>
+          </button>
+
+          {showWithdraw && (
+            <div className="mt-2 p-3 bg-zinc-950 rounded-lg border border-white/5 space-y-3">
+              {userBalance.position && parseFloat(userBalance.position.size) !== 0 ? (
+                <div className="p-2 bg-red-500/10 rounded border border-red-500/20">
+                  <p className="text-[10px] text-red-400 leading-relaxed">
+                    ⚠️ <strong>Close position first:</strong> You have an open position. Close it before withdrawing collateral.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p className="text-[10px] text-zinc-500">
+                    Withdraw your collateral back to your wallet. Available: {userBalance.balance.toFixed(4)} SOL
+                  </p>
+                  <div className="relative">
+                    <label className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-zinc-500 pointer-events-none">Amount</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max={userBalance.balance}
+                      value={withdrawAmount}
+                      onChange={(e) => setWithdrawAmount(e.target.value)}
+                      placeholder={userBalance.balance.toFixed(4)}
+                      className="w-full pl-16 pr-12 py-2 bg-zinc-900 border border-white/5 rounded-lg text-sm text-right text-zinc-100 placeholder-zinc-700 focus:outline-none focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 transition-all"
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-zinc-600 pointer-events-none">SOL</span>
+                  </div>
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setWithdrawAmount((userBalance.balance * 0.25).toFixed(4))}
+                      className="flex-1 py-1 text-[10px] font-medium rounded transition-colors text-zinc-500 hover:text-zinc-300 hover:bg-white/5"
+                    >
+                      25%
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWithdrawAmount((userBalance.balance * 0.5).toFixed(4))}
+                      className="flex-1 py-1 text-[10px] font-medium rounded transition-colors text-zinc-500 hover:text-zinc-300 hover:bg-white/5"
+                    >
+                      50%
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWithdrawAmount((userBalance.balance * 0.75).toFixed(4))}
+                      className="flex-1 py-1 text-[10px] font-medium rounded transition-colors text-zinc-500 hover:text-zinc-300 hover:bg-white/5"
+                    >
+                      75%
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWithdrawAmount(userBalance.balance.toFixed(4))}
+                      className="flex-1 py-1 text-[10px] font-medium rounded transition-colors bg-amber-500/20 text-amber-400"
+                    >
+                      Max
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleWithdraw}
+                    disabled={withdrawLoading || !publicKey || !withdrawAmount || parseFloat(withdrawAmount) <= 0}
+                    className="w-full py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {withdrawLoading ? 'Withdrawing...' : `Withdraw ${withdrawAmount || '0'} SOL`}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {!reservedOrder ? (
         <form onSubmit={handleReserve} className="space-y-3">

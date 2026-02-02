@@ -216,12 +216,12 @@ export function PositionManager({ prices, currentPrice }: PositionManagerProps) 
           <div className="text-right">
             <p className="text-[10px] text-zinc-500 uppercase">Total P&L</p>
             <p className={`text-sm font-bold ${totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(4)} SOL
+              {totalPnl >= 0 ? '+' : '-'}${Math.abs(totalPnl).toFixed(2)}
             </p>
           </div>
           <div className="text-right">
             <p className="text-[10px] text-zinc-500 uppercase">Margin Used</p>
-            <p className="text-sm font-mono text-zinc-300">{totalMargin.toFixed(4)} SOL</p>
+            <p className="text-sm font-mono text-zinc-300">${totalMargin.toFixed(2)}</p>
           </div>
         </div>
       )}
@@ -266,7 +266,7 @@ export function PositionManager({ prices, currentPrice }: PositionManagerProps) 
                     <TrendingDown className="w-3 h-3" />
                   )}
                   <span className="text-sm font-bold">
-                    {position.pnl >= 0 ? '+' : ''}{position.pnl.toFixed(4)}
+                    {position.pnl >= 0 ? '+' : '-'}${Math.abs(position.pnl).toFixed(2)}
                   </span>
                   <span className="text-[10px]">
                     ({position.pnlPercent >= 0 ? '+' : ''}{position.pnlPercent.toFixed(2)}%)
@@ -277,7 +277,7 @@ export function PositionManager({ prices, currentPrice }: PositionManagerProps) 
               <div className="grid grid-cols-4 gap-2 text-[10px]">
                 <div>
                   <p className="text-zinc-500">Size</p>
-                  <p className="text-zinc-300 font-mono">{position.size.toFixed(4)}</p>
+                  <p className="text-zinc-300 font-mono">{position.size.toFixed(3)} SOL</p>
                 </div>
                 <div>
                   <p className="text-zinc-500">Entry</p>

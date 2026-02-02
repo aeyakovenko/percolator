@@ -5,6 +5,7 @@ import TradingChart from '@/components/charts/TradingChart';
 import { OrderForm } from '@/components/trading/OrderForm';
 import { OrderBook } from '@/components/trading/OrderBook';
 import { PastTrades } from '@/components/trading/PastTrades';
+import { PositionManager } from '@/components/trading/PositionManager';
 import { TestnetBanner } from '@/components/TestnetBanner';
 import { StatusFooter } from '@/components/StatusFooter';
 import { AMMInterface } from '@/components/trading/AMMInterface';
@@ -262,10 +263,13 @@ export default function DashboardPage() {
                   {tradingMode === 'orderbook' ? (
                     <>
                       <div className="p-1">
-                        <OrderForm 
-                          coin={getCoinString(selectedCoin)} 
-                          currentPrice={currentPrice} 
+                        <OrderForm
+                          coin={getCoinString(selectedCoin)}
+                          currentPrice={currentPrice}
                         />
+                      </div>
+                      <div className="p-1">
+                        <PositionManager currentPrice={currentPrice} />
                       </div>
                       <div className="rounded-xl border border-white/5 bg-black/20 overflow-hidden">
                         <OrderBook symbol={getSymbol(selectedCoin)} walletAddress={publicKey?.toBase58()} />
