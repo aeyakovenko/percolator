@@ -208,13 +208,7 @@ fn test_e2e_complete_user_journey() {
         "LP position should be closed"
     );
 
-    // System should be in risk-reduction mode
-    assert!(
-        engine.risk_reduction_only,
-        "Should be in risk-reduction mode after panic settle"
-    );
-
-    // All PNLs should be >= 0 (negative PNL clamped and socialized)
+    // All PNLs should be >= 0 (negative PNL clamped and written off)
     assert!(
         engine.accounts[alice as usize].pnl.get() >= 0,
         "Alice PNL should be >= 0"
@@ -229,86 +223,6 @@ fn test_e2e_complete_user_journey() {
     );
 
     println!("✅ E2E test passed: Complete user journey works correctly");
-}
-
-// ============================================================================
-// E2E Test 2: Multi-User Trading with ADL
-// ============================================================================
-
-#[test]
-fn test_e2e_multi_user_with_adl() {
-    // Scenario: Multiple users trade, one causes loss requiring ADL
-
-    let mut engine = Box::new(RiskEngine::new(default_params()));
-    engine.insurance_fund.balance = U128::new(10_000);
-
-    let lp = engine.add_lp([1u8; 32], [2u8; 32], 10_000).unwrap();
-    engine.accounts[lp as usize].capital = U128::new(200_000);
-    engine.vault = U128::new(200_000);
-
-    // Add 5 users
-    let mut users = Vec::new();
-    for _ in 0..5 {
-        let user = engine.add_user(10_000).unwrap();
-        engine.deposit(user, 10_000, 0).unwrap();
-        users.push(user);
-    }
-    engine.vault = U128::new(250_000);
-
-    // Users 0-3 open long positions at $1000
-    for i in 0..4 {
-        engine
-            .execute_trade(&MATCHER, lp, users[i], 0, 1_000_000, 2_000)
-            .unwrap();
-    }
-
-    // User 4 opens short position
-    engine
-        .execute_trade(&MATCHER, lp, users[4], 0, 1_000_000, -8_000)
-        .unwrap();
-
-    // Price moves to $1.10 - all longs profit, short loses
-    let new_price = 1_100_000;
-
-    // Close some positions to realize PNL
-    for i in 0..4 {
-        engine
-            .execute_trade(&MATCHER, lp, users[i], 0, new_price, -2_000)
-            .unwrap();
-    }
-
-    // Users 0-3 should have positive PNL
-    for i in 0..4 {
-        assert!(engine.accounts[users[i] as usize].pnl.is_positive());
-    }
-
-    // Simulate a large loss event requiring ADL (e.g., LP underwater)
-    let adl_loss = 5_000;
-    engine.apply_adl(adl_loss).unwrap();
-
-    // Verify ADL haircutted unwrapped PNL first
-    // Users should still have their principal intact (minus trading fees settled)
-    // Note: With immediate negative PnL settlement, trading fees reduce capital slightly
-    for i in 0..4 {
-        // Capital may be slightly reduced by trading fees that were settled
-        // but principal (minus fees) should be protected by I1
-        assert!(
-            engine.accounts[users[i] as usize].capital.get() >= 9_990,
-            "Principal should be mostly intact (minus fees): got {}",
-            engine.accounts[users[i] as usize].capital
-        );
-    }
-
-    // Total PNL should be reduced by ADL
-    let total_pnl_after: i128 = users
-        .iter()
-        .map(|&u| engine.accounts[u as usize].pnl.get())
-        .sum();
-
-    // Some PNL should remain (not all haircutted)
-    println!("Total PNL after ADL: {}", total_pnl_after);
-
-    println!("✅ E2E test passed: Multi-user ADL scenario works correctly");
 }
 
 // ============================================================================
@@ -470,13 +384,14 @@ fn test_e2e_funding_complete_cycle() {
     // === Positions Flip ===
 
     // Alice closes long and opens short
+    let slot = engine.current_slot;
     engine
-        .execute_trade(&MATCHER, lp, alice, 0, 1_000_000, -20_000)
+        .execute_trade(&MATCHER, lp, alice, slot, 1_000_000, -20_000)
         .unwrap();
 
     // Bob closes short and opens long
     engine
-        .execute_trade(&MATCHER, lp, bob, 0, 1_000_000, 20_000)
+        .execute_trade(&MATCHER, lp, bob, slot, 1_000_000, 20_000)
         .unwrap();
 
     // Now Alice is short and Bob is long
