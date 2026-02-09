@@ -17,7 +17,7 @@ solana-client = "1.18"
 borsh = "0.10.3"
 thiserror = "1.0"
 bytemuck = { version = "1.16", features = ["derive"] }
-percolator = { path = "../percolator" }
+percolator = { path = ".." }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
