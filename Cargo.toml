@@ -14,7 +14,7 @@ path = "src/percolator.rs"
 [dev-dependencies]
 proptest = "1.4"
 # Shared spec harnesses used by `cfg(kani)` proofs; pinned for reproducibility.
-kani-solana = { git = "https://github.com/kamiyo-ai/kani-solana.git", rev = "30add5662ba9120f1e4614008772b7c851d664b4", default-features = false }
+kani-solana = { git = "https://github.com/kamiyo-ai/kani-solana.git", rev = "e4e02cb57d6f930b355d3d224e1d3d27ed8403d4", default-features = false }
 
 [features]
 default = []
