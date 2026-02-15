@@ -13,6 +13,7 @@ path = "src/percolator.rs"
 
 [dev-dependencies]
 proptest = "1.4"
+kani-solana = { git = "https://github.com/kamiyo-ai/kamiyo-protocol.git", package = "kani-solana", rev = "888741ef1bd5d638f1c78b8094bee24047fc1900" }
 
 [features]
 default = []
@@ -36,3 +37,6 @@ unstable = { stubbing = true }
 [[workspace.metadata.kani.proof]]
 harness = ".*"
 unwind = 70
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

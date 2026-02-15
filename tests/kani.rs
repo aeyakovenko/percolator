@@ -22,6 +22,7 @@
 
 #![cfg(kani)]
 
+use kani_solana::risk::{effective_pnl as spec_effective_pnl, haircut_ratio as spec_haircut_ratio};
 use percolator::*;
 
 // Default oracle price for conservation checks
@@ -5264,7 +5265,13 @@ fn proof_haircut_ratio_formula_correctness() {
     engine.pnl_pos_tot = U128::new(pnl_pos_tot);
 
     let (h_num, h_den) = engine.haircut_ratio();
+    let (exp_num, exp_den) = spec_haircut_ratio(vault, c_tot, insurance, pnl_pos_tot);
     let residual = vault.saturating_sub(c_tot).saturating_sub(insurance);
+
+    assert!(
+        (h_num, h_den) == (exp_num, exp_den),
+        "C1: haircut_ratio must match spec"
+    );
 
     // P1: h_den is never 0
     assert!(h_den > 0, "C1: h_den must be > 0");
@@ -5351,14 +5358,14 @@ fn proof_effective_equity_with_haircut() {
 
     // P1: effective_pos_pnl matches spec formula
     let eff = engine.effective_pos_pnl(pnl);
-    if pnl <= 0 {
-        assert!(eff == 0, "C2: effective_pos_pnl must be 0 for non-positive PnL");
-    } else {
-        let expected = (pnl as u128).saturating_mul(h_num) / h_den;
-        assert!(eff == expected, "C2: effective_pos_pnl must equal floor(pos_pnl * h_num / h_den)");
-        // Haircutted must not exceed raw
-        assert!(eff <= pnl as u128, "C2: haircutted PnL must not exceed raw PnL");
-    }
+    let expected = spec_effective_pnl(pnl, h_num, h_den);
+    assert!(
+        eff == expected,
+        "C2: effective_pos_pnl must equal floor(max(pnl, 0) * h_num / h_den)"
+    );
+
+    let pos = pnl.max(0) as u128;
+    assert!(eff <= pos, "C2: haircutted PnL must not exceed raw positive PnL");
 
     // P2: effective_equity matches spec: max(0, C + min(PNL, 0) + PNL_eff_pos)
     let expected_eff_equity = {
@@ -5500,7 +5507,7 @@ fn proof_profit_conversion_payout_formula() {
 
     // x = min(avail_gross, cap) = min(pnl, pnl * 100) = pnl
     let x = pnl; // entire positive PnL is warmable
-    let expected_y = x.saturating_mul(h_num) / h_den;
+    let expected_y = spec_effective_pnl(x as i128, h_num, h_den);
 
     // Execute conversion
     let result = engine.settle_warmup_to_capital(idx);
