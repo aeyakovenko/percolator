@@ -89,6 +89,8 @@ Formally verified with 145 Kani proofs covering conservation, principal protecti
 Fork it, test it, send bug reports. Percolator is open research under Apache-2.0.
 
 ```bash
+cargo test --features test
+
 cargo install --locked kani-verifier
 cargo kani setup
 cargo kani

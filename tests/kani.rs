@@ -5268,8 +5268,9 @@ fn proof_haircut_ratio_formula_correctness() {
     let (exp_num, exp_den) = spec_haircut_ratio(vault, c_tot, insurance, pnl_pos_tot);
     let residual = vault.saturating_sub(c_tot).saturating_sub(insurance);
 
-    assert!(
-        (h_num, h_den) == (exp_num, exp_den),
+    assert_eq!(
+        (h_num, h_den),
+        (exp_num, exp_den),
         "C1: haircut_ratio must match spec"
     );
 
@@ -5359,8 +5360,8 @@ fn proof_effective_equity_with_haircut() {
     // P1: effective_pos_pnl matches spec formula
     let eff = engine.effective_pos_pnl(pnl);
     let expected = spec_effective_pnl(pnl, h_num, h_den);
-    assert!(
-        eff == expected,
+    assert_eq!(
+        eff, expected,
         "C2: effective_pos_pnl must equal floor(max(pnl, 0) * h_num / h_den)"
     );
 
