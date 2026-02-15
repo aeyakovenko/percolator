@@ -72,7 +72,7 @@ dependencies = [
 [[package]]
 name = "kani-solana"
 version = "0.1.0"
-source = "git+https://github.com/kamiyo-ai/kani-solana.git?rev=a9fc18fe2067c83e4c409fcc50133ea0b05f74ac#a9fc18fe2067c83e4c409fcc50133ea0b05f74ac"
+source = "git+https://github.com/kamiyo-ai/kani-solana.git?rev=30add5662ba9120f1e4614008772b7c851d664b4#30add5662ba9120f1e4614008772b7c851d664b4"
 
 [[package]]
 name = "lazy_static"
