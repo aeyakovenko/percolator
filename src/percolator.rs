@@ -227,7 +227,7 @@ fn empty_account() -> Account {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InsuranceFund {
-    /// Insurance fund balance
+    /// Insurance fund balance (global pool)
     pub balance: U128,
 
     /// Accumulated fees from trades
@@ -240,6 +240,17 @@ pub struct InsuranceFund {
 
     /// Padding for 16-byte alignment.
     pub _rebate_pad: [u8; 8],
+
+    /// PERC-306: Per-market isolated insurance balance.
+    /// Drawn before global fund. Funded via FundMarketInsurance instruction.
+    pub isolated_balance: U128,
+
+    /// PERC-306: Insurance isolation BPS (max % of global fund this market can access).
+    /// 0 = disabled (unlimited global access, legacy behavior).
+    pub insurance_isolation_bps: u16,
+
+    /// Padding for alignment
+    pub _isolation_padding: [u8; 14],
 }
 
 /// Outcome from oracle_close_position_core helper
@@ -862,6 +873,9 @@ impl RiskEngine {
                 fee_revenue: U128::ZERO,
                 balance_incentive_reserve: 0,
                 _rebate_pad: [0; 8],
+                isolated_balance: U128::ZERO,
+                insurance_isolation_bps: 0,
+                _isolation_padding: [0u8; 14],
             },
             params,
             current_slot: 0,
@@ -4179,6 +4193,28 @@ impl RiskEngine {
     }
 
     // ========================================
+    // PERC-306: Per-Market Insurance Isolation
+    // ========================================
+
+    /// Fund the per-market isolated insurance balance.
+    /// Tokens are already in the vault; this just credits the isolated pool.
+    pub fn fund_market_insurance(&mut self, amount: u128) -> Result<()> {
+        // Add to vault
+        self.vault = U128::new(add_u128(self.vault.get(), amount));
+
+        // Credit isolated balance (not the global insurance fund)
+        self.insurance_fund.isolated_balance =
+            U128::new(add_u128(self.insurance_fund.isolated_balance.get(), amount));
+
+        Ok(())
+    }
+
+    /// Set insurance isolation BPS for this market's engine.
+    pub fn set_insurance_isolation_bps(&mut self, bps: u16) {
+        self.insurance_fund.insurance_isolation_bps = bps;
+    }
+
+    // ========================================
     // Utilities
     // ========================================
 
@@ -4238,16 +4274,21 @@ impl RiskEngine {
             return false;
         }
 
-        // Conservation: vault >= C_tot + I (primary invariant)
-        let primary =
-            self.vault.get() >= total_capital.saturating_add(self.insurance_fund.balance.get());
+        // Conservation: vault >= C_tot + I + I_isolated (primary invariant)
+        // PERC-306: Include isolated insurance balance in conservation check
+        let total_insurance = self
+            .insurance_fund
+            .balance
+            .get()
+            .saturating_add(self.insurance_fund.isolated_balance.get());
+        let primary = self.vault.get() >= total_capital.saturating_add(total_insurance);
         if !primary {
             return false;
         }
 
-        // Extended: vault >= sum(capital) + sum(settled_pnl + mark_pnl) + insurance
+        // Extended: vault >= sum(capital) + sum(settled_pnl + mark_pnl) + insurance (global + isolated)
         let total_pnl = net_pnl.saturating_add(net_mark);
-        let base = add_u128(total_capital, self.insurance_fund.balance.get());
+        let base = add_u128(total_capital, total_insurance);
 
         let expected = if total_pnl >= 0 {
             add_u128(base, total_pnl as u128)
