@@ -4,9 +4,9 @@ SDK, Keeper, and Dashboard for [Percolator](https://github.com/aeyakovenko/perco
 
 | Package | Description |
 |--------|-------------|
-| **[sdk](./sdk)** | TypeScript types + instruction builders for wrappers (deposit, withdraw, trade, crank). |
+| **[sdk](./sdk)** | TypeScript instruction builders plus raw RiskEngine decoders for engine state and account slab data. |
 | **[keeper](./keeper)** | Script to call `keeper_crank` on a Percolator wrapper (run locally or as a bot). |
-| **[dashboard](./dashboard)** | Analytics UI: vault, OI, funding, positions, liquidations (mock data + ready for live program). |
+| **[dashboard](./dashboard)** | Analytics UI: live vault, OI, funding, account count, liquidation count, and decoded position rows from the on-chain account slab. |
 
 ## Quick start
 
@@ -24,7 +24,7 @@ cd dashboard && npm install && npm run dev
 ## Deploy
 
 - **Dashboard:** See [DEPLOY.md](./DEPLOY.md) for Vercel, static export, or Node.
-- **SDK:** Optional — publish with `cd sdk && npm run build && npm publish --access public`. The dashboard does not depend on the SDK.
+- **SDK:** Optional — publish with `cd sdk && npm run build && npm publish --access public`.
 
 ## Audit
 

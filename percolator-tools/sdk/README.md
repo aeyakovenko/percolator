@@ -1,6 +1,6 @@
 # @percolatortool/sdk
 
-TypeScript SDK for building on top of **Percolator** — [Anatoly Yakovenko (@aeyakovenko)](https://x.com/aeyakovenko)'s risk engine for perpetual DEXs on Solana. This package provides types and instruction builders so you can build wrapper programs and frontends (deposits, withdrawals, trades, keeper crank) without reimplementing the wire format.
+TypeScript SDK for building on top of **Percolator** — [Anatoly Yakovenko (@aeyakovenko)](https://x.com/aeyakovenko)'s risk engine for perpetual DEXs on Solana. This package provides instruction builders plus raw account decoders so you can build wrapper programs, frontends, dashboards, and bots without reimplementing wire formats or account layout parsing.
 
 ## What is Percolator?
 
@@ -10,6 +10,7 @@ TypeScript SDK for building on top of **Percolator** — [Anatoly Yakovenko (@ae
 
 - **Wrapper builders** — Build a Solana program that uses Percolator as the risk layer; use the SDK to encode `deposit`, `withdraw`, `execute_trade`, and `keeper_crank` instruction data.
 - **Frontends & bots** — Compose transactions that invoke your wrapper (and thus Percolator) with correctly formatted instruction data.
+- **Dashboards & indexers** — Decode aggregate RiskEngine state and the live `accounts[]` slab directly from chain.
 - **Keepers** — The percolator-tools keeper (in this repo) can use this SDK for full types; it also ships with an inline crank builder so it works standalone.
 
 ## Install
@@ -71,6 +72,27 @@ if (decoded) {
   console.log('Liquidations:', decoded.lifetimeLiquidations);
 }
 ```
+
+### Full RiskEngine decode
+
+For dashboards or bots, you can decode both the aggregate engine state and the live account slab:
+
+```ts
+import { decodeRiskEngine, decodeAccountSlab } from '@percolatortool/sdk';
+
+const risk = decodeRiskEngine(accountData);
+if (risk) {
+  console.log('Decoded from offset:', risk.offset);
+  console.log('Accounts decoded:', risk.accounts.length);
+}
+
+const accounts = decodeAccountSlab(accountData, { offset: 0 }) ?? [];
+for (const account of accounts) {
+  console.log(account.accountId.toString(), account.kind, account.positionSize.toString());
+}
+```
+
+`decodeRiskEngine()` tries common layouts where the raw engine starts at byte `0` or byte `8`, which is useful for wrapper accounts with an 8-byte prefix or discriminator.
 
 ## Important note
 
