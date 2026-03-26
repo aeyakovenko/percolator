@@ -4,13 +4,47 @@ import { useState } from 'react';
 import { LiveDataConnect, type LiveDataOptions } from './LiveDataConnect';
 import { AddressLink } from './AddressLink';
 import { mockPositions, mockLiquidations, mockEngineState } from '@/lib/mockData';
-import { formatBigint, type DecodedEngineState } from '@/lib/decodeEngineState';
+import {
+  formatBigint,
+  type DecodedEngineAccount,
+  type DecodedRiskEngine,
+} from '@percolatortool/sdk';
+
+function absBigint(value: bigint): bigint {
+  return value < 0n ? -value : value;
+}
+
+function formatInteger(value: bigint): string {
+  const sign = value < 0n ? '-' : '';
+  const digits = absBigint(value).toString();
+  return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function formatPriceE6(value: number): string {
+  const whole = Math.floor(value / 1_000_000);
+  const fractional = (value % 1_000_000).toString().padStart(6, '0').replace(/0+$/, '');
+  return fractional ? `${whole}.${fractional}` : `${whole}`;
+}
+
+function buildLivePositionRows(accounts: DecodedEngineAccount[]): DecodedEngineAccount[] {
+  return [...accounts]
+    .sort((a, b) => {
+      const aPos = absBigint(a.positionSize);
+      const bPos = absBigint(b.positionSize);
+      if (aPos === bPos) {
+        if (a.capital === b.capital) return Number(a.accountId - b.accountId);
+        return a.capital > b.capital ? -1 : 1;
+      }
+      return aPos > bPos ? -1 : 1;
+    })
+    .slice(0, 20);
+}
 
 export function DashboardClient() {
-  const [live, setLive] = useState<DecodedEngineState | null>(null);
+  const [live, setLive] = useState<DecodedRiskEngine | null>(null);
   const [liveMeta, setLiveMeta] = useState<LiveDataOptions | null>(null);
 
-  const handleLiveData = (data: DecodedEngineState, opts: LiveDataOptions) => {
+  const handleLiveData = (data: DecodedRiskEngine, opts: LiveDataOptions) => {
     setLive(data);
     setLiveMeta(opts);
   };
@@ -19,19 +53,19 @@ export function DashboardClient() {
     setLiveMeta(null);
   };
 
-  const vault = live ? formatBigint(live.vault) : mockEngineState.vault.replace(/_/g, ',');
-  const insurance = live ? formatBigint(live.insuranceBalance) : mockEngineState.insuranceBalance.replace(/_/g, ',');
-  const oi = live ? formatBigint(live.totalOpenInterest) : mockEngineState.totalOpenInterest.replace(/_/g, ',');
-  const cTot = live ? formatBigint(live.cTot) : mockEngineState.cTot.replace(/_/g, ',');
-  const pnlPosTot = live ? formatBigint(live.pnlPosTot) : mockEngineState.pnlPosTot.replace(/_/g, ',');
-  const fundingRate = live ? live.fundingRateBpsPerSlot : mockEngineState.fundingRateBpsPerSlot;
-  const currentSlot = live ? live.currentSlot : mockEngineState.currentSlot;
-  const lastCrankSlot = live ? live.lastCrankSlot : mockEngineState.lastCrankSlot;
-  const liquidations = live?.lifetimeLiquidations ?? mockEngineState.lifetimeLiquidations;
-  const numAccounts = live?.numUsedAccounts ?? mockEngineState.numUsedAccounts;
+  const liveEngine = live?.engine ?? null;
+  const vault = liveEngine ? formatBigint(liveEngine.vault) : mockEngineState.vault.replace(/_/g, ',');
+  const insurance = liveEngine ? formatBigint(liveEngine.insuranceBalance) : mockEngineState.insuranceBalance.replace(/_/g, ',');
+  const oi = liveEngine ? formatBigint(liveEngine.totalOpenInterest) : mockEngineState.totalOpenInterest.replace(/_/g, ',');
+  const cTot = liveEngine ? formatBigint(liveEngine.cTot) : mockEngineState.cTot.replace(/_/g, ',');
+  const pnlPosTot = liveEngine ? formatBigint(liveEngine.pnlPosTot) : mockEngineState.pnlPosTot.replace(/_/g, ',');
+  const fundingRate = liveEngine ? liveEngine.fundingRateBpsPerSlot : mockEngineState.fundingRateBpsPerSlot;
+  const currentSlot = liveEngine ? liveEngine.currentSlot : mockEngineState.currentSlot;
+  const lastCrankSlot = liveEngine ? liveEngine.lastCrankSlot : mockEngineState.lastCrankSlot;
+  const liquidations = liveEngine?.lifetimeLiquidations ?? mockEngineState.lifetimeLiquidations;
+  const numAccounts = liveEngine?.numUsedAccounts ?? mockEngineState.numUsedAccounts;
 
-  // When live, don't show mock table rows — only engine aggregates are from chain
-  const positionsToShow = live ? [] : mockPositions;
+  const livePositionsToShow = live ? buildLivePositionRows(live.accounts) : [];
   const liquidationsToShow = live ? [] : mockLiquidations;
 
   return (
@@ -109,10 +143,10 @@ export function DashboardClient() {
       {live && (
         <div className="live-data-note">
           <p>
-            <strong>Why {numAccounts} accounts but empty tables?</strong> The &quot;Accounts&quot; count is read from the engine&apos;s <code>num_used_accounts</code> on chain. We don&apos;t yet decode the <strong>account slab</strong> (the per-account list of capital, PnL, position, etc.), so we can&apos;t show individual rows. Adding slab decode would fill the positions table.
+            <strong>Live slab decode:</strong> the positions table below is now decoded directly from the engine&apos;s on-chain <code>accounts[]</code> slab. {live.accountsDecoded ? `Showing ${livePositionsToShow.length} top accounts by position size.` : 'This account layout did not expose the full slab, so only engine aggregates could be decoded.'}
           </p>
           <p>
-            <strong>Why are other stats zero?</strong> Either (1) the engine really has no deposits, open interest, or funding yet, or (2) this state account may be a <strong>wrapper</strong> (e.g. 8-byte discriminator before the engine data), so our decoder offsets might not match and we&apos;re reading zeros. If you see 0 everywhere but a positive account count, check the program&apos;s account layout (e.g. wrapper vs raw RiskEngine).
+            <strong>Liquidation history is still aggregate-only.</strong> Percolator exposes the lifetime liquidation count in state, but not a built-in on-chain recent-history table. To show live liquidation rows, we&apos;d need wrapper event logs, indexer data, or a separate history account.
           </p>
         </div>
       )}
@@ -133,38 +167,61 @@ export function DashboardClient() {
             </tr>
           </thead>
           <tbody>
-            {positionsToShow.length === 0 ? (
+            {(live ? livePositionsToShow.length === 0 : mockPositions.length === 0) ? (
               <tr>
                 <td colSpan={8} className="empty-table-msg">
                   {live
-                    ? 'No live position data. Only engine aggregates above are from chain; position slab decode can be added for live rows.'
+                    ? 'No live accounts decoded. The engine may be empty, or this wrapper layout may not store the full raw slab.'
                     : 'No data. Connect a state account above for live engine state.'}
                 </td>
               </tr>
             ) : (
-              positionsToShow.map((row) => (
-                <tr key={row.accountId}>
-                  <td>{row.accountId}</td>
-                  <td><span className={`badge ${row.kind}`}>{row.kind}</span></td>
-                  <td>
-                    {row.ownerAddress ? (
-                      <AddressLink address={row.ownerAddress} cluster={liveMeta?.network ?? 'mainnet'} display={row.owner} className="link-underline" />
-                    ) : (
-                      row.owner
-                    )}
-                  </td>
-                  <td>{row.token}</td>
-                  <td>{row.capital.replace(/_/g, ',')}</td>
-                  <td className={row.pnl.startsWith('-') ? 'neg' : 'pos'}>{row.pnl.replace(/_/g, ',')}</td>
-                  <td>{row.positionSize.replace(/_/g, ',')}</td>
-                  <td>{row.entryPrice}</td>
-                </tr>
-              ))
+              live
+                ? livePositionsToShow.map((row) => (
+                    <tr key={`${row.accountIndex}-${row.accountId.toString()}`}>
+                      <td>{row.accountId.toString()}</td>
+                      <td><span className={`badge ${row.kind}`}>{row.kind}</span></td>
+                      <td>
+                        {row.owner ? (
+                          <AddressLink address={row.owner} cluster={liveMeta?.network ?? 'mainnet'} className="link-underline" />
+                        ) : (
+                          'Unassigned'
+                        )}
+                      </td>
+                      <td>-</td>
+                      <td>{formatInteger(row.capital)}</td>
+                      <td className={row.pnl < 0n ? 'neg' : 'pos'}>{formatInteger(row.pnl)}</td>
+                      <td>{formatInteger(row.positionSize)}</td>
+                      <td>{formatPriceE6(row.entryPrice)}</td>
+                    </tr>
+                  ))
+                : mockPositions.map((row) => (
+                    <tr key={row.accountId}>
+                      <td>{row.accountId}</td>
+                      <td><span className={`badge ${row.kind}`}>{row.kind}</span></td>
+                      <td>
+                        {row.ownerAddress ? (
+                          <AddressLink address={row.ownerAddress} cluster={liveMeta?.network ?? 'mainnet'} display={row.owner} className="link-underline" />
+                        ) : (
+                          row.owner
+                        )}
+                      </td>
+                      <td>{row.token}</td>
+                      <td>{row.capital.replace(/_/g, ',')}</td>
+                      <td className={row.pnl.startsWith('-') ? 'neg' : 'pos'}>{row.pnl.replace(/_/g, ',')}</td>
+                      <td>{row.positionSize.replace(/_/g, ',')}</td>
+                      <td>{row.entryPrice}</td>
+                    </tr>
+                  ))
             )}
           </tbody>
         </table>
       </div>
-      {!live && <p className="table-note">Positions: demo sample data. Connect a state account above for live engine state.</p>}
+      <p className="table-note">
+        {live
+          ? 'Positions: decoded from the live Percolator account slab.'
+          : 'Positions: demo sample data. Connect a state account above for live engine state.'}
+      </p>
 
       <h2 className="section-title">Recent liquidations</h2>
       <div className="table-wrap">

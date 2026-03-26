@@ -167,3 +167,17 @@ export function buildKeeperCrankInstructionData(args: KeeperCrankArgs): Buffer {
   ];
   return Buffer.concat(parts);
 }
+
+// -----------------------------------------------------------------------------
+// Engine state decoder (read vault, OI, funding, etc. from state account)
+// -----------------------------------------------------------------------------
+
+export {
+  decodeAccountSlab,
+  decodeEngineState,
+  decodeRiskEngine,
+  formatBigint,
+  type DecodedEngineAccount,
+  type DecodedEngineState,
+  type DecodedRiskEngine,
+} from './decodeEngineState';

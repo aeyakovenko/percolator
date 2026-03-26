@@ -57,6 +57,21 @@ const crankData = buildKeeperCrankInstructionData({
 
 Then pass `depositData` / `crankData` as the `data` for a `TransactionInstruction` to your **wrapper** program ID (your wrapper then forwards to Percolator as defined by its IDL).
 
+### Engine state decoder
+
+You can also decode an engine state account (vault, OI, funding, liquidations count, etc.):
+
+```ts
+import { decodeEngineState, formatBigint, type DecodedEngineState } from '@percolatortool/sdk';
+
+const decoded = decodeEngineState(accountData); // Uint8Array from getAccountInfo
+if (decoded) {
+  console.log('Vault:', formatBigint(decoded.vault));
+  console.log('Open interest:', formatBigint(decoded.totalOpenInterest));
+  console.log('Liquidations:', decoded.lifetimeLiquidations);
+}
+```
+
 ## Important note
 
 Instruction **layout** (discriminators, field order) is defined by your **wrapper** program. This SDK uses a minimal layout; if your wrapper uses Anchor or a different layout, adapt the builders or use this as reference.

@@ -6,7 +6,7 @@
  * @see https://github.com/aeyakovenko/percolator
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.INSTRUCTION_NAMES = void 0;
+exports.formatBigint = exports.decodeRiskEngine = exports.decodeEngineState = exports.decodeAccountSlab = exports.INSTRUCTION_NAMES = void 0;
 exports.buildDepositInstructionData = buildDepositInstructionData;
 exports.buildWithdrawInstructionData = buildWithdrawInstructionData;
 exports.buildExecuteTradeInstructionData = buildExecuteTradeInstructionData;
@@ -102,3 +102,11 @@ function buildKeeperCrankInstructionData(args) {
     ];
     return Buffer.concat(parts);
 }
+// -----------------------------------------------------------------------------
+// Engine state decoder (read vault, OI, funding, etc. from state account)
+// -----------------------------------------------------------------------------
+var decodeEngineState_1 = require("./decodeEngineState");
+Object.defineProperty(exports, "decodeAccountSlab", { enumerable: true, get: function () { return decodeEngineState_1.decodeAccountSlab; } });
+Object.defineProperty(exports, "decodeEngineState", { enumerable: true, get: function () { return decodeEngineState_1.decodeEngineState; } });
+Object.defineProperty(exports, "decodeRiskEngine", { enumerable: true, get: function () { return decodeEngineState_1.decodeRiskEngine; } });
+Object.defineProperty(exports, "formatBigint", { enumerable: true, get: function () { return decodeEngineState_1.formatBigint; } });

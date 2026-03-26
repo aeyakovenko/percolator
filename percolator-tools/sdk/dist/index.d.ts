@@ -89,3 +89,4 @@ export declare function buildExecuteTradeInstructionData(args: ExecuteTradeArgs)
  * Permissionless; anyone can call. Wrapper forwards to engine.keeper_crank(...).
  */
 export declare function buildKeeperCrankInstructionData(args: KeeperCrankArgs): Buffer;
+export { decodeAccountSlab, decodeEngineState, decodeRiskEngine, formatBigint, type DecodedEngineAccount, type DecodedEngineState, type DecodedRiskEngine, } from './decodeEngineState';

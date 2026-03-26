@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { decodeEngineState, type DecodedEngineState } from '@/lib/decodeEngineState';
+import { decodeRiskEngine, type DecodedRiskEngine } from '@percolatortool/sdk';
 
 const RPC_DEVNET = 'https://api.devnet.solana.com';
 const RPC_MAINNET_PUBLIC = 'https://api.mainnet-beta.solana.com';
@@ -25,7 +25,7 @@ export function LiveDataConnect({
   onLiveData,
   onClear,
 }: {
-  onLiveData: (data: DecodedEngineState, opts: LiveDataOptions) => void;
+  onLiveData: (data: DecodedRiskEngine, opts: LiveDataOptions) => void;
   onClear: () => void;
 }) {
   const [network, setNetwork] = useState<'devnet' | 'mainnet'>('mainnet');
@@ -57,7 +57,7 @@ export function LiveDataConnect({
         setError('Account not found or no data');
         return;
       }
-      const decoded = decodeEngineState(account.data);
+      const decoded = decodeRiskEngine(account.data);
       if (!decoded) {
         setError('Invalid state layout (wrong account or format)');
         return;
@@ -80,17 +80,21 @@ export function LiveDataConnect({
     try {
       const connection = new Connection(rpc);
       const programPubkey = new PublicKey(programId.trim());
-      // Fetch first 330 bytes so we can decode lifetime_liquidations when found
+      // Fetch enough of the header to decode aggregates and num_used_accounts.
       const accounts = await connection.getProgramAccounts(programPubkey, {
-        dataSlice: { offset: 0, length: 330 },
+        dataSlice: { offset: 0, length: 980 },
       });
       for (const { pubkey: key, account } of accounts) {
-        if (account.data.length < 296) continue;
-        const decoded = decodeEngineState(account.data);
+        if (account.data.length < 344) continue;
+        const decoded = decodeRiskEngine(account.data);
         if (decoded) {
           const addr = key.toBase58();
+          const fullAccount = await connection.getAccountInfo(key);
+          if (!fullAccount?.data) continue;
+          const fullDecoded = decodeRiskEngine(fullAccount.data);
+          if (!fullDecoded) continue;
           setStateAddress(addr);
-          onLiveData(decoded, { network, stateAddress: addr });
+          onLiveData(fullDecoded, { network, stateAddress: addr });
           setFindLoading(false);
           return;
         }
