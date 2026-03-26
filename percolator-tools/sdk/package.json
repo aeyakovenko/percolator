@@ -1,6 +1,6 @@
 {
   "name": "@percolatortool/sdk",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "TypeScript SDK for Percolator — types and instruction builders (deposit, withdraw, trade, keeper crank) for wrapper programs and frontends on Solana. Built for the Percolator audit and ecosystem tooling.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
