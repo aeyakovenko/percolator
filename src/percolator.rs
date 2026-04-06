@@ -1957,7 +1957,12 @@ impl RiskEngine {
         let not = self.notional(idx, oracle_price);
         let proportional = mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000);
         let mm_req = core::cmp::max(proportional, self.params.min_nonzero_mm_req);
-        let mm_req_i128 = if mm_req > i128::MAX as u128 { i128::MAX } else { mm_req as i128 };
+        // If mm_req exceeds i128::MAX, the requirement is so large the account
+        // can never meet it. Return false immediately rather than clamping.
+        if mm_req > i128::MAX as u128 {
+            return false;
+        }
+        let mm_req_i128 = mm_req as i128;
         eq_net > mm_req_i128
     }
 
@@ -1974,7 +1979,12 @@ impl RiskEngine {
         let not = self.notional(idx, oracle_price);
         let proportional = mul_div_floor_u128(not, self.params.initial_margin_bps as u128, 10_000);
         let im_req = core::cmp::max(proportional, self.params.min_nonzero_im_req);
-        let im_req_i128 = if im_req > i128::MAX as u128 { i128::MAX } else { im_req as i128 };
+        // If im_req exceeds i128::MAX, the requirement is so large the account
+        // can never meet it. Return false immediately rather than clamping.
+        if im_req > i128::MAX as u128 {
+            return false;
+        }
+        let im_req_i128 = im_req as i128;
         eq_init_raw >= im_req_i128
     }
 
