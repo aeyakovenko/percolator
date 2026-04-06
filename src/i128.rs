@@ -89,7 +89,7 @@ impl I128 {
 
     #[inline(always)]
     pub fn abs(self) -> Self {
-        Self(self.0.abs())
+        Self(self.0.saturating_abs())
     }
 
     #[inline(always)]
@@ -208,6 +208,14 @@ impl core::ops::Sub<I128> for I128 {
 }
 
 #[cfg(kani)]
+impl core::ops::Mul<i128> for I128 {
+    type Output = Self;
+    fn mul(self, rhs: i128) -> Self {
+        Self(self.0.saturating_mul(rhs))
+    }
+}
+
+#[cfg(kani)]
 impl core::ops::Neg for I128 {
     type Output = Self;
     fn neg(self) -> Self {
@@ -307,7 +315,7 @@ impl I128 {
 
     #[inline]
     pub fn abs(self) -> Self {
-        Self::new(self.get().abs())
+        Self::new(self.get().saturating_abs())
     }
 
     #[inline]
@@ -908,7 +916,7 @@ impl core::ops::Mul<i128> for I128 {
 impl core::ops::Neg for I128 {
     type Output = Self;
     fn neg(self) -> Self {
-        Self::new(-self.get())
+        Self::new(self.get().saturating_neg())
     }
 }
 
