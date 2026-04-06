@@ -897,7 +897,7 @@ fn proof_force_close_resolved_with_position_conserves() {
     kani::assume(loss >= 1 && loss <= 400_000);
     engine.set_pnl(a as usize, -(loss as i128));
 
-    let result = engine.force_close_resolved_not_atomic(a, 100);
+    let result = engine.force_close_resolved_not_atomic(a, 100, 0);
     assert!(result.is_ok(), "force_close must succeed with open position");
     assert!(!engine.is_used(a as usize), "account must be freed");
     assert!(engine.check_conservation());
@@ -917,7 +917,7 @@ fn proof_force_close_resolved_with_profit_conserves() {
     engine.set_pnl(idx as usize, profit as i128);
 
     let cap_before = engine.accounts[idx as usize].capital.get();
-    let result = engine.force_close_resolved_not_atomic(idx, 100);
+    let result = engine.force_close_resolved_not_atomic(idx, 100, 0);
     assert!(result.is_ok(), "force_close must succeed with positive PnL");
     assert!(result.unwrap() >= cap_before, "returned must include converted profit");
     assert!(!engine.is_used(idx as usize));
@@ -936,7 +936,7 @@ fn proof_force_close_resolved_flat_returns_capital() {
     kani::assume(dep >= 1 && dep <= 1_000_000);
     engine.deposit(idx, dep as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
-    let result = engine.force_close_resolved_not_atomic(idx, 100);
+    let result = engine.force_close_resolved_not_atomic(idx, 100, 0);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), dep as u128, "flat account must return exact capital");
     assert!(!engine.is_used(idx as usize));
@@ -963,7 +963,7 @@ fn proof_force_close_resolved_position_conservation() {
     engine.keeper_crank_not_atomic(DEFAULT_SLOT + 1, 1500, &[], 64, 0i64).unwrap();
 
     let oi_long_before = engine.oi_eff_long_q;
-    let result = engine.force_close_resolved_not_atomic(a, DEFAULT_SLOT + 1);
+    let result = engine.force_close_resolved_not_atomic(a, DEFAULT_SLOT + 1, 0);
     assert!(result.is_ok());
     assert!(!engine.is_used(a as usize));
     assert!(engine.accounts[a as usize].position_basis_q == 0);
@@ -992,11 +992,11 @@ fn proof_force_close_resolved_pos_count_decrements() {
     let long_before = engine.stored_pos_count_long;
     let short_before = engine.stored_pos_count_short;
 
-    engine.force_close_resolved_not_atomic(a, 100).unwrap(); // a was long
+    engine.force_close_resolved_not_atomic(a, 100, 0).unwrap(); // a was long
     assert_eq!(engine.stored_pos_count_long, long_before - 1);
     assert_eq!(engine.stored_pos_count_short, short_before);
 
-    engine.force_close_resolved_not_atomic(b, 100).unwrap(); // b was short
+    engine.force_close_resolved_not_atomic(b, 100, 0).unwrap(); // b was short
     assert_eq!(engine.stored_pos_count_short, short_before - 1);
 }
 
@@ -1016,7 +1016,7 @@ fn proof_force_close_resolved_fee_sweep_conservation() {
     engine.accounts[idx as usize].fee_credits = I128::new(-(debt as i128));
 
     let ins_before = engine.insurance_fund.balance.get();
-    let result = engine.force_close_resolved_not_atomic(idx, 100);
+    let result = engine.force_close_resolved_not_atomic(idx, 100, 0);
     assert!(result.is_ok());
 
     // Insurance must have increased by swept amount

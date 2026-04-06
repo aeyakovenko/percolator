@@ -2460,7 +2460,7 @@ fn test_force_close_resolved_flat_no_pnl() {
     // Align last_fee_slot so force_close doesn't charge accrued fee
     engine.accounts[idx as usize].last_fee_slot = 100;
 
-    let returned = engine.force_close_resolved_not_atomic(idx, 100).unwrap();
+    let returned = engine.force_close_resolved_not_atomic(idx, 100, 0).unwrap();
     assert_eq!(returned, 50_000);
     assert!(!engine.is_used(idx as usize));
     assert!(engine.check_conservation());
@@ -2478,7 +2478,7 @@ fn test_force_close_resolved_with_open_position() {
     engine.execute_trade_not_atomic(a, b, 1000, 100, size, 1000, 0i64).unwrap();
 
     // Account has open position — force_close settles K-pair PnL and zeros it
-    let result = engine.force_close_resolved_not_atomic(a, 100);
+    let result = engine.force_close_resolved_not_atomic(a, 100, 0);
     assert!(result.is_ok(), "force_close must handle open positions");
     assert!(!engine.is_used(a as usize));
     assert!(engine.check_conservation());
@@ -2499,7 +2499,7 @@ fn test_force_close_resolved_with_negative_pnl() {
     engine.set_pnl(a as usize, -100_000i128);
 
     let cap_before = engine.accounts[a as usize].capital.get();
-    let returned = engine.force_close_resolved_not_atomic(a, 100).unwrap();
+    let returned = engine.force_close_resolved_not_atomic(a, 100, 0).unwrap();
 
     assert!(returned < cap_before, "loss must reduce returned capital");
     assert!(!engine.is_used(a as usize));
@@ -2516,7 +2516,7 @@ fn test_force_close_resolved_with_positive_pnl() {
     // Inject positive PnL on flat account
     engine.set_pnl(idx as usize, 10_000i128);
 
-    let returned = engine.force_close_resolved_not_atomic(idx, 100).unwrap();
+    let returned = engine.force_close_resolved_not_atomic(idx, 100, 0).unwrap();
     // Positive PnL converted to capital (haircutted) before return
     assert!(returned >= 50_000, "positive PnL must increase returned capital");
     assert!(!engine.is_used(idx as usize));
@@ -2533,7 +2533,7 @@ fn test_force_close_resolved_with_fee_debt() {
     // Inject fee debt of 5000
     engine.accounts[idx as usize].fee_credits = I128::new(-5000);
 
-    let returned = engine.force_close_resolved_not_atomic(idx, 100).unwrap();
+    let returned = engine.force_close_resolved_not_atomic(idx, 100, 0).unwrap();
     // Fee debt swept from capital first (spec §7.5 fee seniority):
     // 50_000 capital - 5_000 fee sweep = 45_000 returned
     assert_eq!(returned, 45_000, "fee debt swept before capital return");
@@ -2544,7 +2544,7 @@ fn test_force_close_resolved_with_fee_debt() {
 #[test]
 fn test_force_close_resolved_unused_slot_rejected() {
     let mut engine = RiskEngine::new(default_params());
-    let result = engine.force_close_resolved_not_atomic(0, 100);
+    let result = engine.force_close_resolved_not_atomic(0, 100, 0);
     assert_eq!(result, Err(RiskError::AccountNotFound));
 }
 
@@ -2571,7 +2571,7 @@ fn test_force_close_same_epoch_positive_k_pair_pnl() {
     engine.accounts[a as usize].last_fee_slot = 200;
 
     // a (long) has unrealized profit from K-pair (K_long increased)
-    let returned = engine.force_close_resolved_not_atomic(a, 200).unwrap();
+    let returned = engine.force_close_resolved_not_atomic(a, 200, 0).unwrap();
 
     // Returned should include settled K-pair profit
     assert!(returned >= cap_after_trade, "K-pair profit must increase returned capital");
@@ -2594,7 +2594,7 @@ fn test_force_close_same_epoch_negative_k_pair_pnl() {
     engine.keeper_crank_not_atomic(200, 500, &[], 64, 0i64).unwrap();
 
     let cap_before = engine.accounts[a as usize].capital.get();
-    let returned = engine.force_close_resolved_not_atomic(a, 200).unwrap();
+    let returned = engine.force_close_resolved_not_atomic(a, 200, 0).unwrap();
 
     // Loss settled from capital
     assert!(returned < cap_before, "K-pair loss must reduce returned capital");
@@ -2611,7 +2611,7 @@ fn test_force_close_with_fee_debt_exceeding_capital() {
     // Fee debt >> capital
     engine.accounts[idx as usize].fee_credits = I128::new(-50_000);
 
-    let returned = engine.force_close_resolved_not_atomic(idx, 100).unwrap();
+    let returned = engine.force_close_resolved_not_atomic(idx, 100, 0).unwrap();
     // Capital (10k) fully swept to insurance, remaining debt forgiven
     assert_eq!(returned, 0, "all capital swept for fee debt");
     assert!(!engine.is_used(idx as usize));
@@ -2624,7 +2624,7 @@ fn test_force_close_zero_capital_zero_pnl() {
     let idx = engine.add_user(1000).unwrap();
     // No deposit — capital = 0 (new_account_fee consumed all)
 
-    let returned = engine.force_close_resolved_not_atomic(idx, 100).unwrap();
+    let returned = engine.force_close_resolved_not_atomic(idx, 100, 0).unwrap();
     assert_eq!(returned, 0);
     assert!(!engine.is_used(idx as usize));
     assert!(engine.check_conservation());
@@ -2646,15 +2646,15 @@ fn test_force_close_c_tot_tracks_exactly() {
 
     let c_tot_before = engine.c_tot.get();
 
-    let ret_a = engine.force_close_resolved_not_atomic(a, 100).unwrap();
+    let ret_a = engine.force_close_resolved_not_atomic(a, 100, 0).unwrap();
     assert_eq!(engine.c_tot.get(), c_tot_before - ret_a);
 
     let c_tot_mid = engine.c_tot.get();
-    let ret_b = engine.force_close_resolved_not_atomic(b, 100).unwrap();
+    let ret_b = engine.force_close_resolved_not_atomic(b, 100, 0).unwrap();
     assert_eq!(engine.c_tot.get(), c_tot_mid - ret_b);
 
     let c_tot_mid2 = engine.c_tot.get();
-    let ret_c = engine.force_close_resolved_not_atomic(c, 100).unwrap();
+    let ret_c = engine.force_close_resolved_not_atomic(c, 100, 0).unwrap();
     assert_eq!(engine.c_tot.get(), c_tot_mid2 - ret_c);
 
     assert_eq!(engine.c_tot.get(), 0, "all accounts closed → C_tot must be 0");
@@ -2673,12 +2673,12 @@ fn test_force_close_stored_pos_count_tracks() {
     assert_eq!(engine.stored_pos_count_long, 1);
     assert_eq!(engine.stored_pos_count_short, 1);
 
-    engine.force_close_resolved_not_atomic(a, 100).unwrap();
+    engine.force_close_resolved_not_atomic(a, 100, 0).unwrap();
     assert_eq!(engine.stored_pos_count_long, 0, "long count must decrement");
     // Short count unchanged — b still has position
     assert_eq!(engine.stored_pos_count_short, 1);
 
-    engine.force_close_resolved_not_atomic(b, 100).unwrap();
+    engine.force_close_resolved_not_atomic(b, 100, 0).unwrap();
     assert_eq!(engine.stored_pos_count_short, 0, "short count must decrement");
 }
 
@@ -2693,7 +2693,7 @@ fn test_force_close_multiple_sequential_no_aggregate_drift() {
     }
 
     for &idx in &accounts {
-        engine.force_close_resolved_not_atomic(idx, 100).unwrap();
+        engine.force_close_resolved_not_atomic(idx, 100, 0).unwrap();
     }
 
     assert_eq!(engine.c_tot.get(), 0);
@@ -2717,13 +2717,13 @@ fn test_force_close_decrements_oi() {
     assert!(engine.oi_eff_long_q > 0);
     assert!(engine.oi_eff_short_q > 0);
 
-    engine.force_close_resolved_not_atomic(a, 100).unwrap();
+    engine.force_close_resolved_not_atomic(a, 100, 0).unwrap();
     // Bilateral decrement: both sides go to 0 together
     assert_eq!(engine.oi_eff_long_q, 0);
     assert_eq!(engine.oi_eff_short_q, 0);
     assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q, "OI must stay symmetric");
 
-    engine.force_close_resolved_not_atomic(b, 100).unwrap();
+    engine.force_close_resolved_not_atomic(b, 100, 0).unwrap();
     assert_eq!(engine.oi_eff_long_q, 0);
     assert_eq!(engine.oi_eff_short_q, 0);
     assert_eq!(engine.stored_pos_count_long, 0);
@@ -2748,7 +2748,7 @@ fn test_force_close_oi_symmetry_after_one_side() {
     assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q);
 
     // Force-close only account a (the long side)
-    engine.force_close_resolved_not_atomic(a, 100).unwrap();
+    engine.force_close_resolved_not_atomic(a, 100, 0).unwrap();
 
     // After force-closing one side, OI must stay symmetric so the
     // other side's users can still close normally.
@@ -2756,7 +2756,7 @@ fn test_force_close_oi_symmetry_after_one_side() {
         "OI must stay symmetric after force-closing one side");
 
     // b (short side) must be able to force-close without CorruptState
-    engine.force_close_resolved_not_atomic(b, 100).unwrap();
+    engine.force_close_resolved_not_atomic(b, 100, 0).unwrap();
     assert_eq!(engine.oi_eff_long_q, 0);
     assert_eq!(engine.oi_eff_short_q, 0);
     assert!(engine.check_conservation());
@@ -2773,7 +2773,7 @@ fn test_force_close_rejects_corrupt_a_basis() {
     engine.stored_pos_count_long = 1;
     engine.accounts[a as usize].adl_a_basis = 0;
 
-    let result = engine.force_close_resolved_not_atomic(a, 100);
+    let result = engine.force_close_resolved_not_atomic(a, 100, 0);
     assert_eq!(result, Err(RiskError::CorruptState),
         "must reject corrupt a_basis = 0");
 }

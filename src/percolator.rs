@@ -3580,7 +3580,9 @@ impl RiskEngine {
     ///
     /// Skips accrue_market_to (market is frozen). Handles both same-epoch
     /// and epoch-mismatch accounts.
-    pub fn force_close_resolved_not_atomic(&mut self, idx: u16, resolved_slot: u64) -> Result<u128> {
+    pub fn force_close_resolved_not_atomic(&mut self, idx: u16, resolved_slot: u64, funding_rate: i64) -> Result<u128> {
+        Self::validate_funding_rate(funding_rate)?;
+
         if idx as usize >= MAX_ACCOUNTS || !self.is_used(idx as usize) {
             return Err(RiskError::AccountNotFound);
         }
@@ -3588,6 +3590,8 @@ impl RiskEngine {
             return Err(RiskError::Overflow);
         }
         self.current_slot = resolved_slot;
+
+        let mut ctx = InstructionContext::new();
 
         let i = idx as usize;
 
@@ -3738,6 +3742,11 @@ impl RiskEngine {
         }
         self.vault = self.vault - capital;
         self.set_capital(i, 0);
+
+        // End-of-instruction resets before freeing (spec §5.7-5.8, §10.0)
+        self.schedule_end_of_instruction_resets(&mut ctx)?;
+        self.finalize_end_of_instruction_resets(&ctx);
+        self.recompute_r_last_from_final_state(funding_rate)?;
 
         self.free_slot(idx);
 
