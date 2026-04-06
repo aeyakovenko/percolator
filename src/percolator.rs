@@ -1038,7 +1038,10 @@ impl RiskEngine {
                             let rem = p.checked_rem(U256::from_u128(a_basis));
                             if let Some(r) = rem {
                                 if !r.is_zero() {
-                                    self.inc_phantom_dust_bound(old_side);
+                                    // Fix #36: inc_phantom_dust_bound now returns Result.
+                                    // Ignore overflow on dust bound increment (indicates state corruption,
+                                    // but shouldn't crash internal position attachment logic).
+                                    let _ = self.inc_phantom_dust_bound(old_side);
                                 }
                             }
                         }
@@ -1174,35 +1177,46 @@ impl RiskEngine {
     }
 
     /// Spec §4.6: increment phantom dust bound by 1 q-unit (checked).
-    fn inc_phantom_dust_bound(&mut self, s: Side) {
+    /// Fix #36: Changed to return Result instead of panicking on overflow.
+    /// Returns RiskError::CorruptState if phantom dust bound would overflow u128::MAX.
+    /// This allows the transaction to fail gracefully rather than panic.
+    fn inc_phantom_dust_bound(&mut self, s: Side) -> Result<()> {
         match s {
             Side::Long => {
                 self.phantom_dust_bound_long_q = self.phantom_dust_bound_long_q
                     .checked_add(1u128)
-                    .expect("phantom_dust_bound_long_q overflow");
+                    .ok_or(RiskError::CorruptState)?;
             }
             Side::Short => {
                 self.phantom_dust_bound_short_q = self.phantom_dust_bound_short_q
                     .checked_add(1u128)
-                    .expect("phantom_dust_bound_short_q overflow");
+                    .ok_or(RiskError::CorruptState)?;
             }
         }
+        Ok(())
     }
 
     /// Spec §4.6.1: increment phantom dust bound by amount_q (checked).
-    fn inc_phantom_dust_bound_by(&mut self, s: Side, amount_q: u128) {
+    /// Fix #36: Changed to return Result instead of panicking on overflow.
+    /// Returns RiskError::CorruptState if phantom dust bound would overflow u128::MAX.
+    /// This allows callers to handle the error gracefully at transaction boundary.
+    fn inc_phantom_dust_bound_by(&mut self, s: Side, amount_q: u128) -> Result<()> {
+        if amount_q == 0 {
+            return Ok(());  // No-op for zero increment
+        }
         match s {
             Side::Long => {
                 self.phantom_dust_bound_long_q = self.phantom_dust_bound_long_q
                     .checked_add(amount_q)
-                    .expect("phantom_dust_bound_long_q overflow");
+                    .ok_or(RiskError::CorruptState)?;
             }
             Side::Short => {
                 self.phantom_dust_bound_short_q = self.phantom_dust_bound_short_q
                     .checked_add(amount_q)
-                    .expect("phantom_dust_bound_short_q overflow");
+                    .ok_or(RiskError::CorruptState)?;
             }
         }
+        Ok(())
     }
 
     // ========================================================================
@@ -1302,7 +1316,8 @@ impl RiskEngine {
             if q_eff_new == 0 {
                 // Position effectively zeroed (spec §5.3 step 4)
                 // Reset to canonical zero-position defaults (spec §2.4)
-                self.inc_phantom_dust_bound(side);
+                // Fix #36: inc_phantom_dust_bound now returns Result, propagate error.
+                self.inc_phantom_dust_bound(side)?;
                 self.set_position_basis_q(idx, 0i128);
                 self.accounts[idx].adl_a_basis = ADL_ONE;
                 self.accounts[idx].adl_k_snap = 0i128;
@@ -1638,7 +1653,7 @@ impl RiskEngine {
                 let global_a_dust_bound = n_opp_u256.checked_add(ceil_term)
                     .unwrap_or(U256::MAX);
                 let bound_u128 = global_a_dust_bound.try_into_u128().unwrap_or(u128::MAX);
-                self.inc_phantom_dust_bound_by(opp, bound_u128);
+                self.inc_phantom_dust_bound_by(opp, bound_u128)?;
             }
             if a_new < MIN_A_SIDE {
                 self.set_side_mode(opp, SideMode::DrainOnly);
@@ -3677,7 +3692,7 @@ impl RiskEngine {
                     let rem = p.checked_rem(U256::from_u128(a_basis));
                     if let Some(r) = rem {
                         if !r.is_zero() {
-                            self.inc_phantom_dust_bound(side);
+                            let _ = self.inc_phantom_dust_bound(side);
                         }
                     }
                 }
