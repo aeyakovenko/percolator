@@ -951,7 +951,9 @@ impl RiskEngine {
             "consume_released_pnl: pnl_matured_pos_tot > pnl_pos_tot");
 
         // PNL_i = checked_sub_i128(PNL_i, checked_cast_i128(x))
-        let x_i128: i128 = x.try_into().expect("consume_released_pnl: x > i128::MAX");
+        // Validate that x fits in i128 before converting (should be guaranteed by prior assertions)
+        assert!(x <= i128::MAX as u128, "consume_released_pnl: x > i128::MAX");
+        let x_i128: i128 = x as i128;
         let new_pnl = self.accounts[idx].pnl.checked_sub(x_i128)
             .expect("consume_released_pnl: PNL underflow");
         assert!(new_pnl != i128::MIN, "consume_released_pnl: PNL == i128::MIN");
