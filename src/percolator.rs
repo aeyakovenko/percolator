@@ -715,6 +715,13 @@ impl RiskEngine {
     pub fn init_in_place(&mut self, params: RiskParams, init_slot: u64, init_oracle_price: u64) {
         Self::validate_params(&params);
         assert!(
+            self.num_used_accounts == 0 && self.vault == U128::ZERO,
+            "init_in_place: engine already active (num_used_accounts={}, vault!=ZERO={}); \
+             re-initialization would destroy live state",
+            self.num_used_accounts,
+            self.vault != U128::ZERO,
+        );
+        assert!(
             init_oracle_price > 0 && init_oracle_price <= MAX_ORACLE_PRICE,
             "init_oracle_price must be in (0, MAX_ORACLE_PRICE] per spec §2.7"
         );
