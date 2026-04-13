@@ -687,6 +687,46 @@ impl I256 {
         Some(I256([neg_lo, neg_hi]))
     }
 
+    /// Checked signed multiplication.
+    /// Computes self * rhs using sign + magnitude decomposition through U256,
+    /// returning None on I256 overflow.
+    pub fn checked_mul(self, rhs: I256) -> Option<I256> {
+        if self.is_zero() || rhs.is_zero() {
+            return Some(I256::ZERO);
+        }
+        let negative = self.is_negative() != rhs.is_negative();
+        // Handle MIN specially: abs_u256 panics on MIN.
+        if self == Self::MIN || rhs == Self::MIN {
+            // MIN * anything with |anything| > 1 overflows.
+            // MIN * 1 = MIN, MIN * -1 overflows (since MAX = |MIN|-1).
+            // MIN * 0 already handled above.
+            if self == Self::MIN && rhs == Self::ONE { return Some(Self::MIN); }
+            if rhs == Self::MIN && self == Self::ONE { return Some(Self::MIN); }
+            return None;
+        }
+        let abs_a = self.abs_u256();
+        let abs_b = rhs.abs_u256();
+        let product = abs_a.checked_mul(abs_b)?;
+        if negative {
+            // Result magnitude must be <= 2^255 (= |I256::MIN|).
+            let max_neg_mag = U256::new(0, 1u128 << 127); // 2^255
+            if product.cmp(&max_neg_mag) == Ordering::Greater {
+                return None;
+            }
+            if product == max_neg_mag {
+                return Some(Self::MIN);
+            }
+            let result = I256::from_raw_u256(product);
+            result.checked_neg()
+        } else {
+            // Positive: magnitude must fit in I256::MAX, i.e. hi bit 127 must be 0.
+            if (product.hi() >> 127) != 0 {
+                return None;
+            }
+            Some(I256::from_raw_u256(product))
+        }
+    }
+
     pub fn saturating_add(self, rhs: I256) -> I256 {
         match self.checked_add(rhs) {
             Some(v) => v,
@@ -844,6 +884,40 @@ impl I256 {
         Some(I256::from_lo_hi(neg_lo, neg_hi))
     }
 
+    /// Checked signed multiplication.
+    /// Computes self * rhs using sign + magnitude decomposition through U256,
+    /// returning None on I256 overflow.
+    pub fn checked_mul(self, rhs: I256) -> Option<I256> {
+        if self.is_zero() || rhs.is_zero() {
+            return Some(I256::ZERO);
+        }
+        let negative = self.is_negative() != rhs.is_negative();
+        if self == Self::MIN || rhs == Self::MIN {
+            if self == Self::MIN && rhs == Self::ONE { return Some(Self::MIN); }
+            if rhs == Self::MIN && self == Self::ONE { return Some(Self::MIN); }
+            return None;
+        }
+        let abs_a = self.abs_u256();
+        let abs_b = rhs.abs_u256();
+        let product = abs_a.checked_mul(abs_b)?;
+        if negative {
+            let max_neg_mag = U256::new(0, 1u128 << 127);
+            if product.cmp(&max_neg_mag) == Ordering::Greater {
+                return None;
+            }
+            if product == max_neg_mag {
+                return Some(Self::MIN);
+            }
+            let result = I256::from_raw_u256(product);
+            result.checked_neg()
+        } else {
+            if (product.hi() >> 127) != 0 {
+                return None;
+            }
+            Some(I256::from_raw_u256(product))
+        }
+    }
+
     pub fn saturating_add(self, rhs: I256) -> I256 {
         match self.checked_add(rhs) {
             Some(v) => v,
@@ -934,6 +1008,54 @@ impl core::ops::Neg for I256 {
     fn neg(self) -> Self {
         self.checked_neg().expect("I256 neg overflow (MIN)")
     }
+}
+
+// ============================================================================
+// Wide signed funding helpers (spec §1.7 item 9, §5.4 step 8)
+// ============================================================================
+
+/// Compute `fund_px_0 * funding_rate_e9 * dt` as I256.
+///
+/// The sign comes from `funding_rate_e9`; the other two factors are non-negative.
+/// Uses U256 for the magnitude product, then re-signs.
+/// Returns None on I256 overflow (impossible for spec-bounded inputs but
+/// checked defensively).
+pub fn wide_fund_num_total(fund_px_0: u64, funding_rate_e9: i128, dt: u64) -> Option<I256> {
+    if fund_px_0 == 0 || funding_rate_e9 == 0 || dt == 0 {
+        return Some(I256::ZERO);
+    }
+    let negative = funding_rate_e9 < 0;
+    let abs_rate = funding_rate_e9.unsigned_abs();
+    // All three factors are non-negative magnitudes; product fits U256 easily.
+    let mag = U256::from_u64(fund_px_0)
+        .checked_mul(U256::from_u128(abs_rate))?
+        .checked_mul(U256::from_u64(dt))?;
+    // Convert magnitude to signed I256, checking the sign bit is clear.
+    if mag.hi() >> 127 != 0 {
+        return None; // magnitude exceeds I256::MAX
+    }
+    let result = I256::from_raw_u256(mag);
+    if negative { result.checked_neg() } else { Some(result) }
+}
+
+/// Compute `a_side (u128) * fund_num_total (I256)` in I256.
+///
+/// Returns the wide signed product, or None on overflow. The caller must
+/// subsequently narrow the resulting F_side_num back to i128 with
+/// `try_into_i128()`.
+pub fn wide_u128_mul_i256(a: u128, b: I256) -> Option<I256> {
+    if a == 0 || b.is_zero() {
+        return Some(I256::ZERO);
+    }
+    let negative = b.is_negative();
+    let abs_b = b.abs_u256();
+    let mag = U256::from_u128(a).checked_mul(abs_b)?;
+    // Magnitude must fit in positive I256 (sign bit clear).
+    if mag.hi() >> 127 != 0 {
+        return None;
+    }
+    let result = I256::from_raw_u256(mag);
+    if negative { result.checked_neg() } else { Some(result) }
 }
 
 // ============================================================================

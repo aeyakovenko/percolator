@@ -142,6 +142,7 @@ use wide_math::{
     fee_debt_u128_checked,
     mul_div_floor_u256_with_rem,
     ceil_div_positive_checked,
+    wide_fund_num_total, wide_u128_mul_i256,
 };
 
 // ============================================================================
@@ -1618,23 +1619,27 @@ impl RiskEngine {
             let fund_px_0 = self.last_oracle_price;
 
             if fund_px_0 > 0 {
-                // Exact computation: fund_num_total = fund_px_0 * rate * dt
-                // fund_px_0 <= MAX_ORACLE_PRICE (1e12), rate <= 1e9, dt <= u64::MAX
-                // Product can exceed i128, so use checked i128 arithmetic with
-                // overflow routing to Err.
-                let fund_num_total: i128 = (fund_px_0 as i128)
-                    .checked_mul(funding_rate_e9)
-                    .ok_or(RiskError::Overflow)?
-                    .checked_mul(total_dt as i128)
+                // Enforce MAX_FUNDING_DT (spec §1.4 defense-in-depth).
+                let clamped_dt = total_dt.min(MAX_FUNDING_DT);
+
+                // Exact computation in I256 (spec §1.7 item 9, §5.4 step 8):
+                // fund_num_total = fund_px_0 * funding_rate_e9 * dt
+                let fund_num_total = wide_fund_num_total(fund_px_0, funding_rate_e9, clamped_dt)
                     .ok_or(RiskError::Overflow)?;
 
-                // F_long -= A_long * fund_num_total
-                let df_long = checked_u128_mul_i128(self.adl_mult_long, fund_num_total)?;
-                f_long = f_long.checked_sub(df_long).ok_or(RiskError::Overflow)?;
+                // F_long -= A_long * fund_num_total (wide, then narrow to i128)
+                let df_long_wide = wide_u128_mul_i256(self.adl_mult_long, fund_num_total)
+                    .ok_or(RiskError::Overflow)?;
+                let f_long_wide = I256::from_i128(f_long)
+                    .checked_sub(df_long_wide).ok_or(RiskError::Overflow)?;
+                f_long = f_long_wide.try_into_i128().ok_or(RiskError::Overflow)?;
 
-                // F_short += A_short * fund_num_total
-                let df_short = checked_u128_mul_i128(self.adl_mult_short, fund_num_total)?;
-                f_short = f_short.checked_add(df_short).ok_or(RiskError::Overflow)?;
+                // F_short += A_short * fund_num_total (wide, then narrow to i128)
+                let df_short_wide = wide_u128_mul_i256(self.adl_mult_short, fund_num_total)
+                    .ok_or(RiskError::Overflow)?;
+                let f_short_wide = I256::from_i128(f_short)
+                    .checked_add(df_short_wide).ok_or(RiskError::Overflow)?;
+                f_short = f_short_wide.try_into_i128().ok_or(RiskError::Overflow)?;
             }
         }
 
