@@ -100,8 +100,8 @@ fn bounded_haircut_ratio_bounded() {
     engine.vault = U128::new(vault_val as u128);
     engine.c_tot = U128::new(c_tot_val as u128);
     engine.insurance_fund.balance = U128::new(ins_val as u128);
-    engine.pnl_pos_tot = ppt_val as u128;
-    engine.pnl_matured_pos_tot = matured_val as u128; // v12.14.0: haircut denominator
+    engine.pnl_pos_tot = U128::new(ppt_val as u128);
+    engine.pnl_matured_pos_tot = U128::new(matured_val as u128); // v12.14.0: haircut denominator
 
     let (h_num, h_den) = engine.haircut_ratio();
 
@@ -139,7 +139,7 @@ fn bounded_equity_nonneg_flat() {
     kani::assume(pnl_val > i16::MIN);
     engine.set_pnl(idx as usize, pnl_val as i128);
 
-    assert!(engine.accounts[idx as usize].position_basis_q == 0);
+    assert!(engine.accounts[idx as usize].position_basis_q.get() == 0);
 
     let raw = engine.account_equity_maint_raw(&engine.accounts[idx as usize]);
 
@@ -317,8 +317,8 @@ fn proof_trade_pnl_is_zero_sum_algebraic() {
     assert!(result.is_ok(), "trade must succeed with sufficient margin");
 
     // After a trade, PnL must be zero-sum across the two counterparties
-    let pnl_a = engine.accounts[a as usize].pnl;
-    let pnl_b = engine.accounts[b as usize].pnl;
+    let pnl_a = engine.accounts[a as usize].pnl.get();
+    let pnl_b = engine.accounts[b as usize].pnl.get();
     assert!(pnl_a + pnl_b == 0, "trade PnL must be zero-sum");
 }
 
@@ -344,7 +344,7 @@ fn proof_flat_negative_resolves_through_insurance() {
         engine.finalize_touched_accounts_post_live(&ctx);
     }
 
-    assert!(engine.accounts[idx as usize].pnl == 0i128);
+    assert!(engine.accounts[idx as usize].pnl.get() == 0i128);
     assert!(engine.insurance_fund.balance.get() <= ins_before);
 }
 
@@ -391,10 +391,10 @@ fn t4_18_precision_exhaustion_both_sides_reset() {
 
     // A_mult = 2, OI = 3*PS. Closing 2*PS leaves OI_post = 1*PS.
     // A_candidate = floor(2 * 1 / 3) = 0 → precision exhaustion.
-    engine.adl_mult_long = 2;
-    engine.adl_coeff_long = 0i128;
-    engine.oi_eff_long_q = 3 * POS_SCALE;
-    engine.oi_eff_short_q = 3 * POS_SCALE;
+    engine.adl_mult_long = U128::new(2);
+    engine.adl_coeff_long = I128::ZERO;
+    engine.oi_eff_long_q = U128::new(3 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(3 * POS_SCALE);
     engine.stored_pos_count_long = 1;
 
     let q_close = 2 * POS_SCALE;
@@ -402,8 +402,8 @@ fn t4_18_precision_exhaustion_both_sides_reset() {
     assert!(result.is_ok());
 
     // Both sides' OI must be zeroed (precision exhaustion terminal drain)
-    assert!(engine.oi_eff_long_q == 0, "opposing OI must be zeroed");
-    assert!(engine.oi_eff_short_q == 0, "liquidated OI must be zeroed");
+    assert!(engine.oi_eff_long_q.get() == 0, "opposing OI must be zeroed");
+    assert!(engine.oi_eff_short_q.get() == 0, "liquidated OI must be zeroed");
     assert!(ctx.pending_reset_long, "opposing side must be pending reset");
     assert!(ctx.pending_reset_short, "liquidated side must be pending reset");
 }
@@ -458,10 +458,10 @@ fn t4_21_precision_exhaustion_zeroes_both_sides() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_mult_long = 1;
-    engine.oi_eff_long_q = 3 * POS_SCALE;
-    engine.oi_eff_short_q = 3 * POS_SCALE;
-    engine.adl_coeff_long = 0i128;
+    engine.adl_mult_long = U128::new(1);
+    engine.oi_eff_long_q = U128::new(3 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(3 * POS_SCALE);
+    engine.adl_coeff_long = I128::ZERO;
     engine.stored_pos_count_long = 1;
 
     let q_close = POS_SCALE;
@@ -470,8 +470,8 @@ fn t4_21_precision_exhaustion_zeroes_both_sides() {
     let result = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(result.is_ok());
 
-    assert!(engine.oi_eff_long_q == 0);
-    assert!(engine.oi_eff_short_q == 0);
+    assert!(engine.oi_eff_long_q.get() == 0);
+    assert!(engine.oi_eff_short_q.get() == 0);
     assert!(ctx.pending_reset_long);
     assert!(ctx.pending_reset_short);
 }
@@ -485,10 +485,10 @@ fn t4_22_k_overflow_routes_to_absorb() {
     let mut ctx = InstructionContext::new();
 
     // Set K near i128::MIN so delta_K addition underflows
-    engine.adl_coeff_long = i128::MIN + 1;
-    engine.adl_mult_long = POS_SCALE; // Use POS_SCALE (not ADL_ONE) to keep computation manageable
-    engine.oi_eff_long_q = 4 * POS_SCALE;
-    engine.oi_eff_short_q = 4 * POS_SCALE;
+    engine.adl_coeff_long = I128::new(i128::MIN + 1);
+    engine.adl_mult_long = U128::new(POS_SCALE); // Use POS_SCALE (not ADL_ONE) to keep computation manageable
+    engine.oi_eff_long_q = U128::new(4 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(4 * POS_SCALE);
     engine.stored_pos_count_long = 1;
     engine.insurance_fund.balance = U128::new(10_000_000);
 
@@ -509,7 +509,7 @@ fn t4_22_k_overflow_routes_to_absorb() {
     assert!(engine.insurance_fund.balance.get() < ins_before,
         "insurance must decrease when absorbing overflow deficit");
     // A must still shrink (quantity routing is independent of K overflow)
-    assert!(engine.adl_mult_long < POS_SCALE, "A must shrink even on K overflow");
+    assert!(engine.adl_mult_long.get() < POS_SCALE, "A must shrink even on K overflow");
 }
 
 /// D=0 ADL: K must be unchanged, A must decrease, OI updated.
@@ -521,10 +521,10 @@ fn t4_23_d_zero_routes_quantity_only() {
     let mut ctx = InstructionContext::new();
 
     let k_init: i8 = kani::any();
-    engine.adl_coeff_long = k_init as i128;
-    engine.adl_mult_long = ADL_ONE;
-    engine.oi_eff_long_q = 10 * POS_SCALE;
-    engine.oi_eff_short_q = 10 * POS_SCALE;
+    engine.adl_coeff_long = I128::new(k_init as i128);
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(10 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(10 * POS_SCALE);
     engine.stored_pos_count_long = 1;
 
     let k_before = engine.adl_coeff_long;
@@ -540,8 +540,8 @@ fn t4_23_d_zero_routes_quantity_only() {
     // A must decrease
     assert!(engine.adl_mult_long < a_before, "A must decrease after quantity ADL");
     // OI must decrease by q_close on both sides
-    assert!(engine.oi_eff_long_q == 9 * POS_SCALE);
-    assert!(engine.oi_eff_short_q == 9 * POS_SCALE);
+    assert!(engine.oi_eff_long_q.get() == 9 * POS_SCALE);
+    assert!(engine.oi_eff_short_q.get() == 9 * POS_SCALE);
 }
 
 // ############################################################################
@@ -638,15 +638,15 @@ fn t5_23_dust_clearance_guard_safe() {
 fn t13_54_funding_no_mint_asymmetric_a() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     let a_long: u16 = kani::any();
     kani::assume(a_long >= 1 && a_long <= 10);
     let a_short: u16 = kani::any();
     kani::assume(a_short >= 1 && a_short <= 10);
-    engine.adl_mult_long = a_long as u128;
-    engine.adl_mult_short = a_short as u128;
+    engine.adl_mult_long = U128::new(a_long as u128);
+    engine.adl_mult_short = U128::new(a_short as u128);
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 0;
@@ -857,8 +857,8 @@ fn proof_gc_dust_preserves_fee_credits() {
     // Account has 0 capital, 0 position, but positive fee_credits (prepaid)
     engine.set_capital(a as usize, 0);
     engine.accounts[a as usize].fee_credits = I128::new(5_000);
-    engine.accounts[a as usize].position_basis_q = 0i128;
-    engine.accounts[a as usize].reserved_pnl = 0u128;
+    engine.accounts[a as usize].position_basis_q = I128::ZERO;
+    engine.accounts[a as usize].reserved_pnl = U128::ZERO;
     engine.set_pnl(a as usize, 0i128);
 
     assert!(engine.is_used(a as usize));
@@ -876,8 +876,8 @@ fn proof_gc_dust_preserves_fee_credits() {
     engine.deposit(b, 10_000, 100, 1).unwrap();
     engine.set_capital(b as usize, 0);
     engine.accounts[b as usize].fee_credits = I128::new(-3_000); // debt
-    engine.accounts[b as usize].position_basis_q = 0i128;
-    engine.accounts[b as usize].reserved_pnl = 0u128;
+    engine.accounts[b as usize].position_basis_q = I128::ZERO;
+    engine.accounts[b as usize].reserved_pnl = U128::ZERO;
     engine.set_pnl(b as usize, 0i128);
 
     assert!(engine.is_used(b as usize));
@@ -1074,9 +1074,9 @@ fn proof_phantom_dust_drain_no_revert() {
 
     // Set up opposing side with phantom OI but no stored positions.
     // OI is balanced (required invariant), stored_pos_count_opp = 0.
-    engine.adl_mult_long = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;   // phantom OI on long side (opp)
-    engine.oi_eff_short_q = POS_SCALE;  // matching OI on short side (liq)
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);   // phantom OI on long side (opp)
+    engine.oi_eff_short_q = U128::new(POS_SCALE);  // matching OI on short side (liq)
     engine.stored_pos_count_long = 0;   // no stored positions on opposing side
     engine.stored_pos_count_short = 1;  // liq side has stored positions
 
@@ -1089,8 +1089,8 @@ fn proof_phantom_dust_drain_no_revert() {
 
     // After enqueue_adl: OI_eff_short was decremented by q_close in step 1 → 0
     // OI_eff_long was set to oi_post = OI - q_close = 0 in step 5
-    assert!(engine.oi_eff_long_q == 0, "opp OI must be 0");
-    assert!(engine.oi_eff_short_q == 0, "liq OI must be 0");
+    assert!(engine.oi_eff_long_q.get() == 0, "opp OI must be 0");
+    assert!(engine.oi_eff_short_q.get() == 0, "liq OI must be 0");
 
     // Both pending resets must be set
     assert!(ctx.pending_reset_long, "drained opp side must have pending reset");
@@ -1295,8 +1295,8 @@ fn proof_gc_reclaims_flat_dust_capital() {
 
     let cap = engine.accounts[idx as usize].capital.get();
     assert!(cap > 0 && cap < 10_000, "account must have dust capital");
-    assert!(engine.accounts[idx as usize].pnl == 0);
-    assert!(engine.accounts[idx as usize].position_basis_q == 0);
+    assert!(engine.accounts[idx as usize].pnl.get() == 0);
+    assert!(engine.accounts[idx as usize].position_basis_q.get() == 0);
     assert!(engine.is_used(idx as usize));
 
     let ins_before = engine.insurance_fund.balance.get();
@@ -1351,10 +1351,10 @@ fn proof_property_3_oracle_manipulation_haircut_safety() {
     engine.keeper_crank_not_atomic(slot2, spike_oracle, &[(a, None), (b, None)], 64, 0i128, h_lock).unwrap();
 
     // After touch, a has positive PnL but it's reserved (R_i > 0)
-    let pnl_a = engine.accounts[a as usize].pnl;
+    let pnl_a = engine.accounts[a as usize].pnl.get();
     assert!(pnl_a > 0, "account a must have positive PnL after oracle spike");
 
-    let r_a = engine.accounts[a as usize].reserved_pnl;
+    let r_a = engine.accounts[a as usize].reserved_pnl.get();
     assert!(r_a > 0, "fresh profit must be reserved (R_i > 0)");
 
     // (a) PNL_matured_pos_tot must not have increased from fresh reserved profit
@@ -1413,9 +1413,9 @@ fn proof_property_26_maintenance_vs_im_dual_equity() {
     engine.keeper_crank_not_atomic(slot2, new_oracle, &[(a, None), (b, None)], 64, 0i128, h_lock).unwrap();
 
     // a now has fresh PnL from price increase. This PnL is reserved.
-    let pnl_a = engine.accounts[a as usize].pnl;
+    let pnl_a = engine.accounts[a as usize].pnl.get();
     assert!(pnl_a > 0, "a must have positive PnL");
-    let r_a = engine.accounts[a as usize].reserved_pnl;
+    let r_a = engine.accounts[a as usize].reserved_pnl.get();
     assert!(r_a > 0, "fresh profit must be reserved");
 
     // Maintenance uses full PnL_i → should be healthy
@@ -1511,8 +1511,8 @@ fn proof_audit_fee_sweep_pnl_conservation() {
     engine.set_capital(a as usize, 0);
     engine.set_pnl(a as usize, 50i128);
     // Mark PnL as fully matured (no reserve)
-    engine.accounts[a as usize].reserved_pnl = 0;
-    engine.pnl_matured_pos_tot = 50;
+    engine.accounts[a as usize].reserved_pnl = U128::ZERO;
+    engine.pnl_matured_pos_tot = U128::new(50);
 
     // Set large fee debt — capital can't cover it
     engine.accounts[a as usize].fee_credits = I128::new(-50);
@@ -1560,10 +1560,10 @@ fn proof_audit_im_uses_exact_raw_equity() {
     engine.deposit(a, 100, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Set up a position with very negative PnL to make Eq_init_raw < 0
-    engine.accounts[a as usize].position_basis_q = (1 * POS_SCALE) as i128;
+    engine.accounts[a as usize].position_basis_q = I128::new((1 * POS_SCALE) as i128);
     engine.stored_pos_count_long = 1;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
     engine.set_pnl(a as usize, -500i128);
 
     // Eq_init_raw = C(100) + min(PnL, 0)(-500) + eff_matured(0) - fee(0) = -400
@@ -1595,8 +1595,8 @@ fn proof_audit_empty_lp_gc_reclaimable() {
 
     // LP has zero capital, zero PnL, zero position — it's dead
     assert!(engine.accounts[lp as usize].capital.get() == 0);
-    assert!(engine.accounts[lp as usize].pnl == 0);
-    assert!(engine.accounts[lp as usize].position_basis_q == 0);
+    assert!(engine.accounts[lp as usize].pnl.get() == 0);
+    assert!(engine.accounts[lp as usize].position_basis_q.get() == 0);
 
     // GC should reclaim this empty LP slot
     let freed = engine.garbage_collect_dust();
@@ -1740,7 +1740,7 @@ fn proof_audit2_positive_overflow_equity_conservative() {
     // This bypasses MAX_VAULT_TVL but tests the overflow fallback path.
     let huge_capital = (i128::MAX as u128) + 1; // 2^127
     engine.accounts[a as usize].capital = U128::new(huge_capital);
-    engine.accounts[a as usize].pnl = 0i128;
+    engine.accounts[a as usize].pnl = I128::ZERO;
     engine.accounts[a as usize].fee_credits = I128::ZERO;
 
     // Eq_maint_raw = C + PnL - FeeDebt = huge_capital + 0 - 0 = huge_capital > i128::MAX
@@ -1774,10 +1774,10 @@ fn proof_audit2_positive_overflow_no_false_liquidation() {
     // Set up a position + huge capital
     let huge_capital = (i128::MAX as u128) + 1;
     engine.accounts[a as usize].capital = U128::new(huge_capital);
-    engine.accounts[a as usize].position_basis_q = (1 * POS_SCALE) as i128;
+    engine.accounts[a as usize].position_basis_q = I128::new((1 * POS_SCALE) as i128);
     engine.stored_pos_count_long = 1;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     let above_mm = engine.is_above_maintenance_margin(
         &engine.accounts[a as usize], a as usize, DEFAULT_ORACLE);
@@ -1877,35 +1877,35 @@ fn proof_audit4_init_in_place_canonical() {
     engine.vault = U128::new(999);
     engine.insurance_fund.balance = U128::new(777);
     engine.c_tot = U128::new(555);
-    engine.pnl_pos_tot = 333;
-    engine.pnl_matured_pos_tot = 222;
+    engine.pnl_pos_tot = U128::new(333);
+    engine.pnl_matured_pos_tot = U128::new(222);
     engine.current_slot = 42;
     engine.last_crank_slot = 77;
     engine.gc_cursor = 2;
-    engine.adl_mult_long = 42;
-    engine.adl_mult_short = 43;
-    engine.adl_coeff_long = 100;
-    engine.adl_coeff_short = 200;
+    engine.adl_mult_long = U128::new(42);
+    engine.adl_mult_short = U128::new(43);
+    engine.adl_coeff_long = I128::new(100);
+    engine.adl_coeff_short = I128::new(200);
     engine.adl_epoch_long = 7;
     engine.adl_epoch_short = 8;
-    engine.adl_epoch_start_k_long = 300;
-    engine.adl_epoch_start_k_short = 400;
-    engine.oi_eff_long_q = 1000;
-    engine.oi_eff_short_q = 2000;
+    engine.adl_epoch_start_k_long = I128::new(300);
+    engine.adl_epoch_start_k_short = I128::new(400);
+    engine.oi_eff_long_q = U128::new(1000);
+    engine.oi_eff_short_q = U128::new(2000);
     engine.side_mode_long = SideMode::DrainOnly;
     engine.side_mode_short = SideMode::ResetPending;
     engine.stored_pos_count_long = 10;
     engine.stored_pos_count_short = 11;
     engine.stale_account_count_long = 3;
     engine.stale_account_count_short = 4;
-    engine.phantom_dust_bound_long_q = 50;
-    engine.phantom_dust_bound_short_q = 60;
+    engine.phantom_dust_bound_long_q = U128::new(50);
+    engine.phantom_dust_bound_short_q = U128::new(60);
     engine.num_used_accounts = 10;
     engine.materialized_account_count = 5;
     engine.last_oracle_price = 9999;
     engine.last_market_slot = 55;
-    engine.f_long_num = 42;
-    engine.f_short_num = -42;
+    engine.f_long_num = I128::new(42);
+    engine.f_short_num = I128::new(-42);
     engine.params.insurance_floor = U128::new(12345);
     engine.free_head = u16::MAX; // break the freelist
 
@@ -1918,35 +1918,35 @@ fn proof_audit4_init_in_place_canonical() {
 
     // ---- Aggregates ----
     assert!(engine.c_tot.get() == 0);
-    assert!(engine.pnl_pos_tot == 0);
-    assert!(engine.pnl_matured_pos_tot == 0);
+    assert!(engine.pnl_pos_tot.get() == 0);
+    assert!(engine.pnl_matured_pos_tot.get() == 0);
 
     // ---- Slots / cursors ----
     assert!(engine.current_slot == 0);
     assert!(engine.last_crank_slot == 0);
     assert!(engine.gc_cursor == 0);
-    assert!(engine.f_long_num == 0);
-    assert!(engine.f_short_num == 0);
+    assert!(engine.f_long_num.get() == 0);
+    assert!(engine.f_short_num.get() == 0);
 
     // ---- ADL / side state ----
-    assert!(engine.adl_mult_long == ADL_ONE);
-    assert!(engine.adl_mult_short == ADL_ONE);
-    assert!(engine.adl_coeff_long == 0);
-    assert!(engine.adl_coeff_short == 0);
+    assert!(engine.adl_mult_long == U128::new(ADL_ONE));
+    assert!(engine.adl_mult_short == U128::new(ADL_ONE));
+    assert!(engine.adl_coeff_long.get() == 0);
+    assert!(engine.adl_coeff_short.get() == 0);
     assert!(engine.adl_epoch_long == 0);
     assert!(engine.adl_epoch_short == 0);
-    assert!(engine.adl_epoch_start_k_long == 0);
-    assert!(engine.adl_epoch_start_k_short == 0);
-    assert!(engine.oi_eff_long_q == 0);
-    assert!(engine.oi_eff_short_q == 0);
+    assert!(engine.adl_epoch_start_k_long.get() == 0);
+    assert!(engine.adl_epoch_start_k_short.get() == 0);
+    assert!(engine.oi_eff_long_q.get() == 0);
+    assert!(engine.oi_eff_short_q.get() == 0);
     assert!(engine.side_mode_long == SideMode::Normal);
     assert!(engine.side_mode_short == SideMode::Normal);
     assert!(engine.stored_pos_count_long == 0);
     assert!(engine.stored_pos_count_short == 0);
     assert!(engine.stale_account_count_long == 0);
     assert!(engine.stale_account_count_short == 0);
-    assert!(engine.phantom_dust_bound_long_q == 0);
-    assert!(engine.phantom_dust_bound_short_q == 0);
+    assert!(engine.phantom_dust_bound_long_q.get() == 0);
+    assert!(engine.phantom_dust_bound_short_q.get() == 0);
 
     // ---- Account tracking ----
     assert!(engine.num_used_accounts == 0);
@@ -2225,7 +2225,7 @@ fn proof_audit5_reclaim_rejects_open_position() {
     let idx = engine.add_user(0).unwrap();
 
     // Give the account a position
-    engine.accounts[idx as usize].position_basis_q = 100;
+    engine.accounts[idx as usize].position_basis_q = I128::new(100);
 
     let result = engine.reclaim_empty_account_not_atomic(idx, DEFAULT_SLOT);
     assert!(result.is_err(), "must reject account with open position");
@@ -2577,8 +2577,8 @@ fn proof_execute_trade_full_margin_enforcement() {
         engine.attach_effective_position(lp as usize, -old_pos_q);
         // Update OI to match
         let abs_q = old_pos_q.unsigned_abs();
-        engine.oi_eff_long_q = abs_q;
-        engine.oi_eff_short_q = abs_q;
+        engine.oi_eff_long_q = U128::new(abs_q);
+        engine.oi_eff_short_q = U128::new(abs_q);
     }
 
     let old_eff_user = engine.effective_pos_q(user as usize);
@@ -2686,7 +2686,7 @@ fn proof_convert_released_pnl_exercises_conversion() {
     engine.keeper_crank_not_atomic(slot2, high_oracle, &[(a, None), (b, None)], 64, 0i128, 0).unwrap();
 
     // Verify the account still has a position (not flat — won't early-return at step 4)
-    assert!(engine.accounts[a as usize].position_basis_q != 0,
+    assert!(engine.accounts[a as usize].position_basis_q.get() != 0,
         "account must have open position");
 
     let released = engine.released_pos(a as usize);

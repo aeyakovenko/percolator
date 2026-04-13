@@ -241,14 +241,14 @@ fn proof_notional_scales_with_price() {
     // Give the account a non-zero position
     let q_mul: u8 = kani::any();
     kani::assume(q_mul > 0 && q_mul <= 10);
-    engine.accounts[idx as usize].position_basis_q = (POS_SCALE * (q_mul as u128)) as i128;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].position_basis_q = I128::new((POS_SCALE * (q_mul as u128)) as i128);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.adl_epoch_long = 0;
-    engine.adl_mult_long = ADL_ONE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
     engine.stored_pos_count_long = 1;
-    engine.oi_eff_long_q = POS_SCALE * (q_mul as u128);
+    engine.oi_eff_long_q = U128::new(POS_SCALE * (q_mul as u128));
 
     let p1: u8 = kani::any();
     let p2: u8 = kani::any();

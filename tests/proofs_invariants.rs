@@ -162,7 +162,7 @@ fn inductive_set_pnl_preserves_pnl_pos_tot_delta() {
 
     let pos_a: u128 = if pnl_a > 0 { pnl_a as u128 } else { 0 };
     let pos_b: u128 = if pnl_b > 0 { pnl_b as u128 } else { 0 };
-    assert!(engine.pnl_pos_tot == pos_a + pos_b);
+    assert!(engine.pnl_pos_tot.get() == pos_a + pos_b);
 }
 
 #[kani::proof]
@@ -251,7 +251,7 @@ fn prop_pnl_pos_tot_agrees_with_recompute() {
     let pos_b: u128 = if pnl_b > 0 { pnl_b as u128 } else { 0 };
     let expected = pos_a + pos_b;
 
-    assert!(engine.pnl_pos_tot == expected);
+    assert!(engine.pnl_pos_tot.get() == expected);
 }
 
 #[kani::proof]
@@ -314,14 +314,14 @@ fn proof_set_pnl_maintains_pnl_pos_tot() {
     engine.set_pnl(idx as usize, pnl1 as i128);
 
     let expected1 = if pnl1 > 0 { pnl1 as u128 } else { 0u128 };
-    assert!(engine.pnl_pos_tot == expected1);
+    assert!(engine.pnl_pos_tot.get() == expected1);
 
     let pnl2: i32 = kani::any();
     kani::assume(pnl2 > i32::MIN);
     engine.set_pnl(idx as usize, pnl2 as i128);
 
     let expected2 = if pnl2 > 0 { pnl2 as u128 } else { 0u128 };
-    assert!(engine.pnl_pos_tot == expected2);
+    assert!(engine.pnl_pos_tot.get() == expected2);
 }
 
 #[kani::proof]
@@ -332,13 +332,13 @@ fn proof_set_pnl_underflow_safety() {
     let idx = engine.add_user(0).unwrap();
 
     engine.set_pnl(idx as usize, 1000i128);
-    assert!(engine.pnl_pos_tot == 1000u128);
+    assert!(engine.pnl_pos_tot.get() == 1000u128);
 
     engine.set_pnl(idx as usize, -500i128);
-    assert!(engine.pnl_pos_tot == 0u128);
+    assert!(engine.pnl_pos_tot.get() == 0u128);
 
     engine.set_pnl(idx as usize, 0i128);
-    assert!(engine.pnl_pos_tot == 0u128);
+    assert!(engine.pnl_pos_tot.get() == 0u128);
 }
 
 #[kani::proof]
@@ -351,22 +351,22 @@ fn proof_set_pnl_clamps_reserved_pnl() {
     // set_pnl routes through ImmediateRelease: positive increase goes to matured,
     // not to reserve. So reserved_pnl stays 0 after set_pnl.
     engine.set_pnl(idx as usize, 5000i128);
-    assert!(engine.accounts[idx as usize].reserved_pnl == 0u128,
+    assert!(engine.accounts[idx as usize].reserved_pnl.get() == 0u128,
         "ImmediateRelease: positive PnL goes to matured, not reserve");
 
     // Use UseHLock to test reserve clamping
     engine.set_pnl_with_reserve(idx as usize, 0i128, ReserveMode::ImmediateRelease).unwrap();
     engine.set_pnl_with_reserve(idx as usize, 5000i128, ReserveMode::UseHLock(10)).unwrap();
-    assert!(engine.accounts[idx as usize].reserved_pnl == 5000u128,
+    assert!(engine.accounts[idx as usize].reserved_pnl.get() == 5000u128,
         "UseHLock: positive PnL goes to reserve");
 
     // Decrease PNL: reserve loss applied via newest-first
     engine.set_pnl(idx as usize, 3000i128);
-    assert!(engine.accounts[idx as usize].reserved_pnl <= 3000u128);
+    assert!(engine.accounts[idx as usize].reserved_pnl.get() <= 3000u128);
 
     // Decrease PNL to -100 → reserve clamped to 0
     engine.set_pnl(idx as usize, -100i128);
-    assert!(engine.accounts[idx as usize].reserved_pnl == 0u128);
+    assert!(engine.accounts[idx as usize].reserved_pnl.get() == 0u128);
 }
 
 #[kani::proof]
@@ -420,8 +420,8 @@ fn proof_haircut_ratio_no_division_by_zero() {
     assert!(den == 1u128);
 
     // Set pnl_matured_pos_tot (v12.14.0 uses this as denominator, not pnl_pos_tot)
-    engine.pnl_pos_tot = 1000u128;
-    engine.pnl_matured_pos_tot = 1000u128;
+    engine.pnl_pos_tot = U128::new(1000u128);
+    engine.pnl_matured_pos_tot = U128::new(1000u128);
     engine.vault = U128::new(2000);
     engine.c_tot = U128::new(500);
     engine.insurance_fund.balance = U128::new(300);
@@ -535,7 +535,7 @@ fn proof_account_equity_net_nonnegative() {
     // Set pnl_matured_pos_tot to exercise h < 1 in haircut_ratio (v12.14.0)
     let matured: u16 = kani::any();
     kani::assume(matured <= 20_000);
-    engine.pnl_matured_pos_tot = core::cmp::min(matured as u128, engine.pnl_pos_tot);
+    engine.pnl_matured_pos_tot = U128::new(core::cmp::min(matured as u128, engine.pnl_pos_tot.get()));
 
     // Exercise both positive PnL (haircut path) and negative PnL
     let eq = engine.account_equity_net(&engine.accounts[a as usize], DEFAULT_ORACLE);
@@ -550,8 +550,8 @@ fn proof_effective_pos_q_epoch_mismatch_returns_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
 
-    engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
+    engine.accounts[idx as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(ADL_ONE);
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
 
@@ -559,7 +559,7 @@ fn proof_effective_pos_q_epoch_mismatch_returns_zero() {
     let eff = engine.effective_pos_q(idx as usize);
     assert!(eff == 0);
 
-    engine.accounts[idx as usize].position_basis_q = -(POS_SCALE as i128);
+    engine.accounts[idx as usize].position_basis_q = I128::new(-(POS_SCALE as i128));
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.adl_epoch_short = 1;
     let eff2 = engine.effective_pos_q(idx as usize);
@@ -573,7 +573,7 @@ fn proof_effective_pos_q_flat_is_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let idx = engine.add_user(0).unwrap();
 
-    assert!(engine.accounts[idx as usize].position_basis_q == 0);
+    assert!(engine.accounts[idx as usize].position_basis_q.get() == 0);
     let eff = engine.effective_pos_q(idx as usize);
     assert!(eff == 0);
 }

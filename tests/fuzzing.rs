@@ -98,7 +98,7 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
         if is_account_used(engine, i as u16) {
             let acc = &engine.accounts[i];
             sum_capital += acc.capital.get();
-            let pnl = acc.pnl;
+            let pnl = acc.pnl.get();
             if pnl > 0 {
                 sum_pnl_pos += pnl as u128;
             }
@@ -113,11 +113,11 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
         sum_capital
     );
     assert_eq!(
-        engine.pnl_pos_tot,
+        engine.pnl_pos_tot.get(),
         sum_pnl_pos,
         "{}: pnl_pos_tot={} != sum(max(pnl,0))={}",
         context,
-        engine.pnl_pos_tot,
+        engine.pnl_pos_tot.get(),
         sum_pnl_pos
     );
 
@@ -127,14 +127,14 @@ fn assert_global_invariants(engine: &RiskEngine, context: &str) {
             let acc = &engine.accounts[i];
 
             // reserved_pnl <= max(0, pnl)
-            let pnl = acc.pnl;
+            let pnl = acc.pnl.get();
             let positive_pnl = if pnl > 0 { pnl as u128 } else { 0 };
             assert!(
-                acc.reserved_pnl <= positive_pnl,
+                acc.reserved_pnl.get() <= positive_pnl,
                 "{}: Account {} has reserved_pnl={} > positive_pnl={}",
                 context,
                 i,
-                acc.reserved_pnl,
+                acc.reserved_pnl.get(),
                 positive_pnl
             );
         }
@@ -158,8 +158,8 @@ fn params_regime_a() -> RiskParams {
         liquidation_fee_cap: U128::new(100_000),
         min_liquidation_abs: U128::new(100_000),
         min_initial_deposit: U128::new(2),
-        min_nonzero_mm_req: 1,
-        min_nonzero_im_req: 2,
+        min_nonzero_mm_req: U128::new(1),
+        min_nonzero_im_req: U128::new(2),
         insurance_floor: U128::ZERO,
         h_min: 0,
         h_max: 100,
@@ -180,8 +180,8 @@ fn params_regime_b() -> RiskParams {
         liquidation_fee_cap: U128::new(100_000),
         min_liquidation_abs: U128::new(100_000),
         min_initial_deposit: U128::new(1000),
-        min_nonzero_mm_req: 1,
-        min_nonzero_im_req: 2,
+        min_nonzero_mm_req: U128::new(1),
+        min_nonzero_im_req: U128::new(2),
         insurance_floor: U128::ZERO,
         h_min: 0,
         h_max: 100,

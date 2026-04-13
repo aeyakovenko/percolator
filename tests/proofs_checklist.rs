@@ -23,8 +23,8 @@ fn proof_a2_reserve_bounds_after_set_pnl() {
     kani::assume(init_pnl >= -100_000 && init_pnl <= 100_000);
     engine.set_pnl(idx as usize, init_pnl);
 
-    let r1 = engine.accounts[idx as usize].reserved_pnl;
-    let pos1 = core::cmp::max(engine.accounts[idx as usize].pnl, 0) as u128;
+    let r1 = engine.accounts[idx as usize].reserved_pnl.get();
+    let pos1 = core::cmp::max(engine.accounts[idx as usize].pnl.get(), 0) as u128;
     assert!(r1 <= pos1, "A2: R_i <= max(PNL_i,0) after first set");
 
     let new_pnl: i128 = kani::any();
@@ -33,8 +33,8 @@ fn proof_a2_reserve_bounds_after_set_pnl() {
     kani::assume(new_pnl <= MAX_ACCOUNT_POSITIVE_PNL as i128 || new_pnl <= 0);
     engine.set_pnl(idx as usize, new_pnl);
 
-    let r2 = engine.accounts[idx as usize].reserved_pnl;
-    let pos2 = core::cmp::max(engine.accounts[idx as usize].pnl, 0) as u128;
+    let r2 = engine.accounts[idx as usize].reserved_pnl.get();
+    let pos2 = core::cmp::max(engine.accounts[idx as usize].pnl.get(), 0) as u128;
     assert!(r2 <= pos2, "A2: R_i <= max(PNL_i,0) after transition");
 
     kani::cover!(init_pnl > 0 && new_pnl > init_pnl, "positive increase");
@@ -481,9 +481,9 @@ fn proof_two_bucket_reserve_sum_after_append() {
 
     // R_i must equal sum of both buckets
     let a = &engine.accounts[idx as usize];
-    let sched_r = if a.sched_present != 0 { a.sched_remaining_q } else { 0 };
-    let pend_r = if a.pending_present != 0 { a.pending_remaining_q } else { 0 };
-    assert_eq!(a.reserved_pnl, sched_r + pend_r,
+    let sched_r = if a.sched_present != 0 { a.sched_remaining_q.get() } else { 0 };
+    let pend_r = if a.pending_present != 0 { a.pending_remaining_q.get() } else { 0 };
+    assert_eq!(a.reserved_pnl.get(), sched_r + pend_r,
         "R_i must equal sched + pending");
 
     kani::cover!(a.sched_present != 0 && a.pending_present != 0, "both buckets present");
@@ -499,8 +499,8 @@ fn proof_two_bucket_loss_newest_first() {
     engine.deposit(idx, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Create sched + pending
-    engine.accounts[idx as usize].pnl = 30_000;
-    engine.pnl_pos_tot = 30_000;
+    engine.accounts[idx as usize].pnl = I128::new(30_000);
+    engine.pnl_pos_tot = U128::new(30_000);
     engine.append_or_route_new_reserve(idx as usize, 10_000, DEFAULT_SLOT, 10);
     engine.append_or_route_new_reserve(idx as usize, 20_000, DEFAULT_SLOT + 1, 10);
 
@@ -533,17 +533,17 @@ fn proof_two_bucket_scheduled_timing() {
     let h: u64 = kani::any();
     kani::assume(h >= 1 && h <= 20);
 
-    engine.accounts[idx as usize].pnl = anchor as i128;
-    engine.pnl_pos_tot = anchor;
+    engine.accounts[idx as usize].pnl = I128::new(anchor as i128);
+    engine.pnl_pos_tot = U128::new(anchor);
     engine.append_or_route_new_reserve(idx as usize, anchor, DEFAULT_SLOT, h);
 
     let dt: u64 = kani::any();
     kani::assume(dt >= 1 && dt <= 40);
     engine.current_slot = DEFAULT_SLOT + dt;
 
-    let r_before = engine.accounts[idx as usize].reserved_pnl;
+    let r_before = engine.accounts[idx as usize].reserved_pnl.get();
     engine.advance_profit_warmup(idx as usize);
-    let released = r_before - engine.accounts[idx as usize].reserved_pnl;
+    let released = r_before - engine.accounts[idx as usize].reserved_pnl.get();
 
     let expected = if dt as u128 >= h as u128 { anchor }
         else { mul_div_floor_u128(anchor, dt as u128, h as u128) };
@@ -563,8 +563,8 @@ fn proof_two_bucket_pending_non_maturity() {
     engine.deposit(idx, 1_000_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Create sched + pending
-    engine.accounts[idx as usize].pnl = 30_000;
-    engine.pnl_pos_tot = 30_000;
+    engine.accounts[idx as usize].pnl = I128::new(30_000);
+    engine.pnl_pos_tot = U128::new(30_000);
     engine.append_or_route_new_reserve(idx as usize, 10_000, DEFAULT_SLOT, 10);
     engine.append_or_route_new_reserve(idx as usize, 20_000, DEFAULT_SLOT + 1, 10);
 

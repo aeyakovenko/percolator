@@ -18,12 +18,12 @@ fn t11_43_end_instruction_auto_finalizes_ready_side() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     engine.side_mode_long = SideMode::ResetPending;
-    engine.oi_eff_long_q = 0u128;
+    engine.oi_eff_long_q = U128::ZERO;
     engine.stale_account_count_long = 0;
     engine.stored_pos_count_long = 0;
 
     engine.side_mode_short = SideMode::ResetPending;
-    engine.oi_eff_short_q = 0u128;
+    engine.oi_eff_short_q = U128::ZERO;
     engine.stale_account_count_short = 1;
     engine.stored_pos_count_short = 0;
 
@@ -51,8 +51,8 @@ fn t11_44_trade_path_reopens_ready_reset_side() {
     engine.deposit(b, 10_000_000, 100, 0).unwrap();
 
     engine.side_mode_long = SideMode::ResetPending;
-    engine.oi_eff_long_q = 0u128;
-    engine.oi_eff_short_q = 0u128;
+    engine.oi_eff_long_q = U128::ZERO;
+    engine.oi_eff_short_q = U128::ZERO;
     engine.stale_account_count_long = 0;
     engine.stored_pos_count_long = 0;
 
@@ -87,10 +87,10 @@ fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_coeff_long = i128::MIN + 1;
-    engine.adl_mult_long = POS_SCALE;
-    engine.oi_eff_long_q = 4 * POS_SCALE;
-    engine.oi_eff_short_q = 4 * POS_SCALE;
+    engine.adl_coeff_long = I128::new(i128::MIN + 1);
+    engine.adl_mult_long = U128::new(POS_SCALE);
+    engine.oi_eff_long_q = U128::new(4 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(4 * POS_SCALE);
     engine.insurance_fund.balance = U128::new(10_000_000);
     engine.stored_pos_count_long = 1;
 
@@ -110,7 +110,7 @@ fn t11_46_enqueue_adl_k_add_overflow_still_routes_quantity() {
     // A must shrink (quantity was still routed)
     assert!(engine.adl_mult_long < a_before, "A must shrink on K overflow");
     // OI must decrease by q_close
-    assert!(engine.oi_eff_long_q == 2 * POS_SCALE);
+    assert!(engine.oi_eff_long_q.get() == 2 * POS_SCALE);
     // Insurance fund must decrease by D (absorb_protocol_loss was invoked)
     assert!(engine.insurance_fund.balance.get() < ins_before,
         "insurance fund must decrease — absorb_protocol_loss must be invoked");
@@ -126,10 +126,10 @@ fn t11_47_precision_exhaustion_terminal_drain() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_mult_long = 1;
-    engine.adl_coeff_long = 0i128;
-    engine.oi_eff_long_q = 3 * POS_SCALE;
-    engine.oi_eff_short_q = 3 * POS_SCALE;
+    engine.adl_mult_long = U128::new(1);
+    engine.adl_coeff_long = I128::ZERO;
+    engine.oi_eff_long_q = U128::new(3 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(3 * POS_SCALE);
     engine.stored_pos_count_long = 1;
 
     let q_close = POS_SCALE;
@@ -140,8 +140,8 @@ fn t11_47_precision_exhaustion_terminal_drain() {
 
     assert!(ctx.pending_reset_long);
     assert!(ctx.pending_reset_short);
-    assert!(engine.oi_eff_long_q == 0);
-    assert!(engine.oi_eff_short_q == 0);
+    assert!(engine.oi_eff_long_q.get() == 0);
+    assert!(engine.oi_eff_short_q.get() == 0);
 }
 
 // ============================================================================
@@ -154,10 +154,10 @@ fn t11_48_bankruptcy_liquidation_routes_q_when_D_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_mult_long = POS_SCALE;
-    engine.adl_coeff_long = 42i128;
-    engine.oi_eff_long_q = 4 * POS_SCALE;
-    engine.oi_eff_short_q = 4 * POS_SCALE;
+    engine.adl_mult_long = U128::new(POS_SCALE);
+    engine.adl_coeff_long = I128::new(42i128);
+    engine.oi_eff_long_q = U128::new(4 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(4 * POS_SCALE);
     engine.stored_pos_count_long = 1;
 
     let k_before = engine.adl_coeff_long;
@@ -171,7 +171,7 @@ fn t11_48_bankruptcy_liquidation_routes_q_when_D_zero() {
 
     assert!(engine.adl_coeff_long == k_before, "K must be unchanged when D == 0");
     assert!(engine.adl_mult_long < a_before, "A must shrink");
-    assert!(engine.oi_eff_long_q == 3 * POS_SCALE);
+    assert!(engine.oi_eff_long_q.get() == 3 * POS_SCALE);
 }
 
 // ============================================================================
@@ -184,10 +184,10 @@ fn t11_49_pure_pnl_bankruptcy_path() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_mult_long = POS_SCALE;
-    engine.adl_coeff_long = 0i128;
-    engine.oi_eff_long_q = 2 * POS_SCALE;
-    engine.oi_eff_short_q = 2 * POS_SCALE;
+    engine.adl_mult_long = U128::new(POS_SCALE);
+    engine.adl_coeff_long = I128::ZERO;
+    engine.oi_eff_long_q = U128::new(2 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(2 * POS_SCALE);
     engine.stored_pos_count_long = 1;
 
     let a_before = engine.adl_mult_long;
@@ -201,7 +201,7 @@ fn t11_49_pure_pnl_bankruptcy_path() {
 
     assert!(engine.adl_mult_long == a_before, "A must be unchanged for pure PnL bankruptcy");
     assert!(engine.adl_coeff_long != k_before, "K must change when D > 0");
-    assert!(engine.oi_eff_long_q == 2 * POS_SCALE);
+    assert!(engine.oi_eff_long_q.get() == 2 * POS_SCALE);
 }
 
 // ============================================================================
@@ -215,8 +215,8 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 0;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
     engine.adl_epoch_long = 0;
     engine.adl_epoch_short = 0;
 
@@ -226,16 +226,16 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
 
     // a: long POS_SCALE (entire long side OI), tiny capital → deeply underwater
     engine.deposit(a, 1, 100, 0).unwrap();
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
+    engine.accounts[a as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[a as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[a as usize].adl_k_snap = I128::ZERO;
     engine.accounts[a as usize].adl_epoch_snap = 0;
 
     // b: short POS_SCALE, well-funded
     engine.deposit(b, 10_000_000, 100, 0).unwrap();
-    engine.accounts[b as usize].position_basis_q = -(POS_SCALE as i128);
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
+    engine.accounts[b as usize].position_basis_q = I128::new(-(POS_SCALE as i128));
+    engine.accounts[b as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[b as usize].adl_k_snap = I128::ZERO;
     engine.accounts[b as usize].adl_epoch_snap = 0;
 
     // c: NO position, just capital (should NOT be touched after pending reset)
@@ -244,11 +244,11 @@ fn t11_53_keeper_crank_quiesces_after_pending_reset() {
     // BALANCED OI: 1 long (a) = PS, 1 short (b) = PS
     engine.stored_pos_count_long = 1;
     engine.stored_pos_count_short = 1;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     // Set K_long very negative → account a is deeply underwater
-    engine.adl_coeff_long = -((ADL_ONE as i128) * 1000);
+    engine.adl_coeff_long = I128::new(-((ADL_ONE as i128) * 1000));
 
     let c_cap_before = engine.accounts[c as usize].capital.get();
     let c_pnl_before = engine.accounts[c as usize].pnl;
@@ -275,8 +275,8 @@ fn proof_drain_only_to_reset_progress() {
 
     // Long side: DrainOnly, OI = 0
     engine.side_mode_long = SideMode::DrainOnly;
-    engine.oi_eff_long_q = 0u128;
-    engine.oi_eff_short_q = 0u128;
+    engine.oi_eff_long_q = U128::ZERO;
+    engine.oi_eff_short_q = U128::ZERO;
     engine.stored_pos_count_long = 0;
     // Short side still has stored positions → §5.7.A (bilateral-empty) does NOT fire
     engine.stored_pos_count_short = 1;
@@ -302,8 +302,8 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 
     engine.last_oracle_price = 100;
     engine.last_market_slot = 0;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
     engine.adl_epoch_long = 1;   // new epoch (post-reset)
     engine.adl_epoch_short = 0;
 
@@ -312,22 +312,22 @@ fn proof_keeper_reset_lifecycle_last_stale_triggers_finalize() {
 
     // a: the last stale long account — has a position from epoch 0 (stale)
     engine.deposit(a, 10_000_000, 100, 0).unwrap();
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
+    engine.accounts[a as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[a as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[a as usize].adl_k_snap = I128::ZERO;
     engine.accounts[a as usize].adl_epoch_snap = 0;  // mismatches adl_epoch_long=1
 
     // b: a short account (non-stale, current epoch)
     engine.deposit(b, 10_000_000, 100, 0).unwrap();
-    engine.accounts[b as usize].position_basis_q = 0i128;
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
+    engine.accounts[b as usize].position_basis_q = I128::ZERO;
+    engine.accounts[b as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[b as usize].adl_k_snap = I128::ZERO;
     engine.accounts[b as usize].adl_epoch_snap = 0;
 
     // Long side: ResetPending, 1 stale account remaining, OI=0
     engine.side_mode_long = SideMode::ResetPending;
-    engine.oi_eff_long_q = 0u128;
-    engine.oi_eff_short_q = 0u128;
+    engine.oi_eff_long_q = U128::ZERO;
+    engine.oi_eff_short_q = U128::ZERO;
     engine.stale_account_count_long = 1;
     engine.stored_pos_count_long = 1;
 
@@ -360,8 +360,8 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
     // Phantom dust: OI == dust bound (should clear)
     let dust = 42u128;
     engine.phantom_dust_bound_long_q = dust;
-    engine.oi_eff_long_q = dust;   // OI <= dust bound
-    engine.oi_eff_short_q = dust;  // balanced (required by spec)
+    engine.oi_eff_long_q = U128::new(dust);   // OI <= dust bound
+    engine.oi_eff_short_q = U128::new(dust);  // balanced (required by spec)
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result.is_ok());
@@ -372,9 +372,9 @@ fn proof_unilateral_empty_orphan_dust_clearance() {
     assert!(ctx.pending_reset_short,
         "opposite side must also get reset for bilateral consistency (§5.7.B)");
     // OI must be zeroed
-    assert!(engine.oi_eff_long_q == 0,
+    assert!(engine.oi_eff_long_q.get() == 0,
         "OI must be zeroed after dust clearance");
-    assert!(engine.oi_eff_short_q == 0,
+    assert!(engine.oi_eff_short_q.get() == 0,
         "OI must be zeroed after dust clearance");
 }
 

@@ -26,19 +26,19 @@ fn t3_16_reset_pending_counter_invariant() {
     let k_val: i8 = kani::any();
     let k = k_val as i128;
 
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = k;
+    engine.accounts[a as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[a as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[a as usize].adl_k_snap = I128::new(k);
     engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = k;
+    engine.accounts[b as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[b as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[b as usize].adl_k_snap = I128::new(k);
     engine.accounts[b as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 2;
 
-    engine.adl_coeff_long = k;
+    engine.adl_coeff_long = I128::new(k);
 
-    engine.oi_eff_long_q = 0u128;
+    engine.oi_eff_long_q = U128::ZERO;
     engine.begin_full_drain_reset(Side::Long);
 
     assert!(engine.side_mode_long == SideMode::ResetPending);
@@ -64,25 +64,25 @@ fn t3_16b_reset_counter_with_nonzero_k_diff() {
 
     let k_snap = 0i128;
 
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = k_snap;
+    engine.accounts[a as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[a as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[a as usize].adl_k_snap = I128::new(k_snap);
     engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = k_snap;
+    engine.accounts[b as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[b as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[b as usize].adl_k_snap = I128::new(k_snap);
     engine.accounts[b as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 2;
 
     let k_diff_val: i8 = kani::any();
     kani::assume(k_diff_val != 0);
     let k_long = k_diff_val as i128;
-    engine.adl_coeff_long = k_long;
+    engine.adl_coeff_long = I128::new(k_long);
 
-    engine.oi_eff_long_q = 0u128;
+    engine.oi_eff_long_q = U128::ZERO;
     engine.begin_full_drain_reset(Side::Long);
 
-    assert!(engine.adl_epoch_start_k_long == k_long);
+    assert!(engine.adl_epoch_start_k_long == I128::new(k_long));
     assert!(engine.stale_account_count_long == 2);
 
     let _ = engine.settle_side_effects_with_h_lock(a as usize, 0);
@@ -100,10 +100,10 @@ fn t3_17_clean_empty_engine_no_retrigger() {
 
     assert!(engine.stored_pos_count_long == 0);
     assert!(engine.stored_pos_count_short == 0);
-    assert!(engine.oi_eff_long_q == 0);
-    assert!(engine.oi_eff_short_q == 0);
-    assert!(engine.phantom_dust_bound_long_q == 0);
-    assert!(engine.phantom_dust_bound_short_q == 0);
+    assert!(engine.oi_eff_long_q.get() == 0);
+    assert!(engine.oi_eff_short_q.get() == 0);
+    assert!(engine.phantom_dust_bound_long_q.get() == 0);
+    assert!(engine.phantom_dust_bound_short_q.get() == 0);
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result.is_ok());
@@ -118,12 +118,12 @@ fn t3_17_clean_empty_engine_no_retrigger() {
 fn t3_18_dust_bound_reset_in_begin_full_drain() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    engine.phantom_dust_bound_long_q = 5u128;
-    engine.oi_eff_long_q = 0u128;
+    engine.phantom_dust_bound_long_q = U128::new(5u128);
+    engine.oi_eff_long_q = U128::ZERO;
 
     engine.begin_full_drain_reset(Side::Long);
 
-    assert!(engine.phantom_dust_bound_long_q == 0,
+    assert!(engine.phantom_dust_bound_long_q.get() == 0,
         "phantom_dust_bound must be zeroed by begin_full_drain_reset");
 }
 
@@ -134,7 +134,7 @@ fn t3_19_finalize_side_reset_requires_all_stale_touched() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
     engine.side_mode_long = SideMode::ResetPending;
-    engine.oi_eff_long_q = 0u128;
+    engine.oi_eff_long_q = U128::ZERO;
     engine.stale_account_count_long = 1;
     engine.stored_pos_count_long = 0;
     let result1 = engine.finalize_side_reset(Side::Long);
@@ -159,25 +159,25 @@ fn t6_26b_full_drain_reset_nonzero_k_diff() {
     let idx = engine.add_user(0).unwrap();
     engine.deposit(idx, 10_000_000, 100, 0).unwrap();
 
-    engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
 
-    engine.adl_coeff_long = 500i128;
+    engine.adl_coeff_long = I128::new(500i128);
 
-    engine.oi_eff_long_q = 0u128;
+    engine.oi_eff_long_q = U128::ZERO;
     engine.begin_full_drain_reset(Side::Long);
 
-    assert!(engine.adl_epoch_start_k_long == 500i128);
+    assert!(engine.adl_epoch_start_k_long == I128::new(500i128));
     assert!(engine.adl_epoch_long == 1);
     assert!(engine.stale_account_count_long == 1);
 
     let result = engine.settle_side_effects_with_h_lock(idx as usize, 0);
     assert!(result.is_ok());
 
-    assert!(engine.accounts[idx as usize].position_basis_q == 0);
+    assert!(engine.accounts[idx as usize].position_basis_q.get() == 0);
     assert!(engine.stale_account_count_long == 0);
     // Canonical zero-position defaults: epoch_snap = 0 (spec §2.4)
     assert!(engine.accounts[idx as usize].adl_epoch_snap == 0);
@@ -238,16 +238,16 @@ fn t9_36_fee_seniority_after_restart() {
 
     let fc_before = engine.accounts[idx as usize].fee_credits;
 
-    engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
     engine.adl_epoch_long = 1;
-    engine.adl_epoch_start_k_long = 0i128;
+    engine.adl_epoch_start_k_long = I128::ZERO;
     engine.side_mode_long = SideMode::ResetPending;
     engine.stale_account_count_long = 1;
-    engine.adl_coeff_long = 0i128;
+    engine.adl_coeff_long = I128::ZERO;
 
     let _ = engine.settle_side_effects_with_h_lock(idx as usize, 0);
 
@@ -265,15 +265,15 @@ fn t9_36_fee_seniority_after_restart() {
 fn t10_37_accrue_mark_matches_eager() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
     engine.last_oracle_price = 100;
     engine.last_market_slot = 0;
 
-    let k_long_before = engine.adl_coeff_long;
-    let k_short_before = engine.adl_coeff_short;
+    let k_long_before = engine.adl_coeff_long.get();
+    let k_short_before = engine.adl_coeff_short.get();
 
     let dp: i8 = kani::any();
     kani::assume(dp >= -50 && dp <= 50);
@@ -283,8 +283,8 @@ fn t10_37_accrue_mark_matches_eager() {
     let result = engine.accrue_market_to(1, new_price, 0);
     assert!(result.is_ok());
 
-    let k_long_after = engine.adl_coeff_long;
-    let k_short_after = engine.adl_coeff_short;
+    let k_long_after = engine.adl_coeff_long.get();
+    let k_short_after = engine.adl_coeff_short.get();
 
     let expected_delta = (ADL_ONE as i128) * (dp as i128);
     let actual_long_delta = k_long_after.checked_sub(k_long_before).unwrap();
@@ -302,10 +302,10 @@ fn t10_37_accrue_mark_matches_eager() {
 fn t10_38_accrue_funding_payer_driven() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
     engine.last_oracle_price = 100;
     engine.last_market_slot = 0;
 
@@ -313,14 +313,14 @@ fn t10_38_accrue_funding_payer_driven() {
     kani::assume(rate != 0);
     kani::assume(rate >= -100 && rate <= 100);
 
-    let k_long_before = engine.adl_coeff_long;
-    let k_short_before = engine.adl_coeff_short;
+    let k_long_before = engine.adl_coeff_long.get();
+    let k_short_before = engine.adl_coeff_short.get();
 
     let result = engine.accrue_market_to(1, 100, rate as i128);
     assert!(result.is_ok());
 
-    let k_long_after = engine.adl_coeff_long;
-    let k_short_after = engine.adl_coeff_short;
+    let k_long_after = engine.adl_coeff_long.get();
+    let k_short_after = engine.adl_coeff_short.get();
 
     // v12.15: K gets truncation-divided integer part, F gets remainder.
     // fund_num = 100 * rate. fund_term = fund_num / 1e9 (truncation toward zero).
@@ -339,13 +339,13 @@ fn t10_38_accrue_funding_payer_driven() {
     // F captures the remainder (per-side, with A multiplication)
     let expected_f_long = -(a_long * remainder);
     let expected_f_short = a_long * remainder;
-    assert!(engine.f_long_num == expected_f_long, "F_long must capture remainder");
-    assert!(engine.f_short_num == expected_f_short, "F_short must capture remainder");
+    assert!(engine.f_long_num.get() == expected_f_long, "F_long must capture remainder");
+    assert!(engine.f_short_num.get() == expected_f_short, "F_short must capture remainder");
 
     // Combined K + F is exact: no funding is lost
     // K_delta * FUNDING_DEN + F_delta = A_side * fund_num (exact)
     let k_delta_long = k_long_after - k_long_before;
-    let total_long = k_delta_long * 1_000_000_000i128 + engine.f_long_num;
+    let total_long = k_delta_long * 1_000_000_000i128 + engine.f_long_num.get();
     assert!(total_long == -(a_long * fund_num), "K + F must equal exact funding");
 }
 
@@ -361,20 +361,20 @@ fn t11_39_same_epoch_settle_idempotent_real_engine() {
     engine.deposit(idx, 10_000_000, 100, 0).unwrap();
 
     let pos = POS_SCALE as i128;
-    engine.accounts[idx as usize].position_basis_q = pos;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].position_basis_q = I128::new(pos);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
     engine.adl_epoch_long = 0;
-    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
 
-    engine.adl_coeff_long = 100i128;
+    engine.adl_coeff_long = I128::new(100i128);
 
     let r1 = engine.settle_side_effects_with_h_lock(idx as usize, 0);
     assert!(r1.is_ok());
     let pnl_after_first = engine.accounts[idx as usize].pnl;
-    assert!(engine.accounts[idx as usize].adl_k_snap == 100i128);
+    assert!(engine.accounts[idx as usize].adl_k_snap == I128::new(100i128));
 
     let r2 = engine.settle_side_effects_with_h_lock(idx as usize, 0);
     assert!(r2.is_ok());
@@ -382,8 +382,8 @@ fn t11_39_same_epoch_settle_idempotent_real_engine() {
 
     assert!(pnl_after_second == pnl_after_first,
         "second settle with unchanged K must produce zero incremental PnL");
-    assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
-    assert!(engine.accounts[idx as usize].position_basis_q == pos);
+    assert!(engine.accounts[idx as usize].adl_a_basis == U128::new(ADL_ONE));
+    assert!(engine.accounts[idx as usize].position_basis_q == I128::new(pos));
 }
 
 #[kani::proof]
@@ -394,27 +394,27 @@ fn t11_40_non_compounding_quantity_basis_two_touches() {
     engine.deposit(idx, 10_000_000, 100, 0).unwrap();
 
     let pos = POS_SCALE as i128;
-    engine.accounts[idx as usize].position_basis_q = pos;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].position_basis_q = I128::new(pos);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
     engine.adl_epoch_long = 0;
-    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
 
-    engine.adl_coeff_long = 50i128;
+    engine.adl_coeff_long = I128::new(50i128);
     let _ = engine.settle_side_effects_with_h_lock(idx as usize, 0);
 
-    assert!(engine.accounts[idx as usize].position_basis_q == pos);
-    assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
-    assert!(engine.accounts[idx as usize].adl_k_snap == 50i128);
+    assert!(engine.accounts[idx as usize].position_basis_q == I128::new(pos));
+    assert!(engine.accounts[idx as usize].adl_a_basis == U128::new(ADL_ONE));
+    assert!(engine.accounts[idx as usize].adl_k_snap == I128::new(50i128));
 
-    engine.adl_coeff_long = 120i128;
+    engine.adl_coeff_long = I128::new(120i128);
     let _ = engine.settle_side_effects_with_h_lock(idx as usize, 0);
 
-    assert!(engine.accounts[idx as usize].position_basis_q == pos);
-    assert!(engine.accounts[idx as usize].adl_a_basis == ADL_ONE);
-    assert!(engine.accounts[idx as usize].adl_k_snap == 120i128);
+    assert!(engine.accounts[idx as usize].position_basis_q == I128::new(pos));
+    assert!(engine.accounts[idx as usize].adl_a_basis == U128::new(ADL_ONE));
+    assert!(engine.accounts[idx as usize].adl_k_snap == I128::new(120i128));
 }
 
 #[kani::proof]
@@ -425,11 +425,11 @@ fn t11_41_attach_effective_position_remainder_accounting() {
     engine.deposit(idx, 10_000_000, 100, 0).unwrap();
 
     // Use a_basis=7, a_side=6 so that POS_SCALE * 6 % 7 != 0 (nonzero remainder)
-    engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[idx as usize].adl_a_basis = 7;
+    engine.accounts[idx as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(7);
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.adl_epoch_long = 0;
-    engine.adl_mult_long = 6;
+    engine.adl_mult_long = U128::new(6);
     engine.stored_pos_count_long = 1;
 
     let dust_before = engine.phantom_dust_bound_long_q;
@@ -441,9 +441,9 @@ fn t11_41_attach_effective_position_remainder_accounting() {
         "dust bound must increment on nonzero remainder");
 
     // Now test zero remainder: a_basis == a_side → product evenly divisible
-    engine.accounts[idx as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.adl_mult_long = ADL_ONE;
+    engine.accounts[idx as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.adl_mult_long = U128::new(ADL_ONE);
 
     let dust_before2 = engine.phantom_dust_bound_long_q;
     engine.attach_effective_position(idx as usize, (3 * POS_SCALE) as i128);
@@ -462,27 +462,27 @@ fn t11_42_dynamic_dust_bound_inductive() {
     engine.deposit(b, 10_000_000, 100, 0).unwrap();
 
     // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 → position zeroes
-    engine.accounts[a as usize].position_basis_q = 1i128;
-    engine.accounts[a as usize].adl_a_basis = 3;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
+    engine.accounts[a as usize].position_basis_q = I128::new(1i128);
+    engine.accounts[a as usize].adl_a_basis = U128::new(3);
+    engine.accounts[a as usize].adl_k_snap = I128::ZERO;
     engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = 1i128;
-    engine.accounts[b as usize].adl_a_basis = 3;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
+    engine.accounts[b as usize].position_basis_q = I128::new(1i128);
+    engine.accounts[b as usize].adl_a_basis = U128::new(3);
+    engine.accounts[b as usize].adl_k_snap = I128::ZERO;
     engine.accounts[b as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 2;
     engine.adl_epoch_long = 0;
-    engine.oi_eff_long_q = 2;
+    engine.oi_eff_long_q = U128::new(2);
 
-    engine.adl_mult_long = 1;
+    engine.adl_mult_long = U128::new(1);
 
     let _ = engine.settle_side_effects_with_h_lock(a as usize, 0);
-    assert!(engine.accounts[a as usize].position_basis_q == 0);
-    assert!(engine.phantom_dust_bound_long_q == 1u128);
+    assert!(engine.accounts[a as usize].position_basis_q.get() == 0);
+    assert!(engine.phantom_dust_bound_long_q.get() == 1u128);
 
     let _ = engine.settle_side_effects_with_h_lock(b as usize, 0);
-    assert!(engine.accounts[b as usize].position_basis_q == 0);
-    assert!(engine.phantom_dust_bound_long_q == 2u128);
+    assert!(engine.accounts[b as usize].position_basis_q.get() == 0);
+    assert!(engine.phantom_dust_bound_long_q.get() == 2u128);
 }
 
 #[kani::proof]
@@ -546,18 +546,18 @@ fn t11_52_touch_account_full_restart_fee_seniority() {
     engine.deposit(idx, 10_000_000, 100, 0).unwrap();
 
     let pos = POS_SCALE as i128;
-    engine.accounts[idx as usize].position_basis_q = pos;
-    engine.accounts[idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].position_basis_q = I128::new(pos);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
     engine.adl_epoch_long = 0;
-    engine.oi_eff_long_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
 
-    engine.accounts[idx as usize].pnl = 5000i128;
-    engine.pnl_pos_tot = 5000u128;
+    engine.accounts[idx as usize].pnl = I128::new(5000i128);
+    engine.pnl_pos_tot = U128::new(5000u128);
 
-    engine.adl_coeff_long = (ADL_ONE as i128) * 100;
+    engine.adl_coeff_long = I128::new((ADL_ONE as i128) * 100);
 
     engine.accounts[idx as usize].fee_credits = I128::new(-500i128);
 
@@ -613,9 +613,9 @@ fn t11_54_worked_example_regression() {
     let r2 = engine.enqueue_adl(&mut ctx, Side::Short, q_close, d);
     assert!(r2.is_ok());
 
-    assert!(engine.adl_mult_long < ADL_ONE);
-    assert!(engine.oi_eff_long_q == POS_SCALE);
-    assert!(engine.adl_coeff_long != 0i128);
+    assert!(engine.adl_mult_long.get() < ADL_ONE);
+    assert!(engine.oi_eff_long_q == U128::new(POS_SCALE));
+    assert!(engine.adl_coeff_long.get() != 0i128);
 
     let _ = engine.settle_side_effects_with_h_lock(a as usize, 0);
 
@@ -635,26 +635,26 @@ fn t5_24_dynamic_dust_bound_sufficient() {
     engine.deposit(b, 10_000_000, 100, 0).unwrap();
 
     // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 → position zeroes
-    engine.accounts[a as usize].position_basis_q = 1i128;
-    engine.accounts[a as usize].adl_a_basis = 3;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
+    engine.accounts[a as usize].position_basis_q = I128::new(1i128);
+    engine.accounts[a as usize].adl_a_basis = U128::new(3);
+    engine.accounts[a as usize].adl_k_snap = I128::ZERO;
     engine.accounts[a as usize].adl_epoch_snap = 0;
-    engine.accounts[b as usize].position_basis_q = 1i128;
-    engine.accounts[b as usize].adl_a_basis = 3;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
+    engine.accounts[b as usize].position_basis_q = I128::new(1i128);
+    engine.accounts[b as usize].adl_a_basis = U128::new(3);
+    engine.accounts[b as usize].adl_k_snap = I128::ZERO;
     engine.accounts[b as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 2;
-    engine.oi_eff_long_q = 2;
+    engine.oi_eff_long_q = U128::new(2);
     engine.adl_epoch_long = 0;
 
-    engine.adl_mult_long = 1;
-    engine.adl_coeff_long = 0i128;
+    engine.adl_mult_long = U128::new(1);
+    engine.adl_coeff_long = I128::ZERO;
 
     let _ = engine.settle_side_effects_with_h_lock(a as usize, 0);
-    assert!(engine.phantom_dust_bound_long_q == 1u128);
+    assert!(engine.phantom_dust_bound_long_q.get() == 1u128);
 
     let _ = engine.settle_side_effects_with_h_lock(b as usize, 0);
-    assert!(engine.phantom_dust_bound_long_q == 2u128);
+    assert!(engine.phantom_dust_bound_long_q.get() == 2u128);
 }
 
 // ############################################################################
@@ -670,12 +670,12 @@ fn proof_begin_full_drain_reset() {
     let epoch_before = engine.adl_epoch_long;
     let k_before = engine.adl_coeff_long;
 
-    assert!(engine.oi_eff_long_q == 0);
+    assert!(engine.oi_eff_long_q.get() == 0);
 
     engine.begin_full_drain_reset(Side::Long);
 
     assert!(engine.adl_epoch_long == epoch_before + 1);
-    assert!(engine.adl_mult_long == ADL_ONE);
+    assert!(engine.adl_mult_long == U128::new(ADL_ONE));
     assert!(engine.side_mode_long == SideMode::ResetPending);
     assert!(engine.adl_epoch_start_k_long == k_before);
     assert!(engine.stale_account_count_long == engine.stored_pos_count_long);
@@ -691,11 +691,11 @@ fn proof_finalize_side_reset_requires_conditions() {
     assert!(r1.is_err());
 
     engine.side_mode_long = SideMode::ResetPending;
-    engine.oi_eff_long_q = 100u128;
+    engine.oi_eff_long_q = U128::new(100u128);
     let r2 = engine.finalize_side_reset(Side::Long);
     assert!(r2.is_err());
 
-    engine.oi_eff_long_q = 0u128;
+    engine.oi_eff_long_q = U128::ZERO;
     engine.stale_account_count_long = 1;
     let r3 = engine.finalize_side_reset(Side::Long);
     assert!(r3.is_err());
@@ -718,10 +718,10 @@ fn t13_55_empty_opposing_side_deficit_fallback() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_mult_long = POS_SCALE;
-    engine.adl_coeff_long = 12345i128;
-    engine.oi_eff_long_q = 4 * POS_SCALE;
-    engine.oi_eff_short_q = 4 * POS_SCALE;
+    engine.adl_mult_long = U128::new(POS_SCALE);
+    engine.adl_coeff_long = I128::new(12345i128);
+    engine.oi_eff_long_q = U128::new(4 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(4 * POS_SCALE);
     engine.insurance_fund.balance = U128::new(10_000_000);
     engine.stored_pos_count_long = 0;
 
@@ -736,7 +736,7 @@ fn t13_55_empty_opposing_side_deficit_fallback() {
 
     assert!(engine.adl_coeff_long == k_before, "K must not change when stored_pos_count_opp == 0");
     assert!(engine.insurance_fund.balance.get() < ins_before, "insurance must absorb deficit");
-    assert!(engine.oi_eff_long_q == 3 * POS_SCALE);
+    assert!(engine.oi_eff_long_q.get() == 3 * POS_SCALE);
 }
 
 #[kani::proof]
@@ -747,19 +747,19 @@ fn t13_56_unilateral_empty_orphan_resolution() {
     let mut ctx = InstructionContext::new();
 
     engine.stored_pos_count_long = 0;
-    engine.phantom_dust_bound_long_q = 100u128;
-    engine.oi_eff_long_q = 50u128;
+    engine.phantom_dust_bound_long_q = U128::new(100u128);
+    engine.oi_eff_long_q = U128::new(50u128);
 
     engine.stored_pos_count_short = 2;
-    engine.oi_eff_short_q = 50u128;
+    engine.oi_eff_short_q = U128::new(50u128);
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result.is_ok());
 
     assert!(ctx.pending_reset_long);
     assert!(ctx.pending_reset_short);
-    assert!(engine.oi_eff_long_q == 0);
-    assert!(engine.oi_eff_short_q == 0);
+    assert!(engine.oi_eff_long_q.get() == 0);
+    assert!(engine.oi_eff_short_q.get() == 0);
 }
 
 #[kani::proof]
@@ -770,11 +770,11 @@ fn t13_57_unilateral_empty_corruption_guard() {
     let mut ctx = InstructionContext::new();
 
     engine.stored_pos_count_long = 0;
-    engine.phantom_dust_bound_long_q = 100u128;
-    engine.oi_eff_long_q = 50u128;
+    engine.phantom_dust_bound_long_q = U128::new(100u128);
+    engine.oi_eff_long_q = U128::new(50u128);
 
     engine.stored_pos_count_short = 2;
-    engine.oi_eff_short_q = 999u128;
+    engine.oi_eff_short_q = U128::new(999u128);
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result == Err(RiskError::CorruptState));
@@ -788,19 +788,19 @@ fn t13_58_unilateral_empty_short_side() {
     let mut ctx = InstructionContext::new();
 
     engine.stored_pos_count_short = 0;
-    engine.phantom_dust_bound_short_q = 200u128;
-    engine.oi_eff_short_q = 75u128;
+    engine.phantom_dust_bound_short_q = U128::new(200u128);
+    engine.oi_eff_short_q = U128::new(75u128);
 
     engine.stored_pos_count_long = 3;
-    engine.oi_eff_long_q = 75u128;
+    engine.oi_eff_long_q = U128::new(75u128);
 
     let result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(result.is_ok());
 
     assert!(ctx.pending_reset_long);
     assert!(ctx.pending_reset_short);
-    assert!(engine.oi_eff_long_q == 0);
-    assert!(engine.oi_eff_short_q == 0);
+    assert!(engine.oi_eff_long_q.get() == 0);
+    assert!(engine.oi_eff_short_q.get() == 0);
 }
 
 #[kani::proof]
@@ -812,10 +812,10 @@ fn t13_60_unconditional_dust_bound_on_any_a_decay() {
     let mut engine = RiskEngine::new(zero_fee_params());
     let mut ctx = InstructionContext::new();
 
-    engine.adl_mult_long = 4;
-    engine.adl_coeff_long = 0i128;
-    engine.oi_eff_long_q = 4 * POS_SCALE;
-    engine.oi_eff_short_q = 4 * POS_SCALE;
+    engine.adl_mult_long = U128::new(4);
+    engine.adl_coeff_long = I128::ZERO;
+    engine.oi_eff_long_q = U128::new(4 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(4 * POS_SCALE);
     engine.stored_pos_count_long = 1;
 
     let dust_before = engine.phantom_dust_bound_long_q;
@@ -824,7 +824,7 @@ fn t13_60_unconditional_dust_bound_on_any_a_decay() {
         &mut ctx, Side::Short, 2 * POS_SCALE, 0u128,
     );
     assert!(result.is_ok());
-    assert!(engine.adl_mult_long == 2);
+    assert!(engine.adl_mult_long.get() == 2);
 
     // Unconditional: dust ALWAYS increments by at least 1 on A decay
     assert!(engine.phantom_dust_bound_long_q >= dust_before + 1,
@@ -843,27 +843,27 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
     engine.deposit(b, 10_000_000, 100, 0).unwrap();
 
     // One long (a) at A=7, one short (b) for OI balance.
-    engine.adl_mult_long = 7;
-    engine.adl_mult_short = ADL_ONE;
-    engine.adl_coeff_long = 0i128;
-    engine.adl_coeff_short = 0i128;
+    engine.adl_mult_long = U128::new(7);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.adl_coeff_long = I128::ZERO;
+    engine.adl_coeff_short = I128::ZERO;
 
     // Account a: long 10*POS_SCALE at a_basis=7
-    engine.accounts[a as usize].position_basis_q = (10 * POS_SCALE) as i128;
-    engine.accounts[a as usize].adl_a_basis = 7;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
+    engine.accounts[a as usize].position_basis_q = I128::new((10 * POS_SCALE) as i128);
+    engine.accounts[a as usize].adl_a_basis = U128::new(7);
+    engine.accounts[a as usize].adl_k_snap = I128::ZERO;
     engine.accounts[a as usize].adl_epoch_snap = 0;
 
     // Account b: short 10*POS_SCALE
-    engine.accounts[b as usize].position_basis_q = -((10 * POS_SCALE) as i128);
-    engine.accounts[b as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[b as usize].adl_k_snap = 0i128;
+    engine.accounts[b as usize].position_basis_q = I128::new(-((10 * POS_SCALE) as i128));
+    engine.accounts[b as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[b as usize].adl_k_snap = I128::ZERO;
     engine.accounts[b as usize].adl_epoch_snap = 0;
 
     engine.stored_pos_count_long = 1;
     engine.stored_pos_count_short = 1;
-    engine.oi_eff_long_q = 10 * POS_SCALE;
-    engine.oi_eff_short_q = 10 * POS_SCALE;
+    engine.oi_eff_long_q = U128::new(10 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(10 * POS_SCALE);
 
     // ADL: close POS_SCALE from short side → shrinks A_long via truncation
     // enqueue_adl decrements both sides by q_close, then A-truncates opposing
@@ -872,9 +872,9 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
     );
     assert!(result.is_ok());
     // A_new = floor(7 * 9M / 10M) = 6
-    assert!(engine.adl_mult_long == 6);
-    assert!(engine.oi_eff_long_q == 9 * POS_SCALE);
-    assert!(engine.oi_eff_short_q == 9 * POS_SCALE);
+    assert!(engine.adl_mult_long.get() == 6);
+    assert!(engine.oi_eff_long_q.get() == 9 * POS_SCALE);
+    assert!(engine.oi_eff_short_q.get() == 9 * POS_SCALE);
 
     // Settle account a to get actual effective position under new A
     let settle_a = engine.settle_side_effects_with_h_lock(a as usize, 0);
@@ -882,18 +882,18 @@ fn t12_53_adl_truncation_dust_must_not_deadlock() {
 
     // eff_a = floor(10_000_000 * 6 / 7) = 8_571_428 (< 9_000_000)
     let eff_a = engine.effective_pos_q(a as usize);
-    let dust = engine.oi_eff_long_q.checked_sub(eff_a.unsigned_abs()).unwrap_or(0);
+    let dust = engine.oi_eff_long_q.get().checked_sub(eff_a.unsigned_abs()).unwrap_or(0);
 
     // Verify phantom_dust_bound covers the A-truncation dust
-    assert!(engine.phantom_dust_bound_long_q >= dust,
+    assert!(engine.phantom_dust_bound_long_q.get() >= dust,
         "dust bound must cover A-truncation phantom OI");
 
     // Simulate final state: all positions closed via balanced trades,
     // which maintain OI_long == OI_short. Residual dust is equal on both sides.
     engine.attach_effective_position(a as usize, 0i128);
     engine.attach_effective_position(b as usize, 0i128);
-    engine.oi_eff_long_q = dust;
-    engine.oi_eff_short_q = dust;
+    engine.oi_eff_long_q = U128::new(dust);
+    engine.oi_eff_short_q = U128::new(dust);
 
     let reset_result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(reset_result.is_ok(), "ADL truncation dust must not deadlock market reset");
@@ -954,16 +954,16 @@ fn t14_62_dust_bound_same_epoch_zeroing() {
     engine.deposit(idx, 10_000_000, 100, 0).unwrap();
 
     // Use basis=1, a_basis=3 so floor(1 * 1 / 3) = 0 → position zeroes
-    engine.accounts[idx as usize].position_basis_q = 1i128;
-    engine.accounts[idx as usize].adl_a_basis = 3;
-    engine.accounts[idx as usize].adl_k_snap = 0i128;
+    engine.accounts[idx as usize].position_basis_q = I128::new(1i128);
+    engine.accounts[idx as usize].adl_a_basis = U128::new(3);
+    engine.accounts[idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[idx as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
     engine.adl_epoch_long = 0;
-    engine.adl_coeff_long = 0i128;
+    engine.adl_coeff_long = I128::ZERO;
 
     // A_side=1 so floor(1 * 1 / 3) = 0
-    engine.adl_mult_long = 1;
+    engine.adl_mult_long = U128::new(1);
 
     let dust_before = engine.phantom_dust_bound_long_q;
 
@@ -971,7 +971,7 @@ fn t14_62_dust_bound_same_epoch_zeroing() {
     assert!(result.is_ok());
 
     // Position must be zeroed
-    assert!(engine.accounts[idx as usize].position_basis_q == 0);
+    assert!(engine.accounts[idx as usize].position_basis_q.get() == 0);
     // Dust bound must have incremented by 1
     let dust_after = engine.phantom_dust_bound_long_q;
     assert!(dust_after == dust_before + 1u128,
@@ -1017,15 +1017,15 @@ fn t14_63_dust_bound_position_reattach_remainder() {
 fn t14_64_dust_bound_full_drain_reset_zeroes() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    engine.phantom_dust_bound_long_q = 42u128;
-    engine.oi_eff_long_q = 0u128;
+    engine.phantom_dust_bound_long_q = U128::new(42u128);
+    engine.oi_eff_long_q = U128::ZERO;
     engine.stored_pos_count_long = 0;
     engine.adl_epoch_long = 0;
 
     engine.begin_full_drain_reset(Side::Long);
 
-    assert!(engine.phantom_dust_bound_long_q == 0u128);
-    assert!(engine.oi_eff_long_q == 0u128);
+    assert!(engine.phantom_dust_bound_long_q.get() == 0u128);
+    assert!(engine.oi_eff_long_q.get() == 0u128);
 }
 
 #[kani::proof]
@@ -1043,34 +1043,34 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     engine.deposit(b_idx, 10_000_000, 100, 0).unwrap();
     engine.deposit(c_idx, 10_000_000, 100, 0).unwrap();
 
-    engine.adl_mult_long = 13;
-    engine.adl_mult_short = ADL_ONE;
-    engine.adl_coeff_long = 0i128;
-    engine.adl_coeff_short = 0i128;
+    engine.adl_mult_long = U128::new(13);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.adl_coeff_long = I128::ZERO;
+    engine.adl_coeff_short = I128::ZERO;
     engine.adl_epoch_long = 0;
 
     // Account a: long 7*POS_SCALE at a_basis=13
-    engine.accounts[a_idx as usize].position_basis_q = (7 * POS_SCALE) as i128;
-    engine.accounts[a_idx as usize].adl_a_basis = 13;
-    engine.accounts[a_idx as usize].adl_k_snap = 0i128;
+    engine.accounts[a_idx as usize].position_basis_q = I128::new((7 * POS_SCALE) as i128);
+    engine.accounts[a_idx as usize].adl_a_basis = U128::new(13);
+    engine.accounts[a_idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[a_idx as usize].adl_epoch_snap = 0;
 
     // Account b: long 5*POS_SCALE at a_basis=13
-    engine.accounts[b_idx as usize].position_basis_q = (5 * POS_SCALE) as i128;
-    engine.accounts[b_idx as usize].adl_a_basis = 13;
-    engine.accounts[b_idx as usize].adl_k_snap = 0i128;
+    engine.accounts[b_idx as usize].position_basis_q = I128::new((5 * POS_SCALE) as i128);
+    engine.accounts[b_idx as usize].adl_a_basis = U128::new(13);
+    engine.accounts[b_idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[b_idx as usize].adl_epoch_snap = 0;
 
     // Account c: short 12*POS_SCALE
-    engine.accounts[c_idx as usize].position_basis_q = -((12 * POS_SCALE) as i128);
-    engine.accounts[c_idx as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[c_idx as usize].adl_k_snap = 0i128;
+    engine.accounts[c_idx as usize].position_basis_q = I128::new(-((12 * POS_SCALE) as i128));
+    engine.accounts[c_idx as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[c_idx as usize].adl_k_snap = I128::ZERO;
     engine.accounts[c_idx as usize].adl_epoch_snap = 0;
 
     engine.stored_pos_count_long = 2;
     engine.stored_pos_count_short = 1;
-    engine.oi_eff_long_q = 12 * POS_SCALE;
-    engine.oi_eff_short_q = 12 * POS_SCALE;
+    engine.oi_eff_long_q = U128::new(12 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(12 * POS_SCALE);
 
     // ADL: close 3*POS_SCALE from short side → shrinks A_long via truncation
     let result = engine.enqueue_adl(
@@ -1078,10 +1078,10 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     );
     assert!(result.is_ok());
     // A_new = floor(13 * 9M / 12M) = 9
-    assert!(engine.adl_mult_long == 9);
-    assert!(engine.oi_eff_long_q == 9 * POS_SCALE);
-    assert!(engine.oi_eff_short_q == 9 * POS_SCALE);
-    assert!(engine.phantom_dust_bound_long_q != 0);
+    assert!(engine.adl_mult_long.get() == 9);
+    assert!(engine.oi_eff_long_q.get() == 9 * POS_SCALE);
+    assert!(engine.oi_eff_short_q.get() == 9 * POS_SCALE);
+    assert!(engine.phantom_dust_bound_long_q.get() != 0);
 
     // Settle long accounts to get actual effective positions under new A
     let sa = engine.settle_side_effects_with_h_lock(a_idx as usize, 0);
@@ -1095,10 +1095,10 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     let sum_eff = eff_a.unsigned_abs() + eff_b.unsigned_abs();
 
     // Dust = tracked OI - actual sum of effective positions
-    let dust = engine.oi_eff_long_q.checked_sub(sum_eff).unwrap_or(0);
+    let dust = engine.oi_eff_long_q.get().checked_sub(sum_eff).unwrap_or(0);
 
     // Verify phantom_dust_bound covers the multi-account A-truncation dust
-    assert!(engine.phantom_dust_bound_long_q >= dust,
+    assert!(engine.phantom_dust_bound_long_q.get() >= dust,
         "dust bound must cover A-truncation phantom OI for multiple accounts");
 
     // Close all positions and set OI to balanced dust level
@@ -1106,8 +1106,8 @@ fn t14_65_dust_bound_end_to_end_clearance() {
     engine.attach_effective_position(a_idx as usize, 0i128);
     engine.attach_effective_position(b_idx as usize, 0i128);
     engine.attach_effective_position(c_idx as usize, 0i128);
-    engine.oi_eff_long_q = dust;
-    engine.oi_eff_short_q = dust;
+    engine.oi_eff_long_q = U128::new(dust);
+    engine.oi_eff_short_q = U128::new(dust);
 
     let reset_result = engine.schedule_end_of_instruction_resets(&mut ctx);
     assert!(reset_result.is_ok(), "dust bound must be sufficient for reset after all positions closed");
@@ -1358,14 +1358,14 @@ fn proof_property_44_deposit_true_flat_guard() {
     engine.deposit(a, 500_000, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
 
     // Directly set up open position with negative PnL (bypassing trade to isolate deposit behavior)
-    engine.accounts[a as usize].position_basis_q = (10 * POS_SCALE) as i128;
+    engine.accounts[a as usize].position_basis_q = I128::new((10 * POS_SCALE) as i128);
     engine.stored_pos_count_long = 1;
-    engine.oi_eff_long_q = 10 * POS_SCALE;
-    engine.oi_eff_short_q = 10 * POS_SCALE;
+    engine.oi_eff_long_q = U128::new(10 * POS_SCALE);
+    engine.oi_eff_short_q = U128::new(10 * POS_SCALE);
     engine.set_pnl(a as usize, -5_000i128);
 
-    assert!(engine.accounts[a as usize].position_basis_q != 0);
-    assert!(engine.accounts[a as usize].pnl < 0);
+    assert!(engine.accounts[a as usize].position_basis_q.get() != 0);
+    assert!(engine.accounts[a as usize].pnl.get() < 0);
 
     let ins_before = engine.insurance_fund.balance.get();
     let pnl_before = engine.accounts[a as usize].pnl;
@@ -1379,7 +1379,7 @@ fn proof_property_44_deposit_true_flat_guard() {
         "insurance must not change: resolve_flat_negative must not run when basis != 0");
 
     // Position must still be intact
-    assert!(engine.accounts[a as usize].position_basis_q != 0,
+    assert!(engine.accounts[a as usize].position_basis_q.get() != 0,
         "position must still be intact after deposit");
 
     // PnL may have been partially settled by settle_losses (step 7),
@@ -1481,7 +1481,7 @@ fn proof_property_50_flat_only_auto_conversion() {
     engine.keeper_crank_not_atomic(slot3, high_oracle, &[(a, None)], 64, 0i128, 0).unwrap();
 
     // a still has position, so should have released profit but NOT auto-converted
-    assert!(engine.accounts[a as usize].position_basis_q != 0,
+    assert!(engine.accounts[a as usize].position_basis_q.get() != 0,
         "account must still have open position");
 
     let released = engine.released_pos(a as usize);
@@ -1494,7 +1494,7 @@ fn proof_property_50_flat_only_auto_conversion() {
         cap_a);
 
     // Verify released profit exists but wasn't consumed
-    assert!(released > 0 || engine.accounts[a as usize].reserved_pnl == 0,
+    assert!(released > 0 || engine.accounts[a as usize].reserved_pnl.get() == 0,
         "warmup must have released profit or reserve is zero");
 
     assert!(engine.check_conservation());

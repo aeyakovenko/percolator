@@ -57,10 +57,10 @@ fn proof_funding_rate_bound_rejected() {
 #[kani::solver(cadical)]
 fn proof_funding_sign_and_floor() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
@@ -100,10 +100,10 @@ fn proof_funding_sign_and_floor() {
 #[kani::solver(cadical)]
 fn proof_funding_floor_not_truncation() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
@@ -134,13 +134,13 @@ fn proof_funding_floor_not_truncation() {
 #[kani::solver(cadical)]
 fn proof_funding_skip_zero_oi_short() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = 0;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::ZERO;
 
     let k_long_before = engine.adl_coeff_long;
     let k_short_before = engine.adl_coeff_short;
@@ -160,13 +160,13 @@ fn proof_funding_skip_zero_oi_short() {
 #[kani::solver(cadical)]
 fn proof_funding_skip_zero_oi_long() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
-    engine.oi_eff_long_q = 0;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::ZERO;
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     let k_long_before = engine.adl_coeff_long;
     let k_short_before = engine.adl_coeff_short;
@@ -186,13 +186,13 @@ fn proof_funding_skip_zero_oi_long() {
 #[kani::solver(cadical)]
 fn proof_funding_skip_zero_oi_both() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
-    engine.oi_eff_long_q = 0;
-    engine.oi_eff_short_q = 0;
+    engine.oi_eff_long_q = U128::ZERO;
+    engine.oi_eff_short_q = U128::ZERO;
 
     let k_long_before = engine.adl_coeff_long;
     let k_short_before = engine.adl_coeff_short;
@@ -217,10 +217,10 @@ fn proof_funding_skip_zero_oi_both() {
 #[kani::solver(cadical)]
 fn proof_funding_substep_large_dt() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
@@ -234,9 +234,9 @@ fn proof_funding_substep_large_dt() {
     // sub-step 2: fund_num = 1000 * 100 * 1 = 100_000; fund_term = floor(100_000/1e9) = 0
     // total fund_term effect = 6 * ADL_ONE = 6_000_000
     let expected_delta: i128 = 6i128 * (ADL_ONE as i128);
-    assert_eq!(engine.adl_coeff_long, -expected_delta,
+    assert_eq!(engine.adl_coeff_long, I128::new(-expected_delta),
         "K_long must reflect sum of sub-step funding deltas");
-    assert_eq!(engine.adl_coeff_short, expected_delta,
+    assert_eq!(engine.adl_coeff_short, I128::new(expected_delta),
         "K_short must reflect sum of sub-step funding deltas");
 }
 
@@ -251,10 +251,10 @@ fn proof_funding_substep_large_dt() {
 #[kani::solver(cadical)]
 fn proof_funding_price_basis_timing() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
     engine.last_oracle_price = 500; // old price (also used as fund_px_0 in v12.16.4)
     engine.last_market_slot = 0;
 
@@ -270,7 +270,7 @@ fn proof_funding_price_basis_timing() {
     // K_long += ADL_ONE * 1000 = 1_000_000_000 (mark)
     // K_long -= ADL_ONE * 50 = 50_000_000 (funding)
     // Net K_long = 1_000_000_000 - 50_000_000 = 950_000_000
-    let expected_k_long = 1_000_000_000i128 - 50_000_000i128;
+    let expected_k_long = I128::new(1_000_000_000i128 - 50_000_000i128);
     assert_eq!(engine.adl_coeff_long, expected_k_long,
         "funding must use fund_px_0=500, not oracle=1500");
 
@@ -289,10 +289,10 @@ fn proof_funding_price_basis_timing() {
 #[kani::solver(cadical)]
 fn proof_accrue_no_funding_when_rate_zero() {
     let mut engine = RiskEngine::new(zero_fee_params());
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
@@ -316,10 +316,10 @@ fn proof_accrue_no_funding_when_rate_zero() {
 fn proof_accrue_mark_still_works() {
     let mut engine = RiskEngine::new(zero_fee_params());
 
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
     engine.last_oracle_price = DEFAULT_ORACLE;
     engine.last_market_slot = 0;
 
@@ -377,7 +377,7 @@ fn proof_deposit_no_insurance_draw() {
         "deposit must never decrement I");
 
     // PNL must still be negative (settle_losses paid from capital but couldn't cover all)
-    assert!(engine.accounts[idx as usize].pnl < 0,
+    assert!(engine.accounts[idx as usize].pnl.get() < 0,
         "negative PNL must survive deposit — resolve_flat_negative not called");
 }
 
@@ -416,7 +416,7 @@ fn proof_deposit_sweep_pnl_guard() {
     // PNL is still very negative, so sweep must NOT happen
     assert!(engine.accounts[idx as usize].fee_credits.get() == fc_before,
         "deposit must not sweep when PNL < 0 after settle_losses");
-    assert!(engine.accounts[idx as usize].pnl < 0,
+    assert!(engine.accounts[idx as usize].pnl.get() < 0,
         "PNL must still be negative — settle_losses can't cover full loss");
 }
 
@@ -438,7 +438,7 @@ fn proof_deposit_sweep_when_pnl_nonneg() {
     engine.accounts[idx as usize].fee_credits = I128::new(-5000);
 
     // PNL = 0 (flat position, no losses)
-    assert!(engine.accounts[idx as usize].pnl == 0);
+    assert!(engine.accounts[idx as usize].pnl.get() == 0);
 
     // Symbolic deposit amount
     let dep: u32 = kani::any();
@@ -524,7 +524,7 @@ fn proof_positive_conversion_denominator() {
     // released_pos = pnl_matured_pos_tot contribution from this account.
     // In a flat account, after warmup, the released portion is positive.
     // We directly verify the haircut ratio:
-    engine.pnl_matured_pos_tot = pnl_val as u128;
+    engine.pnl_matured_pos_tot = U128::new(pnl_val as u128);
 
     let (h_num, h_den) = engine.haircut_ratio();
     // When pnl_matured_pos_tot > 0, h_den == pnl_matured_pos_tot > 0
@@ -583,9 +583,9 @@ fn proof_bilateral_oi_decomposition() {
         let expected_short = if eff_a < 0 { eff_a.unsigned_abs() } else { 0 }
             + if eff_b < 0 { eff_b.unsigned_abs() } else { 0 };
 
-        assert!(engine.oi_eff_long_q == expected_long,
+        assert!(engine.oi_eff_long_q.get() == expected_long,
             "OI_long must match bilateral decomposition");
-        assert!(engine.oi_eff_short_q == expected_short,
+        assert!(engine.oi_eff_short_q.get() == expected_short,
             "OI_short must match bilateral decomposition");
 
         // OI balance: must be equal

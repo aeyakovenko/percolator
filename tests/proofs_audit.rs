@@ -41,8 +41,8 @@ fn proof_epoch_snap_zero_on_position_zeroout() {
     // Set epoch mismatch to skip the phantom dust U256 path
     // (irrelevant to the epoch_snap fix).
     engine.set_position_basis_q(idx, signed_basis);
-    engine.accounts[idx].adl_a_basis = ADL_ONE;
-    engine.accounts[idx].adl_k_snap = 0;
+    engine.accounts[idx].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[idx].adl_k_snap = I128::ZERO;
     // Epoch mismatch: snap=0 != epoch_long=5 / epoch_short=7
     engine.accounts[idx].adl_epoch_snap = 0;
 
@@ -50,9 +50,9 @@ fn proof_epoch_snap_zero_on_position_zeroout() {
     engine.attach_effective_position(idx, 0);
 
     // Spec §2.4: all canonical zero-position defaults
-    assert!(engine.accounts[idx].position_basis_q == 0, "basis must be zero");
-    assert!(engine.accounts[idx].adl_a_basis == ADL_ONE, "a_basis must be ADL_ONE");
-    assert!(engine.accounts[idx].adl_k_snap == 0, "k_snap must be zero");
+    assert!(engine.accounts[idx].position_basis_q.get() == 0, "basis must be zero");
+    assert!(engine.accounts[idx].adl_a_basis == U128::new(ADL_ONE), "a_basis must be ADL_ONE");
+    assert!(engine.accounts[idx].adl_k_snap.get() == 0, "k_snap must be zero");
     assert!(engine.accounts[idx].adl_epoch_snap == 0, "epoch_snap must be zero per §2.4");
 }
 
@@ -390,7 +390,7 @@ fn proof_close_account_pnl_check_before_fee_forgive() {
     // Use set_pnl to keep pnl_pos_tot in sync
     engine.set_pnl(idx as usize, 5000i128);
     // All PnL is reserved (warmup not complete)
-    engine.accounts[idx as usize].reserved_pnl = 5000;
+    engine.accounts[idx as usize].reserved_pnl = U128::new(5000);
     // Zero capital — fee_debt_sweep will be a no-op
     // (capital is already 0 from add_user with fee=0)
 
@@ -440,7 +440,7 @@ fn proof_settle_epoch_snap_zero_on_truncation() {
     // The simplest way: directly manipulate adl_mult_long to 0 (below MIN_A_SIDE).
     // But that's invalid. Instead, set a very small a_mult to make floor(basis * a / a_basis) = 0.
     // With basis=1, a_basis=ADL_ONE=1_000_000, if a_mult < 1_000_000 the floor gives 0.
-    engine.adl_mult_long = 1; // Very small — floor(1 * 1 / 1_000_000) = 0
+    engine.adl_mult_long = U128::new(1); // Very small — floor(1 * 1 / 1_000_000) = 0
 
     // Now touch the account — settle_side_effects should zero the position
     {
@@ -452,7 +452,7 @@ fn proof_settle_epoch_snap_zero_on_truncation() {
     }
 
     // If position was zeroed, epoch_snap must be 0 per §2.4
-    if engine.accounts[a as usize].position_basis_q == 0 {
+    if engine.accounts[a as usize].position_basis_q.get() == 0 {
         assert!(
             engine.accounts[a as usize].adl_epoch_snap == 0,
             "epoch_snap must be 0 on settle zero-out per §2.4"
@@ -980,7 +980,7 @@ fn proof_force_close_resolved_position_conservation() {
     let result = engine.close_resolved_terminal_not_atomic(a);
     assert!(result.is_ok());
     assert!(!engine.is_used(a as usize));
-    assert!(engine.accounts[a as usize].position_basis_q == 0);
+    assert!(engine.accounts[a as usize].position_basis_q.get() == 0);
     assert!(engine.check_conservation(),
         "V >= C_tot + I must hold after resolved close");
 }
