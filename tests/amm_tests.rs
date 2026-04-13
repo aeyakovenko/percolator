@@ -19,8 +19,8 @@ fn default_params() -> RiskParams {
         liquidation_fee_cap: U128::new(100_000),
         min_liquidation_abs: U128::new(0),
         min_initial_deposit: U128::new(2),
-        min_nonzero_mm_req: 1,
-        min_nonzero_im_req: 2,
+        min_nonzero_mm_req: U128::new(1),
+        min_nonzero_im_req: U128::new(2),
         insurance_floor: U128::ZERO,
         h_min: 0,
         h_max: 100,
@@ -103,7 +103,7 @@ fn test_e2e_complete_user_journey() {
 
     let alice_pnl = engine.accounts[alice as usize].pnl;
     // Long position + price up = positive PnL
-    assert!(alice_pnl > 0, "Alice should have positive PnL after price increase");
+    assert!(alice_pnl.get() > 0, "Alice should have positive PnL after price increase");
 
     // === Phase 3: PNL Warmup ===
 

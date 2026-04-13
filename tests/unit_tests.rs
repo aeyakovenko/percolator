@@ -19,8 +19,8 @@ fn default_params() -> RiskParams {
         liquidation_fee_cap: U128::new(1_000_000),
         min_liquidation_abs: U128::new(0),
         min_initial_deposit: U128::new(1000),
-        min_nonzero_mm_req: 1,
-        min_nonzero_im_req: 2,
+        min_nonzero_mm_req: U128::new(1),
+        min_nonzero_im_req: U128::new(2),
         insurance_floor: U128::ZERO,
         h_min: 0,
         h_max: 100,
@@ -228,7 +228,7 @@ fn test_basic_trade() {
     let eff_b = engine.effective_pos_q(b as usize);
     assert_eq!(eff_a, make_size_q(100), "account a must be long 100 units");
     assert_eq!(eff_b, make_size_q(-100), "account b must be short 100 units");
-    assert!(engine.oi_eff_long_q > 0, "open interest must be nonzero after trade");
+    assert!(engine.oi_eff_long_q.get() > 0, "open interest must be nonzero after trade");
     assert!(engine.check_conservation());
 }
 
@@ -276,7 +276,7 @@ fn test_trade_with_different_exec_price() {
 
     // Account a (long) bought at exec=990 vs oracle=1000, so should have positive PnL
     // trade_pnl = floor(100 * POS_SCALE * (1000 - 990) / POS_SCALE) = 1000
-    assert!(engine.accounts[a as usize].pnl > 0,
+    assert!(engine.accounts[a as usize].pnl.get() > 0,
         "long PnL must be positive when exec < oracle: pnl={}",
         engine.accounts[a as usize].pnl);
 
@@ -450,8 +450,8 @@ fn test_cohort_reserve_set_on_new_profit() {
     }
 
     // If PnL is positive, reserved_pnl should be nonzero (cohort-based warmup with h_lock>0)
-    if engine.accounts[a as usize].pnl > 0 {
-        assert!(engine.accounts[a as usize].reserved_pnl > 0,
+    if engine.accounts[a as usize].pnl.get() > 0 {
+        assert!(engine.accounts[a as usize].reserved_pnl.get() > 0,
             "reserved_pnl should be nonzero for positive PnL (cohort warmup with h_lock>0)");
     }
 }
@@ -752,12 +752,12 @@ fn test_adl_epoch_changes() {
     let epoch_long_before = engine.adl_epoch_long;
 
     // Begin a full drain reset on long side (requires OI=0)
-    assert!(engine.oi_eff_long_q == 0);
+    assert!(engine.oi_eff_long_q.get() == 0);
     engine.begin_full_drain_reset(Side::Long);
 
     assert_eq!(engine.adl_epoch_long, epoch_long_before + 1);
     assert_eq!(engine.side_mode_long, SideMode::ResetPending);
-    assert_eq!(engine.adl_mult_long, ADL_ONE);
+    assert_eq!(engine.adl_mult_long.get(), ADL_ONE);
 }
 
 #[test]
@@ -923,7 +923,7 @@ fn test_close_account_after_trade_and_unwind() {
 
     // PnL should be zero or converted by now
     let pnl = engine.accounts[a as usize].pnl;
-    if pnl == 0 {
+    if pnl.get() == 0 {
         let cap = engine.close_account_not_atomic(a, slot2, oracle, 0i128, 0).expect("close account");
         assert!(cap > 0);
         assert!(!engine.is_used(a as usize));
@@ -1216,11 +1216,11 @@ fn test_keeper_crank_propagates_corruption() {
 
     // Set up a corrupt state: a_basis = 0 triggers CorruptState error
     // in settle_side_effects (called by touch_account_full_not_atomic)
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
-    engine.accounts[a as usize].adl_a_basis = 0; // CORRUPT: a_basis must be > 0
+    engine.accounts[a as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.accounts[a as usize].adl_a_basis = U128::ZERO; // CORRUPT: a_basis must be > 0
     engine.stored_pos_count_long = 1;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     // keeper_crank_not_atomic must propagate the CorruptState error, not swallow it
     let result = engine.keeper_crank_not_atomic(2, oracle, &[(a, None)], 64, 0i128, 0);
@@ -1259,10 +1259,10 @@ fn test_same_slot_price_change_applies_mark() {
     engine.current_slot = slot;
     engine.last_oracle_price = oracle;
     engine.last_market_slot = slot; // same slot
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     let k_long_before = engine.adl_coeff_long;
     let k_short_before = engine.adl_coeff_short;
@@ -1301,8 +1301,8 @@ fn test_schedule_reset_error_propagated_in_withdraw() {
     // This makes schedule_end_of_instruction_resets return CorruptState.
     engine.stored_pos_count_long = 0;
     engine.stored_pos_count_short = 0;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE * 2; // unequal OI
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE * 2); // unequal OI
 
     let result = engine.withdraw_not_atomic(a, 1, oracle, slot, 0i128, 0);
     assert!(result.is_err(), "withdraw_not_atomic must propagate reset error on corrupt state");
@@ -1394,10 +1394,10 @@ fn test_accrue_market_to_multi_substep_large_dt() {
     let mut engine = RiskEngine::new(default_params());
     engine.last_oracle_price = 1000;
     engine.last_market_slot = 0;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     // High funding rate, large time gap requiring multiple sub-steps
     let large_dt = MAX_FUNDING_DT * 3 + 100; // triggers 4 sub-steps
@@ -1416,10 +1416,10 @@ fn test_accrue_market_funding_rate_zero_no_funding_applied() {
     let mut engine = RiskEngine::new(default_params());
     engine.last_oracle_price = 1000;
     engine.last_market_slot = 0;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     let k_long_before = engine.adl_coeff_long;
     let k_short_before = engine.adl_coeff_short;
@@ -1439,10 +1439,10 @@ fn test_accrue_market_applies_funding_transfer() {
     let mut engine = RiskEngine::new(default_params());
     engine.last_oracle_price = 1000;
     engine.last_market_slot = 0;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     let f_long_before = engine.f_long_num;
     let f_short_before = engine.f_short_num;
@@ -1470,10 +1470,10 @@ fn test_accrue_market_no_funding_when_rate_zero() {
     let mut engine = RiskEngine::new(default_params());
     engine.last_oracle_price = 1000;
     engine.last_market_slot = 0;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
 
     let k_long_before = engine.adl_coeff_long;
     let k_short_before = engine.adl_coeff_short;
@@ -1641,17 +1641,17 @@ fn test_charge_fee_safe_rejects_pnl_at_i256_min() {
     // Liquidation fee would push PnL to exactly i128::MIN — must return Err
     // We test via the public liquidate path, but first set up the conditions
     // for an underwater account with a position.
-    engine.accounts[a as usize].position_basis_q = POS_SCALE as i128;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
+    engine.accounts[a as usize].position_basis_q = I128::new(POS_SCALE as i128);
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
     engine.adl_epoch_long = 0;
     engine.adl_epoch_short = 0;
-    engine.accounts[a as usize].adl_a_basis = ADL_ONE;
-    engine.accounts[a as usize].adl_k_snap = 0i128;
+    engine.accounts[a as usize].adl_a_basis = U128::new(ADL_ONE);
+    engine.accounts[a as usize].adl_k_snap = I128::new(0i128);
     engine.accounts[a as usize].adl_epoch_snap = 0;
     engine.stored_pos_count_long = 1;
-    engine.oi_eff_long_q = POS_SCALE;
-    engine.oi_eff_short_q = POS_SCALE;
+    engine.oi_eff_long_q = U128::new(POS_SCALE);
+    engine.oi_eff_short_q = U128::new(POS_SCALE);
     engine.last_oracle_price = oracle;
     engine.last_market_slot = slot;
     engine.last_crank_slot = slot;
@@ -1660,7 +1660,7 @@ fn test_charge_fee_safe_rejects_pnl_at_i256_min() {
     let result = engine.liquidate_at_oracle_not_atomic(a, slot, oracle, LiquidationPolicy::FullClose, 0i128, 0);
     // Either it errors out or it succeeds but PnL is not i128::MIN
     if result.is_ok() {
-        assert!(engine.accounts[a as usize].pnl != i128::MIN,
+        assert!(engine.accounts[a as usize].pnl.get() != i128::MIN,
             "PnL must never reach i128::MIN");
     }
 }
@@ -1700,8 +1700,8 @@ fn test_oracle_price_max_accepted() {
     let mut engine = RiskEngine::new(default_params());
     engine.last_oracle_price = 1000;
     engine.last_market_slot = 0;
-    engine.adl_mult_long = ADL_ONE;
-    engine.adl_mult_short = ADL_ONE;
+    engine.adl_mult_long = U128::new(ADL_ONE);
+    engine.adl_mult_short = U128::new(ADL_ONE);
 
     let result = engine.accrue_market_to(1, MAX_ORACLE_PRICE, 0);
     assert!(result.is_ok(), "MAX_ORACLE_PRICE must be accepted");
@@ -1835,7 +1835,7 @@ fn test_gc_dust_preserves_fee_credits() {
 
     // Set up dust-like state: 0 capital, 0 position, but positive fee_credits
     engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].position_basis_q = 0i128;
+    engine.accounts[a as usize].position_basis_q = I128::new(0i128);
     engine.set_pnl(a as usize, 0i128);
     engine.accounts[a as usize].fee_credits = I128::new(5_000);
 
@@ -1867,7 +1867,7 @@ fn test_gc_collects_dead_account_with_negative_fee_credits() {
 
     // Simulate abandoned account: zero everything, inject negative fee_credits
     engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].position_basis_q = 0i128;
+    engine.accounts[a as usize].position_basis_q = I128::new(0i128);
     engine.set_pnl(a as usize, 0i128);
     engine.accounts[a as usize].fee_credits = I128::new(-500);
 
@@ -1894,7 +1894,7 @@ fn test_gc_still_protects_positive_fee_credits() {
     engine.keeper_crank_not_atomic(slot, oracle, &[] as &[(u16, Option<LiquidationPolicy>)], 64, 0i128, 0).unwrap();
 
     engine.set_capital(a as usize, 0);
-    engine.accounts[a as usize].position_basis_q = 0i128;
+    engine.accounts[a as usize].position_basis_q = I128::new(0i128);
     engine.set_pnl(a as usize, 0i128);
     // Large positive prepaid credits
     engine.accounts[a as usize].fee_credits = I128::new(1_000_000);
@@ -2025,15 +2025,15 @@ fn test_property_49_consume_released_pnl_preserves_reserve() {
     // After set_pnl, the increase goes to reserved_pnl; simulate warmup completion
     {
         let old_r = engine.accounts[idx].reserved_pnl;
-        engine.accounts[idx].reserved_pnl = 0;
-        engine.pnl_matured_pos_tot += old_r;
+        engine.accounts[idx].reserved_pnl = U128::new(0);
+        engine.pnl_matured_pos_tot = U128::new(engine.pnl_matured_pos_tot.get() + old_r.get());
     }
 
     let r_before = engine.accounts[idx].reserved_pnl;
     let ppt_before = engine.pnl_pos_tot;
     let pmpt_before = engine.pnl_matured_pos_tot;
 
-    assert_eq!(r_before, 0, "all profit should be released");
+    assert_eq!(r_before.get(), 0, "all profit should be released");
 
     let x = 2_000u128;
     engine.consume_released_pnl(idx, x);
@@ -2044,7 +2044,7 @@ fn test_property_49_consume_released_pnl_preserves_reserve() {
         "pnl_pos_tot must decrease by x");
     assert_eq!(engine.pnl_matured_pos_tot, pmpt_before - x,
         "pnl_matured_pos_tot must decrease by x");
-    assert_eq!(engine.accounts[idx].pnl, 3_000i128,
+    assert_eq!(engine.accounts[idx].pnl.get(), 3_000i128,
         "PNL_i must decrease by x");
 }
 
@@ -2078,8 +2078,8 @@ fn test_property_50_flat_only_auto_conversion() {
     engine.set_pnl(idx_a, 10_000);
     {
         let old_r = engine.accounts[idx_a].reserved_pnl;
-        engine.accounts[idx_a].reserved_pnl = 0;
-        engine.pnl_matured_pos_tot += old_r;
+        engine.accounts[idx_a].reserved_pnl = U128::new(0);
+        engine.pnl_matured_pos_tot = U128::new(engine.pnl_matured_pos_tot.get() + old_r.get());
     }
     engine.vault = U128::new(engine.vault.get() + 10_000); // fund the PnL
 
@@ -2093,7 +2093,7 @@ fn test_property_50_flat_only_auto_conversion() {
     }
 
     let pnl_after = engine.accounts[idx_a].pnl;
-    assert!(pnl_after > 0, "open-position touch must not zero out released profit via auto-convert");
+    assert!(pnl_after.get() > 0, "open-position touch must not zero out released profit via auto-convert");
 
     // Now test flat account: close the position first
     engine.execute_trade_not_atomic(b, a, oracle, slot + 1, size_q, oracle, 0i128, 0).unwrap();
@@ -2102,8 +2102,8 @@ fn test_property_50_flat_only_auto_conversion() {
     engine.set_pnl(idx_a, 5_000);
     {
         let old_r = engine.accounts[idx_a].reserved_pnl;
-        engine.accounts[idx_a].reserved_pnl = 0;
-        engine.pnl_matured_pos_tot += old_r;
+        engine.accounts[idx_a].reserved_pnl = U128::new(0);
+        engine.pnl_matured_pos_tot = U128::new(engine.pnl_matured_pos_tot.get() + old_r.get());
     }
     engine.vault = U128::new(engine.vault.get() + 5_000);
 
@@ -2119,7 +2119,7 @@ fn test_property_50_flat_only_auto_conversion() {
     // After flat touch, released profit should have been converted to capital
     let pnl_after_flat = engine.accounts[idx_a].pnl;
     let cap_after_flat = engine.accounts[idx_a].capital.get();
-    assert_eq!(pnl_after_flat, 0, "flat touch must convert released profit (PNL → 0)");
+    assert_eq!(pnl_after_flat.get(), 0, "flat touch must convert released profit (PNL → 0)");
     assert!(cap_after_flat > cap_before_flat, "flat touch must increase capital from conversion");
 }
 
@@ -2187,12 +2187,12 @@ fn test_property_52_convert_released_pnl_explicit() {
     // Set released matured profit: use UseHLock(10) so PnL goes to reserve queue
     let idx = a as usize;
     engine.set_pnl_with_reserve(idx, 10_000, ReserveMode::UseHLock(10)).unwrap();
-    assert_eq!(engine.accounts[idx].reserved_pnl, 10_000, "all goes to reserve with h_lock>0");
+    assert_eq!(engine.accounts[idx].reserved_pnl.get(), 10_000, "all goes to reserve with h_lock>0");
     // Advance past horizon to mature cohorts, releasing 7000 (keep 3000 reserved)
     engine.current_slot = slot + 20; // well past h_lock=10
     engine.advance_profit_warmup(idx);
     // All 10000 is now matured; manually set reserved to 3000 to simulate partial release
-    engine.accounts[idx].reserved_pnl = 3_000;
+    engine.accounts[idx].reserved_pnl = U128::new(3_000);
     // Adjust matured for the re-reservation
     engine.pnl_matured_pos_tot = engine.pnl_matured_pos_tot.saturating_sub(3_000);
 
@@ -2210,8 +2210,8 @@ fn test_property_52_convert_released_pnl_explicit() {
     // Requesting more than released must fail
     let released_now = {
         let pnl = engine.accounts[idx].pnl;
-        let pos = if pnl > 0 { pnl as u128 } else { 0u128 };
-        pos.saturating_sub(engine.accounts[idx].reserved_pnl)
+        let pos = if pnl.get() > 0 { pnl.get() as u128 } else { 0u128 };
+        pos.saturating_sub(engine.accounts[idx].reserved_pnl.get())
     };
     let result2 = engine.convert_released_pnl_not_atomic(a, released_now + 1, oracle, slot3, 0i128, 0);
     assert!(result2.is_err(), "requesting more than released must fail");
@@ -2247,7 +2247,7 @@ fn test_property_53_phantom_dust_adl_ordering() {
 
     // Verify balanced OI before crash
     assert_eq!(engine.oi_eff_long_q, engine.oi_eff_short_q, "OI must be balanced");
-    assert!(engine.oi_eff_long_q > 0, "OI must be nonzero");
+    assert!(engine.oi_eff_long_q.get() > 0, "OI must be nonzero");
     assert!(engine.stored_pos_count_long > 0, "should have stored long positions");
 
     // Crash the price to make 'a' (long) deeply underwater, triggering
@@ -2308,7 +2308,7 @@ fn test_property_54_unilateral_exact_drain_reset() {
     assert!(engine.check_conservation(), "conservation must hold after exact-drain scenario");
 
     // If long OI went to 0, the side should have a reset scheduled or already finalized
-    if engine.oi_eff_long_q == 0 && engine.stored_pos_count_long == 0 {
+    if engine.oi_eff_long_q.get() == 0 && engine.stored_pos_count_long == 0 {
         // Side was fully drained — mode should transition appropriately
         assert!(engine.side_mode_long != SideMode::Normal
                 || engine.stored_pos_count_short == 0,
@@ -2476,7 +2476,7 @@ fn test_force_close_combined_convenience() {
 
     // First call on positive-PnL account: reconciles, may be Deferred
     let a_result = engine.force_close_resolved_not_atomic(a, 200).unwrap();
-    if engine.accounts[a as usize].pnl > 0 && a_result.is_progress_only() {
+    if engine.accounts[a as usize].pnl.get() > 0 && a_result.is_progress_only() {
         assert!(engine.is_used(a as usize), "account stays open when deferred");
     }
 
@@ -2657,8 +2657,8 @@ fn test_force_close_multiple_sequential_no_aggregate_drift() {
     }
 
     assert_eq!(engine.c_tot.get(), 0);
-    assert_eq!(engine.pnl_pos_tot, 0);
-    assert_eq!(engine.pnl_matured_pos_tot, 0);
+    assert_eq!(engine.pnl_pos_tot.get(), 0);
+    assert_eq!(engine.pnl_matured_pos_tot.get(), 0);
     assert_eq!(engine.stored_pos_count_long, 0);
     assert_eq!(engine.stored_pos_count_short, 0);
     assert_eq!(engine.num_used_accounts, 0);
@@ -2679,7 +2679,7 @@ fn test_force_close_decrements_positions() {
 
     // resolve_market zeroes OI; force_close zeroes positions
     engine.resolve_market(1000, 1000, 100, 0).unwrap();
-    assert_eq!(engine.oi_eff_long_q, 0, "resolve_market zeroes OI");
+    assert_eq!(engine.oi_eff_long_q.get(), 0, "resolve_market zeroes OI");
 
     // Close both sides — position counts go to 0
     engine.force_close_resolved_not_atomic(a, 100).unwrap().expect_closed("force_close");
@@ -2723,7 +2723,7 @@ fn test_force_close_rejects_corrupt_a_basis() {
     // Manufacture corrupt state: nonzero position with a_basis = 0
     engine.set_position_basis_q(a as usize, (10 * POS_SCALE) as i128);
     engine.stored_pos_count_long = 1;
-    engine.accounts[a as usize].adl_a_basis = 0;
+    engine.accounts[a as usize].adl_a_basis = U128::ZERO;
 
     engine.market_mode = MarketMode::Resolved;
     let result = engine.force_close_resolved_not_atomic(a, 100);
@@ -2759,7 +2759,7 @@ fn test_property_31_fullclose_liquidation_zeros_position() {
     assert_eq!(engine.effective_pos_q(a as usize), 0,
         "FullClose liquidation must zero the effective position");
     // Position basis must also be zero
-    assert_eq!(engine.accounts[a as usize].position_basis_q, 0,
+    assert_eq!(engine.accounts[a as usize].position_basis_q.get(), 0,
         "FullClose liquidation must zero position_basis_q");
     assert!(engine.check_conservation());
 }
@@ -2774,17 +2774,17 @@ fn test_append_reserve_creates_sched_bucket() {
     let idx = engine.add_user(1000).unwrap();
     engine.deposit(idx, 100_000, 1000, 100).unwrap();
     // Simulate positive PnL increase that would create a reserve
-    engine.accounts[idx as usize].pnl = 10_000;
-    engine.accounts[idx as usize].reserved_pnl = 0;
+    engine.accounts[idx as usize].pnl = I128::new(10_000);
+    engine.accounts[idx as usize].reserved_pnl = U128::new(0);
     engine.current_slot = 100;
 
     engine.append_or_route_new_reserve(idx as usize, 10_000, 100, 50);
 
     assert_eq!(engine.accounts[idx as usize].sched_present, 1);
-    assert_eq!(engine.accounts[idx as usize].sched_remaining_q, 10_000);
+    assert_eq!(engine.accounts[idx as usize].sched_remaining_q.get(), 10_000);
     assert_eq!(engine.accounts[idx as usize].sched_horizon, 50);
     assert_eq!(engine.accounts[idx as usize].sched_start_slot, 100);
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 10_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 10_000);
 }
 
 #[test]
@@ -2799,10 +2799,10 @@ fn test_append_reserve_merges_same_slot_horizon() {
 
     // Should merge into one scheduled bucket
     assert_eq!(engine.accounts[idx as usize].sched_present, 1);
-    assert_eq!(engine.accounts[idx as usize].sched_remaining_q, 8_000);
-    assert_eq!(engine.accounts[idx as usize].sched_anchor_q, 8_000);
+    assert_eq!(engine.accounts[idx as usize].sched_remaining_q.get(), 8_000);
+    assert_eq!(engine.accounts[idx as usize].sched_anchor_q.get(), 8_000);
     assert_eq!(engine.accounts[idx as usize].pending_present, 0);
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 8_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 8_000);
 }
 
 #[test]
@@ -2818,8 +2818,8 @@ fn test_append_reserve_different_horizon_creates_pending() {
     // First goes to sched, second to pending (different horizon, so no merge)
     assert_eq!(engine.accounts[idx as usize].sched_present, 1);
     assert_eq!(engine.accounts[idx as usize].pending_present, 1);
-    assert_eq!(engine.accounts[idx as usize].pending_remaining_q, 3_000);
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 8_000);
+    assert_eq!(engine.accounts[idx as usize].pending_remaining_q.get(), 3_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 8_000);
 }
 
 #[test]
@@ -2838,8 +2838,8 @@ fn test_apply_reserve_loss_newest_first() {
 
     assert_eq!(engine.accounts[idx as usize].pending_present, 0); // pending removed
     assert_eq!(engine.accounts[idx as usize].sched_present, 1);
-    assert_eq!(engine.accounts[idx as usize].sched_remaining_q, 4_000); // sched had 5k - 1k = 4k
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 4_000);
+    assert_eq!(engine.accounts[idx as usize].sched_remaining_q.get(), 4_000); // sched had 5k - 1k = 4k
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 4_000);
 }
 
 #[test]
@@ -2850,11 +2850,11 @@ fn test_prepare_account_for_resolved_touch() {
     engine.current_slot = 100;
 
     engine.append_or_route_new_reserve(idx as usize, 10_000, 100, 50);
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 10_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 10_000);
 
     engine.prepare_account_for_resolved_touch(idx as usize);
 
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 0);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 0);
     assert_eq!(engine.accounts[idx as usize].sched_present, 0);
     assert_eq!(engine.accounts[idx as usize].pending_present, 0);
 }
@@ -2868,25 +2868,25 @@ fn test_advance_profit_warmup_sched_maturity() {
     engine.current_slot = 100;
 
     // Create a scheduled bucket: 10_000 reserve, horizon 100 slots, starting at slot 100
-    engine.accounts[idx as usize].pnl = 10_000;
-    engine.pnl_pos_tot = 10_000;
+    engine.accounts[idx as usize].pnl = I128::new(10_000);
+    engine.pnl_pos_tot = U128::new(10_000);
     engine.append_or_route_new_reserve(idx as usize, 10_000, 100, 100);
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 10_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 10_000);
 
     // Advance 50 slots -> should release floor(10_000 * 50 / 100) = 5_000
     engine.current_slot = 150;
     let matured_before = engine.pnl_matured_pos_tot;
     engine.advance_profit_warmup(idx as usize);
 
-    let released = engine.pnl_matured_pos_tot - matured_before;
+    let released = (engine.pnl_matured_pos_tot - matured_before).get();
     assert_eq!(released, 5_000, "50% of horizon should release 50% of reserve");
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 5_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 5_000);
 
     // Advance to full maturity (slot 200)
     engine.current_slot = 200;
     engine.advance_profit_warmup(idx as usize);
 
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 0, "fully matured");
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 0, "fully matured");
     assert_eq!(engine.accounts[idx as usize].sched_present, 0, "empty bucket cleared");
 }
 
@@ -2898,24 +2898,24 @@ fn test_advance_profit_warmup_sched_then_pending_promotion() {
     engine.current_slot = 100;
 
     // Two buckets: sched (10k, h=100) then pending (5k, h=200)
-    engine.accounts[idx as usize].pnl = 15_000;
-    engine.pnl_pos_tot = 15_000;
+    engine.accounts[idx as usize].pnl = I128::new(15_000);
+    engine.pnl_pos_tot = U128::new(15_000);
     engine.append_or_route_new_reserve(idx as usize, 10_000, 100, 100); // sched: 100-slot horizon
     engine.append_or_route_new_reserve(idx as usize, 5_000, 100, 200);  // pending: 200-slot horizon
 
     assert_eq!(engine.accounts[idx as usize].sched_present, 1);
     assert_eq!(engine.accounts[idx as usize].pending_present, 1);
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 15_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 15_000);
 
     // At slot 200: sched fully matured -> clears + promotes pending to sched
     engine.current_slot = 200;
     engine.advance_profit_warmup(idx as usize);
 
     // sched 10_000 fully released, pending promoted to sched (starts at slot 200)
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 5_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 5_000);
     assert_eq!(engine.accounts[idx as usize].sched_present, 1, "pending promoted to sched");
     assert_eq!(engine.accounts[idx as usize].pending_present, 0);
-    assert_eq!(engine.accounts[idx as usize].sched_remaining_q, 5_000);
+    assert_eq!(engine.accounts[idx as usize].sched_remaining_q.get(), 5_000);
     assert_eq!(engine.accounts[idx as usize].sched_start_slot, 200);
 }
 
@@ -2929,12 +2929,12 @@ fn test_set_pnl_with_reserve_positive_increase_creates_cohort() {
     // Set PnL from 0 to 10_000 with H_lock=50
     engine.set_pnl_with_reserve(idx as usize, 10_000, ReserveMode::UseHLock(50)).unwrap();
 
-    assert_eq!(engine.accounts[idx as usize].pnl, 10_000);
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 10_000);
+    assert_eq!(engine.accounts[idx as usize].pnl.get(), 10_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 10_000);
     assert_eq!(engine.accounts[idx as usize].sched_present, 1);
-    assert_eq!(engine.pnl_pos_tot, 10_000);
+    assert_eq!(engine.pnl_pos_tot.get(), 10_000);
     // Matured should NOT increase (reserve not yet matured)
-    assert_eq!(engine.pnl_matured_pos_tot, 0);
+    assert_eq!(engine.pnl_matured_pos_tot.get(), 0);
 }
 
 #[test]
@@ -2945,9 +2945,9 @@ fn test_set_pnl_with_reserve_immediate_release() {
 
     engine.set_pnl_with_reserve(idx as usize, 10_000, ReserveMode::ImmediateRelease).unwrap();
 
-    assert_eq!(engine.accounts[idx as usize].pnl, 10_000);
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 0); // no reserve
-    assert_eq!(engine.pnl_matured_pos_tot, 10_000); // immediately matured
+    assert_eq!(engine.accounts[idx as usize].pnl.get(), 10_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 0); // no reserve
+    assert_eq!(engine.pnl_matured_pos_tot.get(), 10_000); // immediately matured
 }
 
 #[test]
@@ -2959,14 +2959,14 @@ fn test_set_pnl_with_reserve_negative_lifo_loss() {
 
     // Start with 10_000 reserved
     engine.set_pnl_with_reserve(idx as usize, 10_000, ReserveMode::UseHLock(50)).unwrap();
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 10_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 10_000);
 
     // PnL drops to 3_000 → loss of 7_000 from positive, consumed from reserve LIFO
     engine.set_pnl_with_reserve(idx as usize, 3_000, ReserveMode::NoPositiveIncreaseAllowed).unwrap();
 
-    assert_eq!(engine.accounts[idx as usize].pnl, 3_000);
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 3_000); // 10_000 - 7_000
-    assert_eq!(engine.pnl_pos_tot, 3_000);
+    assert_eq!(engine.accounts[idx as usize].pnl.get(), 3_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 3_000); // 10_000 - 7_000
+    assert_eq!(engine.pnl_pos_tot.get(), 3_000);
 }
 
 #[test]
@@ -2978,8 +2978,8 @@ fn test_set_pnl_with_reserve_h_lock_zero_immediate() {
     // H_lock = 0 means immediate release (no cohort)
     engine.set_pnl_with_reserve(idx as usize, 5_000, ReserveMode::UseHLock(0)).unwrap();
 
-    assert_eq!(engine.accounts[idx as usize].reserved_pnl, 0);
-    assert_eq!(engine.pnl_matured_pos_tot, 5_000);
+    assert_eq!(engine.accounts[idx as usize].reserved_pnl.get(), 0);
+    assert_eq!(engine.pnl_matured_pos_tot.get(), 5_000);
 }
 
 // ============================================================================
@@ -2995,7 +2995,7 @@ fn test_touch_live_local_does_not_auto_convert() {
 
     // Give account positive PnL (flat, released)
     engine.set_pnl(idx as usize, 10_000);
-    engine.pnl_matured_pos_tot = 10_000;
+    engine.pnl_matured_pos_tot = U128::new(10_000);
 
     let cap_before = engine.accounts[idx as usize].capital.get();
     engine.last_market_slot = 100;
@@ -3082,8 +3082,8 @@ fn test_resolve_market_basic() {
     assert!(result.is_ok());
     assert!(engine.market_mode == MarketMode::Resolved);
     assert_eq!(engine.resolved_price, 1000);
-    assert_eq!(engine.oi_eff_long_q, 0);
-    assert_eq!(engine.oi_eff_short_q, 0);
+    assert_eq!(engine.oi_eff_long_q.get(), 0);
+    assert_eq!(engine.oi_eff_short_q.get(), 0);
     assert_eq!(engine.pnl_matured_pos_tot, engine.pnl_pos_tot);
 }
 
@@ -3137,8 +3137,8 @@ fn test_blocker1_trade_open_must_not_use_unreleased_pnl() {
     engine.touch_account_live_local(a as usize, &mut ctx).unwrap();
 
     // a now has reserved positive PnL (not yet released due to h_lock=50)
-    assert!(engine.accounts[a as usize].pnl > 0, "a must have positive PnL");
-    assert!(engine.accounts[a as usize].reserved_pnl > 0, "PnL must be reserved");
+    assert!(engine.accounts[a as usize].pnl.get() > 0, "a must have positive PnL");
+    assert!(engine.accounts[a as usize].reserved_pnl.get() > 0, "PnL must be reserved");
 
     // Compute trade-open equity and init equity
     let eq_trade = engine.account_equity_trade_open_raw(
@@ -3212,10 +3212,10 @@ fn audit_2_trade_open_must_use_all_pos_pnl_via_g() {
     engine.deposit(a, 100, 1000, 100).unwrap();
 
     // Inject positive PnL, ALL in reserve (unreleased)
-    engine.accounts[a as usize].pnl = 100;
-    engine.accounts[a as usize].reserved_pnl = 100;
-    engine.pnl_pos_tot = 100;
-    engine.pnl_matured_pos_tot = 0;
+    engine.accounts[a as usize].pnl = I128::new(100);
+    engine.accounts[a as usize].reserved_pnl = U128::new(100);
+    engine.pnl_pos_tot = U128::new(100);
+    engine.pnl_matured_pos_tot = U128::new(0);
     // Vault fully backs positive PnL: g = 1
     engine.vault = U128::new(engine.vault.get() + 100);
 
@@ -3327,7 +3327,7 @@ fn audit_9_pending_merge_uses_max_horizon() {
     engine.accounts[idx].pnl += 1000;
     engine.pnl_pos_tot += 1000;
     engine.append_or_route_new_reserve(idx, 1000, 102, 100);
-    assert_eq!(engine.accounts[idx].pending_remaining_q, 2000);
+    assert_eq!(engine.accounts[idx].pending_remaining_q.get(), 2000);
     assert_eq!(engine.accounts[idx].pending_horizon, 100,
         "pending horizon must be max of all merged horizons");
 }
@@ -3520,7 +3520,7 @@ fn funding_new_entrant_must_not_inherit_old_fraction() {
     let d_pnl = engine.accounts[d as usize].pnl;
     // With per-side F indices and f_snap, the new pair sees exactly
     // F(slot+2) - F(slot+1) funding, not the accumulated fraction.
-    assert!(c_pnl.abs() <= 1 && d_pnl.abs() <= 1,
+    assert!(c_pnl.get().abs() <= 1 && d_pnl.get().abs() <= 1,
         "new entrant must not inherit old fractional funding: c_pnl={}, d_pnl={}", c_pnl, d_pnl);
 }
 
@@ -3564,7 +3564,7 @@ fn funding_basic_sign_convention() {
     let b_cap = engine.accounts[b as usize].capital.get();
     assert!(a_cap < 500_000,
         "positive rate: long must lose capital, got cap={}", a_cap);
-    assert!(b_cap > 500_000 || engine.accounts[b as usize].pnl > 0,
+    assert!(b_cap > 500_000 || engine.accounts[b as usize].pnl.get() > 0,
         "positive rate: short must gain, cap={} pnl={}", b_cap, engine.accounts[b as usize].pnl);
     assert!(engine.check_conservation());
 }
@@ -3620,8 +3620,8 @@ fn test_kf_combined_floor_negative_boundary() {
     let f_before = engine.f_long_num;
 
     // Set K_diff = -1, F_diff = -FUNDING_DEN through accrue manipulation
-    engine.adl_coeff_long = engine.accounts[idx].adl_k_snap - 1;
-    engine.f_long_num = engine.accounts[idx].f_snap - (FUNDING_DEN as i128);
+    engine.adl_coeff_long = I128::new(engine.accounts[idx].adl_k_snap.get() - 1);
+    engine.f_long_num = I128::new(engine.accounts[idx].f_snap.get() - (FUNDING_DEN as i128));
 
     let pnl_before = engine.accounts[idx].pnl;
 
@@ -3641,7 +3641,7 @@ fn test_kf_combined_floor_negative_boundary() {
     // reasonable K_diff. Need larger abs_basis.
 
     // Let me use a direct approach: verify pnl_delta is not double-counted
-    assert!(pnl_delta >= -1,
+    assert!(pnl_delta.get() >= -1,
         "KF settlement must not double-floor: pnl_delta={}", pnl_delta);
 }
 
@@ -3696,10 +3696,10 @@ fn test_reclaim_rejects_nonempty_queue_metadata() {
 
     let idx = a as usize;
     // Corrupt state: reserved_pnl = 0 but bucket metadata not empty
-    engine.accounts[idx].reserved_pnl = 0;
+    engine.accounts[idx].reserved_pnl = U128::new(0);
     engine.accounts[idx].sched_present = 1; // orphaned metadata
-    engine.accounts[idx].pnl = 0;
-    engine.accounts[idx].position_basis_q = 0;
+    engine.accounts[idx].pnl = I128::new(0);
+    engine.accounts[idx].position_basis_q = I128::new(0);
     // Make capital dust (below min_initial_deposit)
     engine.set_capital(idx, 1);
 
@@ -3768,8 +3768,8 @@ fn test_funding_partition_invariance() {
 
     // K may differ between paths (different chunking → different integer parts).
     // But K*FUNDING_DEN + F must be the same (exact total funding).
-    let total_a = (k_a as i128) * (FUNDING_DEN as i128) + f_a;
-    let total_b = (k_b as i128) * (FUNDING_DEN as i128) + f_b;
+    let total_a = k_a.get() * (FUNDING_DEN as i128) + f_a.get();
+    let total_b = k_b.get() * (FUNDING_DEN as i128) + f_b.get();
     assert_eq!(total_a, total_b,
         "K*DEN + F must be partition-invariant: A=({},{}) B=({},{})", k_a, f_a, k_b, f_b);
 
@@ -3912,7 +3912,7 @@ fn test_settle_flat_negative_pnl() {
     engine.settle_flat_negative_pnl_not_atomic(a, 101).unwrap();
 
     // PnL should be zeroed, insurance should have absorbed the loss
-    assert_eq!(engine.accounts[a as usize].pnl, 0,
+    assert_eq!(engine.accounts[a as usize].pnl.get(), 0,
         "flat negative PnL must be zeroed");
     assert!(engine.check_conservation());
 }
