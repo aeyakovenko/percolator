@@ -145,7 +145,7 @@ fn inductive_set_capital_decrease_preserves_accounting() {
 
     let new_cap: u32 = kani::any();
     kani::assume(new_cap <= dep);
-    engine.set_capital(idx as usize, new_cap as u128);
+    engine.set_capital(idx as usize, new_cap as u128).unwrap();
     assert!(engine.check_conservation());
 }
 

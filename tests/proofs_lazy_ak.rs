@@ -601,7 +601,7 @@ fn t6_26_full_drain_reset_regression() {
     engine.adl_coeff_long = k_epoch_start;
 
     engine.oi_eff_long_q = 0u128;
-    engine.begin_full_drain_reset(Side::Long);
+    engine.begin_full_drain_reset(Side::Long).unwrap();
 
     assert!(engine.side_mode_long == SideMode::ResetPending);
     assert!(engine.adl_epoch_long == 1);

@@ -171,6 +171,20 @@ PnL admission for untrusted public flows, sync recurring fees when enabled, and
 reject extraction-sensitive actions while raw oracle target and effective engine
 price diverge.
 
+### Wrapper Security Boundary
+
+Do not expose core primitives directly as permissionless public instructions:
+
+- `set_owner`, live/resolved insurance withdrawals, and insurance-to-account
+  credits require wrapper authentication and policy limits.
+- `ResolveMode::Degenerate` is a privileged recovery branch. Public resolution
+  flows should use ordinary resolution unless an authenticated recovery path
+  explicitly authorizes the degenerate branch.
+- Account-free `accrue_market_to` must not be a public heartbeat on exposed
+  markets when price or funding would move account equity. Public catch-up
+  should use an account-touching keeper/liquidation path or a wrapper proof that
+  the accrual is not equity-active.
+
 ---
 
 ## Open Source

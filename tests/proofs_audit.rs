@@ -46,14 +46,14 @@ fn proof_epoch_snap_zero_on_position_zeroout() {
     // Use set_position_basis_q to correctly track stored_pos_count.
     // Set epoch mismatch to skip the phantom dust U256 path
     // (irrelevant to the epoch_snap fix).
-    engine.set_position_basis_q(idx, signed_basis);
+    engine.set_position_basis_q(idx, signed_basis).unwrap();
     engine.accounts[idx].adl_a_basis = ADL_ONE;
     engine.accounts[idx].adl_k_snap = 0;
     // Epoch mismatch: snap=0 != epoch_long=5 / epoch_short=7
     engine.accounts[idx].adl_epoch_snap = 0;
 
     // Zero out the position
-    engine.attach_effective_position(idx, 0);
+    engine.attach_effective_position(idx, 0).unwrap();
 
     // Spec §2.4: all canonical zero-position defaults
     assert!(
@@ -97,7 +97,7 @@ fn proof_epoch_snap_correct_on_nonzero_attach() {
         -(basis as i128)
     };
 
-    engine.attach_effective_position(idx, new_eff);
+    engine.attach_effective_position(idx, new_eff).unwrap();
 
     if side_long {
         assert!(engine.accounts[idx].adl_epoch_snap == engine.adl_epoch_long);
@@ -285,7 +285,7 @@ fn proof_fee_debt_sweep_checked_arithmetic() {
     let fc_before = engine.accounts[idx].fee_credits.get();
     let ins_before = engine.insurance_fund.balance.get();
 
-    engine.fee_debt_sweep(idx);
+    engine.fee_debt_sweep(idx).unwrap();
 
     let cap_after = engine.accounts[idx].capital.get();
     let fc_after = engine.accounts[idx].fee_credits.get();
@@ -468,10 +468,9 @@ fn proof_close_account_pnl_check_before_fee_forgive() {
     let idx = add_user_test(&mut engine, 0).unwrap();
 
     // Set up consistent state: flat, PnL > 0 (fully reserved), capital = 0, fee debt
-    // Use set_pnl to keep pnl_pos_tot in sync
-    engine.set_pnl(idx as usize, 5000i128);
-    // All PnL is reserved (warmup not complete)
-    engine.accounts[idx as usize].reserved_pnl = 5000;
+    // Use the live-compatible helper to keep PnL aggregates and reserve
+    // buckets in sync.
+    set_pnl_test(&mut engine, idx as usize, 5000i128).unwrap();
     // Zero capital — fee_debt_sweep will be a no-op
     // (capital is already 0 from add_user with fee=0)
 
@@ -791,7 +790,7 @@ fn proof_reclaim_rejects_negative_pnl() {
     let idx = add_user_test(&mut engine, 0).unwrap();
     engine.deposit_not_atomic(idx, 1, DEFAULT_SLOT).unwrap();
 
-    engine.set_pnl(idx as usize, -100i128);
+    engine.set_pnl(idx as usize, -100i128).unwrap();
 
     let ins_before = engine.insurance_fund.balance.get();
 

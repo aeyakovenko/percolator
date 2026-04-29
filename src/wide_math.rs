@@ -650,9 +650,7 @@ impl I256 {
         if neg {
             // Result must be <= 2^255 (magnitude of MIN)
             // 2^255 as U256: hi limb has bit 127 set (for [u128;2]) or bit 63 of limb[3] (for [u64;4])
-            let min_mag = U256::from_u128(0)
-                .checked_add(U256::from_u128(1u128 << 127))
-                .unwrap_or(U256::MAX);
+            let min_mag = U256::new(0, 1u128 << 127);
             // For exactly 2^255, result is MIN
             if product == min_mag {
                 return Some(I256::MIN);
@@ -873,9 +871,7 @@ impl I256 {
         if neg {
             // Result must be <= 2^255 (magnitude of MIN)
             // 2^255 as U256: hi limb has bit 127 set (for [u128;2]) or bit 63 of limb[3] (for [u64;4])
-            let min_mag = U256::from_u128(0)
-                .checked_add(U256::from_u128(1u128 << 127))
-                .unwrap_or(U256::MAX);
+            let min_mag = U256::new(0, 1u128 << 127);
             // For exactly 2^255, result is MIN
             if product == min_mag {
                 return Some(I256::MIN);
@@ -1921,6 +1917,20 @@ mod tests {
         let v = I256::from_i128(-100);
         let a = v.abs_u256();
         assert_eq!(a, U256::from_u128(100));
+    }
+
+    #[test]
+    fn test_i256_mul_negative_above_i128_magnitude() {
+        let a = I256::from_u128(1u128 << 127);
+        let b = I256::from_i128(-2);
+
+        let product = a
+            .checked_mul_i256(b)
+            .expect("-2^128 fits in signed 256-bit range");
+
+        assert!(product.is_negative());
+        assert_eq!(product.try_into_i128(), None);
+        assert_eq!(product.abs_u256(), U256::new(0, 1));
     }
 
     // --- I256 comparison ---

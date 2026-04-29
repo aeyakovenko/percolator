@@ -33,6 +33,9 @@ overflow-checks = true
 inherits = "release"
 panic = "abort"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [workspace.metadata.kani]
 flags = { tests = true }
 unstable = { stubbing = true }

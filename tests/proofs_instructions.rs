@@ -39,7 +39,7 @@ fn t3_16_reset_pending_counter_invariant() {
     engine.adl_coeff_long = k;
 
     engine.oi_eff_long_q = 0u128;
-    engine.begin_full_drain_reset(Side::Long);
+    engine.begin_full_drain_reset(Side::Long).unwrap();
 
     assert!(engine.side_mode_long == SideMode::ResetPending);
     assert!(engine.stale_account_count_long == 2);
@@ -86,7 +86,7 @@ fn t3_16b_reset_counter_with_nonzero_k_diff() {
     engine.adl_coeff_long = k_long;
 
     engine.oi_eff_long_q = 0u128;
-    engine.begin_full_drain_reset(Side::Long);
+    engine.begin_full_drain_reset(Side::Long).unwrap();
 
     assert!(engine.adl_epoch_start_k_long == k_long);
     assert!(engine.stale_account_count_long == 2);
@@ -133,7 +133,7 @@ fn t3_18_dust_bound_reset_in_begin_full_drain() {
     engine.phantom_dust_bound_long_q = 5u128;
     engine.oi_eff_long_q = 0u128;
 
-    engine.begin_full_drain_reset(Side::Long);
+    engine.begin_full_drain_reset(Side::Long).unwrap();
 
     assert!(
         engine.phantom_dust_bound_long_q == 0,
@@ -182,7 +182,7 @@ fn t6_26b_full_drain_reset_nonzero_k_diff() {
     engine.adl_coeff_long = 500i128;
 
     engine.oi_eff_long_q = 0u128;
-    engine.begin_full_drain_reset(Side::Long);
+    engine.begin_full_drain_reset(Side::Long).unwrap();
 
     assert!(engine.adl_epoch_start_k_long == 500i128);
     assert!(engine.adl_epoch_long == 1);
@@ -824,7 +824,7 @@ fn proof_begin_full_drain_reset() {
 
     assert!(engine.oi_eff_long_q == 0);
 
-    engine.begin_full_drain_reset(Side::Long);
+    engine.begin_full_drain_reset(Side::Long).unwrap();
 
     assert!(engine.adl_epoch_long == epoch_before + 1);
     assert!(engine.adl_mult_long == ADL_ONE);
@@ -1206,7 +1206,7 @@ fn t14_64_dust_bound_full_drain_reset_zeroes() {
     engine.stored_pos_count_long = 0;
     engine.adl_epoch_long = 0;
 
-    engine.begin_full_drain_reset(Side::Long);
+    engine.begin_full_drain_reset(Side::Long).unwrap();
 
     assert!(engine.phantom_dust_bound_long_q == 0u128);
     assert!(engine.oi_eff_long_q == 0u128);
