@@ -130,6 +130,16 @@ fn mat_regression_account(engine: &mut RiskEngine, idx: u16, capital: u128, slot
     engine.deposit_not_atomic(idx, capital, slot).unwrap();
 }
 
+fn assert_err_restores_engine<T>(
+    engine: &mut RiskEngine,
+    action: impl FnOnce(&mut RiskEngine) -> Result<T>,
+) {
+    let before = engine.clone();
+    let result = action(engine);
+    assert!(result.is_err(), "action must fail for rollback check");
+    assert_eq!(*engine, before);
+}
+
 /// Helper: allocate a user slot without moving capital (back-door via
 /// materialize_at). The spec-strict deposit path is exercised in
 /// test_deposit_materialize_user.
@@ -387,6 +397,91 @@ fn test_withdraw_exceeds_balance() {
 
     let result = engine.withdraw_not_atomic(idx, 10_000, oracle, slot, 0i128, 0, 100, None);
     assert_eq!(result, Err(RiskError::InsufficientBalance));
+}
+
+#[test]
+fn withdraw_failure_rolls_back_fee_sweep() {
+    let mut engine = RiskEngine::new(default_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+    let idx = add_user_test(&mut engine, 1000).expect("add_user");
+    engine
+        .deposit_not_atomic(idx, 1_000, slot)
+        .expect("deposit");
+    engine.accounts[idx as usize].fee_credits = I128::new(-100);
+
+    let before = engine.clone();
+    let result = engine.withdraw_not_atomic(idx, 950, oracle, slot, 0i128, 0, 100, None);
+
+    assert_eq!(result, Err(RiskError::InsufficientBalance));
+    assert_eq!(engine, before);
+}
+
+#[test]
+fn withdraw_failure_rolls_back_flat_loss_settlement() {
+    let mut engine = RiskEngine::new(default_params());
+    let oracle = 1000u64;
+    let slot = 1u64;
+    engine.current_slot = slot;
+    let idx = add_user_test(&mut engine, 1000).expect("add_user");
+    engine
+        .deposit_not_atomic(idx, 1_000, slot)
+        .expect("deposit");
+    engine.set_pnl(idx as usize, -100).expect("set pnl");
+
+    let before = engine.clone();
+    let result = engine.withdraw_not_atomic(idx, 950, oracle, slot, 0i128, 0, 100, None);
+
+    assert_eq!(result, Err(RiskError::InsufficientBalance));
+    assert_eq!(engine, before);
+}
+
+#[test]
+fn representative_not_atomic_failures_restore_engine() {
+    let oracle = 1000u64;
+
+    {
+        let mut engine = RiskEngine::new(default_params());
+        assert_err_restores_engine(&mut engine, |engine| engine.deposit_not_atomic(1, 0, 0));
+    }
+
+    {
+        let (mut engine, a, b) = setup_two_users(1_000, 1_000);
+        let size_q = make_size_q(11);
+        assert_err_restores_engine(&mut engine, |engine| {
+            engine.execute_trade_not_atomic(a, b, oracle, 1, size_q, oracle, 0i128, 0, 100, None)
+        });
+    }
+
+    {
+        let (mut engine, a, b) = setup_two_users(100_000, 100_000);
+        let size_q = make_size_q(10);
+        engine
+            .execute_trade_not_atomic(a, b, oracle, 1, size_q, oracle, 0i128, 0, 100, None)
+            .unwrap();
+        assert_err_restores_engine(&mut engine, |engine| {
+            engine.close_account_not_atomic(a, 1, oracle, 0i128, 0, 100, None)
+        });
+    }
+
+    {
+        let mut engine = RiskEngine::new(default_params());
+        let a = add_user_test(&mut engine, 1000).unwrap();
+        engine.deposit_not_atomic(a, 100_000, 100).unwrap();
+        assert_err_restores_engine(&mut engine, |engine| {
+            engine.resolve_market_not_atomic(ResolveMode::Ordinary, 2000, 1000, 200, 0)
+        });
+    }
+
+    {
+        let mut engine = RiskEngine::new(default_params());
+        let a = add_user_test(&mut engine, 1000).unwrap();
+        engine.deposit_not_atomic(a, 100_000, 100).unwrap();
+        assert_err_restores_engine(&mut engine, |engine| {
+            engine.reclaim_empty_account_not_atomic(a, 100)
+        });
+    }
 }
 
 #[test]
