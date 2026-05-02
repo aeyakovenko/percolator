@@ -14,9 +14,15 @@
 //!
 //! # Atomicity Model
 //!
-//! Public functions suffixed with `_not_atomic` can return `Err` after partial
-//! state mutation. **Callers MUST abort the entire transaction on `Err`** —
-//! they must not retry, suppress, or continue with mutated state.
+//! Public functions suffixed with `_not_atomic` run directly inside an
+//! engine-local rollback guard, or purely delegate to a guarded `_not_atomic`
+//! callee: if they return `Err`, engine state is restored to its pre-call
+//! snapshot before the error is returned. Most guards snapshot only the
+//! non-account engine state plus the explicitly touched account slots; dynamic
+//! keeper scans snapshot the bounded candidate and round-robin touch sets. The
+//! suffix remains a deployment reminder that wrappers still own outer
+//! transaction atomicity for token transfers, account persistence, and
+//! multi-account side effects.
 //!
 //! On Solana SVM, any `Err` return from an instruction aborts the transaction
 //! and rolls back all account state automatically. This is the expected
@@ -32,6 +38,25 @@
 
 #![no_std]
 #![forbid(unsafe_code)]
+#![allow(unused_doc_comments)]
+#![allow(
+    clippy::bool_comparison,
+    clippy::collapsible_if,
+    clippy::doc_lazy_continuation,
+    clippy::empty_line_after_doc_comments,
+    clippy::if_same_then_else,
+    clippy::manual_div_ceil,
+    clippy::manual_is_multiple_of,
+    clippy::manual_saturating_arithmetic,
+    clippy::manual_unwrap_or,
+    clippy::needless_range_loop,
+    clippy::new_without_default,
+    clippy::question_mark,
+    clippy::should_implement_trait,
+    clippy::too_many_arguments,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_map_or
+)]
 
 #[cfg(kani)]
 extern crate kani;
@@ -57,6 +82,18 @@ macro_rules! test_visible {
         #[cfg(not(any(feature = "test", feature = "stress", kani)))]
         fn $name($($args)*) $(-> $ret)? $body
     };
+}
+
+macro_rules! rollback_on_error {
+    ($self:ident, [$($idx:expr),* $(,)?], $body:block) => {{
+        let __before = $self.rollback_snapshot_accounts([$($idx as usize),*]);
+        #[allow(clippy::redundant_closure_call)]
+        let __result = (|| $body)();
+        if __result.is_err() {
+            $self.restore_rollback_snapshot(__before);
+        }
+        __result
+    }};
 }
 
 // ============================================================================
@@ -232,6 +269,7 @@ pub enum SideMode {
 
 /// Max accounts that can be touched in a single instruction.
 pub const MAX_TOUCHED_PER_INSTRUCTION: usize = 256;
+const KEEPER_ROLLBACK_ACCOUNT_SLOTS: usize = MAX_TOUCHED_PER_INSTRUCTION * 2;
 
 /// h_max sticky set is stored as a bitmap indexed by storage slot.
 /// Size = BITMAP_WORDS (same sizing as the allocator's `used` bitmap).
@@ -484,27 +522,15 @@ pub struct Account {
 impl Account {
     pub const KIND_USER: u8 = 0;
     pub const KIND_LP: u8 = 1;
-
-    pub fn is_lp(&self) -> bool {
-        self.kind == Self::KIND_LP
-    }
-
-    pub fn is_user(&self) -> bool {
-        self.kind == Self::KIND_USER
-    }
-}
-
-#[cfg(any(feature = "test", kani))]
-fn empty_account() -> Account {
-    Account {
+    pub const EMPTY: Account = Account {
         capital: U128::ZERO,
         kind: Account::KIND_USER,
-        pnl: 0i128,
-        reserved_pnl: 0u128,
-        position_basis_q: 0i128,
+        pnl: 0,
+        reserved_pnl: 0,
+        position_basis_q: 0,
         adl_a_basis: ADL_ONE,
-        adl_k_snap: 0i128,
-        f_snap: 0i128,
+        adl_k_snap: 0,
+        f_snap: 0,
         adl_epoch_snap: 0,
         matcher_program: [0; 32],
         matcher_context: [0; 32],
@@ -521,7 +547,20 @@ fn empty_account() -> Account {
         pending_remaining_q: 0,
         pending_horizon: 0,
         pending_created_slot: 0,
+    };
+
+    pub fn is_lp(&self) -> bool {
+        self.kind == Self::KIND_LP
     }
+
+    pub fn is_user(&self) -> bool {
+        self.kind == Self::KIND_USER
+    }
+}
+
+#[cfg(any(feature = "test", kani))]
+fn empty_account() -> Account {
+    Account::EMPTY
 }
 
 /// Insurance fund state
@@ -731,6 +770,74 @@ pub struct RiskEngine {
     pub accounts: [Account; MAX_ACCOUNTS],
 }
 
+struct RiskEngineNonAccountSnapshot {
+    vault: U128,
+    insurance_fund: InsuranceFund,
+    params: RiskParams,
+    current_slot: u64,
+    market_mode: MarketMode,
+    resolved_price: u64,
+    resolved_slot: u64,
+    resolved_payout_h_num: u128,
+    resolved_payout_h_den: u128,
+    resolved_payout_ready: u8,
+    resolved_k_long_terminal_delta: i128,
+    resolved_k_short_terminal_delta: i128,
+    resolved_live_price: u64,
+    c_tot: U128,
+    pnl_pos_tot: u128,
+    pnl_matured_pos_tot: u128,
+    adl_mult_long: u128,
+    adl_mult_short: u128,
+    adl_coeff_long: i128,
+    adl_coeff_short: i128,
+    adl_epoch_long: u64,
+    adl_epoch_short: u64,
+    adl_epoch_start_k_long: i128,
+    adl_epoch_start_k_short: i128,
+    oi_eff_long_q: u128,
+    oi_eff_short_q: u128,
+    side_mode_long: SideMode,
+    side_mode_short: SideMode,
+    stored_pos_count_long: u64,
+    stored_pos_count_short: u64,
+    stale_account_count_long: u64,
+    stale_account_count_short: u64,
+    phantom_dust_certified_long_q: u128,
+    phantom_dust_certified_short_q: u128,
+    phantom_dust_potential_long_q: u128,
+    phantom_dust_potential_short_q: u128,
+    materialized_account_count: u64,
+    neg_pnl_account_count: u64,
+    rr_cursor_position: u64,
+    sweep_generation: u64,
+    stress_consumed_bps_e9_since_envelope: u128,
+    stress_envelope_remaining_indices: u64,
+    stress_envelope_start_slot: u64,
+    stress_envelope_start_generation: u64,
+    last_sweep_generation_advance_slot: u64,
+    bankruptcy_hmax_lock_active: bool,
+    last_oracle_price: u64,
+    fund_px_last: u64,
+    last_market_slot: u64,
+    f_long_num: i128,
+    f_short_num: i128,
+    f_epoch_start_long_num: i128,
+    f_epoch_start_short_num: i128,
+    used: [u64; BITMAP_WORDS],
+    num_used_accounts: u16,
+    free_head: u16,
+    next_free: [u16; MAX_ACCOUNTS],
+    prev_free: [u16; MAX_ACCOUNTS],
+}
+
+struct RiskEngineRollbackSnapshot<const N: usize> {
+    non_account: RiskEngineNonAccountSnapshot,
+    account_count: usize,
+    account_indices: [usize; N],
+    accounts: [Account; N],
+}
+
 // ============================================================================
 // Error Types
 // ============================================================================
@@ -892,6 +999,253 @@ fn i128_clamp_pos(v: i128) -> u128 {
 // ============================================================================
 
 impl RiskEngine {
+    fn snapshot_non_account(&self) -> RiskEngineNonAccountSnapshot {
+        RiskEngineNonAccountSnapshot {
+            vault: self.vault,
+            insurance_fund: self.insurance_fund,
+            params: self.params,
+            current_slot: self.current_slot,
+            market_mode: self.market_mode,
+            resolved_price: self.resolved_price,
+            resolved_slot: self.resolved_slot,
+            resolved_payout_h_num: self.resolved_payout_h_num,
+            resolved_payout_h_den: self.resolved_payout_h_den,
+            resolved_payout_ready: self.resolved_payout_ready,
+            resolved_k_long_terminal_delta: self.resolved_k_long_terminal_delta,
+            resolved_k_short_terminal_delta: self.resolved_k_short_terminal_delta,
+            resolved_live_price: self.resolved_live_price,
+            c_tot: self.c_tot,
+            pnl_pos_tot: self.pnl_pos_tot,
+            pnl_matured_pos_tot: self.pnl_matured_pos_tot,
+            adl_mult_long: self.adl_mult_long,
+            adl_mult_short: self.adl_mult_short,
+            adl_coeff_long: self.adl_coeff_long,
+            adl_coeff_short: self.adl_coeff_short,
+            adl_epoch_long: self.adl_epoch_long,
+            adl_epoch_short: self.adl_epoch_short,
+            adl_epoch_start_k_long: self.adl_epoch_start_k_long,
+            adl_epoch_start_k_short: self.adl_epoch_start_k_short,
+            oi_eff_long_q: self.oi_eff_long_q,
+            oi_eff_short_q: self.oi_eff_short_q,
+            side_mode_long: self.side_mode_long,
+            side_mode_short: self.side_mode_short,
+            stored_pos_count_long: self.stored_pos_count_long,
+            stored_pos_count_short: self.stored_pos_count_short,
+            stale_account_count_long: self.stale_account_count_long,
+            stale_account_count_short: self.stale_account_count_short,
+            phantom_dust_certified_long_q: self.phantom_dust_certified_long_q,
+            phantom_dust_certified_short_q: self.phantom_dust_certified_short_q,
+            phantom_dust_potential_long_q: self.phantom_dust_potential_long_q,
+            phantom_dust_potential_short_q: self.phantom_dust_potential_short_q,
+            materialized_account_count: self.materialized_account_count,
+            neg_pnl_account_count: self.neg_pnl_account_count,
+            rr_cursor_position: self.rr_cursor_position,
+            sweep_generation: self.sweep_generation,
+            stress_consumed_bps_e9_since_envelope: self.stress_consumed_bps_e9_since_envelope,
+            stress_envelope_remaining_indices: self.stress_envelope_remaining_indices,
+            stress_envelope_start_slot: self.stress_envelope_start_slot,
+            stress_envelope_start_generation: self.stress_envelope_start_generation,
+            last_sweep_generation_advance_slot: self.last_sweep_generation_advance_slot,
+            bankruptcy_hmax_lock_active: self.bankruptcy_hmax_lock_active,
+            last_oracle_price: self.last_oracle_price,
+            fund_px_last: self.fund_px_last,
+            last_market_slot: self.last_market_slot,
+            f_long_num: self.f_long_num,
+            f_short_num: self.f_short_num,
+            f_epoch_start_long_num: self.f_epoch_start_long_num,
+            f_epoch_start_short_num: self.f_epoch_start_short_num,
+            used: self.used,
+            num_used_accounts: self.num_used_accounts,
+            free_head: self.free_head,
+            next_free: self.next_free,
+            prev_free: self.prev_free,
+        }
+    }
+
+    fn restore_non_account(&mut self, snapshot: RiskEngineNonAccountSnapshot) {
+        self.vault = snapshot.vault;
+        self.insurance_fund = snapshot.insurance_fund;
+        self.params = snapshot.params;
+        self.current_slot = snapshot.current_slot;
+        self.market_mode = snapshot.market_mode;
+        self.resolved_price = snapshot.resolved_price;
+        self.resolved_slot = snapshot.resolved_slot;
+        self.resolved_payout_h_num = snapshot.resolved_payout_h_num;
+        self.resolved_payout_h_den = snapshot.resolved_payout_h_den;
+        self.resolved_payout_ready = snapshot.resolved_payout_ready;
+        self.resolved_k_long_terminal_delta = snapshot.resolved_k_long_terminal_delta;
+        self.resolved_k_short_terminal_delta = snapshot.resolved_k_short_terminal_delta;
+        self.resolved_live_price = snapshot.resolved_live_price;
+        self.c_tot = snapshot.c_tot;
+        self.pnl_pos_tot = snapshot.pnl_pos_tot;
+        self.pnl_matured_pos_tot = snapshot.pnl_matured_pos_tot;
+        self.adl_mult_long = snapshot.adl_mult_long;
+        self.adl_mult_short = snapshot.adl_mult_short;
+        self.adl_coeff_long = snapshot.adl_coeff_long;
+        self.adl_coeff_short = snapshot.adl_coeff_short;
+        self.adl_epoch_long = snapshot.adl_epoch_long;
+        self.adl_epoch_short = snapshot.adl_epoch_short;
+        self.adl_epoch_start_k_long = snapshot.adl_epoch_start_k_long;
+        self.adl_epoch_start_k_short = snapshot.adl_epoch_start_k_short;
+        self.oi_eff_long_q = snapshot.oi_eff_long_q;
+        self.oi_eff_short_q = snapshot.oi_eff_short_q;
+        self.side_mode_long = snapshot.side_mode_long;
+        self.side_mode_short = snapshot.side_mode_short;
+        self.stored_pos_count_long = snapshot.stored_pos_count_long;
+        self.stored_pos_count_short = snapshot.stored_pos_count_short;
+        self.stale_account_count_long = snapshot.stale_account_count_long;
+        self.stale_account_count_short = snapshot.stale_account_count_short;
+        self.phantom_dust_certified_long_q = snapshot.phantom_dust_certified_long_q;
+        self.phantom_dust_certified_short_q = snapshot.phantom_dust_certified_short_q;
+        self.phantom_dust_potential_long_q = snapshot.phantom_dust_potential_long_q;
+        self.phantom_dust_potential_short_q = snapshot.phantom_dust_potential_short_q;
+        self.materialized_account_count = snapshot.materialized_account_count;
+        self.neg_pnl_account_count = snapshot.neg_pnl_account_count;
+        self.rr_cursor_position = snapshot.rr_cursor_position;
+        self.sweep_generation = snapshot.sweep_generation;
+        self.stress_consumed_bps_e9_since_envelope = snapshot.stress_consumed_bps_e9_since_envelope;
+        self.stress_envelope_remaining_indices = snapshot.stress_envelope_remaining_indices;
+        self.stress_envelope_start_slot = snapshot.stress_envelope_start_slot;
+        self.stress_envelope_start_generation = snapshot.stress_envelope_start_generation;
+        self.last_sweep_generation_advance_slot = snapshot.last_sweep_generation_advance_slot;
+        self.bankruptcy_hmax_lock_active = snapshot.bankruptcy_hmax_lock_active;
+        self.last_oracle_price = snapshot.last_oracle_price;
+        self.fund_px_last = snapshot.fund_px_last;
+        self.last_market_slot = snapshot.last_market_slot;
+        self.f_long_num = snapshot.f_long_num;
+        self.f_short_num = snapshot.f_short_num;
+        self.f_epoch_start_long_num = snapshot.f_epoch_start_long_num;
+        self.f_epoch_start_short_num = snapshot.f_epoch_start_short_num;
+        self.used = snapshot.used;
+        self.num_used_accounts = snapshot.num_used_accounts;
+        self.free_head = snapshot.free_head;
+        self.next_free = snapshot.next_free;
+        self.prev_free = snapshot.prev_free;
+    }
+
+    fn rollback_snapshot_accounts<const N: usize>(
+        &self,
+        indices: [usize; N],
+    ) -> RiskEngineRollbackSnapshot<N> {
+        let mut account_indices = [usize::MAX; N];
+        let mut accounts = [Account::EMPTY; N];
+        let mut account_count = 0usize;
+        for idx in indices {
+            self.record_rollback_account(
+                idx,
+                &mut account_count,
+                &mut account_indices,
+                &mut accounts,
+            );
+        }
+        RiskEngineRollbackSnapshot {
+            non_account: self.snapshot_non_account(),
+            account_count,
+            account_indices,
+            accounts,
+        }
+    }
+
+    fn rollback_snapshot_keeper(
+        &self,
+        req: &KeeperCrankRequest<'_>,
+    ) -> RiskEngineRollbackSnapshot<KEEPER_ROLLBACK_ACCOUNT_SLOTS> {
+        let mut account_indices = [usize::MAX; KEEPER_ROLLBACK_ACCOUNT_SLOTS];
+        let mut accounts = [Account::EMPTY; KEEPER_ROLLBACK_ACCOUNT_SLOTS];
+        let mut account_count = 0usize;
+
+        let max_candidate_inspections = core::cmp::min(
+            MAX_TOUCHED_PER_INSTRUCTION as u16,
+            req.max_candidate_inspections,
+        );
+        let mut inspected = 0u16;
+        for &(candidate_idx, _) in req.ordered_candidates {
+            if inspected >= max_candidate_inspections {
+                break;
+            }
+            inspected = inspected.saturating_add(1);
+            self.record_rollback_account(
+                candidate_idx as usize,
+                &mut account_count,
+                &mut account_indices,
+                &mut accounts,
+            );
+        }
+
+        if req.rr_touch_limit != 0 && req.rr_scan_limit != 0 {
+            let wrap_bound = self.params.max_accounts;
+            if wrap_bound != 0 && self.rr_cursor_position < wrap_bound {
+                let scan_cap = core::cmp::min(req.rr_scan_limit, wrap_bound);
+                let touch_limit =
+                    core::cmp::min(req.rr_touch_limit, MAX_TOUCHED_PER_INSTRUCTION as u64);
+                let mut i = self.rr_cursor_position;
+                let mut replayed_inspected = 0u64;
+                let mut replayed_touched = 0u64;
+                while replayed_inspected < scan_cap && replayed_touched < touch_limit {
+                    if i >= wrap_bound {
+                        break;
+                    }
+                    let idx = i as usize;
+                    if self.is_used(idx) {
+                        self.record_rollback_account(
+                            idx,
+                            &mut account_count,
+                            &mut account_indices,
+                            &mut accounts,
+                        );
+                        replayed_touched = replayed_touched.saturating_add(1);
+                    }
+                    i = i.saturating_add(1);
+                    replayed_inspected = replayed_inspected.saturating_add(1);
+                    if i == wrap_bound {
+                        break;
+                    }
+                }
+            }
+        }
+
+        RiskEngineRollbackSnapshot {
+            non_account: self.snapshot_non_account(),
+            account_count,
+            account_indices,
+            accounts,
+        }
+    }
+
+    fn record_rollback_account<const N: usize>(
+        &self,
+        idx: usize,
+        account_count: &mut usize,
+        account_indices: &mut [usize; N],
+        accounts: &mut [Account; N],
+    ) {
+        if idx >= MAX_ACCOUNTS || *account_count >= N {
+            return;
+        }
+        let mut i = 0usize;
+        while i < *account_count {
+            if account_indices[i] == idx {
+                return;
+            }
+            i += 1;
+        }
+        account_indices[*account_count] = idx;
+        accounts[*account_count] = self.accounts[idx];
+        *account_count += 1;
+    }
+
+    fn restore_rollback_snapshot<const N: usize>(
+        &mut self,
+        snapshot: RiskEngineRollbackSnapshot<N>,
+    ) {
+        self.restore_non_account(snapshot.non_account);
+        let mut i = 0usize;
+        while i < snapshot.account_count {
+            self.accounts[snapshot.account_indices[i]] = snapshot.accounts[i];
+            i += 1;
+        }
+    }
+
     #[cfg(all(
         not(kani),
         any(feature = "test", feature = "audit-scan", debug_assertions)
@@ -5781,83 +6135,85 @@ impl RiskEngine {
     /// Spec §9.2: `deposit(i, amount, now_slot)`. Pure capital-transfer path;
     /// does not call `accrue_market_to` and therefore takes no oracle input.
     pub fn deposit_not_atomic(&mut self, idx: u16, amount: u128, now_slot: u64) -> Result<()> {
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-        // Time monotonicity (spec §10.3 step 1)
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        if now_slot < self.last_market_slot {
-            return Err(RiskError::Overflow);
-        }
-        // deposit_not_atomic advances current_slot without calling
-        // accrue_market_to; enforce the live accrual envelope so a
-        // zero-amount (or any) deposit cannot brick subsequent accrual.
-        self.check_live_accrual_envelope(now_slot)?;
-
-        // Pre-validate vault capacity before any mutations (prevents ghost account)
-        let v_candidate = self
-            .vault
-            .get()
-            .checked_add(amount)
-            .ok_or(RiskError::Overflow)?;
-        if v_candidate > MAX_VAULT_TVL {
-            return Err(RiskError::Overflow);
-        }
-
-        // Step 2: spec §10.2 — deposit is the canonical materialization path.
-        // The engine only requires amount > 0 for a fresh materialization
-        // (no zero-capital ghost accounts). Any higher minimum-deposit
-        // threshold is wrapper policy: the wrapper is expected to enforce
-        // a deployment-chosen floor for anti-spam, paired with recurring
-        // maintenance fees (§7.3) to keep the materialized-account set
-        // bounded.
-        let capital_amount = amount;
-        if !self.is_used(idx as usize) {
-            if amount == 0 {
-                return Err(RiskError::InsufficientBalance);
+        rollback_on_error!(self, [idx], {
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
             }
-            self.materialize_at(idx, now_slot)?;
-        }
-        let i = idx as usize;
-        self.validate_touched_account_shape_at_fee_slot(i, now_slot)?;
+            // Time monotonicity (spec §10.3 step 1)
+            if now_slot < self.current_slot {
+                return Err(RiskError::Overflow);
+            }
+            if now_slot < self.last_market_slot {
+                return Err(RiskError::Overflow);
+            }
+            // deposit_not_atomic advances current_slot without calling
+            // accrue_market_to; enforce the live accrual envelope so a
+            // zero-amount (or any) deposit cannot brick subsequent accrual.
+            self.check_live_accrual_envelope(now_slot)?;
 
-        // Pre-validate: settle_losses can only fail on i128::MIN PNL (corruption).
-        // Check before any mutation to maintain validate-then-mutate contract.
-        if self.accounts[i].pnl == i128::MIN {
-            return Err(RiskError::CorruptState);
-        }
+            // Pre-validate vault capacity before any mutations (prevents ghost account)
+            let v_candidate = self
+                .vault
+                .get()
+                .checked_add(amount)
+                .ok_or(RiskError::Overflow)?;
+            if v_candidate > MAX_VAULT_TVL {
+                return Err(RiskError::Overflow);
+            }
 
-        // Step 3: current_slot = now_slot
-        self.current_slot = now_slot;
-        self.vault = U128::new(v_candidate);
+            // Step 2: spec §10.2 — deposit is the canonical materialization path.
+            // The engine only requires amount > 0 for a fresh materialization
+            // (no zero-capital ghost accounts). Any higher minimum-deposit
+            // threshold is wrapper policy: the wrapper is expected to enforce
+            // a deployment-chosen floor for anti-spam, paired with recurring
+            // maintenance fees (§7.3) to keep the materialized-account set
+            // bounded.
+            let capital_amount = amount;
+            if !self.is_used(idx as usize) {
+                if amount == 0 {
+                    return Err(RiskError::InsufficientBalance);
+                }
+                self.materialize_at(idx, now_slot)?;
+            }
+            let i = idx as usize;
+            self.validate_touched_account_shape_at_fee_slot(i, now_slot)?;
 
-        // Step 6: set_capital(i, C_i + capital_amount)
-        let new_cap = self.accounts[i]
-            .capital
-            .get()
-            .checked_add(capital_amount)
-            .ok_or(RiskError::Overflow)?;
-        self.set_capital(i, new_cap)?;
+            // Pre-validate: settle_losses can only fail on i128::MIN PNL (corruption).
+            // Check before any mutation to maintain validate-then-mutate contract.
+            if self.accounts[i].pnl == i128::MIN {
+                return Err(RiskError::CorruptState);
+            }
 
-        // Step 7: settle_losses_from_principal
-        self.settle_losses(i)?;
+            // Step 3: current_slot = now_slot
+            self.current_slot = now_slot;
+            self.vault = U128::new(v_candidate);
 
-        // Step 8: deposit MUST NOT invoke resolve_flat_negative (spec §7.3).
-        // A pure deposit path that does not call accrue_market_to MUST NOT
-        // invoke this path — surviving flat negative PNL waits for a later
-        // accrued touch.
+            // Step 6: set_capital(i, C_i + capital_amount)
+            let new_cap = self.accounts[i]
+                .capital
+                .get()
+                .checked_add(capital_amount)
+                .ok_or(RiskError::Overflow)?;
+            self.set_capital(i, new_cap)?;
 
-        // Step 9: if flat and PNL >= 0, sweep fee debt (spec §7.5)
-        // Per spec §10.3: deposit into account with basis != 0 MUST defer.
-        // Per spec §7.5: only a surviving negative PNL_i blocks the sweep.
-        if self.accounts[i].position_basis_q == 0 && self.accounts[i].pnl >= 0 {
-            self.fee_debt_sweep(i)?;
-        }
+            // Step 7: settle_losses_from_principal
+            self.settle_losses(i)?;
 
-        self.assert_public_postconditions()?;
-        Ok(())
+            // Step 8: deposit MUST NOT invoke resolve_flat_negative (spec §7.3).
+            // A pure deposit path that does not call accrue_market_to MUST NOT
+            // invoke this path — surviving flat negative PNL waits for a later
+            // accrued touch.
+
+            // Step 9: if flat and PNL >= 0, sweep fee debt (spec §7.5)
+            // Per spec §10.3: deposit into account with basis != 0 MUST defer.
+            // Per spec §7.5: only a surviving negative PNL_i blocks the sweep.
+            if self.accounts[i].position_basis_q == 0 && self.accounts[i].pnl >= 0 {
+                self.fee_debt_sweep(i)?;
+            }
+
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     // ========================================================================
@@ -5886,102 +6242,104 @@ impl RiskEngine {
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
     ) -> Result<()> {
-        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
-        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        rollback_on_error!(self, [idx], {
+            Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+            Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
-        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
+            if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+                return Err(RiskError::Overflow);
+            }
 
-        self.validate_touched_account_shape(idx as usize)?;
+            self.validate_touched_account_shape(idx as usize)?;
 
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
 
-        let mut ctx = InstructionContext::new_with_admission_and_threshold(
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-        );
-
-        if self.loss_stale_positive_pnl_lock_active()
-            && self.accounts[idx as usize].position_basis_q != 0
-        {
-            return Err(RiskError::Undercollateralized);
-        }
-
-        // Step 2: accrue market
-        self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
-        self.current_slot = now_slot;
-        if self.loss_stale_positive_pnl_lock_active()
-            && self.accounts[idx as usize].position_basis_q != 0
-        {
-            return Err(RiskError::Undercollateralized);
-        }
-
-        // Step 3: live local touch
-        self.touch_account_live_local(idx as usize, &mut ctx)?;
-        let stress_active = self.stress_gate_active(&ctx);
-
-        // Finalize touched (whole-only conversion + fee sweep)
-        self.finalize_touched_accounts_post_live(&mut ctx)?;
-
-        // Step 4: require amount <= C_i
-        if self.accounts[idx as usize].capital.get() < amount {
-            return Err(RiskError::InsufficientBalance);
-        }
-
-        // Step 5: the engine allows any partial withdraw that leaves
-        // `capital - amount >= 0`. A post-withdraw "dust floor" (capital
-        // must be 0 or >= some threshold) is wrapper policy — enforce it
-        // at the wrapper layer if your deployment doesn't want tiny
-        // residuals lingering in account slots.
-
-        // Step 6: if position exists, require post-withdrawal margin using
-        // `Eq_withdraw_raw` (spec §3.5) — capital + min(PNL, 0) + haircutted
-        // matured PnL - fee debt. Haircutting by the current `h` ratio
-        // prevents approval against matured claims that would be diluted
-        // by other accounts' conversions.
-        let eff = self.effective_pos_q_checked(idx as usize, false)?;
-        if eff != 0 {
-            // Post-withdrawal equity: current withdraw equity minus withdrawal amount
-            let eq_withdraw = if stress_active {
-                self.account_equity_withdraw_no_pos_raw(&self.accounts[idx as usize])
-            } else {
-                self.account_equity_withdraw_raw(&self.accounts[idx as usize], idx as usize)
-            };
-            let notional = self.notional_checked(idx as usize, oracle_price, false)?;
-            // eff != 0 here, so always enforce min_nonzero_im_req. The
-            // risk notional itself is ceil-rounded, but proportional IM can
-            // still floor to 0 for microscopic positions.
-            let im_req = core::cmp::max(
-                mul_div_floor_u128(notional, self.params.initial_margin_bps as u128, 10_000),
-                self.params.min_nonzero_im_req,
+            let mut ctx = InstructionContext::new_with_admission_and_threshold(
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
             );
-            // Spec §8.1: Eq_withdraw_raw_i >= IM_req_i. Compare in wide
-            // signed domain — a bare `im_req as i128` can wrap when
-            // im_req > i128::MAX (min_nonzero_im_req is u128; spec §1.4
-            // does not clip it to i128 range), approving an otherwise
-            // undercollateralized withdrawal. Use I256 to avoid the wrap.
-            let eq_post_wide = I256::from_i128(eq_withdraw)
-                .checked_sub(I256::from_u128(amount))
-                .ok_or(RiskError::Overflow)?;
-            let im_req_wide = I256::from_u128(im_req);
-            if eq_post_wide < im_req_wide {
+
+            if self.loss_stale_positive_pnl_lock_active()
+                && self.accounts[idx as usize].position_basis_q != 0
+            {
                 return Err(RiskError::Undercollateralized);
             }
-        }
 
-        // Step 7: commit withdrawal
-        self.commit_withdrawal(idx as usize, amount)?;
+            // Step 2: accrue market
+            self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
+            self.current_slot = now_slot;
+            if self.loss_stale_positive_pnl_lock_active()
+                && self.accounts[idx as usize].position_basis_q != 0
+            {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        // Steps 8-9: end-of-instruction resets
-        self.schedule_end_of_instruction_resets(&mut ctx)?;
-        self.finalize_end_of_instruction_resets(&ctx)?;
+            // Step 3: live local touch
+            self.touch_account_live_local(idx as usize, &mut ctx)?;
+            let stress_active = self.stress_gate_active(&ctx);
 
-        self.assert_public_postconditions()?;
-        Ok(())
+            // Finalize touched (whole-only conversion + fee sweep)
+            self.finalize_touched_accounts_post_live(&mut ctx)?;
+
+            // Step 4: require amount <= C_i
+            if self.accounts[idx as usize].capital.get() < amount {
+                return Err(RiskError::InsufficientBalance);
+            }
+
+            // Step 5: the engine allows any partial withdraw that leaves
+            // `capital - amount >= 0`. A post-withdraw "dust floor" (capital
+            // must be 0 or >= some threshold) is wrapper policy — enforce it
+            // at the wrapper layer if your deployment doesn't want tiny
+            // residuals lingering in account slots.
+
+            // Step 6: if position exists, require post-withdrawal margin using
+            // `Eq_withdraw_raw` (spec §3.5) — capital + min(PNL, 0) + haircutted
+            // matured PnL - fee debt. Haircutting by the current `h` ratio
+            // prevents approval against matured claims that would be diluted
+            // by other accounts' conversions.
+            let eff = self.effective_pos_q_checked(idx as usize, false)?;
+            if eff != 0 {
+                // Post-withdrawal equity: current withdraw equity minus withdrawal amount
+                let eq_withdraw = if stress_active {
+                    self.account_equity_withdraw_no_pos_raw(&self.accounts[idx as usize])
+                } else {
+                    self.account_equity_withdraw_raw(&self.accounts[idx as usize], idx as usize)
+                };
+                let notional = self.notional_checked(idx as usize, oracle_price, false)?;
+                // eff != 0 here, so always enforce min_nonzero_im_req. The
+                // risk notional itself is ceil-rounded, but proportional IM can
+                // still floor to 0 for microscopic positions.
+                let im_req = core::cmp::max(
+                    mul_div_floor_u128(notional, self.params.initial_margin_bps as u128, 10_000),
+                    self.params.min_nonzero_im_req,
+                );
+                // Spec §8.1: Eq_withdraw_raw_i >= IM_req_i. Compare in wide
+                // signed domain — a bare `im_req as i128` can wrap when
+                // im_req > i128::MAX (min_nonzero_im_req is u128; spec §1.4
+                // does not clip it to i128 range), approving an otherwise
+                // undercollateralized withdrawal. Use I256 to avoid the wrap.
+                let eq_post_wide = I256::from_i128(eq_withdraw)
+                    .checked_sub(I256::from_u128(amount))
+                    .ok_or(RiskError::Overflow)?;
+                let im_req_wide = I256::from_u128(im_req);
+                if eq_post_wide < im_req_wide {
+                    return Err(RiskError::Undercollateralized);
+                }
+            }
+
+            // Step 7: commit withdrawal
+            self.commit_withdrawal(idx as usize, amount)?;
+
+            // Steps 8-9: end-of-instruction resets
+            self.schedule_end_of_instruction_resets(&mut ctx)?;
+            self.finalize_end_of_instruction_resets(&ctx)?;
+
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     // ========================================================================
@@ -5999,40 +6357,42 @@ impl RiskEngine {
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
     ) -> Result<()> {
-        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
-        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        rollback_on_error!(self, [idx], {
+            Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+            Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
-        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-        self.validate_touched_account_shape(idx as usize)?;
+            if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+                return Err(RiskError::Overflow);
+            }
+            self.validate_touched_account_shape(idx as usize)?;
 
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
 
-        let mut ctx = InstructionContext::new_with_admission_and_threshold(
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-        );
+            let mut ctx = InstructionContext::new_with_admission_and_threshold(
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
+            );
 
-        // Step 2: accrue market
-        self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
-        self.current_slot = now_slot;
+            // Step 2: accrue market
+            self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
+            self.current_slot = now_slot;
 
-        // Step 3: live local touch (no auto-convert, no fee-sweep)
-        self.touch_account_live_local(idx as usize, &mut ctx)?;
+            // Step 3: live local touch (no auto-convert, no fee-sweep)
+            self.touch_account_live_local(idx as usize, &mut ctx)?;
 
-        // Step 4: finalize (shared snapshot, whole-only conversion, fee-sweep)
-        self.finalize_touched_accounts_post_live(&mut ctx)?;
+            // Step 4: finalize (shared snapshot, whole-only conversion, fee-sweep)
+            self.finalize_touched_accounts_post_live(&mut ctx)?;
 
-        // Steps 5-6: end-of-instruction resets
-        self.schedule_end_of_instruction_resets(&mut ctx)?;
-        self.finalize_end_of_instruction_resets(&ctx)?;
+            // Steps 5-6: end-of-instruction resets
+            self.schedule_end_of_instruction_resets(&mut ctx)?;
+            self.finalize_end_of_instruction_resets(&ctx)?;
 
-        self.assert_public_postconditions()?;
-        Ok(())
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     // ========================================================================
@@ -6109,277 +6469,283 @@ impl RiskEngine {
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
     ) -> Result<()> {
-        self.validate_execute_trade_entry(
-            a,
-            b,
-            oracle_price,
-            now_slot,
-            size_q,
-            exec_price,
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-        )?;
-        self.validate_touched_account_shape(a as usize)?;
-        self.validate_touched_account_shape(b as usize)?;
-        let mut ctx = InstructionContext::new_with_admission_and_threshold(
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-        );
+        rollback_on_error!(self, [a, b], {
+            self.validate_execute_trade_entry(
+                a,
+                b,
+                oracle_price,
+                now_slot,
+                size_q,
+                exec_price,
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
+            )?;
+            self.validate_touched_account_shape(a as usize)?;
+            self.validate_touched_account_shape(b as usize)?;
+            let mut ctx = InstructionContext::new_with_admission_and_threshold(
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
+            );
 
-        self.ensure_loss_current_for_position_change()?;
+            self.ensure_loss_current_for_position_change()?;
 
-        // Step 10: accrue market once
-        self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
-        self.current_slot = now_slot;
-        self.ensure_loss_current_for_position_change()?;
+            // Step 10: accrue market once
+            self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
+            self.current_slot = now_slot;
+            self.ensure_loss_current_for_position_change()?;
 
-        // Steps 11-12 (spec §9.4 v12.19.53): live local touch both counterparties
-        // in deterministic ascending storage-index order. One touch may change
-        // PNL_matured_pos_tot and therefore the second account's admission
-        // outcome; cross-client order differences are forbidden.
-        // Property #108: touch(min(a,b)) first, then touch(max(a,b)).
-        let (first, second) = if a <= b { (a, b) } else { (b, a) };
-        self.touch_account_live_local(first as usize, &mut ctx)?;
-        self.touch_account_live_local(second as usize, &mut ctx)?;
+            // Steps 11-12 (spec §9.4 v12.19.53): live local touch both counterparties
+            // in deterministic ascending storage-index order. One touch may change
+            // PNL_matured_pos_tot and therefore the second account's admission
+            // outcome; cross-client order differences are forbidden.
+            // Property #108: touch(min(a,b)) first, then touch(max(a,b)).
+            let (first, second) = if a <= b { (a, b) } else { (b, a) };
+            self.touch_account_live_local(first as usize, &mut ctx)?;
+            self.touch_account_live_local(second as usize, &mut ctx)?;
 
-        // Step 12a: flush dust-only empty sides before computing
-        // bilateral_oi_after. A touch that hits the "q_eff_new == 0" dust
-        // branch zeros the account basis and decrements stored_pos_count
-        // but leaves oi_eff_side pointing at the pre-cleanup dust value; cleanup
-        // relies on the end-of-instruction bilateral-empty-dust branch.
-        // If the trade attaches fresh OI before that cleanup runs,
-        // stored_pos_count becomes nonzero again, the cleanup branch no
-        // longer fires, and the stale dust permanently inflates OI. A
-        // dedicated reset_ctx keeps the trade's pending_reset flags from
-        // re-resetting the freshly opened positions at end of instruction.
-        {
-            let mut reset_ctx = InstructionContext::new();
-            self.schedule_end_of_instruction_resets(&mut reset_ctx)?;
-            self.finalize_end_of_instruction_resets(&reset_ctx)?;
-        }
-        // After the flush, any real remaining stale/drain state is still
-        // reflected in side_mode_*; the existing ResetPending/DrainOnly
-        // OI-increase gate below will reject if a trade would grow a
-        // side that is still mid-reset.
+            // Step 12a: flush dust-only empty sides before computing
+            // bilateral_oi_after. A touch that hits the "q_eff_new == 0" dust
+            // branch zeros the account basis and decrements stored_pos_count
+            // but leaves oi_eff_side pointing at the pre-cleanup dust value; cleanup
+            // relies on the end-of-instruction bilateral-empty-dust branch.
+            // If the trade attaches fresh OI before that cleanup runs,
+            // stored_pos_count becomes nonzero again, the cleanup branch no
+            // longer fires, and the stale dust permanently inflates OI. A
+            // dedicated reset_ctx keeps the trade's pending_reset flags from
+            // re-resetting the freshly opened positions at end of instruction.
+            {
+                let mut reset_ctx = InstructionContext::new();
+                self.schedule_end_of_instruction_resets(&mut reset_ctx)?;
+                self.finalize_end_of_instruction_resets(&reset_ctx)?;
+            }
+            // After the flush, any real remaining stale/drain state is still
+            // reflected in side_mode_*; the existing ResetPending/DrainOnly
+            // OI-increase gate below will reject if a trade would grow a
+            // side that is still mid-reset.
 
-        // Step 13: capture old effective positions
-        let old_eff_a = self.effective_pos_q_checked(a as usize, false)?;
-        let old_eff_b = self.effective_pos_q_checked(b as usize, false)?;
+            // Step 13: capture old effective positions
+            let old_eff_a = self.effective_pos_q_checked(a as usize, false)?;
+            let old_eff_b = self.effective_pos_q_checked(b as usize, false)?;
 
-        // Steps 14-16: capture pre-trade MM requirements and raw maintenance buffers
-        // Spec §9.1: if effective_pos_q(i) == 0, MM_req_i = 0
-        let mm_req_pre_a = if old_eff_a == 0 {
-            0u128
-        } else {
-            let not = self.notional_checked(a as usize, oracle_price, false)?;
-            core::cmp::max(
-                mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
-                self.params.min_nonzero_mm_req,
-            )
-        };
-        let mm_req_pre_b = if old_eff_b == 0 {
-            0u128
-        } else {
-            let not = self.notional_checked(b as usize, oracle_price, false)?;
-            core::cmp::max(
-                mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
-                self.params.min_nonzero_mm_req,
-            )
-        };
-        let maint_raw_wide_pre_a = self.account_equity_maint_raw_wide(&self.accounts[a as usize]);
-        let maint_raw_wide_pre_b = self.account_equity_maint_raw_wide(&self.accounts[b as usize]);
-        let buffer_pre_a = maint_raw_wide_pre_a
-            .checked_sub(I256::from_u128(mm_req_pre_a))
-            .expect("I256 sub");
-        let buffer_pre_b = maint_raw_wide_pre_b
-            .checked_sub(I256::from_u128(mm_req_pre_b))
-            .expect("I256 sub");
+            // Steps 14-16: capture pre-trade MM requirements and raw maintenance buffers
+            // Spec §9.1: if effective_pos_q(i) == 0, MM_req_i = 0
+            let mm_req_pre_a = if old_eff_a == 0 {
+                0u128
+            } else {
+                let not = self.notional_checked(a as usize, oracle_price, false)?;
+                core::cmp::max(
+                    mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
+                    self.params.min_nonzero_mm_req,
+                )
+            };
+            let mm_req_pre_b = if old_eff_b == 0 {
+                0u128
+            } else {
+                let not = self.notional_checked(b as usize, oracle_price, false)?;
+                core::cmp::max(
+                    mul_div_floor_u128(not, self.params.maintenance_margin_bps as u128, 10_000),
+                    self.params.min_nonzero_mm_req,
+                )
+            };
+            let maint_raw_wide_pre_a =
+                self.account_equity_maint_raw_wide(&self.accounts[a as usize]);
+            let maint_raw_wide_pre_b =
+                self.account_equity_maint_raw_wide(&self.accounts[b as usize]);
+            let buffer_pre_a = maint_raw_wide_pre_a
+                .checked_sub(I256::from_u128(mm_req_pre_a))
+                .expect("I256 sub");
+            let buffer_pre_b = maint_raw_wide_pre_b
+                .checked_sub(I256::from_u128(mm_req_pre_b))
+                .expect("I256 sub");
 
-        // Step 6: compute new effective positions
-        let new_eff_a = old_eff_a.checked_add(size_q).ok_or(RiskError::Overflow)?;
-        let neg_size_q = size_q.checked_neg().ok_or(RiskError::Overflow)?;
-        let new_eff_b = old_eff_b
-            .checked_add(neg_size_q)
-            .ok_or(RiskError::Overflow)?;
+            // Step 6: compute new effective positions
+            let new_eff_a = old_eff_a.checked_add(size_q).ok_or(RiskError::Overflow)?;
+            let neg_size_q = size_q.checked_neg().ok_or(RiskError::Overflow)?;
+            let new_eff_b = old_eff_b
+                .checked_add(neg_size_q)
+                .ok_or(RiskError::Overflow)?;
 
-        // Validate position bounds
-        if new_eff_a != 0 && new_eff_a.unsigned_abs() > MAX_POSITION_ABS_Q {
-            return Err(RiskError::Overflow);
-        }
-        if new_eff_b != 0 && new_eff_b.unsigned_abs() > MAX_POSITION_ABS_Q {
-            return Err(RiskError::Overflow);
-        }
-
-        // Validate notional bounds
-        {
-            let notional_a = Self::risk_notional_from_eff_q(new_eff_a, oracle_price);
-            if notional_a > MAX_ACCOUNT_NOTIONAL {
+            // Validate position bounds
+            if new_eff_a != 0 && new_eff_a.unsigned_abs() > MAX_POSITION_ABS_Q {
                 return Err(RiskError::Overflow);
             }
-            let notional_b = Self::risk_notional_from_eff_q(new_eff_b, oracle_price);
-            if notional_b > MAX_ACCOUNT_NOTIONAL {
+            if new_eff_b != 0 && new_eff_b.unsigned_abs() > MAX_POSITION_ABS_Q {
                 return Err(RiskError::Overflow);
             }
-        }
 
-        // Preflight: finalize any ResetPending sides that are fully ready,
-        // so OI-increase gating doesn't block trades on reopenable sides.
-        self.maybe_finalize_ready_reset_sides();
-
-        // Step 5: compute bilateral OI once (spec §5.2.2) and use for both
-        // mode gating and later writeback. Avoids redundant checked arithmetic.
-        let (oi_long_after, oi_short_after) =
-            self.bilateral_oi_after(&old_eff_a, &new_eff_a, &old_eff_b, &new_eff_b)?;
-
-        // Validate OI bounds
-        if oi_long_after > MAX_OI_SIDE_Q || oi_short_after > MAX_OI_SIDE_Q {
-            return Err(RiskError::Overflow);
-        }
-
-        // Reject if trade would increase OI on a blocked side.
-        self.enforce_side_mode_oi_gate(
-            old_eff_a,
-            new_eff_a,
-            old_eff_b,
-            new_eff_b,
-            oi_long_after,
-            oi_short_after,
-        )?;
-
-        // Spec §1.4: per-side active-position cap. Pre-validate the NET
-        // delta across BOTH legs so a valid position swap at the cap
-        // (taker replacing maker on the same side) is not false-rejected
-        // by a transient per-account spike during the attach pair.
-        {
-            let long_before = (side_of_i128(old_eff_a) == Some(Side::Long)) as i64
-                + (side_of_i128(old_eff_b) == Some(Side::Long)) as i64;
-            let long_after = (side_of_i128(new_eff_a) == Some(Side::Long)) as i64
-                + (side_of_i128(new_eff_b) == Some(Side::Long)) as i64;
-            let short_before = (side_of_i128(old_eff_a) == Some(Side::Short)) as i64
-                + (side_of_i128(old_eff_b) == Some(Side::Short)) as i64;
-            let short_after = (side_of_i128(new_eff_a) == Some(Side::Short)) as i64
-                + (side_of_i128(new_eff_b) == Some(Side::Short)) as i64;
-            let final_long = (self.stored_pos_count_long as i64) + long_after - long_before;
-            let final_short = (self.stored_pos_count_short as i64) + short_after - short_before;
-            if final_long < 0 || final_short < 0 {
-                return Err(RiskError::CorruptState);
+            // Validate notional bounds
+            {
+                let notional_a = Self::risk_notional_from_eff_q(new_eff_a, oracle_price);
+                if notional_a > MAX_ACCOUNT_NOTIONAL {
+                    return Err(RiskError::Overflow);
+                }
+                let notional_b = Self::risk_notional_from_eff_q(new_eff_b, oracle_price);
+                if notional_b > MAX_ACCOUNT_NOTIONAL {
+                    return Err(RiskError::Overflow);
+                }
             }
-            let cap = self.params.max_active_positions_per_side as i64;
-            if final_long > cap || final_short > cap {
+
+            // Preflight: finalize any ResetPending sides that are fully ready,
+            // so OI-increase gating doesn't block trades on reopenable sides.
+            self.maybe_finalize_ready_reset_sides();
+
+            // Step 5: compute bilateral OI once (spec §5.2.2) and use for both
+            // mode gating and later writeback. Avoids redundant checked arithmetic.
+            let (oi_long_after, oi_short_after) =
+                self.bilateral_oi_after(&old_eff_a, &new_eff_a, &old_eff_b, &new_eff_b)?;
+
+            // Validate OI bounds
+            if oi_long_after > MAX_OI_SIDE_Q || oi_short_after > MAX_OI_SIDE_Q {
                 return Err(RiskError::Overflow);
             }
-        }
 
-        // Step 21: trade PnL alignment (spec §10.5)
-        let price_diff = (oracle_price as i128) - (exec_price as i128);
-        let trade_pnl_a = compute_trade_pnl(size_q, price_diff)?;
-        let trade_pnl_b = trade_pnl_a.checked_neg().ok_or(RiskError::Overflow)?;
+            // Reject if trade would increase OI on a blocked side.
+            self.enforce_side_mode_oi_gate(
+                old_eff_a,
+                new_eff_a,
+                old_eff_b,
+                new_eff_b,
+                oi_long_after,
+                oi_short_after,
+            )?;
 
-        let pnl_a = self.accounts[a as usize]
-            .pnl
-            .checked_add(trade_pnl_a)
-            .ok_or(RiskError::Overflow)?;
-        if pnl_a == i128::MIN {
-            return Err(RiskError::Overflow);
-        }
-        self.set_pnl_with_reserve(
-            a as usize,
-            pnl_a,
-            ReserveMode::UseAdmissionPair(ctx.admit_h_min_shared, ctx.admit_h_max_shared),
-            Some(&mut ctx),
-        )?;
+            // Spec §1.4: per-side active-position cap. Pre-validate the NET
+            // delta across BOTH legs so a valid position swap at the cap
+            // (taker replacing maker on the same side) is not false-rejected
+            // by a transient per-account spike during the attach pair.
+            {
+                let long_before = (side_of_i128(old_eff_a) == Some(Side::Long)) as i64
+                    + (side_of_i128(old_eff_b) == Some(Side::Long)) as i64;
+                let long_after = (side_of_i128(new_eff_a) == Some(Side::Long)) as i64
+                    + (side_of_i128(new_eff_b) == Some(Side::Long)) as i64;
+                let short_before = (side_of_i128(old_eff_a) == Some(Side::Short)) as i64
+                    + (side_of_i128(old_eff_b) == Some(Side::Short)) as i64;
+                let short_after = (side_of_i128(new_eff_a) == Some(Side::Short)) as i64
+                    + (side_of_i128(new_eff_b) == Some(Side::Short)) as i64;
+                let final_long = (self.stored_pos_count_long as i64) + long_after - long_before;
+                let final_short = (self.stored_pos_count_short as i64) + short_after - short_before;
+                if final_long < 0 || final_short < 0 {
+                    return Err(RiskError::CorruptState);
+                }
+                let cap = self.params.max_active_positions_per_side as i64;
+                if final_long > cap || final_short > cap {
+                    return Err(RiskError::Overflow);
+                }
+            }
 
-        let pnl_b = self.accounts[b as usize]
-            .pnl
-            .checked_add(trade_pnl_b)
-            .ok_or(RiskError::Overflow)?;
-        if pnl_b == i128::MIN {
-            return Err(RiskError::Overflow);
-        }
-        self.set_pnl_with_reserve(
-            b as usize,
-            pnl_b,
-            ReserveMode::UseAdmissionPair(ctx.admit_h_min_shared, ctx.admit_h_max_shared),
-            Some(&mut ctx),
-        )?;
+            // Step 21: trade PnL alignment (spec §10.5)
+            let price_diff = (oracle_price as i128) - (exec_price as i128);
+            let trade_pnl_a = compute_trade_pnl(size_q, price_diff)?;
+            let trade_pnl_b = trade_pnl_a.checked_neg().ok_or(RiskError::Overflow)?;
 
-        // Step 8: attach effective positions
-        // Use allow_spike variant: bilateral trade may transiently push one
-        // side's count to cap+1 between the two attaches. execute_trade's
-        // pre-flight proves the final per-side count fits cap, and
-        // assert_public_postconditions re-verifies at instruction end.
-        self.attach_effective_position_allow_spike(a as usize, new_eff_a)?;
-        self.attach_effective_position_allow_spike(b as usize, new_eff_b)?;
-
-        // Step 9: write pre-computed OI (same values from step 5, spec §5.2.2)
-        self.oi_eff_long_q = oi_long_after;
-        self.oi_eff_short_q = oi_short_after;
-
-        // Step 10: settle post-trade losses from principal for both accounts (spec §10.4 step 18)
-        // Loss seniority: losses MUST be settled before explicit fees (spec §0 item 14)
-        self.settle_losses_with_context(a as usize, Some(&mut ctx))?;
-        self.settle_losses_with_context(b as usize, Some(&mut ctx))?;
-
-        // Step 11: charge trading fees (spec §10.4 step 19, §8.1)
-        let trade_notional =
-            mul_div_floor_u128(size_q.unsigned_abs(), exec_price as u128, POS_SCALE);
-        let fee = if trade_notional > 0 && self.params.trading_fee_bps > 0 {
-            mul_div_ceil_u128(trade_notional, self.params.trading_fee_bps as u128, 10_000)
-        } else {
-            0
-        };
-
-        // Charge fee from both accounts (spec §10.5 step 28). Only the
-        // equity-impact value (capital_paid + collectible_debt) feeds the
-        // post-trade margin enforcement below; cash-to-insurance and
-        // dropped portions are side effects of charge_fee_to_insurance.
-        let mut fee_impact_a = 0u128;
-        let mut fee_impact_b = 0u128;
-        if fee > 0 {
-            if fee > MAX_PROTOCOL_FEE_ABS {
+            let pnl_a = self.accounts[a as usize]
+                .pnl
+                .checked_add(trade_pnl_a)
+                .ok_or(RiskError::Overflow)?;
+            if pnl_a == i128::MIN {
                 return Err(RiskError::Overflow);
             }
-            let (_cash_a, impact_a, _dropped_a) = self.charge_fee_to_insurance(a as usize, fee)?;
-            let (_cash_b, impact_b, _dropped_b) = self.charge_fee_to_insurance(b as usize, fee)?;
-            fee_impact_a = impact_a;
-            fee_impact_b = impact_b;
-        }
+            self.set_pnl_with_reserve(
+                a as usize,
+                pnl_a,
+                ReserveMode::UseAdmissionPair(ctx.admit_h_min_shared, ctx.admit_h_max_shared),
+                Some(&mut ctx),
+            )?;
 
-        // Step 29: post-trade margin enforcement (spec §10.5)
-        // The spec says "(Eq_maint_raw_i + fee)" using the nominal fee.
-        // We use fee_impact (capital_paid + collectible_debt) instead because:
-        // - charge_fee_to_insurance can drop excess beyond collectible headroom
-        // - Eq_maint_raw only decreased by impact, not the full nominal fee
-        // - Adding back impact correctly reverses the actual state change
-        // - Using nominal fee would over-compensate and admit invalid trades
-        self.enforce_post_trade_margin(
-            a as usize,
-            b as usize,
-            oracle_price,
-            &old_eff_a,
-            &new_eff_a,
-            &old_eff_b,
-            &new_eff_b,
-            buffer_pre_a,
-            buffer_pre_b,
-            fee_impact_a,
-            fee_impact_b,
-            trade_pnl_a,
-            trade_pnl_b,
-            self.stress_gate_active(&ctx),
-        )?;
+            let pnl_b = self.accounts[b as usize]
+                .pnl
+                .checked_add(trade_pnl_b)
+                .ok_or(RiskError::Overflow)?;
+            if pnl_b == i128::MIN {
+                return Err(RiskError::Overflow);
+            }
+            self.set_pnl_with_reserve(
+                b as usize,
+                pnl_b,
+                ReserveMode::UseAdmissionPair(ctx.admit_h_min_shared, ctx.admit_h_max_shared),
+                Some(&mut ctx),
+            )?;
 
-        // Finalize touched accounts (shared snapshot conversion + fee sweep)
-        self.finalize_touched_accounts_post_live(&mut ctx)?;
+            // Step 8: attach effective positions
+            // Use allow_spike variant: bilateral trade may transiently push one
+            // side's count to cap+1 between the two attaches. execute_trade's
+            // pre-flight proves the final per-side count fits cap, and
+            // assert_public_postconditions re-verifies at instruction end.
+            self.attach_effective_position_allow_spike(a as usize, new_eff_a)?;
+            self.attach_effective_position_allow_spike(b as usize, new_eff_b)?;
 
-        // Steps 16-17: end-of-instruction resets
-        self.schedule_end_of_instruction_resets(&mut ctx)?;
-        self.finalize_end_of_instruction_resets(&ctx)?;
+            // Step 9: write pre-computed OI (same values from step 5, spec §5.2.2)
+            self.oi_eff_long_q = oi_long_after;
+            self.oi_eff_short_q = oi_short_after;
 
-        self.assert_public_postconditions()?;
-        Ok(())
+            // Step 10: settle post-trade losses from principal for both accounts (spec §10.4 step 18)
+            // Loss seniority: losses MUST be settled before explicit fees (spec §0 item 14)
+            self.settle_losses_with_context(a as usize, Some(&mut ctx))?;
+            self.settle_losses_with_context(b as usize, Some(&mut ctx))?;
+
+            // Step 11: charge trading fees (spec §10.4 step 19, §8.1)
+            let trade_notional =
+                mul_div_floor_u128(size_q.unsigned_abs(), exec_price as u128, POS_SCALE);
+            let fee = if trade_notional > 0 && self.params.trading_fee_bps > 0 {
+                mul_div_ceil_u128(trade_notional, self.params.trading_fee_bps as u128, 10_000)
+            } else {
+                0
+            };
+
+            // Charge fee from both accounts (spec §10.5 step 28). Only the
+            // equity-impact value (capital_paid + collectible_debt) feeds the
+            // post-trade margin enforcement below; cash-to-insurance and
+            // dropped portions are side effects of charge_fee_to_insurance.
+            let mut fee_impact_a = 0u128;
+            let mut fee_impact_b = 0u128;
+            if fee > 0 {
+                if fee > MAX_PROTOCOL_FEE_ABS {
+                    return Err(RiskError::Overflow);
+                }
+                let (_cash_a, impact_a, _dropped_a) =
+                    self.charge_fee_to_insurance(a as usize, fee)?;
+                let (_cash_b, impact_b, _dropped_b) =
+                    self.charge_fee_to_insurance(b as usize, fee)?;
+                fee_impact_a = impact_a;
+                fee_impact_b = impact_b;
+            }
+
+            // Step 29: post-trade margin enforcement (spec §10.5)
+            // The spec says "(Eq_maint_raw_i + fee)" using the nominal fee.
+            // We use fee_impact (capital_paid + collectible_debt) instead because:
+            // - charge_fee_to_insurance can drop excess beyond collectible headroom
+            // - Eq_maint_raw only decreased by impact, not the full nominal fee
+            // - Adding back impact correctly reverses the actual state change
+            // - Using nominal fee would over-compensate and admit invalid trades
+            self.enforce_post_trade_margin(
+                a as usize,
+                b as usize,
+                oracle_price,
+                &old_eff_a,
+                &new_eff_a,
+                &old_eff_b,
+                &new_eff_b,
+                buffer_pre_a,
+                buffer_pre_b,
+                fee_impact_a,
+                fee_impact_b,
+                trade_pnl_a,
+                trade_pnl_b,
+                self.stress_gate_active(&ctx),
+            )?;
+
+            // Finalize touched accounts (shared snapshot conversion + fee sweep)
+            self.finalize_touched_accounts_post_live(&mut ctx)?;
+
+            // Steps 16-17: end-of-instruction resets
+            self.schedule_end_of_instruction_resets(&mut ctx)?;
+            self.finalize_end_of_instruction_resets(&ctx)?;
+
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     test_visible! {
@@ -6704,46 +7070,48 @@ impl RiskEngine {
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
     ) -> Result<bool> {
-        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
-        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        rollback_on_error!(self, [idx], {
+            Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+            Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
-        // Spec §9.6 step 2: require account materialized (public entry point).
-        self.validate_touched_account_shape(idx as usize)?;
+            // Spec §9.6 step 2: require account materialized (public entry point).
+            self.validate_touched_account_shape(idx as usize)?;
 
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
 
-        let mut ctx = InstructionContext::new_with_admission_and_threshold(
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-        );
+            let mut ctx = InstructionContext::new_with_admission_and_threshold(
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
+            );
 
-        self.ensure_loss_current_for_position_change()?;
+            self.ensure_loss_current_for_position_change()?;
 
-        // Step 2: accrue market
-        self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
-        self.current_slot = now_slot;
-        self.ensure_loss_current_for_position_change()?;
+            // Step 2: accrue market
+            self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
+            self.current_slot = now_slot;
+            self.ensure_loss_current_for_position_change()?;
 
-        // Step 3: live local touch
-        self.touch_account_live_local(idx as usize, &mut ctx)?;
+            // Step 3: live local touch
+            self.touch_account_live_local(idx as usize, &mut ctx)?;
 
-        // Step 4: liquidate (before finalize, so post-liquidation state gets finalized)
-        let result =
-            self.liquidate_at_oracle_internal(idx, now_slot, oracle_price, policy, &mut ctx)?;
+            // Step 4: liquidate (before finalize, so post-liquidation state gets finalized)
+            let result =
+                self.liquidate_at_oracle_internal(idx, now_slot, oracle_price, policy, &mut ctx)?;
 
-        // Step 5: finalize AFTER liquidation — post-liquidation flat accounts
-        // get whole-only conversion and fee sweep
-        self.finalize_touched_accounts_post_live(&mut ctx)?;
+            // Step 5: finalize AFTER liquidation — post-liquidation flat accounts
+            // get whole-only conversion and fee sweep
+            self.finalize_touched_accounts_post_live(&mut ctx)?;
 
-        // End-of-instruction resets
-        self.schedule_end_of_instruction_resets(&mut ctx)?;
-        self.finalize_end_of_instruction_resets(&ctx)?;
+            // End-of-instruction resets
+            self.schedule_end_of_instruction_resets(&mut ctx)?;
+            self.finalize_end_of_instruction_resets(&ctx)?;
 
-        self.assert_public_postconditions()?;
-        Ok(result)
+            self.assert_public_postconditions()?;
+            Ok(result)
+        })
     }
 
     /// Internal liquidation routine: takes caller's shared InstructionContext.
@@ -7017,258 +7385,273 @@ impl RiskEngine {
         &mut self,
         req: KeeperCrankRequest<'_>,
     ) -> Result<CrankOutcome> {
-        let KeeperCrankRequest {
-            now_slot,
-            oracle_price,
-            ordered_candidates,
-            max_revalidations,
-            max_candidate_inspections,
-            funding_rate_e9,
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-            rr_touch_limit,
-            rr_scan_limit,
-        } = req;
-        // Pre-state invariant check catches corrupt inputs like
-        // rr_cursor_position out of range or ready-snapshot inconsistency
-        // before mutation.
-        self.assert_public_postconditions()?;
-
-        // Step 1 (spec §9.0): validate inputs pre-mutation.
-        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
-        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
-
-        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-
-        // Combined Phase 1 + Phase 2 touched-account budget must fit the
-        // runtime ctx capacity. In Phase 2, rr_touch_limit is a touched-account
-        // budget; unused slots are authenticated by the engine bitmap and do
-        // not consume touched-account capacity.
-        let combined_touch_budget = (max_revalidations as u64).saturating_add(rr_touch_limit);
-        if combined_touch_budget > MAX_TOUCHED_PER_INSTRUCTION as u64 {
-            return Err(RiskError::Overflow);
-        }
-
-        // Step 2: initialize instruction context with threshold gate wired in.
-        let mut ctx = InstructionContext::new_with_admission_and_threshold(
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-        );
-
-        // Steps 3-4: validate time monotonicity.
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        if now_slot < self.last_market_slot {
-            return Err(RiskError::Overflow);
-        }
-        let equity_active_accrual =
-            self.keeper_accrual_is_equity_active(now_slot, oracle_price, funding_rate_e9);
-        let remaining_dt = now_slot
-            .checked_sub(self.last_market_slot)
-            .ok_or(RiskError::Overflow)?;
-        let accrual_slot =
-            if equity_active_accrual && remaining_dt > self.params.max_accrual_dt_slots {
-                self.last_market_slot
-                    .checked_add(self.params.max_accrual_dt_slots)
-                    .ok_or(RiskError::Overflow)?
-            } else {
-                now_slot
-            };
-        if equity_active_accrual
-            && !self.keeper_has_possible_protective_progress(
+        let __before = self.rollback_snapshot_keeper(&req);
+        #[allow(clippy::redundant_closure_call)]
+        let __result = (|| {
+            let KeeperCrankRequest {
                 now_slot,
+                oracle_price,
                 ordered_candidates,
                 max_revalidations,
                 max_candidate_inspections,
+                funding_rate_e9,
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
                 rr_touch_limit,
                 rr_scan_limit,
-            )?
-        {
-            return Err(RiskError::Undercollateralized);
-        }
+            } = req;
+            // Pre-state invariant check catches corrupt inputs like
+            // rr_cursor_position out of range or ready-snapshot inconsistency
+            // before mutation.
+            self.assert_public_postconditions()?;
 
-        // Step 5: accrue once. If the authenticated slot is too stale for a
-        // single equity-active accrual, advance exactly one bounded segment and
-        // keep public time owned by `now_slot`.
-        self.accrue_market_segment_to_internal(
-            accrual_slot,
-            now_slot,
-            now_slot,
-            oracle_price,
-            funding_rate_e9,
-        )?;
-        let loss_stale_after_accrual = self.loss_stale_positive_pnl_lock_active();
+            // Step 1 (spec §9.0): validate inputs pre-mutation.
+            Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+            Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
-        // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
-        let mut attempts: u16 = 0;
-        let max_candidate_inspections = core::cmp::min(
-            MAX_TOUCHED_PER_INSTRUCTION as u16,
-            max_candidate_inspections,
-        );
-        self.pretrigger_bankruptcy_hmax_for_candidates(
-            &mut ctx,
-            ordered_candidates,
-            max_revalidations,
-            max_candidate_inspections,
-        )?;
-        let mut inspected: u16 = 0;
-        let mut num_liquidations: u32 = 0;
-        let mut protective_progress = false;
-
-        for &(candidate_idx, ref hint) in ordered_candidates {
-            if attempts >= max_revalidations || inspected >= max_candidate_inspections {
-                break;
-            }
-            if ctx.pending_reset_long || ctx.pending_reset_short {
-                break;
-            }
-            inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
-            if (candidate_idx as usize) >= MAX_ACCOUNTS || !self.is_used(candidate_idx as usize) {
-                continue;
-            }
-            if candidate_idx as u64 >= self.params.max_accounts {
-                continue;
+            if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+                return Err(RiskError::Overflow);
             }
 
-            attempts += 1;
-            let cidx = candidate_idx as usize;
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
 
-            self.touch_account_live_local(cidx, &mut ctx)?;
-            protective_progress = true;
+            // Combined Phase 1 + Phase 2 touched-account budget must fit the
+            // runtime ctx capacity. In Phase 2, rr_touch_limit is a touched-account
+            // budget; unused slots are authenticated by the engine bitmap and do
+            // not consume touched-account capacity.
+            let combined_touch_budget = (max_revalidations as u64).saturating_add(rr_touch_limit);
+            if combined_touch_budget > MAX_TOUCHED_PER_INSTRUCTION as u64 {
+                return Err(RiskError::Overflow);
+            }
 
-            if !loss_stale_after_accrual && !ctx.pending_reset_long && !ctx.pending_reset_short {
-                let eff = self.effective_pos_q_checked(cidx, false)?;
-                if eff != 0 {
-                    if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
-                        if let Some(policy) =
-                            self.validate_keeper_hint(candidate_idx, eff, hint, oracle_price)?
-                        {
-                            match self.liquidate_at_oracle_internal(
-                                candidate_idx,
-                                now_slot,
-                                oracle_price,
-                                policy,
-                                &mut ctx,
-                            ) {
-                                Ok(true) => {
-                                    num_liquidations += 1;
+            // Step 2: initialize instruction context with threshold gate wired in.
+            let mut ctx = InstructionContext::new_with_admission_and_threshold(
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
+            );
+
+            // Steps 3-4: validate time monotonicity.
+            if now_slot < self.current_slot {
+                return Err(RiskError::Overflow);
+            }
+            if now_slot < self.last_market_slot {
+                return Err(RiskError::Overflow);
+            }
+            let equity_active_accrual =
+                self.keeper_accrual_is_equity_active(now_slot, oracle_price, funding_rate_e9);
+            let remaining_dt = now_slot
+                .checked_sub(self.last_market_slot)
+                .ok_or(RiskError::Overflow)?;
+            let accrual_slot =
+                if equity_active_accrual && remaining_dt > self.params.max_accrual_dt_slots {
+                    self.last_market_slot
+                        .checked_add(self.params.max_accrual_dt_slots)
+                        .ok_or(RiskError::Overflow)?
+                } else {
+                    now_slot
+                };
+            if equity_active_accrual
+                && !self.keeper_has_possible_protective_progress(
+                    now_slot,
+                    ordered_candidates,
+                    max_revalidations,
+                    max_candidate_inspections,
+                    rr_touch_limit,
+                    rr_scan_limit,
+                )?
+            {
+                return Err(RiskError::Undercollateralized);
+            }
+
+            // Step 5: accrue once. If the authenticated slot is too stale for a
+            // single equity-active accrual, advance exactly one bounded segment and
+            // keep public time owned by `now_slot`.
+            self.accrue_market_segment_to_internal(
+                accrual_slot,
+                now_slot,
+                now_slot,
+                oracle_price,
+                funding_rate_e9,
+            )?;
+            let loss_stale_after_accrual = self.loss_stale_positive_pnl_lock_active();
+
+            // Phase 1 (spec §9.7 step 6): spot liquidation from keeper shortlist.
+            let mut attempts: u16 = 0;
+            let max_candidate_inspections = core::cmp::min(
+                MAX_TOUCHED_PER_INSTRUCTION as u16,
+                max_candidate_inspections,
+            );
+            self.pretrigger_bankruptcy_hmax_for_candidates(
+                &mut ctx,
+                ordered_candidates,
+                max_revalidations,
+                max_candidate_inspections,
+            )?;
+            let mut inspected: u16 = 0;
+            let mut num_liquidations: u32 = 0;
+            let mut protective_progress = false;
+
+            for &(candidate_idx, ref hint) in ordered_candidates {
+                if attempts >= max_revalidations || inspected >= max_candidate_inspections {
+                    break;
+                }
+                if ctx.pending_reset_long || ctx.pending_reset_short {
+                    break;
+                }
+                inspected = inspected.checked_add(1).ok_or(RiskError::Overflow)?;
+                if (candidate_idx as usize) >= MAX_ACCOUNTS || !self.is_used(candidate_idx as usize)
+                {
+                    continue;
+                }
+                if candidate_idx as u64 >= self.params.max_accounts {
+                    continue;
+                }
+
+                attempts += 1;
+                let cidx = candidate_idx as usize;
+
+                self.touch_account_live_local(cidx, &mut ctx)?;
+                protective_progress = true;
+
+                if !loss_stale_after_accrual && !ctx.pending_reset_long && !ctx.pending_reset_short
+                {
+                    let eff = self.effective_pos_q_checked(cidx, false)?;
+                    if eff != 0 {
+                        if !self.is_above_maintenance_margin(
+                            &self.accounts[cidx],
+                            cidx,
+                            oracle_price,
+                        ) {
+                            if let Some(policy) =
+                                self.validate_keeper_hint(candidate_idx, eff, hint, oracle_price)?
+                            {
+                                match self.liquidate_at_oracle_internal(
+                                    candidate_idx,
+                                    now_slot,
+                                    oracle_price,
+                                    policy,
+                                    &mut ctx,
+                                ) {
+                                    Ok(true) => {
+                                        num_liquidations += 1;
+                                    }
+                                    Ok(false) => {}
+                                    Err(e) => return Err(e),
                                 }
-                                Ok(false) => {}
-                                Err(e) => return Err(e),
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Phase 2 (spec §9.7 step 7): mandatory round-robin structural sweep.
-        // Runs unconditionally — including when Phase 1 exited early on a
-        // pending reset. Phase 2 does NOT execute liquidations, does NOT
-        // count against max_revalidations, and does NOT break on pending
-        // reset. Its job is to deterministically walk index space, skip unused
-        // slots, and touch up to rr_touch_limit materialized accounts so
-        // warmup/reserve state advances uniformly across the deployment.
-        //
-        // Cursor wrap bound: params.max_accounts (runtime slab capacity).
-        // Generation turnover is proportional to the real deployment size;
-        // the spec's theoretical 1e6 bound was collapsed onto this runtime
-        // value so compact shards do not spend most of a generation
-        // walking non-existent index space.
-        let wrap_bound = self.params.max_accounts;
-        let reconciliation_envelope_active =
-            self.stress_consumed_bps_e9_since_envelope > 0 || self.bankruptcy_hmax_lock_active;
-        let same_slot_as_stress_start =
-            reconciliation_envelope_active && self.stress_envelope_start_slot == now_slot;
-        let wrap_allowed = self.last_sweep_generation_advance_slot == NO_SLOT
-            || now_slot > self.last_sweep_generation_advance_slot;
+            // Phase 2 (spec §9.7 step 7): mandatory round-robin structural sweep.
+            // Runs unconditionally — including when Phase 1 exited early on a
+            // pending reset. Phase 2 does NOT execute liquidations, does NOT
+            // count against max_revalidations, and does NOT break on pending
+            // reset. Its job is to deterministically walk index space, skip unused
+            // slots, and touch up to rr_touch_limit materialized accounts so
+            // warmup/reserve state advances uniformly across the deployment.
+            //
+            // Cursor wrap bound: params.max_accounts (runtime slab capacity).
+            // Generation turnover is proportional to the real deployment size;
+            // the spec's theoretical 1e6 bound was collapsed onto this runtime
+            // value so compact shards do not spend most of a generation
+            // walking non-existent index space.
+            let wrap_bound = self.params.max_accounts;
+            let reconciliation_envelope_active =
+                self.stress_consumed_bps_e9_since_envelope > 0 || self.bankruptcy_hmax_lock_active;
+            let same_slot_as_stress_start =
+                reconciliation_envelope_active && self.stress_envelope_start_slot == now_slot;
+            let wrap_allowed = self.last_sweep_generation_advance_slot == NO_SLOT
+                || now_slot > self.last_sweep_generation_advance_slot;
 
-        let phase2 = self.phase2_scan_outcome(
-            wrap_bound,
-            rr_touch_limit,
-            rr_scan_limit,
-            reconciliation_envelope_active,
-            wrap_allowed,
-            same_slot_as_stress_start,
-        )?;
-        self.pretrigger_bankruptcy_hmax_for_phase2(&mut ctx, phase2.inspected)?;
+            let phase2 = self.phase2_scan_outcome(
+                wrap_bound,
+                rr_touch_limit,
+                rr_scan_limit,
+                reconciliation_envelope_active,
+                wrap_allowed,
+                same_slot_as_stress_start,
+            )?;
+            self.pretrigger_bankruptcy_hmax_for_phase2(&mut ctx, phase2.inspected)?;
 
-        let phase2_guard_prev = ctx.speculative_hmax_guard_active;
-        let phase2_guard_enabled = phase2.touched > 0
-            && !phase2_guard_prev
-            && !ctx.bankruptcy_hmax_candidate_active
-            && !self.bankruptcy_hmax_lock_active;
-        if phase2_guard_enabled {
-            ctx.speculative_hmax_guard_active = true;
-        }
+            let phase2_guard_prev = ctx.speculative_hmax_guard_active;
+            let phase2_guard_enabled = phase2.touched > 0
+                && !phase2_guard_prev
+                && !ctx.bankruptcy_hmax_candidate_active
+                && !self.bankruptcy_hmax_lock_active;
+            if phase2_guard_enabled {
+                ctx.speculative_hmax_guard_active = true;
+            }
 
-        let mut touch_i = self.rr_cursor_position;
-        let mut replayed_inspected = 0u64;
-        let mut replayed_touched = 0u64;
-        while replayed_inspected < phase2.inspected {
-            if wrap_bound == 0 || touch_i >= wrap_bound {
+            let mut touch_i = self.rr_cursor_position;
+            let mut replayed_inspected = 0u64;
+            let mut replayed_touched = 0u64;
+            while replayed_inspected < phase2.inspected {
+                if wrap_bound == 0 || touch_i >= wrap_bound {
+                    return Err(RiskError::CorruptState);
+                }
+                let iu = touch_i as usize;
+                if self.is_used(iu) {
+                    self.touch_account_live_local(iu, &mut ctx)?;
+                    replayed_touched =
+                        replayed_touched.checked_add(1).ok_or(RiskError::Overflow)?;
+                }
+                touch_i = touch_i.checked_add(1).ok_or(RiskError::Overflow)?;
+                replayed_inspected = replayed_inspected
+                    .checked_add(1)
+                    .ok_or(RiskError::Overflow)?;
+                if touch_i == wrap_bound {
+                    touch_i = 0;
+                    break;
+                }
+            }
+            if phase2_guard_enabled
+                && !ctx.stress_envelope_restarted
+                && !self.bankruptcy_hmax_lock_active
+            {
+                ctx.speculative_hmax_guard_active = phase2_guard_prev;
+            }
+            if touch_i != phase2.next_cursor || replayed_touched != phase2.touched {
                 return Err(RiskError::CorruptState);
             }
-            let iu = touch_i as usize;
-            if self.is_used(iu) {
-                self.touch_account_live_local(iu, &mut ctx)?;
-                replayed_touched = replayed_touched.checked_add(1).ok_or(RiskError::Overflow)?;
+            if phase2.inspected > 0 {
+                protective_progress = true;
             }
-            touch_i = touch_i.checked_add(1).ok_or(RiskError::Overflow)?;
-            replayed_inspected = replayed_inspected
-                .checked_add(1)
-                .ok_or(RiskError::Overflow)?;
-            if touch_i == wrap_bound {
-                touch_i = 0;
-                break;
+
+            if phase2.wrapped && wrap_allowed {
+                self.advance_sweep_generation(now_slot)?;
             }
-        }
-        if phase2_guard_enabled
-            && !ctx.stress_envelope_restarted
-            && !self.bankruptcy_hmax_lock_active
-        {
-            ctx.speculative_hmax_guard_active = phase2_guard_prev;
-        }
-        if touch_i != phase2.next_cursor || replayed_touched != phase2.touched {
-            return Err(RiskError::CorruptState);
-        }
-        if phase2.inspected > 0 {
-            protective_progress = true;
-        }
+            self.rr_cursor_position = phase2.next_cursor;
+            let stress_counted_inspected = if ctx.stress_envelope_restarted {
+                0
+            } else {
+                phase2.stress_counted_inspected
+            };
+            self.apply_stress_envelope_progress(now_slot, stress_counted_inspected)?;
+            if equity_active_accrual && !protective_progress {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        if phase2.wrapped && wrap_allowed {
-            self.advance_sweep_generation(now_slot)?;
+            // Finalize: compute fresh snapshot from post-mutation state, apply
+            // whole-only conversion + fee sweep to all tracked accounts.
+            self.finalize_touched_accounts_post_live(&mut ctx)?;
+
+            // End-of-instruction resets (spec §9.7 steps 9-10).
+            self.schedule_end_of_instruction_resets(&mut ctx)?;
+            self.finalize_end_of_instruction_resets(&ctx)?;
+
+            self.assert_public_postconditions()?;
+            Ok(CrankOutcome { num_liquidations })
+        })();
+        if __result.is_err() {
+            self.restore_rollback_snapshot(__before);
         }
-        self.rr_cursor_position = phase2.next_cursor;
-        let stress_counted_inspected = if ctx.stress_envelope_restarted {
-            0
-        } else {
-            phase2.stress_counted_inspected
-        };
-        self.apply_stress_envelope_progress(now_slot, stress_counted_inspected)?;
-        if equity_active_accrual && !protective_progress {
-            return Err(RiskError::Undercollateralized);
-        }
-
-        // Finalize: compute fresh snapshot from post-mutation state, apply
-        // whole-only conversion + fee sweep to all tracked accounts.
-        self.finalize_touched_accounts_post_live(&mut ctx)?;
-
-        // End-of-instruction resets (spec §9.7 steps 9-10).
-        self.schedule_end_of_instruction_resets(&mut ctx)?;
-        self.finalize_end_of_instruction_resets(&ctx)?;
-
-        self.assert_public_postconditions()?;
-        Ok(CrankOutcome { num_liquidations })
+        __result
     }
 
     /// Validate a keeper-supplied liquidation-policy hint (spec §11.1 rule 3).
@@ -7431,51 +7814,53 @@ impl RiskEngine {
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
     ) -> Result<()> {
-        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
-        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        rollback_on_error!(self, [idx], {
+            Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+            Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
-        if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-        self.validate_touched_account_shape(idx as usize)?;
+            if oracle_price == 0 || oracle_price > MAX_ORACLE_PRICE {
+                return Err(RiskError::Overflow);
+            }
+            self.validate_touched_account_shape(idx as usize)?;
 
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
 
-        let mut ctx = InstructionContext::new_with_admission_and_threshold(
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-        );
+            let mut ctx = InstructionContext::new_with_admission_and_threshold(
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
+            );
 
-        if self.loss_stale_positive_pnl_lock_active() {
-            return Err(RiskError::Undercollateralized);
-        }
+            if self.loss_stale_positive_pnl_lock_active() {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        // Step 2: accrue market
-        self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
-        self.current_slot = now_slot;
+            // Step 2: accrue market
+            self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
+            self.current_slot = now_slot;
 
-        // Step 3: live local touch (no auto-convert, no finalize yet)
-        self.touch_account_live_local(idx as usize, &mut ctx)?;
-        if self.stress_gate_active(&ctx) {
-            return Err(RiskError::Undercollateralized);
-        }
+            // Step 3: live local touch (no auto-convert, no finalize yet)
+            self.touch_account_live_local(idx as usize, &mut ctx)?;
+            if self.stress_gate_active(&ctx) {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        // Steps 4-10 happen before finalize so auto-convert cannot consume
-        // the user's released PnL before they can request it.
-        self.convert_released_pnl_core(idx as usize, x_req, oracle_price)?;
+            // Steps 4-10 happen before finalize so auto-convert cannot consume
+            // the user's released PnL before they can request it.
+            self.convert_released_pnl_core(idx as usize, x_req, oracle_price)?;
 
-        // Step 11: finalize after explicit conversion.
-        self.finalize_touched_accounts_post_live(&mut ctx)?;
+            // Step 11: finalize after explicit conversion.
+            self.finalize_touched_accounts_post_live(&mut ctx)?;
 
-        // Steps 12-13: end-of-instruction resets
-        self.schedule_end_of_instruction_resets(&mut ctx)?;
-        self.finalize_end_of_instruction_resets(&ctx)?;
+            // Steps 12-13: end-of-instruction resets
+            self.schedule_end_of_instruction_resets(&mut ctx)?;
+            self.finalize_end_of_instruction_resets(&ctx)?;
 
-        self.assert_public_postconditions()?;
-        Ok(())
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     // ========================================================================
@@ -7492,99 +7877,92 @@ impl RiskEngine {
         admit_h_max: u64,
         admit_h_max_consumption_threshold_bps_opt: Option<u128>,
     ) -> Result<u128> {
-        Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
-        Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
+        rollback_on_error!(self, [idx], {
+            Self::validate_admission_pair(admit_h_min, admit_h_max, &self.params)?;
+            Self::validate_threshold_opt(admit_h_max_consumption_threshold_bps_opt)?;
 
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
 
-        self.validate_touched_account_shape(idx as usize)?;
+            self.validate_touched_account_shape(idx as usize)?;
 
-        let mut ctx = InstructionContext::new_with_admission_and_threshold(
-            admit_h_min,
-            admit_h_max,
-            admit_h_max_consumption_threshold_bps_opt,
-        );
+            let mut ctx = InstructionContext::new_with_admission_and_threshold(
+                admit_h_min,
+                admit_h_max,
+                admit_h_max_consumption_threshold_bps_opt,
+            );
 
-        if self.loss_stale_positive_pnl_lock_active()
-            && self.accounts[idx as usize].position_basis_q != 0
-        {
-            return Err(RiskError::Undercollateralized);
-        }
+            if self.loss_stale_positive_pnl_lock_active()
+                && self.accounts[idx as usize].position_basis_q != 0
+            {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        // Accrue market + live local touch + finalize
-        self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
-        self.current_slot = now_slot;
-        if self.loss_stale_positive_pnl_lock_active()
-            && self.accounts[idx as usize].position_basis_q != 0
-        {
-            return Err(RiskError::Undercollateralized);
-        }
-        self.touch_account_live_local(idx as usize, &mut ctx)?;
-        self.finalize_touched_accounts_post_live(&mut ctx)?;
+            // Accrue market + live local touch + finalize
+            self.accrue_market_to(now_slot, oracle_price, funding_rate_e9)?;
+            self.current_slot = now_slot;
+            if self.loss_stale_positive_pnl_lock_active()
+                && self.accounts[idx as usize].position_basis_q != 0
+            {
+                return Err(RiskError::Undercollateralized);
+            }
+            self.touch_account_live_local(idx as usize, &mut ctx)?;
+            self.finalize_touched_accounts_post_live(&mut ctx)?;
 
-        // Position must be zero
-        let eff = self.effective_pos_q_checked(idx as usize, false)?;
-        if eff != 0 {
-            return Err(RiskError::Undercollateralized);
-        }
+            // Position must be zero
+            let eff = self.effective_pos_q_checked(idx as usize, false)?;
+            if eff != 0 {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        // PnL must be zero (check BEFORE fee forgiveness to avoid
-        // mutating fee_credits on a path that returns Err)
-        if self.accounts[idx as usize].pnl > 0 {
-            return Err(RiskError::PnlNotWarmedUp);
-        }
-        if self.accounts[idx as usize].pnl < 0 {
-            return Err(RiskError::Undercollateralized);
-        }
+            // PnL must be zero (check BEFORE fee forgiveness to avoid
+            // mutating fee_credits on a path that returns Err)
+            if self.accounts[idx as usize].pnl > 0 {
+                return Err(RiskError::PnlNotWarmedUp);
+            }
+            if self.accounts[idx as usize].pnl < 0 {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        // Spec §9.5 step 11: require FeeDebt_i == 0 (fee_credits >= 0).
-        // Voluntary close must not forgive fee debt (unlike reclaim).
-        if self.accounts[idx as usize].fee_credits.get() < 0 {
-            return Err(RiskError::Undercollateralized);
-        }
+            // Spec §9.5 step 11: require FeeDebt_i == 0 (fee_credits >= 0).
+            // Voluntary close must not forgive fee debt (unlike reclaim).
+            if self.accounts[idx as usize].fee_credits.get() < 0 {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        // Spec §9.5 step 10: require R_i == 0 and both reserve buckets absent.
-        if self.accounts[idx as usize].reserved_pnl != 0
-            || self.accounts[idx as usize].sched_present != 0
-            || self.accounts[idx as usize].pending_present != 0
-        {
-            return Err(RiskError::Undercollateralized);
-        }
+            // Spec §9.5 step 10: require R_i == 0 and both reserve buckets absent.
+            if self.accounts[idx as usize].reserved_pnl != 0
+                || self.accounts[idx as usize].sched_present != 0
+                || self.accounts[idx as usize].pending_present != 0
+            {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        let capital = self.accounts[idx as usize].capital;
+            let capital = self.accounts[idx as usize].capital;
 
-        if capital > self.vault {
-            return Err(RiskError::InsufficientBalance);
-        }
-        self.vault = self.vault - capital;
-        self.set_capital(idx as usize, 0)?;
+            if capital > self.vault {
+                return Err(RiskError::InsufficientBalance);
+            }
+            self.vault = self.vault - capital;
+            self.set_capital(idx as usize, 0)?;
 
-        // End-of-instruction resets before freeing
-        self.schedule_end_of_instruction_resets(&mut ctx)?;
-        self.finalize_end_of_instruction_resets(&ctx)?;
+            // End-of-instruction resets before freeing
+            self.schedule_end_of_instruction_resets(&mut ctx)?;
+            self.finalize_end_of_instruction_resets(&ctx)?;
 
-        self.free_slot(idx)?;
-        self.sweep_empty_market_surplus_to_insurance()?;
+            self.free_slot(idx)?;
+            self.sweep_empty_market_surplus_to_insurance()?;
 
-        self.assert_public_postconditions()?;
-        Ok(capital.get())
+            self.assert_public_postconditions()?;
+            Ok(capital.get())
+        })
     }
 
     // ========================================================================
     // force_close_resolved_not_atomic (resolved/frozen market path)
     // ========================================================================
 
-    /// Force-close an account on a resolved market. Uses `self.resolved_slot`
-    /// as the time anchor (no slot argument).
-    ///
-    /// Settles K-pair PnL, zeros position, settles losses, absorbs from
-    /// insurance, converts profit (bypassing warmup), sweeps fee debt,
-    /// forgives remainder, returns capital, frees slot.
-    ///
-    /// Skips accrue_market_to (market is frozen). Handles both same-epoch
-    /// and epoch-mismatch accounts.
     // ========================================================================
     // resolve_market (spec §10.7)
     // ========================================================================
@@ -7599,153 +7977,157 @@ impl RiskEngine {
         now_slot: u64,
         funding_rate_e9: i128,
     ) -> Result<()> {
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        // Degenerate branch also skips accrue_market_to's last_market_slot
-        // monotonicity check; enforce it here so the degenerate branch cannot
-        // decrease last_market_slot under corrupt state.
-        if now_slot < self.last_market_slot {
-            return Err(RiskError::Overflow);
-        }
-        if resolved_price == 0 || resolved_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-        if live_oracle_price == 0 || live_oracle_price > MAX_ORACLE_PRICE {
-            return Err(RiskError::Overflow);
-        }
-
-        // Explicit branch selection per spec §9.8.
-        // Value-detected branch selection is forbidden: a flat live oracle
-        // must NOT automatically enter the degenerate branch.
-        let used_degenerate = match resolve_mode {
-            ResolveMode::Degenerate => {
-                // Degenerate branch requires these trusted equalities.
-                if live_oracle_price != self.last_oracle_price {
-                    return Err(RiskError::Overflow);
-                }
-                if funding_rate_e9 != 0 {
-                    return Err(RiskError::Overflow);
-                }
-                self.current_slot = now_slot;
-                self.last_market_slot = now_slot;
-                true
+        rollback_on_error!(self, [], {
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
             }
-            ResolveMode::Ordinary => {
-                // Ordinary branch: accrue to now_slot using live inputs.
-                // Even when `live == P_last && rate == 0`, the ordinary
-                // branch stays ordinary (spec test 85).
-                self.accrue_market_to(now_slot, live_oracle_price, funding_rate_e9)?;
-                false
-            }
-        };
-
-        // Band check runs on the ordinary branch only. The degenerate branch
-        // relies entirely on trusted wrapper inputs (spec §9.8 step 9).
-        if !used_degenerate {
-            let p_last = self.last_oracle_price;
-            let p_last_i = p_last as i128;
-            let p_res = resolved_price as i128;
-            let dev_bps = self.params.resolve_price_deviation_bps as i128;
-            let diff_abs = (p_res - p_last_i).unsigned_abs();
-            let lhs = (diff_abs as u128)
-                .checked_mul(10_000)
-                .ok_or(RiskError::Overflow)?;
-            let rhs = (dev_bps as u128)
-                .checked_mul(p_last as u128)
-                .ok_or(RiskError::Overflow)?;
-            if lhs > rhs {
+            if now_slot < self.current_slot {
                 return Err(RiskError::Overflow);
             }
-        }
+            // Degenerate branch also skips accrue_market_to's last_market_slot
+            // monotonicity check; enforce it here so the degenerate branch cannot
+            // decrease last_market_slot under corrupt state.
+            if now_slot < self.last_market_slot {
+                return Err(RiskError::Overflow);
+            }
+            if resolved_price == 0 || resolved_price > MAX_ORACLE_PRICE {
+                return Err(RiskError::Overflow);
+            }
+            if live_oracle_price == 0 || live_oracle_price > MAX_ORACLE_PRICE {
+                return Err(RiskError::Overflow);
+            }
 
-        let pre_mode_long = self.side_mode_long;
-        let pre_mode_short = self.side_mode_short;
-        let pre_a_long = self.adl_mult_long;
-        let pre_a_short = self.adl_mult_short;
-        let pre_oi_long = self.oi_eff_long_q;
-        let pre_oi_short = self.oi_eff_short_q;
-        let pre_stored_long = self.stored_pos_count_long;
-        let pre_stored_short = self.stored_pos_count_short;
+            // Explicit branch selection per spec §9.8.
+            // Value-detected branch selection is forbidden: a flat live oracle
+            // must NOT automatically enter the degenerate branch.
+            let used_degenerate = match resolve_mode {
+                ResolveMode::Degenerate => {
+                    // Degenerate branch requires these trusted equalities.
+                    if live_oracle_price != self.last_oracle_price {
+                        return Err(RiskError::Overflow);
+                    }
+                    if funding_rate_e9 != 0 {
+                        return Err(RiskError::Overflow);
+                    }
+                    self.current_slot = now_slot;
+                    self.last_market_slot = now_slot;
+                    true
+                }
+                ResolveMode::Ordinary => {
+                    // Ordinary branch: accrue to now_slot using live inputs.
+                    // Even when `live == P_last && rate == 0`, the ordinary
+                    // branch stays ordinary (spec test 85).
+                    self.accrue_market_to(now_slot, live_oracle_price, funding_rate_e9)?;
+                    false
+                }
+            };
 
-        // Step 8: compute resolved terminal mark deltas in exact signed arithmetic.
-        // These deltas carry the settlement shift WITHOUT adding to persistent K_side,
-        // so resolution can succeed even near K headroom (spec §9.7 step 8).
-        let price_diff = resolved_price as i128 - live_oracle_price as i128;
-        let resolved_k_long_td = if pre_mode_long == SideMode::ResetPending || pre_oi_long == 0 {
-            0i128
-        } else {
-            checked_u128_mul_i128(pre_a_long, price_diff)?
-        };
-        let resolved_k_short_td = if pre_mode_short == SideMode::ResetPending || pre_oi_short == 0 {
-            0i128
-        } else {
-            // Short side: negative of price_diff
-            let neg_price_diff = price_diff.checked_neg().ok_or(RiskError::Overflow)?;
-            checked_u128_mul_i128(pre_a_short, neg_price_diff)?
-        };
+            // Band check runs on the ordinary branch only. The degenerate branch
+            // relies entirely on trusted wrapper inputs (spec §9.8 step 9).
+            if !used_degenerate {
+                let p_last = self.last_oracle_price;
+                let p_last_i = p_last as i128;
+                let p_res = resolved_price as i128;
+                let dev_bps = self.params.resolve_price_deviation_bps as i128;
+                let diff_abs = (p_res - p_last_i).unsigned_abs();
+                let lhs = (diff_abs as u128)
+                    .checked_mul(10_000)
+                    .ok_or(RiskError::Overflow)?;
+                let rhs = (dev_bps as u128)
+                    .checked_mul(p_last as u128)
+                    .ok_or(RiskError::Overflow)?;
+                if lhs > rhs {
+                    return Err(RiskError::Overflow);
+                }
+            }
 
-        // Steps 8-13: set resolved state
-        self.current_slot = now_slot;
-        self.market_mode = MarketMode::Resolved;
-        self.resolved_price = resolved_price;
-        self.resolved_live_price = live_oracle_price;
-        self.resolved_slot = now_slot;
-        self.resolved_k_long_terminal_delta = resolved_k_long_td;
-        self.resolved_k_short_terminal_delta = resolved_k_short_td;
-        self.clear_stress_envelope();
+            let pre_mode_long = self.side_mode_long;
+            let pre_mode_short = self.side_mode_short;
+            let pre_a_long = self.adl_mult_long;
+            let pre_a_short = self.adl_mult_short;
+            let pre_oi_long = self.oi_eff_long_q;
+            let pre_oi_short = self.oi_eff_short_q;
+            let pre_stored_long = self.stored_pos_count_long;
+            let pre_stored_short = self.stored_pos_count_short;
 
-        // Step 13: clear resolved payout snapshot state
-        self.resolved_payout_h_num = 0;
-        self.resolved_payout_h_den = 0;
-        self.resolved_payout_ready = 0;
+            // Step 8: compute resolved terminal mark deltas in exact signed arithmetic.
+            // These deltas carry the settlement shift WITHOUT adding to persistent K_side,
+            // so resolution can succeed even near K headroom (spec §9.7 step 8).
+            let price_diff = resolved_price as i128 - live_oracle_price as i128;
+            let resolved_k_long_td = if pre_mode_long == SideMode::ResetPending || pre_oi_long == 0
+            {
+                0i128
+            } else {
+                checked_u128_mul_i128(pre_a_long, price_diff)?
+            };
+            let resolved_k_short_td =
+                if pre_mode_short == SideMode::ResetPending || pre_oi_short == 0 {
+                    0i128
+                } else {
+                    // Short side: negative of price_diff
+                    let neg_price_diff = price_diff.checked_neg().ok_or(RiskError::Overflow)?;
+                    checked_u128_mul_i128(pre_a_short, neg_price_diff)?
+                };
 
-        // Step 14: all positive PnL is now matured
-        self.pnl_matured_pos_tot = self.pnl_pos_tot;
+            // Steps 8-13: set resolved state
+            self.current_slot = now_slot;
+            self.market_mode = MarketMode::Resolved;
+            self.resolved_price = resolved_price;
+            self.resolved_live_price = live_oracle_price;
+            self.resolved_slot = now_slot;
+            self.resolved_k_long_terminal_delta = resolved_k_long_td;
+            self.resolved_k_short_terminal_delta = resolved_k_short_td;
+            self.clear_stress_envelope();
 
-        // Steps 15-16: zero OI
-        self.oi_eff_long_q = 0;
-        self.oi_eff_short_q = 0;
-        if pre_stored_long == 0 {
-            self.phantom_dust_certified_long_q = 0;
-            self.phantom_dust_potential_long_q = 0;
-        }
-        if pre_stored_short == 0 {
-            self.phantom_dust_certified_short_q = 0;
-            self.phantom_dust_potential_short_q = 0;
-        }
+            // Step 13: clear resolved payout snapshot state
+            self.resolved_payout_h_num = 0;
+            self.resolved_payout_h_den = 0;
+            self.resolved_payout_ready = 0;
 
-        // Steps 17-20: drain/finalize sides
-        if pre_mode_long != SideMode::ResetPending && pre_stored_long > 0 {
-            self.begin_full_drain_reset(Side::Long)?;
-        }
-        if pre_mode_short != SideMode::ResetPending && pre_stored_short > 0 {
-            self.begin_full_drain_reset(Side::Short)?;
-        }
-        if self.side_mode_long == SideMode::ResetPending
-            && self.stale_account_count_long == 0
-            && self.stored_pos_count_long == 0
-        {
-            self.finalize_side_reset(Side::Long)?;
-        }
-        if self.side_mode_short == SideMode::ResetPending
-            && self.stale_account_count_short == 0
-            && self.stored_pos_count_short == 0
-        {
-            self.finalize_side_reset(Side::Short)?;
-        }
+            // Step 14: all positive PnL is now matured
+            self.pnl_matured_pos_tot = self.pnl_pos_tot;
 
-        // Step 21: resolve additionally requires both sides == 0 (stronger
-        // than bilateral balance).
-        if self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0 {
-            return Err(RiskError::CorruptState);
-        }
+            // Steps 15-16: zero OI
+            self.oi_eff_long_q = 0;
+            self.oi_eff_short_q = 0;
+            if pre_stored_long == 0 {
+                self.phantom_dust_certified_long_q = 0;
+                self.phantom_dust_potential_long_q = 0;
+            }
+            if pre_stored_short == 0 {
+                self.phantom_dust_certified_short_q = 0;
+                self.phantom_dust_potential_short_q = 0;
+            }
 
-        self.assert_public_postconditions()?;
-        Ok(())
+            // Steps 17-20: drain/finalize sides
+            if pre_mode_long != SideMode::ResetPending && pre_stored_long > 0 {
+                self.begin_full_drain_reset(Side::Long)?;
+            }
+            if pre_mode_short != SideMode::ResetPending && pre_stored_short > 0 {
+                self.begin_full_drain_reset(Side::Short)?;
+            }
+            if self.side_mode_long == SideMode::ResetPending
+                && self.stale_account_count_long == 0
+                && self.stored_pos_count_long == 0
+            {
+                self.finalize_side_reset(Side::Long)?;
+            }
+            if self.side_mode_short == SideMode::ResetPending
+                && self.stale_account_count_short == 0
+                && self.stored_pos_count_short == 0
+            {
+                self.finalize_side_reset(Side::Short)?;
+            }
+
+            // Step 21: resolve additionally requires both sides == 0 (stronger
+            // than bilateral balance).
+            if self.oi_eff_long_q != 0 || self.oi_eff_short_q != 0 {
+                return Err(RiskError::CorruptState);
+            }
+
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     /// Combined convenience: reconcile + terminal close if ready.
@@ -7758,142 +8140,155 @@ impl RiskEngine {
         self.force_close_resolved_with_fee_not_atomic(idx, 0)
     }
 
+    /// Force-close an account on a resolved market. Uses `self.resolved_slot`
+    /// as the time anchor (no slot argument).
+    ///
+    /// Settles K-pair PnL, zeros position, settles losses, absorbs from
+    /// insurance, converts profit (bypassing warmup), sweeps fee debt,
+    /// forgives remainder, returns capital, frees slot.
+    ///
+    /// Skips accrue_market_to (market is frozen). Handles both same-epoch
+    /// and epoch-mismatch accounts.
     pub fn force_close_resolved_with_fee_not_atomic(
         &mut self,
         idx: u16,
         fee_rate_per_slot: u128,
     ) -> Result<ResolvedCloseResult> {
-        // Phase 1: always reconcile (persists on success)
-        self.reconcile_resolved_not_atomic(idx)?;
+        rollback_on_error!(self, [idx], {
+            // Phase 1: always reconcile (persists on success)
+            self.reconcile_resolved_not_atomic(idx)?;
 
-        let i = idx as usize;
+            let i = idx as usize;
 
-        // Finalize any sides that are fully ready for reopening
-        self.maybe_finalize_ready_reset_sides();
-        self.sync_account_fee_to_slot(i, self.resolved_slot, fee_rate_per_slot)?;
-        self.assert_public_postconditions()?;
+            // Finalize any sides that are fully ready for reopening
+            self.maybe_finalize_ready_reset_sides();
+            self.sync_account_fee_to_slot(i, self.resolved_slot, fee_rate_per_slot)?;
+            self.assert_public_postconditions()?;
 
-        // pnl <= 0: can close immediately (loser/zero — no payout gate)
-        // pnl > 0: needs terminal readiness for payout
-        if self.accounts[i].pnl > 0 && !self.is_terminal_ready() {
-            // Reconciled but not yet payable. Progress persisted.
-            return Ok(ResolvedCloseResult::ProgressOnly);
-        }
+            // pnl <= 0: can close immediately (loser/zero — no payout gate)
+            // pnl > 0: needs terminal readiness for payout
+            if self.accounts[i].pnl > 0 && !self.is_terminal_ready() {
+                // Reconciled but not yet payable. Progress persisted.
+                return Ok(ResolvedCloseResult::ProgressOnly);
+            }
 
-        // Phase 2: terminal close
-        let capital = self.close_resolved_terminal_not_atomic(idx)?;
-        Ok(ResolvedCloseResult::Closed(capital))
+            // Phase 2: terminal close
+            let capital = self.close_resolved_terminal_not_atomic(idx)?;
+            Ok(ResolvedCloseResult::Closed(capital))
+        })
     }
 
     /// Phase 1: Reconcile a resolved account. Materializes K-pair PnL,
     /// zeroes position, settles losses, absorbs insurance. Always persists
     /// on success. Idempotent on already-reconciled accounts.
     pub fn reconcile_resolved_not_atomic(&mut self, idx: u16) -> Result<()> {
-        if self.market_mode != MarketMode::Resolved {
-            return Err(RiskError::Unauthorized);
-        }
-        self.validate_touched_account_shape(idx as usize)?;
-        // Recurring maintenance-fee ordering is a WRAPPER responsibility.
-        // The engine provides `sync_account_fee_to_slot_not_atomic` as a
-        // primitive for wrappers that enable fees, but does not enforce
-        // "fees synced before resolved close" — the engine has no way to
-        // distinguish "wrapper has rate=0, no sync needed" from "wrapper
-        // has rate>0 and forgot". A deployment with recurring fees MUST
-        // call sync on every account before `reconcile_resolved_not_atomic`
-        // / `force_close_resolved_not_atomic` /
-        // `close_resolved_terminal_not_atomic`.
-        //
-        // Spec §9.9 step 3: require current_slot == resolved_slot.
-        // resolve_market sets current_slot = resolved_slot; subsequent
-        // resolved-mode instructions MUST preserve that invariant rather
-        // than silently repair it. If they diverge, that's a symptom of
-        // post-resolution slot mutation from some other path, and it
-        // should surface as an error rather than be masked.
-        if self.current_slot != self.resolved_slot {
-            return Err(RiskError::CorruptState);
-        }
-        let i = idx as usize;
-
-        // Always clear reserve metadata (even flat accounts may have ghost bucket flags)
-        self.prepare_account_for_resolved_touch(i);
-
-        if self.accounts[i].position_basis_q != 0 {
-            let basis = self.accounts[i].position_basis_q;
-            let abs_basis = basis.unsigned_abs();
-            let a_basis = self.accounts[i].adl_a_basis;
-            if a_basis == 0 {
+        rollback_on_error!(self, [idx], {
+            if self.market_mode != MarketMode::Resolved {
+                return Err(RiskError::Unauthorized);
+            }
+            self.validate_touched_account_shape(idx as usize)?;
+            // Recurring maintenance-fee ordering is a WRAPPER responsibility.
+            // The engine provides `sync_account_fee_to_slot_not_atomic` as a
+            // primitive for wrappers that enable fees, but does not enforce
+            // "fees synced before resolved close" — the engine has no way to
+            // distinguish "wrapper has rate=0, no sync needed" from "wrapper
+            // has rate>0 and forgot". A deployment with recurring fees MUST
+            // call sync on every account before `reconcile_resolved_not_atomic`
+            // / `force_close_resolved_not_atomic` /
+            // `close_resolved_terminal_not_atomic`.
+            //
+            // Spec §9.9 step 3: require current_slot == resolved_slot.
+            // resolve_market sets current_slot = resolved_slot; subsequent
+            // resolved-mode instructions MUST preserve that invariant rather
+            // than silently repair it. If they diverge, that's a symptom of
+            // post-resolution slot mutation from some other path, and it
+            // should surface as an error rather than be masked.
+            if self.current_slot != self.resolved_slot {
                 return Err(RiskError::CorruptState);
             }
-            let k_snap = self.accounts[i].adl_k_snap;
-            let f_snap_acct = self.accounts[i].f_snap;
-            let side = side_of_i128(basis).unwrap();
-            let epoch_snap = self.accounts[i].adl_epoch_snap;
-            let epoch_side = self.get_epoch_side(side);
+            let i = idx as usize;
 
-            // Resolved reconciliation uses K_epoch_start + resolved_k_terminal_delta
-            // as the target K (spec §5.4 steps 6-7). F uses F_epoch_start.
-            // All accounts are stale after resolution (epoch mismatch).
-            let resolved_k_td = match side {
-                Side::Long => self.resolved_k_long_terminal_delta,
-                Side::Short => self.resolved_k_short_terminal_delta,
-            };
-            let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
-            let pnl_delta = if epoch_snap == epoch_side {
-                // Same-epoch with nonzero basis in resolved mode is corrupt state.
-                // After resolution, all nonzero-basis accounts must be stale.
-                return Err(RiskError::CorruptState);
-            } else {
-                // Stale (normal resolved path): require one-epoch lag
-                if epoch_snap.checked_add(1) != Some(epoch_side) {
+            // Always clear reserve metadata (even flat accounts may have ghost bucket flags)
+            self.prepare_account_for_resolved_touch(i);
+
+            if self.accounts[i].position_basis_q != 0 {
+                let basis = self.accounts[i].position_basis_q;
+                let abs_basis = basis.unsigned_abs();
+                let a_basis = self.accounts[i].adl_a_basis;
+                if a_basis == 0 {
                     return Err(RiskError::CorruptState);
                 }
-                if self.get_stale_count(side) == 0 {
+                let k_snap = self.accounts[i].adl_k_snap;
+                let f_snap_acct = self.accounts[i].f_snap;
+                let side = side_of_i128(basis).unwrap();
+                let epoch_snap = self.accounts[i].adl_epoch_snap;
+                let epoch_side = self.get_epoch_side(side);
+
+                // Resolved reconciliation uses K_epoch_start + resolved_k_terminal_delta
+                // as the target K (spec §5.4 steps 6-7). F uses F_epoch_start.
+                // All accounts are stale after resolution (epoch mismatch).
+                let resolved_k_td = match side {
+                    Side::Long => self.resolved_k_long_terminal_delta,
+                    Side::Short => self.resolved_k_short_terminal_delta,
+                };
+                let den = a_basis.checked_mul(POS_SCALE).ok_or(RiskError::Overflow)?;
+                let pnl_delta = if epoch_snap == epoch_side {
+                    // Same-epoch with nonzero basis in resolved mode is corrupt state.
+                    // After resolution, all nonzero-basis accounts must be stale.
                     return Err(RiskError::CorruptState);
-                }
-                // K_epoch_start + terminal delta in wide I256.
-                // The terminal K sum may exceed i128; the wide helper handles this exactly.
-                let k_terminal_wide = I256::from_i128(self.get_k_epoch_start(side))
-                    .checked_add(I256::from_i128(resolved_k_td))
+                } else {
+                    // Stale (normal resolved path): require one-epoch lag
+                    if epoch_snap.checked_add(1) != Some(epoch_side) {
+                        return Err(RiskError::CorruptState);
+                    }
+                    if self.get_stale_count(side) == 0 {
+                        return Err(RiskError::CorruptState);
+                    }
+                    // K_epoch_start + terminal delta in wide I256.
+                    // The terminal K sum may exceed i128; the wide helper handles this exactly.
+                    let k_terminal_wide = I256::from_i128(self.get_k_epoch_start(side))
+                        .checked_add(I256::from_i128(resolved_k_td))
+                        .ok_or(RiskError::Overflow)?;
+                    let f_end_wide = I256::from_i128(self.get_f_epoch_start(side));
+                    Self::compute_kf_pnl_delta_wide(
+                        abs_basis,
+                        k_snap,
+                        k_terminal_wide,
+                        f_snap_acct,
+                        f_end_wide,
+                        den,
+                    )?
+                };
+                let new_pnl = self.accounts[i]
+                    .pnl
+                    .checked_add(pnl_delta)
                     .ok_or(RiskError::Overflow)?;
-                let f_end_wide = I256::from_i128(self.get_f_epoch_start(side));
-                Self::compute_kf_pnl_delta_wide(
-                    abs_basis,
-                    k_snap,
-                    k_terminal_wide,
-                    f_snap_acct,
-                    f_end_wide,
-                    den,
-                )?
-            };
-            let new_pnl = self.accounts[i]
-                .pnl
-                .checked_add(pnl_delta)
-                .ok_or(RiskError::Overflow)?;
-            if new_pnl == i128::MIN {
-                return Err(RiskError::Overflow);
+                if new_pnl == i128::MIN {
+                    return Err(RiskError::Overflow);
+                }
+
+                // MUTATE (prepare already called above, epoch validated above)
+                if pnl_delta != 0 {
+                    self.set_pnl(i, new_pnl)?;
+                    self.pnl_matured_pos_tot = self.pnl_pos_tot;
+                }
+                if epoch_snap != epoch_side {
+                    let old_stale = self.get_stale_count(side);
+                    self.set_stale_count(
+                        side,
+                        old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?,
+                    );
+                }
+                self.clear_position_basis_q(i)?;
             }
 
-            // MUTATE (prepare already called above, epoch validated above)
-            if pnl_delta != 0 {
-                self.set_pnl(i, new_pnl)?;
-                self.pnl_matured_pos_tot = self.pnl_pos_tot;
-            }
-            if epoch_snap != epoch_side {
-                let old_stale = self.get_stale_count(side);
-                self.set_stale_count(
-                    side,
-                    old_stale.checked_sub(1).ok_or(RiskError::CorruptState)?,
-                );
-            }
-            self.clear_position_basis_q(i)?;
-        }
+            self.settle_losses(i)?;
+            self.resolve_flat_negative(i)?;
+            self.maybe_finalize_ready_reset_sides();
 
-        self.settle_losses(i)?;
-        self.resolve_flat_negative(i)?;
-        self.maybe_finalize_ready_reset_sides();
-
-        self.assert_public_postconditions()?;
-        Ok(())
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     /// Check if resolved market is terminal-ready for payouts.
@@ -7940,105 +8335,112 @@ impl RiskEngine {
         idx: u16,
         fee_rate_per_slot: u128,
     ) -> Result<u128> {
-        if self.market_mode != MarketMode::Resolved {
-            return Err(RiskError::Unauthorized);
-        }
-        self.validate_touched_account_shape(idx as usize)?;
-        // Spec §9.9 step 3: resolved-market instructions MUST run at the
-        // frozen anchor slot. reconcile_resolved_not_atomic enforces this;
-        // terminal close does too — a post-resolution drift of current_slot
-        // is corruption, not recoverable state.
-        if self.current_slot != self.resolved_slot {
-            return Err(RiskError::CorruptState);
-        }
-        let i = idx as usize;
-        // Reject unreconciled accounts: position must be zeroed, PnL >= 0
-        if self.accounts[i].position_basis_q != 0 {
-            return Err(RiskError::Undercollateralized);
-        }
-        if self.accounts[i].pnl < 0 {
-            // Negative PnL means losses not yet absorbed — must reconcile first
-            return Err(RiskError::Undercollateralized);
-        }
-        if self.accounts[i].pnl > 0 && !self.is_terminal_ready() {
-            return Err(RiskError::Unauthorized);
-        }
-        self.sync_account_fee_to_slot(i, self.resolved_slot, fee_rate_per_slot)?;
-
-        // Canonicalize reserve metadata before free_slot.
-        self.prepare_account_for_resolved_touch(i);
-        if self.accounts[i].pnl > 0 {
-            if self.resolved_payout_ready == 0 {
-                self.pnl_matured_pos_tot = self.pnl_pos_tot;
-                let senior = self
-                    .c_tot
-                    .get()
-                    .checked_add(self.insurance_fund.balance.get())
-                    .unwrap_or(u128::MAX);
-                let residual = if self.vault.get() >= senior {
-                    self.vault.get() - senior
-                } else {
-                    0u128
-                };
-                let h_den = self.pnl_matured_pos_tot;
-                let h_num = if h_den == 0 {
-                    0
-                } else {
-                    core::cmp::min(residual, h_den)
-                };
-                self.resolved_payout_h_num = h_num;
-                self.resolved_payout_h_den = h_den;
-                self.resolved_payout_ready = 1;
+        rollback_on_error!(self, [idx], {
+            if self.market_mode != MarketMode::Resolved {
+                return Err(RiskError::Unauthorized);
             }
-            // prepare_account_for_resolved_touch already cleared reserve to 0;
-            // assert the invariant explicitly as defense-in-depth before using
-            // resolved released-PnL view.
-            if self.accounts[i].reserved_pnl != 0 {
+            self.validate_touched_account_shape(idx as usize)?;
+            // Spec §9.9 step 3: resolved-market instructions MUST run at the
+            // frozen anchor slot. reconcile_resolved_not_atomic enforces this;
+            // terminal close does too — a post-resolution drift of current_slot
+            // is corruption, not recoverable state.
+            if self.current_slot != self.resolved_slot {
                 return Err(RiskError::CorruptState);
             }
-            let released = self.released_pos_checked(i, false)?;
-            if released > 0 {
-                // Spec forbids h_den==0 with positive released PnL when snapshot is ready.
-                if self.resolved_payout_h_den == 0 {
+            let i = idx as usize;
+            // Reject unreconciled accounts: position must be zeroed, PnL >= 0
+            if self.accounts[i].position_basis_q != 0 {
+                return Err(RiskError::Undercollateralized);
+            }
+            if self.accounts[i].pnl < 0 {
+                // Negative PnL means losses not yet absorbed — must reconcile first
+                return Err(RiskError::Undercollateralized);
+            }
+            if self.accounts[i].pnl > 0 && !self.is_terminal_ready() {
+                return Err(RiskError::Unauthorized);
+            }
+            self.sync_account_fee_to_slot(i, self.resolved_slot, fee_rate_per_slot)?;
+
+            // Canonicalize reserve metadata before free_slot.
+            self.prepare_account_for_resolved_touch(i);
+            if self.accounts[i].pnl > 0 {
+                if self.resolved_payout_ready == 0 {
+                    self.pnl_matured_pos_tot = self.pnl_pos_tot;
+                    let senior = self
+                        .c_tot
+                        .get()
+                        .checked_add(self.insurance_fund.balance.get())
+                        .unwrap_or(u128::MAX);
+                    let residual = if self.vault.get() >= senior {
+                        self.vault.get() - senior
+                    } else {
+                        0u128
+                    };
+                    let h_den = self.pnl_matured_pos_tot;
+                    let h_num = if h_den == 0 {
+                        0
+                    } else {
+                        core::cmp::min(residual, h_den)
+                    };
+                    self.resolved_payout_h_num = h_num;
+                    self.resolved_payout_h_den = h_den;
+                    self.resolved_payout_ready = 1;
+                }
+                // prepare_account_for_resolved_touch already cleared reserve to 0;
+                // assert the invariant explicitly as defense-in-depth before using
+                // resolved released-PnL view.
+                if self.accounts[i].reserved_pnl != 0 {
                     return Err(RiskError::CorruptState);
                 }
-                let y = wide_mul_div_floor_u128(
-                    released,
-                    self.resolved_payout_h_num,
-                    self.resolved_payout_h_den,
-                );
-                // Canonical resolved-close path (spec): set_pnl_with_reserve to
-                // zero the account's PnL with NoPositiveIncreaseAllowed, then
-                // credit the haircutted payout y to capital. Unlike
-                // consume_released_pnl (which is a Live-mode matured-drain
-                // helper), this uses the same canonical PnL mutation primitive
-                // as the rest of the engine.
-                self.set_pnl_with_reserve(i, 0i128, ReserveMode::NoPositiveIncreaseAllowed, None)?;
-                let new_cap = self.accounts[i]
-                    .capital
-                    .get()
-                    .checked_add(y)
-                    .ok_or(RiskError::Overflow)?;
-                self.set_capital(i, new_cap)?;
+                let released = self.released_pos_checked(i, false)?;
+                if released > 0 {
+                    // Spec forbids h_den==0 with positive released PnL when snapshot is ready.
+                    if self.resolved_payout_h_den == 0 {
+                        return Err(RiskError::CorruptState);
+                    }
+                    let y = wide_mul_div_floor_u128(
+                        released,
+                        self.resolved_payout_h_num,
+                        self.resolved_payout_h_den,
+                    );
+                    // Canonical resolved-close path (spec): set_pnl_with_reserve to
+                    // zero the account's PnL with NoPositiveIncreaseAllowed, then
+                    // credit the haircutted payout y to capital. Unlike
+                    // consume_released_pnl (which is a Live-mode matured-drain
+                    // helper), this uses the same canonical PnL mutation primitive
+                    // as the rest of the engine.
+                    self.set_pnl_with_reserve(
+                        i,
+                        0i128,
+                        ReserveMode::NoPositiveIncreaseAllowed,
+                        None,
+                    )?;
+                    let new_cap = self.accounts[i]
+                        .capital
+                        .get()
+                        .checked_add(y)
+                        .ok_or(RiskError::Overflow)?;
+                    self.set_capital(i, new_cap)?;
+                }
             }
-        }
-        self.fee_debt_sweep(i)?;
-        self.validate_fee_credits_shape(i)?;
-        let fc = self.accounts[i].fee_credits.get();
-        if fc < 0 {
-            self.accounts[i].fee_credits = I128::ZERO;
-        }
-        let capital = self.accounts[i].capital;
-        if capital > self.vault {
-            return Err(RiskError::InsufficientBalance);
-        }
-        self.vault = self.vault - capital;
-        self.set_capital(i, 0)?;
-        self.free_slot(idx)?;
-        self.sweep_empty_market_surplus_to_insurance()?;
+            self.fee_debt_sweep(i)?;
+            self.validate_fee_credits_shape(i)?;
+            let fc = self.accounts[i].fee_credits.get();
+            if fc < 0 {
+                self.accounts[i].fee_credits = I128::ZERO;
+            }
+            let capital = self.accounts[i].capital;
+            if capital > self.vault {
+                return Err(RiskError::InsufficientBalance);
+            }
+            self.vault = self.vault - capital;
+            self.set_capital(i, 0)?;
+            self.free_slot(idx)?;
+            self.sweep_empty_market_surplus_to_insurance()?;
 
-        self.assert_public_postconditions()?;
-        Ok(capital.get())
+            self.assert_public_postconditions()?;
+            Ok(capital.get())
+        })
     }
 
     // ========================================================================
@@ -8049,63 +8451,65 @@ impl RiskEngine {
     /// Spec §10.7: MUST NOT call accrue_market_to, MUST NOT mutate side state,
     /// MUST NOT materialize any account.
     pub fn reclaim_empty_account_not_atomic(&mut self, idx: u16, now_slot: u64) -> Result<()> {
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
-        // Reject time jumps that would brick subsequent accrue_market_to.
-        self.check_live_accrual_envelope(now_slot)?;
+        rollback_on_error!(self, [idx], {
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
+            if now_slot < self.current_slot {
+                return Err(RiskError::Overflow);
+            }
+            self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
+            // Reject time jumps that would brick subsequent accrue_market_to.
+            self.check_live_accrual_envelope(now_slot)?;
 
-        // Step 3: Pre-realization flat-clean preconditions (spec §10.7 / §2.6)
-        let account = &self.accounts[idx as usize];
-        if account.position_basis_q != 0 {
-            return Err(RiskError::Undercollateralized);
-        }
-        if account.pnl != 0 {
-            return Err(RiskError::Undercollateralized);
-        }
-        if account.reserved_pnl != 0 {
-            return Err(RiskError::Undercollateralized);
-        }
-        // Require bucket metadata empty (not just reserved_pnl == 0)
-        if account.sched_present != 0 || account.pending_present != 0 {
-            return Err(RiskError::Undercollateralized);
-        }
-        self.validate_fee_credits_shape(idx as usize)?;
+            // Step 3: Pre-realization flat-clean preconditions (spec §10.7 / §2.6)
+            let account = &self.accounts[idx as usize];
+            if account.position_basis_q != 0 {
+                return Err(RiskError::Undercollateralized);
+            }
+            if account.pnl != 0 {
+                return Err(RiskError::Undercollateralized);
+            }
+            if account.reserved_pnl != 0 {
+                return Err(RiskError::Undercollateralized);
+            }
+            // Require bucket metadata empty (not just reserved_pnl == 0)
+            if account.sched_present != 0 || account.pending_present != 0 {
+                return Err(RiskError::Undercollateralized);
+            }
+            self.validate_fee_credits_shape(idx as usize)?;
 
-        // Step 4: anchor current_slot
-        self.current_slot = now_slot;
+            // Step 4: anchor current_slot
+            self.current_slot = now_slot;
 
-        // No engine-native maintenance fee (spec §8).
+            // No engine-native maintenance fee (spec §8).
 
-        // Step 5: final reclaim-eligibility check.
-        // The engine only reclaims accounts whose capital has been fully
-        // drained. Wrappers that want to recycle slots with tiny residual
-        // capital MUST drain that residual first (e.g., via
-        // `charge_account_fee_not_atomic` to push the remainder into the
-        // insurance fund). This keeps the engine's reclaim predicate a
-        // single bit (`capital == 0`) and pushes any "dust threshold"
-        // policy into the wrapper.
-        if !self.accounts[idx as usize].capital.is_zero() {
-            return Err(RiskError::Undercollateralized);
-        }
+            // Step 5: final reclaim-eligibility check.
+            // The engine only reclaims accounts whose capital has been fully
+            // drained. Wrappers that want to recycle slots with tiny residual
+            // capital MUST drain that residual first (e.g., via
+            // `charge_account_fee_not_atomic` to push the remainder into the
+            // insurance fund). This keeps the engine's reclaim predicate a
+            // single bit (`capital == 0`) and pushes any "dust threshold"
+            // policy into the wrapper.
+            if !self.accounts[idx as usize].capital.is_zero() {
+                return Err(RiskError::Undercollateralized);
+            }
 
-        // Forgive uncollectible fee debt (spec §2.6).
-        self.validate_fee_credits_shape(idx as usize)?;
-        let fc = self.accounts[idx as usize].fee_credits.get();
-        if fc < 0 {
-            self.accounts[idx as usize].fee_credits = I128::ZERO;
-        }
+            // Forgive uncollectible fee debt (spec §2.6).
+            self.validate_fee_credits_shape(idx as usize)?;
+            let fc = self.accounts[idx as usize].fee_credits.get();
+            if fc < 0 {
+                self.accounts[idx as usize].fee_credits = I128::ZERO;
+            }
 
-        // Free the slot
-        self.free_slot(idx)?;
-        self.sweep_empty_market_surplus_to_insurance()?;
+            // Free the slot
+            self.free_slot(idx)?;
+            self.sweep_empty_market_surplus_to_insurance()?;
 
-        self.assert_public_postconditions()?;
-        Ok(())
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     // ========================================================================
@@ -8162,36 +8566,39 @@ impl RiskEngine {
         amount: u128,
         now_slot: u64,
     ) -> Result<()> {
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
-        self.assert_public_postconditions()?;
-        self.check_live_accrual_envelope(now_slot)?;
-        let ins = self.insurance_fund.balance.get();
-        if amount > ins {
-            return Err(RiskError::InsufficientBalance);
-        }
-        let new_cap = self.accounts[idx as usize]
-            .capital
-            .get()
-            .checked_add(amount)
-            .ok_or(RiskError::Overflow)?;
+        rollback_on_error!(self, [idx], {
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
+            if now_slot < self.current_slot {
+                return Err(RiskError::Overflow);
+            }
+            self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
+            self.assert_public_postconditions()?;
+            self.check_live_accrual_envelope(now_slot)?;
+            let ins = self.insurance_fund.balance.get();
+            if amount > ins {
+                return Err(RiskError::InsufficientBalance);
+            }
+            let new_cap = self.accounts[idx as usize]
+                .capital
+                .get()
+                .checked_add(amount)
+                .ok_or(RiskError::Overflow)?;
 
-        self.current_slot = now_slot;
-        self.insurance_fund.balance = U128::new(ins - amount);
-        self.set_capital(idx as usize, new_cap)?;
+            self.current_slot = now_slot;
+            self.insurance_fund.balance = U128::new(ins - amount);
+            self.set_capital(idx as usize, new_cap)?;
 
-        if self.accounts[idx as usize].position_basis_q == 0 && self.accounts[idx as usize].pnl >= 0
-        {
-            self.fee_debt_sweep(idx as usize)?;
-        }
+            if self.accounts[idx as usize].position_basis_q == 0
+                && self.accounts[idx as usize].pnl >= 0
+            {
+                self.fee_debt_sweep(idx as usize)?;
+            }
 
-        self.assert_public_postconditions()?;
-        Ok(())
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     /// Withdraw insurance from a live market. The wrapper owns authorization
@@ -8201,55 +8608,59 @@ impl RiskEngine {
         amount: u128,
         now_slot: u64,
     ) -> Result<()> {
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-        self.assert_public_postconditions()?;
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        self.check_live_accrual_envelope(now_slot)?;
-        let ins = self.insurance_fund.balance.get();
-        if amount > ins {
-            return Err(RiskError::InsufficientBalance);
-        }
-        let vault_next = self
-            .vault
-            .get()
-            .checked_sub(amount)
-            .ok_or(RiskError::CorruptState)?;
+        rollback_on_error!(self, [], {
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
+            self.assert_public_postconditions()?;
+            if now_slot < self.current_slot {
+                return Err(RiskError::Overflow);
+            }
+            self.check_live_accrual_envelope(now_slot)?;
+            let ins = self.insurance_fund.balance.get();
+            if amount > ins {
+                return Err(RiskError::InsufficientBalance);
+            }
+            let vault_next = self
+                .vault
+                .get()
+                .checked_sub(amount)
+                .ok_or(RiskError::CorruptState)?;
 
-        self.current_slot = now_slot;
-        self.insurance_fund.balance = U128::new(ins - amount);
-        self.vault = U128::new(vault_next);
-        self.assert_public_postconditions()?;
-        Ok(())
+            self.current_slot = now_slot;
+            self.insurance_fund.balance = U128::new(ins - amount);
+            self.vault = U128::new(vault_next);
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     /// Withdraw all terminal insurance from a resolved, empty market. This also
     /// folds any empty-market rounding surplus into insurance before draining.
     pub fn withdraw_resolved_insurance_not_atomic(&mut self) -> Result<u128> {
-        if self.market_mode != MarketMode::Resolved {
-            return Err(RiskError::Unauthorized);
-        }
-        self.assert_public_postconditions()?;
-        if self.num_used_accounts != 0 {
-            return Err(RiskError::Unauthorized);
-        }
-        self.sweep_empty_market_surplus_to_insurance()?;
-        let payout = self.insurance_fund.balance.get();
-        if payout == 0 {
-            return Ok(0);
-        }
-        let vault_next = self
-            .vault
-            .get()
-            .checked_sub(payout)
-            .ok_or(RiskError::CorruptState)?;
-        self.insurance_fund.balance = U128::ZERO;
-        self.vault = U128::new(vault_next);
-        self.assert_public_postconditions()?;
-        Ok(payout)
+        rollback_on_error!(self, [], {
+            if self.market_mode != MarketMode::Resolved {
+                return Err(RiskError::Unauthorized);
+            }
+            self.assert_public_postconditions()?;
+            if self.num_used_accounts != 0 {
+                return Err(RiskError::Unauthorized);
+            }
+            self.sweep_empty_market_surplus_to_insurance()?;
+            let payout = self.insurance_fund.balance.get();
+            if payout == 0 {
+                return Ok(0);
+            }
+            let vault_next = self
+                .vault
+                .get()
+                .checked_sub(payout)
+                .ok_or(RiskError::CorruptState)?;
+            self.insurance_fund.balance = U128::ZERO;
+            self.vault = U128::new(vault_next);
+            self.assert_public_postconditions()?;
+            Ok(payout)
+        })
     }
 
     // ========================================================================
@@ -8280,30 +8691,32 @@ impl RiskEngine {
         fee_abs: u128,
         now_slot: u64,
     ) -> Result<()> {
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
-        // Reject time jumps that would brick subsequent accrue_market_to.
-        self.check_live_accrual_envelope(now_slot)?;
-        if fee_abs > MAX_PROTOCOL_FEE_ABS {
-            return Err(RiskError::Overflow);
-        }
-        if fee_abs > 0 {
-            self.ensure_fee_draw_does_not_precede_loss(idx as usize)?;
-        }
+        rollback_on_error!(self, [idx], {
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
+            if now_slot < self.current_slot {
+                return Err(RiskError::Overflow);
+            }
+            self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
+            // Reject time jumps that would brick subsequent accrue_market_to.
+            self.check_live_accrual_envelope(now_slot)?;
+            if fee_abs > MAX_PROTOCOL_FEE_ABS {
+                return Err(RiskError::Overflow);
+            }
+            if fee_abs > 0 {
+                self.ensure_fee_draw_does_not_precede_loss(idx as usize)?;
+            }
 
-        self.current_slot = now_slot;
+            self.current_slot = now_slot;
 
-        if fee_abs > 0 {
-            self.charge_fee_to_insurance(idx as usize, fee_abs)?;
-        }
+            if fee_abs > 0 {
+                self.charge_fee_to_insurance(idx as usize, fee_abs)?;
+            }
 
-        self.assert_public_postconditions()?;
-        Ok(())
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     // ========================================================================
@@ -8318,44 +8731,46 @@ impl RiskEngine {
     ///
     /// Preconditions: account is flat (position_basis_q == 0) and pnl < 0.
     pub fn settle_flat_negative_pnl_not_atomic(&mut self, idx: u16, now_slot: u64) -> Result<()> {
-        if self.market_mode != MarketMode::Live {
-            return Err(RiskError::Unauthorized);
-        }
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
-        // Reject time jumps that would brick subsequent accrue_market_to.
-        self.check_live_accrual_envelope(now_slot)?;
-        let i = idx as usize;
-        // Flat only, reserve state empty
-        if self.accounts[i].position_basis_q != 0 {
-            return Err(RiskError::Undercollateralized);
-        }
-        if self.accounts[i].reserved_pnl != 0
-            || self.accounts[i].sched_present != 0
-            || self.accounts[i].pending_present != 0
-        {
-            return Err(RiskError::Undercollateralized);
-        }
-        // Spec §9.2.4 step 4: set current_slot = now_slot BEFORE the
-        // pnl >= 0 early-return. A successful no-op still advances the
-        // engine's time anchor; without this, a caller can see inconsistent
-        // `current_slot` behavior between no-op and full-path invocations.
-        self.current_slot = now_slot;
+        rollback_on_error!(self, [idx], {
+            if self.market_mode != MarketMode::Live {
+                return Err(RiskError::Unauthorized);
+            }
+            if now_slot < self.current_slot {
+                return Err(RiskError::Overflow);
+            }
+            self.validate_touched_account_shape_at_fee_slot(idx as usize, now_slot)?;
+            // Reject time jumps that would brick subsequent accrue_market_to.
+            self.check_live_accrual_envelope(now_slot)?;
+            let i = idx as usize;
+            // Flat only, reserve state empty
+            if self.accounts[i].position_basis_q != 0 {
+                return Err(RiskError::Undercollateralized);
+            }
+            if self.accounts[i].reserved_pnl != 0
+                || self.accounts[i].sched_present != 0
+                || self.accounts[i].pending_present != 0
+            {
+                return Err(RiskError::Undercollateralized);
+            }
+            // Spec §9.2.4 step 4: set current_slot = now_slot BEFORE the
+            // pnl >= 0 early-return. A successful no-op still advances the
+            // engine's time anchor; without this, a caller can see inconsistent
+            // `current_slot` behavior between no-op and full-path invocations.
+            self.current_slot = now_slot;
 
-        // Noop if PnL >= 0 (spec §9.2.4 step 6-7).
-        if self.accounts[i].pnl >= 0 {
+            // Noop if PnL >= 0 (spec §9.2.4 step 6-7).
+            if self.accounts[i].pnl >= 0 {
+                self.assert_public_postconditions()?;
+                return Ok(());
+            }
+
+            // Settle losses from principal first, then absorb remaining via insurance
+            self.settle_losses(i)?;
+            self.resolve_flat_negative(i)?;
+
             self.assert_public_postconditions()?;
-            return Ok(());
-        }
-
-        // Settle losses from principal first, then absorb remaining via insurance
-        self.settle_losses(i)?;
-        self.resolve_flat_negative(i)?;
-
-        self.assert_public_postconditions()?;
-        Ok(())
+            Ok(())
+        })
     }
 
     // ========================================================================
@@ -8392,46 +8807,48 @@ impl RiskEngine {
         now_slot: u64,
         fee_rate_per_slot: u128,
     ) -> Result<()> {
-        if now_slot < self.current_slot {
-            return Err(RiskError::Overflow);
-        }
-        let live_loss_safe_anchor = if self.market_mode == MarketMode::Live
-            && now_slot > self.last_market_slot
-            && (idx as usize) < MAX_ACCOUNTS
-            && self.accounts[idx as usize].position_basis_q != 0
-        {
-            self.last_market_slot
-        } else {
-            now_slot
-        };
-        let shape_anchor = match self.market_mode {
-            MarketMode::Live => live_loss_safe_anchor,
-            MarketMode::Resolved => self.resolved_slot,
-        };
-        self.validate_touched_account_shape_at_fee_slot(idx as usize, shape_anchor)?;
-        if fee_rate_per_slot > 0 && shape_anchor > self.accounts[idx as usize].last_fee_slot {
-            self.ensure_fee_draw_does_not_precede_loss(idx as usize)?;
-        }
-        // Reject time jumps that would brick subsequent accrue_market_to.
-        // Only meaningful on Live; on Resolved the envelope is moot because
-        // accrue_market_to is no longer reachable, but the check is safe
-        // (last_market_slot is frozen to resolved_slot).
-        if self.market_mode == MarketMode::Live && now_slot > self.current_slot {
-            self.check_live_accrual_envelope(now_slot)?;
-        }
-        let anchor = match self.market_mode {
-            MarketMode::Live => {
-                self.current_slot = now_slot;
-                live_loss_safe_anchor
+        rollback_on_error!(self, [idx], {
+            if now_slot < self.current_slot {
+                return Err(RiskError::Overflow);
             }
-            MarketMode::Resolved => {
-                // Resolved fee sync is anchored at resolution.
-                self.resolved_slot
+            let live_loss_safe_anchor = if self.market_mode == MarketMode::Live
+                && now_slot > self.last_market_slot
+                && (idx as usize) < MAX_ACCOUNTS
+                && self.accounts[idx as usize].position_basis_q != 0
+            {
+                self.last_market_slot
+            } else {
+                now_slot
+            };
+            let shape_anchor = match self.market_mode {
+                MarketMode::Live => live_loss_safe_anchor,
+                MarketMode::Resolved => self.resolved_slot,
+            };
+            self.validate_touched_account_shape_at_fee_slot(idx as usize, shape_anchor)?;
+            if fee_rate_per_slot > 0 && shape_anchor > self.accounts[idx as usize].last_fee_slot {
+                self.ensure_fee_draw_does_not_precede_loss(idx as usize)?;
             }
-        };
-        self.sync_account_fee_to_slot(idx as usize, anchor, fee_rate_per_slot)?;
-        self.assert_public_postconditions()?;
-        Ok(())
+            // Reject time jumps that would brick subsequent accrue_market_to.
+            // Only meaningful on Live; on Resolved the envelope is moot because
+            // accrue_market_to is no longer reachable, but the check is safe
+            // (last_market_slot is frozen to resolved_slot).
+            if self.market_mode == MarketMode::Live && now_slot > self.current_slot {
+                self.check_live_accrual_envelope(now_slot)?;
+            }
+            let anchor = match self.market_mode {
+                MarketMode::Live => {
+                    self.current_slot = now_slot;
+                    live_loss_safe_anchor
+                }
+                MarketMode::Resolved => {
+                    // Resolved fee sync is anchored at resolution.
+                    self.resolved_slot
+                }
+            };
+            self.sync_account_fee_to_slot(idx as usize, anchor, fee_rate_per_slot)?;
+            self.assert_public_postconditions()?;
+            Ok(())
+        })
     }
 
     // ========================================================================

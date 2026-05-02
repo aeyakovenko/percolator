@@ -23,6 +23,9 @@ small = []  # MAX_ACCOUNTS=256 for low-traffic markets
 medium = []  # MAX_ACCOUNTS=1024 for mid-range markets
 audit-scan = []  # Enable full account-table invariant scans on public exits
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
