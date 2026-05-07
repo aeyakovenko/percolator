@@ -1037,6 +1037,11 @@ test_visible_struct! {
 struct KeeperCrankRequest<'a> {
     pub now_slot: u64,
     pub oracle_price: u64,
+    /// Raw (unbounded) oracle target price. Used to detect that a position's
+    /// loss direction cannot reverse even while `loss_stale` is true during
+    /// partial catchup, allowing early liquidation before deficit compounds.
+    /// Set to `oracle_price` for authenticated keeper cranks (no bypass).
+    pub authenticated_raw_target_price: u64,
     pub ordered_candidates: &'a [(u16, Option<LiquidationPolicy>)],
     pub max_revalidations: u16,
     pub max_candidate_inspections: u16,
@@ -1087,6 +1092,10 @@ impl<'a> KeeperCrankRequest<'a> {
         Self {
             now_slot,
             oracle_price,
+            // Authenticated keeper cranks have no raw target concept; using
+            // oracle_price means target == last_oracle so the stale bypass
+            // never fires (correct — authenticated cranks aren't partial catchup).
+            authenticated_raw_target_price: oracle_price,
             ordered_candidates,
             max_revalidations,
             max_candidate_inspections: MAX_TOUCHED_PER_INSTRUCTION as u16,
@@ -5757,6 +5766,18 @@ impl RiskEngine {
     }
     }
 
+    /// Returns true if account `idx` is strictly below maintenance margin at `price`.
+    /// Safe to call from the wrapper: bounds-checks idx before delegating to
+    /// `is_above_maintenance_margin`.  Returns false (i.e. "healthy") for any
+    /// invalid or unused index so that the caller degrades gracefully.
+    pub fn account_below_maintenance_margin_at_price(&self, idx: u16, price: u64) -> bool {
+        let i = idx as usize;
+        if i >= MAX_ACCOUNTS || i as u64 >= self.params.max_accounts || !self.is_used(i) {
+            return false;
+        }
+        !self.is_above_maintenance_margin(&self.accounts[i], i, price)
+    }
+
     /// is_above_initial_margin (spec §9.1): exact Eq_init_raw_i >= IM_req_i
     /// Per spec §9.1: if eff == 0 then IM_req = 0; else IM_req = max(proportional, MIN_NONZERO_IM_REQ)
     /// Per spec §3.4: MUST use exact raw equity, not clamped Eq_init_net_i,
@@ -8571,6 +8592,7 @@ impl RiskEngine {
         ctx: &mut InstructionContext,
         now_slot: u64,
         oracle_price: u64,
+        target_price: u64,
         ordered_candidates: &[(u16, Option<LiquidationPolicy>)],
         max_revalidations: u16,
         max_candidate_inspections: u16,
@@ -8602,7 +8624,29 @@ impl RiskEngine {
             self.touch_account_live_local(cidx, ctx)?;
             protective_progress = true;
 
-            if !loss_stale_after_accrual && !ctx.pending_reset_long && !ctx.pending_reset_short {
+            // Bypass the loss_stale gate when the oracle target is adverse to
+            // the position direction and the position is already underwater.
+            // During partial catchup (last_market_slot < current_slot),
+            // loss_stale_after_accrual is always true, which would defer
+            // liquidation until the final non-partial crank and allow the
+            // deficit to compound across all intermediate cranks. When the
+            // raw target price confirms that the oracle will continue moving
+            // against the position (long + falling target, short + rising
+            // target), there is no path to recovery and immediate liquidation
+            // at this crank's bounded oracle price minimises insurance drain.
+            let loss_stale_bypass = if loss_stale_after_accrual {
+                let eff = self.effective_pos_q_checked(cidx, false).unwrap_or(0);
+                let current_oracle = self.last_oracle_price;
+                (eff > 0 && target_price < current_oracle)
+                    || (eff < 0 && target_price > current_oracle)
+            } else {
+                false
+            };
+
+            if (!loss_stale_after_accrual || loss_stale_bypass)
+                && !ctx.pending_reset_long
+                && !ctx.pending_reset_short
+            {
                 let eff = self.effective_pos_q_checked(cidx, false)?;
                 if eff != 0 {
                     if !self.is_above_maintenance_margin(&self.accounts[cidx], cidx, oracle_price) {
@@ -8831,6 +8875,7 @@ impl RiskEngine {
         let outcome = self.keeper_crank_with_request_not_atomic(KeeperCrankRequest {
             now_slot,
             oracle_price,
+            authenticated_raw_target_price,
             ordered_candidates,
             max_revalidations,
             max_candidate_inspections,
@@ -8852,6 +8897,7 @@ impl RiskEngine {
         let KeeperCrankRequest {
             now_slot,
             oracle_price,
+            authenticated_raw_target_price,
             ordered_candidates,
             max_revalidations,
             max_candidate_inspections,
@@ -8962,6 +9008,7 @@ impl RiskEngine {
             &mut ctx,
             now_slot,
             oracle_price,
+            authenticated_raw_target_price,
             ordered_candidates,
             max_revalidations,
             max_candidate_inspections,
