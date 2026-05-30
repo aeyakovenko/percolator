@@ -10430,6 +10430,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(paid)
     }
 
+    /// Kani-only direct entry to the *core* negative-PnL principal settlement
+    /// transition, bypassing the loop-based `validate_with_market` precondition
+    /// and the (default-off) audit scans. This exists so an inductive proof can
+    /// `assume(canonical_inv(s))` over a loop-free decomposed invariant and then
+    /// apply the bare transition `f`, proving `INV(s) => INV(f(s))` without
+    /// paying the cost of the full O(N) shape scan inside the assume.
+    #[cfg(kani)]
+    pub fn kani_settle_negative_pnl_from_principal_core_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)
+    }
+
     fn settle_negative_pnl_from_principal_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
