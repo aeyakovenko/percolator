@@ -29,8 +29,9 @@
 //!     TokenValueFlowProof with vault_before == vault_after.
 
 use percolator::v16::{
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
-    PortfolioSourceDomainV16Account, PortfolioV16ViewMut, V16PodI128, V16PodU128,
+    EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
+    PortfolioAccountV16Account, PortfolioSourceDomainV16Account, PortfolioV16ViewMut, SideV16,
+    V16PodI128, V16PodU128, V16PodU32,
 };
 use percolator::MAX_VAULT_TVL;
 
@@ -436,4 +437,114 @@ fn proof_v16_inductive_settle_negative_pnl_maintains_aggregate_c_tot() {
             "target capital delta equals c_tot delta (no aggregate drift)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fourth inductive proof — MARKETS-SLICE-TOUCHING transition.
+//
+// This pushes past the zero-market cone into the per-domain insurance ledger,
+// which is exactly the territory Criterion 6b/6d describe as harder: the
+// transition `consume_domain_insurance_for_negative_pnl` READS and WRITES the
+// `markets` slice (the asset slot's domain budget/spent counters) and decrements
+// `header.insurance`, with a `while d < configured_domains` loop inside
+// `available_domain_insurance`.
+//
+// HONEST symbolic-vs-bounded breakdown for this harness:
+//   * SYMBOLIC (full domain) : header.vault, header.insurance, account.pnl,
+//                              account.capital, slot.domain_budget,
+//                              slot.domain_spent.
+//   * FIXED (topology, not economics): config.max_market_slots = 1 (one asset,
+//     two domains) and zeroed source-credit / insurance reservations. The
+//     transition's helpers require a configured slot to index, so the *shape*
+//     (1 market) is concrete while the *economic scalars* on it are symbolic.
+//     This is still strictly more symbolic than the STRONG harnesses, which fix
+//     the budget/spent/insurance via a fixture and only vary one small value.
+//
+// Invariants proven preserved over this fully-symbolic-economics state:
+//   inv_accounting: insurance' <= vault          (insurance only decreases)
+//   inv_domain_budget: spent' <= budget          (the per-domain ledger bound
+//                                                  the audit names as
+//                                                  inv_source_domain's budget leg)
+// ---------------------------------------------------------------------------
+
+/// `inv_domain_budget`: per-source-domain insurance accounting bound, the
+/// budget leg of the audit's `inv_source_domain` (`Σ liens <= reserved
+/// backing`). Loop-free: stated for one domain's (spent, budget) pair.
+fn inv_domain_budget(spent: u128, budget: u128) -> bool {
+    spent <= budget
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_inductive_consume_domain_insurance_preserves_domain_and_accounting() {
+    let vault: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let domain_budget: u128 = kani::any();
+    let domain_spent: u128 = kani::any();
+
+    // assume the relevant decomposed invariant components.
+    kani::assume(inv_vault_bound(vault));
+    kani::assume(insurance <= vault); // inv_accounting leg in the cone
+    kani::assume(pnl != i128::MIN);
+    kani::assume(inv_domain_budget(domain_spent, domain_budget));
+    // Live source-credit insurance reservations are zero in this state
+    // (reservations zeroed), so the validate_shape coupling
+    // `domain_spent + reserved_atoms <= budget` reduces to `domain_spent <=
+    // budget`, already assumed. budget_remaining math below cannot underflow.
+
+    // Build a one-market state: topology fixed at 1 asset / 2 domains, economic
+    // scalars on the slot symbolic.
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.config.max_market_slots = V16PodU32::new(1);
+    header.vault = V16PodU128::new(vault);
+    header.insurance = V16PodU128::new(insurance);
+
+    let mut slot = EngineAssetSlotV16Account::default();
+    // bankrupt_side = Long => opposite_side = Short => domain index = asset*2+1
+    // => the SHORT domain ledger is the one consumed.
+    slot.insurance_domain_budget_short = V16PodU128::new(domain_budget);
+    slot.insurance_domain_spent_short = V16PodU128::new(domain_spent);
+    let mut markets = [Market::new(0u64, slot)];
+
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(pnl);
+    let mut source_domains: [PortfolioSourceDomainV16Account; 0] = [];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header, &mut source_domains);
+
+    kani::cover!(
+        pnl < 0 && domain_budget > domain_spent && insurance > 0,
+        "domain insurance actually consumed (nonzero used)"
+    );
+
+    let result =
+        market.kani_consume_domain_insurance_for_negative_pnl(0, SideV16::Long, &mut account);
+
+    let vault_after = market.header.vault.get();
+    let insurance_after = market.header.insurance.get();
+    let slot_after = &market.markets[0].engine;
+    let spent_after = slot_after.insurance_domain_spent_short.get();
+    let budget_after = slot_after.insurance_domain_budget_short.get();
+
+    // (1) inv_accounting leg: insurance never rises above vault.
+    assert!(
+        insurance_after <= vault_after,
+        "consume_domain_insurance preserves insurance <= vault"
+    );
+    // (2) per-domain budget bound preserved: the ledger cannot over-spend the
+    //     configured domain budget, for ANY symbolic budget/spent/insurance.
+    assert!(
+        inv_domain_budget(spent_after, budget_after),
+        "consume_domain_insurance preserves spent <= budget"
+    );
+    // (3) vault is invariant; budget is invariant (only `spent` moves up).
+    assert_eq!(vault_after, vault, "vault unchanged by insurance consumption");
+    assert_eq!(budget_after, domain_budget, "domain budget unchanged");
+    // (4) insurance is non-increasing and spent is non-decreasing.
+    assert!(insurance_after <= insurance, "insurance non-increasing");
+    assert!(spent_after >= domain_spent, "domain spent non-decreasing");
 }
