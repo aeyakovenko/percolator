@@ -20,13 +20,15 @@
 //! Scope of the first flagship transition,
 //! `settle_negative_pnl_from_principal_core_not_atomic`:
 //!   - reads  : account.pnl, account.capital, header.c_tot, header.vault,
-//!              header.insurance, header.negative_pnl_account_count
+//!              header.negative_pnl_account_count
 //!   - writes : account.capital -= paid, header.c_tot -= paid,
 //!              account.pnl += paid, (maybe) negative_pnl_account_count -= 1,
 //!              bankruptcy_hlock_active, health_cert.valid
 //!     where paid = min(account.capital, |pnl|). vault and insurance are NEVER
-//!     written. The core also emits a balanced `account_capital_to_realized_loss`
-//!     TokenValueFlowProof with vault_before == vault_after.
+//!     read or written by this core transition (insurance is asserted invariant
+//!     in the harness purely as a post-condition). The core emits a balanced
+//!     `account_capital_to_realized_loss` TokenValueFlowProof over (paid,
+//!     vault_before, vault_after) with vault_before == vault_after.
 
 use percolator::v16::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
