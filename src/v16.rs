@@ -4035,7 +4035,10 @@ impl<'a> PortfolioV16View<'a> {
             && close_progress.close_id != 0
             && !close_progress.has_irreversible_progress()
             && close_progress.residual_remaining == close_progress.gross_loss_at_close_start;
-        if !close_progress.is_empty() && !inert_canceled_close {
+        if !close_progress.is_empty()
+            && !inert_canceled_close
+            && !close_progress.is_finalized_inert()
+        {
             return Ok(false);
         }
 
@@ -4199,6 +4202,10 @@ impl CloseProgressLedgerV16 {
             || self.explicit_loss_assigned != 0
             || self.quantity_adl_applied_q != 0
             || self.drift_consumed != 0
+    }
+
+    fn is_finalized_inert(self) -> bool {
+        self.active && self.finalized && !self.canceled && self.residual_remaining == 0
     }
 
     pub fn is_empty(self) -> bool {
@@ -12617,14 +12624,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if gross_loss == 0 {
             return Ok(());
         }
-        if account.header.close_progress.try_to_runtime()?.active {
+        let current = account.header.close_progress.try_to_runtime()?;
+        if current.active && !current.is_finalized_inert() {
             return Err(V16Error::LockActive);
         }
         let domain = self.insurance_domain_index(asset_index, domain_side)?;
         if self.pending_domain_loss_barrier_count(asset_index, domain_side)? != 0 {
             return Err(V16Error::LockActive);
         }
-        let current = account.header.close_progress.try_to_runtime()?;
         let close_id = current.close_id.saturating_add(1).max(1);
         let asset = self.asset_state(asset_index)?;
         let ledger = CloseProgressLedgerV16 {
@@ -12713,7 +12720,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Ok(());
         }
-        let mut ledger = account.header.close_progress.try_to_runtime()?;
+        let ledger = account.header.close_progress.try_to_runtime()?;
         self.ensure_close_progress_not_expired(ledger)?;
         let was_pending = ledger.has_pending_residual();
         let domain_side = ledger.domain_side;
@@ -14495,7 +14502,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // flat, solvent user who cured a forced close. Only an active/in-progress close
         // ledger must block withdrawal.
         let close_progress = account.header.close_progress.try_to_runtime()?;
-        if close_progress != CloseProgressLedgerV16::EMPTY && !close_progress.canceled {
+        if close_progress != CloseProgressLedgerV16::EMPTY
+            && !close_progress.canceled
+            && !close_progress.is_finalized_inert()
+        {
             return Err(V16Error::LockActive);
         }
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
