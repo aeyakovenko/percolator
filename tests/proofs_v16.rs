@@ -13503,6 +13503,82 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
 // liveness) are asserted at runtime by tests/backing_double_claim_fuzz.rs
 // (5 randomized properties, 300 cases each) and the spec tests.
 
+// Once a resolved payout receipt exists, terminal source realization must be
+// idempotent: the claim face is already frozen into the receipt pool, so the
+// source-backed realization pass cannot consume backing, credit capital, or
+// mutate account/market state a second time.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_source_realization_is_noop_after_receipt() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let claim = claim_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let source_market_id = markets[0].engine.asset.market_id.get();
+    header.mode = 1; // Resolved
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: claim_num,
+            terminal_positive_claim_face: claim,
+            ..ResolvedPayoutReceiptV16::EMPTY
+        });
+    // Deliberately leave a source claim present: receipt existence must win and
+    // prevent a second realization pass over the same terminal face.
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(source_market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let converted = market
+        .kani_realize_source_backed_claims_for_resolved_close_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(claim > 3, "receipt-present realization no-op covers claim");
+    assert_eq!(converted, 0);
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
+}
+
+// Source realization is only for source-attributed claims. A positive ordinary
+// junior PnL claim with no source domains must be left untouched for the
+// resolved receipt/junior-pool path; otherwise the realization pass could mint
+// capital from unsupported junior PnL.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_source_realization_is_noop_without_source_claims() {
+    let pnl_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&pnl_raw));
+    let pnl = pnl_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1; // Resolved
+    account_header.pnl = V16PodI128::new(pnl as i128);
+
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let converted = market
+        .kani_realize_source_backed_claims_for_resolved_close_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(pnl > 3, "no-source realization no-op covers junior PnL");
+    assert_eq!(converted, 0);
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
+}
+
 // Expiry-liveness primitive (wrapper finding 2026-06-10): the resolved-close
 // realize step must not strand a source-backed winner whose backing has lapsed
 // (bucket still Fresh but expiry_slot <= current_slot — nothing processes
