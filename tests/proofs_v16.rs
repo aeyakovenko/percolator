@@ -14561,6 +14561,60 @@ fn proof_v16_validator_sound_senior_stack_within_vault() {
     assert!(senior <= market.header.vault.get());
 }
 
+// Strengthened protected-principal floor: validate_shape also treats recoverable
+// counterparty backing principal as a vault-backed senior claim. This bridges
+// the aggregate validator to the no-double-promise invariant: a committed state
+// cannot simultaneously promise capital/insurance/provider earnings and fresh
+// backing principal beyond the vault.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_senior_stack_includes_fresh_backing() {
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let backing_units_raw: u8 = kani::any();
+    kani::assume(backing_units_raw <= 16);
+    let backing_num = backing_units_raw as u128 * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(vault);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        status: BackingBucketStatusV16::Fresh,
+        market_id: 1,
+        expiry_slot: header.current_slot.get() + 1,
+        fresh_unliened_backing_num: backing_num,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    kani::assume(market.validate_shape() == Ok(()));
+    kani::cover!(
+        c_tot > 0 && insurance > 0 && backing_units_raw > 0,
+        "senior-stack backing lemma reaches nontrivial capital, insurance, and fresh backing"
+    );
+
+    let senior_with_backing = market
+        .header
+        .c_tot
+        .get()
+        .checked_add(market.header.insurance.get())
+        .and_then(|v| v.checked_add(market.header.backing_provider_earnings_total.get()))
+        .and_then(|v| {
+            v.checked_add(market.header.source_fresh_backing_total_num.get() / BOUND_SCALE)
+        })
+        .expect("strengthened senior stack cannot overflow a validated state");
+    assert!(senior_with_backing <= market.header.vault.get());
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
