@@ -12252,6 +12252,199 @@ fn proof_v16_finalized_zero_residual_close_is_inert_for_next_begin() {
     );
 }
 
+fn resolved_payout_receipt_for_proof(face: u128, paid: u128) -> ResolvedPayoutReceiptV16 {
+    ResolvedPayoutReceiptV16 {
+        present: true,
+        prior_bound_contribution_num: face * BOUND_SCALE,
+        live_released_face_at_receipt: 0,
+        terminal_positive_claim_face: face,
+        paid_effective: paid,
+        finalized: paid == face,
+    }
+}
+
+// A fully paid resolved-payout receipt is terminal account history. Like a
+// finalized close ledger, it must not strand empty-account lifecycle APIs just
+// because the persisted receipt has not yet been zeroed.
+#[kani::proof]
+#[kani::unwind(56)]
+#[kani::solver(cadical)]
+fn proof_v16_finalized_resolved_receipt_is_inert_for_dematerialization() {
+    let deregister: bool = kani::any();
+    let face_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&face_raw));
+    let face = face_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    if deregister {
+        header.materialized_portfolio_count = V16PodU64::new(1);
+    }
+    account_header.resolved_payout_receipt = ResolvedPayoutReceiptV16Account::from_runtime(
+        &resolved_payout_receipt_for_proof(face, face),
+    );
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    if deregister {
+        market
+            .deregister_empty_materialized_portfolio_not_atomic(&account.as_view())
+            .unwrap();
+        assert_eq!(market.header.materialized_portfolio_count.get(), 0);
+    } else {
+        market
+            .register_empty_materialized_portfolio_not_atomic(&account.as_view())
+            .unwrap();
+        assert_eq!(market.header.materialized_portfolio_count.get(), 1);
+    }
+
+    kani::cover!(deregister, "finalized receipt can deregister empty account");
+    kani::cover!(!deregister, "finalized receipt can register empty account");
+    kani::cover!(
+        face > 2,
+        "finalized receipt covers nontrivial terminal face"
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+// The inertness rule is exact: a present receipt with unpaid effective face is
+// still an outstanding resolved-payout claim and must block empty-account
+// dematerialization without mutating global materialized-account accounting.
+#[kani::proof]
+#[kani::unwind(56)]
+#[kani::solver(cadical)]
+fn proof_v16_unfinalized_resolved_receipt_blocks_dematerialization_before_mutation() {
+    let deregister: bool = kani::any();
+    let face_raw: u8 = kani::any();
+    let paid_raw: u8 = kani::any();
+    kani::assume((2..=8).contains(&face_raw));
+    kani::assume(paid_raw < face_raw);
+    let face = face_raw as u128;
+    let paid = paid_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    if deregister {
+        header.materialized_portfolio_count = V16PodU64::new(1);
+    }
+    account_header.resolved_payout_receipt = ResolvedPayoutReceiptV16Account::from_runtime(
+        &resolved_payout_receipt_for_proof(face, paid),
+    );
+    let count_before = header.materialized_portfolio_count.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    let result = if deregister {
+        market.deregister_empty_materialized_portfolio_not_atomic(&account.as_view())
+    } else {
+        market.register_empty_materialized_portfolio_not_atomic(&account.as_view())
+    };
+
+    kani::cover!(
+        deregister && paid > 0,
+        "unfinalized partially paid receipt blocks deregister"
+    );
+    kani::cover!(
+        !deregister && paid > 0,
+        "unfinalized partially paid receipt blocks register"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(
+        market.header.materialized_portfolio_count.get(),
+        count_before
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+// The payout topup core must bridge the two states: a receipt that is fully
+// paid at the terminal haircut rate is not finalized by full-face equality, but
+// it is economically terminal. The production core must clear it, after which
+// ordinary empty-account dematerialization is available.
+#[kani::proof]
+#[kani::unwind(56)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_resolved_receipt_core_restores_dematerialization() {
+    let face_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    kani::assume((2..=6).contains(&face_raw));
+    kani::assume((1..=5).contains(&residual_raw));
+    kani::assume(residual_raw < face_raw);
+    let face = face_raw as u128;
+    let residual = residual_raw as u128;
+    let total_bound_num = face * BOUND_SCALE;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1; // Resolved
+    header.vault = V16PodU128::new(residual);
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: residual,
+            terminal_claim_exact_receipts_num: total_bound_num,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: residual * BOUND_SCALE,
+            current_payout_rate_den: total_bound_num,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        });
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: total_bound_num,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: face,
+            paid_effective: residual,
+            finalized: false,
+        });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.kani_residual();
+    assert_eq!(
+        kani_apply_resolved_payout_receipt_payment(
+            account
+                .header
+                .resolved_payout_receipt
+                .try_to_runtime()
+                .unwrap(),
+            0,
+        )
+        .unwrap(),
+        account
+            .header
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap()
+    );
+    assert_eq!(
+        market.register_empty_materialized_portfolio_not_atomic(&account.as_view()),
+        Err(V16Error::LockActive)
+    );
+
+    let paid_out = market
+        .kani_claim_resolved_payout_topup_core_not_atomic(&mut account)
+        .unwrap();
+    let receipt = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+
+    market
+        .register_empty_materialized_portfolio_not_atomic(&account.as_view())
+        .unwrap();
+
+    kani::cover!(
+        face > 3 && residual > 1,
+        "terminal public topup clears a symbolic haircut receipt"
+    );
+    assert_eq!(paid_out, 0);
+    assert!(!receipt.present);
+    assert_eq!(market.header.materialized_portfolio_count.get(), 1);
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
 // Finding D: an insolvent resolved market's winner receipt can never finalize.
 // Resolved close records terminal_positive_claim_face = FULL positive PnL, and the only
 // finalize site (plus the receipt validator) require paid_effective == that full face.
