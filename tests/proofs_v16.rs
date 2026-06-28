@@ -14615,6 +14615,73 @@ fn proof_v16_validator_sound_senior_stack_includes_fresh_backing() {
     assert!(senior_with_backing <= market.header.vault.get());
 }
 
+// Insurance-capacity floor: a committable market shape cannot carry domain
+// insurance budget or live insurance-credit reservations exceeding global
+// insurance, and live reservations must fit inside the domain budget they spend.
+// The proof uses a real slot reservation ledger plus independently symbolic
+// budget/reservation atoms so the implication comes from validate_shape.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_insurance_capacity_covers_budget_and_reservations() {
+    let insurance: u128 = kani::any();
+    let budget_raw: u8 = kani::any();
+    let reserved_raw: u8 = kani::any();
+    kani::assume(budget_raw <= 16);
+    kani::assume(reserved_raw <= 16);
+    let budget_atoms = budget_raw as u128;
+    let reserved_atoms = reserved_raw as u128;
+    let reserved_num = reserved_atoms * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget_atoms);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(reserved_atoms);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        status: BackingBucketStatusV16::Expired,
+        market_id: 1,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budget_atoms);
+    markets[0].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: reserved_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            insurance_credit_reserved_num: reserved_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    kani::assume(market.validate_shape() == Ok(()));
+    kani::cover!(
+        reserved_atoms > 0 && budget_atoms > reserved_atoms && insurance > budget_atoms,
+        "insurance-capacity lemma reaches nontrivial reservation within funded budget"
+    );
+
+    assert!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get()
+            <= market.header.insurance_domain_budget_remaining_total.get()
+    );
+    assert!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get()
+            <= market.header.insurance.get()
+    );
+    assert!(
+        market.header.insurance_domain_budget_remaining_total.get()
+            <= market.header.insurance.get()
+    );
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
