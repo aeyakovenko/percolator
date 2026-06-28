@@ -8858,6 +8858,68 @@ fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
     assert_eq!(market.header.vault.get(), capital);
 }
 
+// Once an account has been charged through the immutable resolved slot, resolved
+// mode fee sync must be a no-op even if a permissionless caller supplies a much
+// later `now_slot`. Otherwise future crankers could drain residual account
+// capital into insurance after resolution.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_fee_sync_noops_after_resolved_slot() {
+    let future_delta_raw: u8 = kani::any();
+    let fee_rate_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    kani::assume((1..=32).contains(&future_delta_raw));
+    kani::assume((1..=16).contains(&fee_rate_raw));
+    kani::assume(capital_raw <= 16);
+    kani::assume(other_capital_raw <= 16);
+    let resolved_slot = 1u64;
+    let now_slot = resolved_slot + future_delta_raw as u64;
+    let fee_rate = fee_rate_raw as u128;
+    let capital = capital_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let c_tot = capital + other_capital;
+    let insurance = 2u128;
+    let surplus = 3u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1; // Resolved
+    header.resolved_slot = V16PodU64::new(resolved_slot);
+    header.current_slot = V16PodU64::new(resolved_slot);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.last_fee_slot = V16PodU64::new(resolved_slot);
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let vault_before = header.vault.get();
+    let capital_before = account_header.capital;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let charged = market
+        .sync_account_fee_to_slot_not_atomic(&mut account, now_slot, fee_rate)
+        .unwrap();
+
+    kani::cover!(
+        future_delta_raw > 8 && fee_rate > 8 && capital > 0 && other_capital > 0,
+        "resolved fee sync covers nontrivial future caller slot and nonzero fee rate"
+    );
+    assert_eq!(charged, 0);
+    assert_eq!(account.header.last_fee_slot.get(), resolved_slot);
+    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(
+        market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get(),
+        surplus
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
