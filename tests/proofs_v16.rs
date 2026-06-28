@@ -14754,12 +14754,13 @@ fn proof_v16_validator_sound_pnl_aggregates() {
 // vault within the TVL cap (U1) and a nonzero market-id counter (U10). Only the
 // non-division-coupled fields are made symbolic.
 //
-// U8 (pnl_pos_bound_tot_num >= pnl_pos*BOUND_SCALE) is INTRACTABLE as a Kani
-// soundness lemma: making pnl_pos_bound_tot_num symbolic forces validate_shape's
-// internal amount_from_bound_num (u128 division by BOUND_SCALE) to bit-blast the
-// division circuit (timed out at 900s — the same wide-arithmetic wall the
-// complex bodies hit). U8 is deferred to reference-model fuzz (Phase 6):
-// bound_num/amount conformance over a stated domain, NOT a Kani lemma.
+// Full-domain U8 (pnl_pos_bound_tot_num >= pnl_pos*BOUND_SCALE) is INTRACTABLE
+// as a Kani soundness lemma: making pnl_pos_bound_tot_num fully symbolic forces
+// validate_shape's internal amount_from_bound_num (u128 division by BOUND_SCALE)
+// to bit-blast the division circuit (timed out at 900s — the same wide-
+// arithmetic wall the complex bodies hit). The bounded supplement below covers
+// the under-aligned boundary that matters for the validator's scaled lower
+// bound; full-domain conformance remains covered by reference-model fuzz.
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -14780,6 +14781,43 @@ fn proof_v16_validator_sound_bound_and_config() {
     let h = &market.header;
     assert!(h.vault.get() <= MAX_VAULT_TVL); // U1
     assert!(h.next_market_id.get() != 0); // U10
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_bound_num_lower_bound_small_domain() {
+    let pnl_raw: u8 = kani::any();
+    let whole_raw: u8 = kani::any();
+    let has_remainder: bool = kani::any();
+    kani::assume((1..=16).contains(&pnl_raw));
+    kani::assume(whole_raw <= 16);
+    let pnl = pnl_raw as u128;
+    let whole = whole_raw as u128;
+    let rem = if has_remainder { 1 } else { 0 };
+    let bound_num = whole * BOUND_SCALE + rem;
+    let derived_bound = whole + if rem == 0 { 0 } else { 1 };
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(derived_bound);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(bound_num);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+
+    kani::cover!(
+        has_remainder && whole + 1 == pnl && pnl > 1 && result == Err(V16Error::InvalidConfig),
+        "bounded U8 proof rejects ceil-rounded amount whose scaled numerator is short"
+    );
+    kani::cover!(
+        has_remainder && whole >= pnl && pnl > 1 && result == Ok(()),
+        "bounded U8 proof accepts nontrivial unaligned overbound state"
+    );
+
+    kani::assume(result == Ok(()));
+    assert!(market.header.pnl_pos_bound_tot.get() >= market.header.pnl_pos_tot.get());
+    assert!(
+        market.header.pnl_pos_bound_tot_num.get() >= market.header.pnl_pos_tot.get() * BOUND_SCALE
+    );
 }
 
 // ROADMAP Phase 1 (Pillar F soundness, U19): validate_with_market's Ok-exit
