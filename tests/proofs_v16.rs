@@ -2920,6 +2920,75 @@ fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
     assert_eq!(account.header.pnl, account_pnl_before);
 }
 
+// Positive PnL with no source-domain claim is junior paper in Live mode. The
+// public conversion entrypoint may pass freshness preflight, but it must still
+// reject before turning unbacked paper PnL into senior account capital.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_live_unbacked_positive_pnl_cannot_convert_to_capital() {
+    let pnl_raw: u8 = kani::any();
+    let reserved_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&pnl_raw));
+    kani::assume(reserved_raw < pnl_raw);
+    kani::assume(capital_raw <= 16);
+    kani::assume(insurance_raw <= 16);
+    kani::assume(surplus_raw <= 16);
+    let pnl = pnl_raw as u128;
+    let reserved = reserved_raw as u128;
+    let capital = capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(pnl as i128);
+    account_header.reserved_pnl = V16PodU128::new(reserved);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128 + pnl as i128,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+    });
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let capital_before = account_header.capital;
+    let pnl_before = account_header.pnl;
+    let reserved_before = account_header.reserved_pnl;
+    let cert_before = account_header.health_cert;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let result = market.convert_released_pnl_to_capital_not_atomic(&mut account);
+
+    kani::cover!(
+        pnl > reserved + 1 && capital > 0 && insurance > 0 && surplus > 0,
+        "live unbacked conversion rejection covers nontrivial released PnL and senior state"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(account.header.pnl, pnl_before);
+    assert_eq!(account.header.reserved_pnl, reserved_before);
+    assert_eq!(account.header.health_cert, cert_before);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
