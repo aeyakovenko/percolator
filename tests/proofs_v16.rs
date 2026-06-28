@@ -6591,6 +6591,49 @@ fn proof_v16_positive_pnl_requires_full_source_claim_attribution() {
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_account_validator_rejects_under_attributed_positive_pnl() {
+    let pnl_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    kani::assume((2..=16).contains(&pnl_raw));
+    kani::assume((1..pnl_raw).contains(&claim_raw));
+    let pnl = pnl_raw as i128;
+    let exact_claim_num = pnl_raw as u128 * BOUND_SCALE;
+    let under_claim_num = claim_raw as u128 * BOUND_SCALE;
+
+    let (mut header, mut markets, mut exact_header) = one_market_view_fixture();
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: exact_claim_num,
+            exact_positive_claim_num: exact_claim_num,
+            fresh_reserved_backing_num: exact_claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    exact_header.pnl = V16PodI128::new(pnl);
+    exact_header.source_domains[0].domain = V16PodU32::new(0);
+    exact_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    exact_header.source_domains[0].source_claim_bound_num = V16PodU128::new(exact_claim_num);
+    let mut under_header = exact_header;
+    under_header.source_domains[0].source_claim_bound_num = V16PodU128::new(under_claim_num);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let exact = PortfolioV16View::new(&exact_header);
+    let under = PortfolioV16View::new(&under_header);
+
+    let exact_result = exact.validate_with_market(&market.as_view());
+    let under_result = under.validate_with_market(&market.as_view());
+
+    kani::cover!(
+        pnl_raw > 8 && claim_raw > 1,
+        "full account validator covers nontrivial under-attributed positive PnL"
+    );
+    assert_eq!(exact_result, Ok(()));
+    assert_eq!(under_result, Err(V16Error::InvalidLeg));
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_source_credit_rate_never_exceeds_available_backing_ratio() {
