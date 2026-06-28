@@ -4951,6 +4951,117 @@ fn proof_v16_public_account_backing_fee_split_preserves_senior_stock() {
     );
 }
 
+// Public backing-fee value movement must be gated by a current health
+// certificate. A stale, invalid, or bitmap-mismatched cert rejects before any
+// capital, senior-stock, provider-earnings, or domain-insurance mutation.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_backing_fee_requires_current_cert_before_mutation() {
+    let stale_kind: u8 = kani::any();
+    kani::assume(stale_kind <= 2);
+
+    let provider_fee = 2u128;
+    let insurance_fee = 3u128;
+    let total_fee = provider_fee + insurance_fee;
+    let capital = total_fee + 4;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(capital + 8);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(1);
+    header.source_fresh_backing_total_num = V16PodU128::new(BOUND_SCALE);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    account_header.capital = V16PodU128::new(capital);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: 1,
+        certified_maintenance_req: 1,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get() + if stale_kind == 1 { 1 } else { 0 },
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: if stale_kind == 2 {
+            [1u64; V16_ACTIVE_BITMAP_WORDS]
+        } else {
+            V16_EMPTY_ACTIVE_BITMAP
+        },
+        valid: stale_kind != 0,
+    });
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let budget_total_before = header.insurance_domain_budget_remaining_total;
+    let earnings_total_before = header.backing_provider_earnings_total;
+    let bucket_before = markets[0].engine.backing_long;
+    let source_before = markets[0].engine.source_credit_long;
+    let domain_budget_before = markets[0].engine.insurance_domain_budget_long;
+    let domain_spent_before = markets[0].engine.insurance_domain_spent_long;
+    let account_capital_before = account_header.capital;
+    let account_cert_before = account_header.health_cert;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let result = market.charge_account_backing_fee_not_atomic(
+        &mut account,
+        0,
+        provider_fee,
+        0,
+        insurance_fee,
+    );
+
+    kani::cover!(
+        stale_kind == 0,
+        "backing fee rejects invalid cert before mixed value routing"
+    );
+    kani::cover!(
+        stale_kind == 1,
+        "backing fee rejects oracle-stale cert before mixed value routing"
+    );
+    kani::cover!(
+        stale_kind == 2,
+        "backing fee rejects bitmap-stale cert before mixed value routing"
+    );
+    assert_eq!(result, Err(V16Error::Stale));
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total,
+        budget_total_before
+    );
+    assert_eq!(
+        market.header.backing_provider_earnings_total,
+        earnings_total_before
+    );
+    assert_eq!(market.markets[0].engine.backing_long, bucket_before);
+    assert_eq!(market.markets[0].engine.source_credit_long, source_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long,
+        domain_budget_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long,
+        domain_spent_before
+    );
+    assert_eq!(account.header.capital, account_capital_before);
+    assert_eq!(account.header.health_cert, account_cert_before);
+}
+
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
