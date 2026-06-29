@@ -3820,6 +3820,58 @@ fn proof_v16_validator_reconciles_resolved_payout_blockers() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_validator_snapshot_flag_binds_resolved_payout_ledger() {
+    let captured: bool = kani::any();
+    let snapshot_residual_raw: u8 = kani::any();
+    let exact_receipts_raw: u8 = kani::any();
+    let bound_unreceipted_raw: u8 = kani::any();
+    let rate_num_raw: u8 = kani::any();
+    let rate_den_raw: u8 = kani::any();
+    let snapshot_slot_raw: u8 = kani::any();
+    let payout_halted: bool = kani::any();
+    let finalized: bool = kani::any();
+    let ledger = ResolvedPayoutLedgerV16 {
+        snapshot_residual: snapshot_residual_raw as u128,
+        terminal_claim_exact_receipts_num: exact_receipts_raw as u128,
+        terminal_claim_bound_unreceipted_num: bound_unreceipted_raw as u128,
+        current_payout_rate_num: rate_num_raw as u128,
+        current_payout_rate_den: rate_den_raw as u128,
+        snapshot_slot: snapshot_slot_raw as u64,
+        payout_halted,
+        finalized,
+    };
+    let ledger_is_empty = ledger == ResolvedPayoutLedgerV16::EMPTY;
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.payout_snapshot_captured = captured as u8;
+    header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+
+    kani::cover!(
+        !captured && !ledger_is_empty && result == Err(V16Error::InvalidConfig),
+        "snapshot flag binding rejects a non-empty resolved ledger before capture"
+    );
+    kani::cover!(
+        !captured && ledger_is_empty && result == Ok(()),
+        "snapshot flag binding accepts an empty resolved ledger before capture"
+    );
+    kani::cover!(
+        captured && !ledger_is_empty && result == Ok(()),
+        "snapshot flag binding permits captured resolved ledger state"
+    );
+
+    if result == Ok(()) {
+        assert!(captured || ledger_is_empty);
+    }
+    if !captured && !ledger_is_empty {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_pending_domain_loss_barrier_detects_touching_position_changes() {
     let long_position_raw: u8 = kani::any();
     let short_position_raw: u8 = kani::any();
