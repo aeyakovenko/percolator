@@ -3872,6 +3872,77 @@ fn proof_v16_validator_snapshot_flag_binds_resolved_payout_ledger() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_validator_priced_lifecycles_require_valid_price_triple() {
+    let lifecycle_raw: u8 = kani::any();
+    let bad_field: u8 = kani::any();
+    let use_invalid_price: bool = kani::any();
+    let use_over_max: bool = kani::any();
+    kani::assume(lifecycle_raw <= 2);
+    kani::assume(bad_field <= 2);
+    let lifecycle = match lifecycle_raw {
+        0 => AssetLifecycleV16::Active,
+        1 => AssetLifecycleV16::DrainOnly,
+        _ => AssetLifecycleV16::Recovery,
+    };
+    let bad_price = if use_over_max {
+        MAX_ORACLE_PRICE + 1
+    } else {
+        0
+    };
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = lifecycle;
+    if use_invalid_price {
+        match bad_field {
+            0 => asset.raw_oracle_target_price = bad_price,
+            1 => asset.effective_price = bad_price,
+            _ => asset.fund_px_last = bad_price,
+        }
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+
+    kani::cover!(
+        use_invalid_price
+            && lifecycle == AssetLifecycleV16::Active
+            && bad_field == 0
+            && !use_over_max
+            && result == Err(V16Error::InvalidConfig),
+        "priced lifecycle validator rejects active asset with zero raw oracle price"
+    );
+    kani::cover!(
+        use_invalid_price
+            && lifecycle == AssetLifecycleV16::DrainOnly
+            && bad_field == 1
+            && use_over_max
+            && result == Err(V16Error::InvalidConfig),
+        "priced lifecycle validator rejects drain-only asset with over-max effective price"
+    );
+    kani::cover!(
+        use_invalid_price
+            && lifecycle == AssetLifecycleV16::Recovery
+            && bad_field == 2
+            && !use_over_max
+            && result == Err(V16Error::InvalidConfig),
+        "priced lifecycle validator rejects recovery asset with zero funding anchor"
+    );
+    kani::cover!(
+        !use_invalid_price && lifecycle == AssetLifecycleV16::Recovery && result == Ok(()),
+        "priced lifecycle validator accepts a valid recovery asset price triple"
+    );
+
+    if use_invalid_price {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    } else {
+        assert_eq!(result, Ok(()));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_pending_domain_loss_barrier_detects_touching_position_changes() {
     let long_position_raw: u8 = kani::any();
     let short_position_raw: u8 = kani::any();
