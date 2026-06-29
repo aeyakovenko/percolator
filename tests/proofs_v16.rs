@@ -3756,6 +3756,70 @@ fn proof_v16_live_market_shape_rejects_long_short_oi_mismatch() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_validator_reconciles_resolved_payout_blockers() {
+    let has_long_pos: bool = kani::any();
+    let has_short_pos: bool = kani::any();
+    let has_long_stale: bool = kani::any();
+    let has_short_stale: bool = kani::any();
+    let has_long_barrier: bool = kani::any();
+    let has_short_barrier: bool = kani::any();
+
+    let stored_long = has_long_pos as u64;
+    let stored_short = has_short_pos as u64;
+    let stale_long = has_long_stale as u64;
+    let stale_short = has_short_stale as u64;
+    let barrier_long = has_long_barrier as u64;
+    let barrier_short = has_short_barrier as u64;
+    let expected =
+        stored_long + stored_short + stale_long + stale_short + barrier_long + barrier_short;
+
+    let (mut header_ok, mut markets_ok) = one_market_only_fixture();
+    {
+        let mut asset = markets_ok[0].engine.asset.try_to_runtime().unwrap();
+        asset.stored_pos_count_long = stored_long;
+        asset.stored_pos_count_short = stored_short;
+        asset.stale_account_count_long = stale_long;
+        asset.stale_account_count_short = stale_short;
+        markets_ok[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    }
+    markets_ok[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(barrier_long);
+    markets_ok[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(barrier_short);
+    header_ok.resolved_payout_blocker_count = V16PodU64::new(expected);
+    let market_ok = MarketGroupV16ViewMut::new(&mut header_ok, &mut markets_ok);
+    let ok_result = market_ok.validate_shape();
+
+    kani::cover!(
+        expected >= 3 && has_long_pos && has_short_stale && has_long_barrier && ok_result == Ok(()),
+        "resolved payout blocker reconciliation accepts exact nontrivial mixed blockers"
+    );
+    assert_eq!(ok_result, Ok(()));
+
+    let (mut header_bad, mut markets_bad) = one_market_only_fixture();
+    {
+        let mut asset = markets_bad[0].engine.asset.try_to_runtime().unwrap();
+        asset.stored_pos_count_long = stored_long;
+        asset.stored_pos_count_short = stored_short;
+        asset.stale_account_count_long = stale_long;
+        asset.stale_account_count_short = stale_short;
+        markets_bad[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    }
+    markets_bad[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(barrier_long);
+    markets_bad[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(barrier_short);
+    header_bad.resolved_payout_blocker_count =
+        V16PodU64::new(if expected == 0 { 1 } else { expected - 1 });
+    let market_bad = MarketGroupV16ViewMut::new(&mut header_bad, &mut markets_bad);
+    let bad_result = market_bad.validate_shape();
+
+    kani::cover!(
+        expected > 0 && bad_result == Err(V16Error::InvalidConfig),
+        "resolved payout blocker reconciliation rejects a stale undercount"
+    );
+    assert_eq!(bad_result, Err(V16Error::InvalidConfig));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_pending_domain_loss_barrier_detects_touching_position_changes() {
     let long_position_raw: u8 = kani::any();
     let short_position_raw: u8 = kani::any();
