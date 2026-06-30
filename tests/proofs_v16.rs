@@ -15956,12 +15956,55 @@ fn proof_v16_validator_sound_pnl_aggregates() {
 // vault within the TVL cap (U1) and a nonzero market-id counter (U10). Only the
 // non-division-coupled fields are made symbolic.
 //
-// U8 (pnl_pos_bound_tot_num >= pnl_pos*BOUND_SCALE) is INTRACTABLE as a Kani
-// soundness lemma: making pnl_pos_bound_tot_num symbolic forces validate_shape's
-// internal amount_from_bound_num (u128 division by BOUND_SCALE) to bit-blast the
-// division circuit (timed out at 900s — the same wide-arithmetic wall the
-// complex bodies hit). U8 is deferred to reference-model fuzz (Phase 6):
-// bound_num/amount conformance over a stated domain, NOT a Kani lemma.
+// The fully symbolic U8 form (arbitrary `pnl_pos_bound_tot_num`) is still
+// intractable because validate_shape divides a symbolic u128 by BOUND_SCALE.
+// The next lemma covers the production validator over the atom-aligned states
+// mutation paths actually persist; the unaligned conversion primitive remains
+// covered by arithmetic/reference-model tests.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_atom_aligned_pnl_bound_num() {
+    let pnl_raw: u8 = kani::any();
+    let matured_raw: u8 = kani::any();
+    let bound_units_raw: u8 = kani::any();
+    let reported_bound_raw: u8 = kani::any();
+    kani::assume(pnl_raw <= 12);
+    kani::assume(matured_raw <= 12);
+    kani::assume(bound_units_raw <= 12);
+    kani::assume(reported_bound_raw <= 12);
+
+    let pnl = pnl_raw as u128;
+    let matured = matured_raw as u128;
+    let bound_units = bound_units_raw as u128;
+    let reported_bound = reported_bound_raw as u128;
+    let bound_num = bound_units * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_matured_pos_tot = V16PodU128::new(matured);
+    header.pnl_pos_bound_tot = V16PodU128::new(reported_bound);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(bound_num);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    kani::assume(market.validate_shape() == Ok(()));
+    kani::cover!(
+        pnl > 0 && bound_units == pnl && matured < pnl,
+        "atom-aligned pnl-bound soundness covers exact positive bound"
+    );
+    kani::cover!(
+        pnl > 0 && bound_units > pnl,
+        "atom-aligned pnl-bound soundness covers slack positive bound"
+    );
+
+    let h = &market.header;
+    assert_eq!(
+        h.pnl_pos_bound_tot.get(),
+        h.pnl_pos_bound_tot_num.get() / BOUND_SCALE
+    );
+    assert!(h.pnl_pos_bound_tot_num.get() >= h.pnl_pos_tot.get() * BOUND_SCALE); // U8
+    assert!(h.pnl_matured_pos_tot.get() <= h.pnl_pos_tot.get()); // U6
+}
+
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
