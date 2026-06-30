@@ -2472,6 +2472,75 @@ fn proof_v16_insurance_domain_mapping_is_in_bounds_unique_and_roundtrips() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_view_domain_mapping_rejects_unconfigured_capacity_slots() {
+    let asset_raw: u8 = kani::any();
+    let domain_raw: u8 = kani::any();
+    let side_is_short: bool = kani::any();
+    kani::assume(asset_raw <= 5);
+    kani::assume(domain_raw <= 9);
+
+    let side = if side_is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let asset_index = asset_raw as usize;
+    let domain = domain_raw as usize;
+    let configured_assets = 2usize;
+    let configured_domains = configured_assets * 2;
+
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, configured_assets as u32, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 4, 0).unwrap();
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(1u64, EngineAssetSlotV16Account::default()),
+        Market::new(2u64, EngineAssetSlotV16Account::default()),
+        Market::new(3u64, EngineAssetSlotV16Account::default()),
+    ];
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let asset_domain = market.kani_insurance_domain_index(asset_index, side);
+    let domain_roundtrip = market.kani_domain_asset_side(domain);
+
+    kani::cover!(
+        asset_index < configured_assets && domain < configured_domains,
+        "configured asset/domain pair is admitted"
+    );
+    kani::cover!(
+        asset_index >= configured_assets && asset_index < markets.len(),
+        "spare allocated market slot is rejected as unconfigured"
+    );
+    kani::cover!(
+        domain >= configured_domains && domain / 2 < markets.len(),
+        "spare allocated domain is rejected as unconfigured"
+    );
+
+    assert_eq!(asset_domain.is_ok(), asset_index < configured_assets);
+    if let Ok(mapped_domain) = asset_domain {
+        assert!(mapped_domain < configured_domains);
+        assert_eq!(mapped_domain / 2, asset_index);
+        assert_eq!(mapped_domain % 2, usize::from(side_is_short));
+    }
+
+    assert_eq!(domain_roundtrip.is_ok(), domain < configured_domains);
+    if let Ok((mapped_asset, mapped_side)) = domain_roundtrip {
+        assert!(mapped_asset < configured_assets);
+        assert_eq!(mapped_asset, domain / 2);
+        assert_eq!(
+            mapped_side,
+            if domain % 2 == 0 {
+                SideV16::Long
+            } else {
+                SideV16::Short
+            }
+        );
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_overwithdraw_rejects() {
