@@ -3756,6 +3756,79 @@ fn proof_v16_live_market_shape_rejects_long_short_oi_mismatch() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_live_market_validator_ok_implies_balanced_oi_and_loss_weight_shape() {
+    let long_units_raw: u8 = kani::any();
+    let short_units_raw: u8 = kani::any();
+    let long_weight_present: bool = kani::any();
+    let short_weight_present: bool = kani::any();
+    let long_count_present: bool = kani::any();
+    let short_count_present: bool = kani::any();
+    kani::assume(long_units_raw <= 16);
+    kani::assume(short_units_raw <= 16);
+
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = long_units_raw as u128 * POS_SCALE;
+    asset.oi_eff_short_q = short_units_raw as u128 * POS_SCALE;
+    asset.loss_weight_sum_long = if long_weight_present {
+        SOCIAL_LOSS_DEN
+    } else {
+        0
+    };
+    asset.loss_weight_sum_short = if short_weight_present {
+        SOCIAL_LOSS_DEN
+    } else {
+        0
+    };
+    asset.stored_pos_count_long = if long_count_present { 1 } else { 0 };
+    asset.stored_pos_count_short = if short_count_present { 1 } else { 0 };
+    header.resolved_payout_blocker_count =
+        V16PodU64::new(asset.stored_pos_count_long + asset.stored_pos_count_short);
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+
+    kani::cover!(
+        result == Ok(())
+            && long_units_raw > 1
+            && long_units_raw == short_units_raw
+            && long_weight_present
+            && short_weight_present,
+        "live asset validator accepts nontrivial balanced OI with supported loss weights"
+    );
+    kani::cover!(
+        long_units_raw != short_units_raw && result == Err(V16Error::InvalidConfig),
+        "live asset validator rejects unbalanced OI"
+    );
+    kani::cover!(
+        long_units_raw > 0 && !long_weight_present && result == Err(V16Error::InvalidConfig),
+        "live asset validator rejects nonzero long OI without loss weight"
+    );
+
+    if result == Ok(()) {
+        let validated = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(validated.oi_eff_long_q, validated.oi_eff_short_q);
+        if validated.oi_eff_long_q != 0 {
+            assert!(validated.loss_weight_sum_long != 0);
+            assert!(validated.stored_pos_count_long != 0);
+        }
+        if validated.oi_eff_short_q != 0 {
+            assert!(validated.loss_weight_sum_short != 0);
+            assert!(validated.stored_pos_count_short != 0);
+        }
+        if validated.loss_weight_sum_long != 0 {
+            assert!(validated.stored_pos_count_long != 0);
+        }
+        if validated.loss_weight_sum_short != 0 {
+            assert!(validated.stored_pos_count_short != 0);
+        }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_validator_reconciles_resolved_payout_blockers() {
     let has_long_pos: bool = kani::any();
     let has_short_pos: bool = kani::any();
