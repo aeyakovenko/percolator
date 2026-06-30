@@ -1524,6 +1524,11 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
+    let current_slot_before = header.current_slot.get();
+    let activation_count_before = header.asset_activation_count.get();
+    let last_activation_slot_before = header.last_asset_activation_slot.get();
+    let asset_set_epoch_before = header.asset_set_epoch.get();
+    let risk_epoch_before = header.risk_epoch.get();
 
     let mut retired_asset = AssetStateV16 {
         lifecycle: AssetLifecycleV16::Retired,
@@ -1577,6 +1582,14 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     if nonempty_claim {
         assert_eq!(slot, slot_before);
         assert_eq!(header.next_market_id.get(), new_market_id);
+        assert_eq!(header.current_slot.get(), current_slot_before);
+        assert_eq!(header.asset_activation_count.get(), activation_count_before);
+        assert_eq!(
+            header.last_asset_activation_slot.get(),
+            last_activation_slot_before
+        );
+        assert_eq!(header.asset_set_epoch.get(), asset_set_epoch_before);
+        assert_eq!(header.risk_epoch.get(), risk_epoch_before);
     } else {
         let asset = slot.asset.try_to_runtime().unwrap();
         assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
@@ -1600,8 +1613,14 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
             new_market_id
         );
         assert_eq!(header.next_market_id.get(), new_market_id + 1);
-        assert_eq!(header.asset_set_epoch.get(), 1);
-        assert_eq!(header.risk_epoch.get(), 1);
+        assert_eq!(header.current_slot.get(), 2);
+        assert_eq!(
+            header.asset_activation_count.get(),
+            activation_count_before + 1
+        );
+        assert_eq!(header.last_asset_activation_slot.get(), 2);
+        assert_eq!(header.asset_set_epoch.get(), asset_set_epoch_before + 1);
+        assert_eq!(header.risk_epoch.get(), risk_epoch_before + 1);
     }
 }
 
