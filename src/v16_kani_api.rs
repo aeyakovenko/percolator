@@ -164,6 +164,22 @@ pub fn kani_kernel_advance_leg_b_snap(
     V16Core::kernel_advance_leg_b_snap(leg, delta_b, new_remainder, remaining_after)
 }
 
+pub fn kani_kernel_resize_leg_same_side(
+    leg: PortfolioLegV16,
+    asset: AssetStateV16,
+    new_signed: i128,
+    new_weight: u128,
+    preserve_pending_obligation_weight: bool,
+) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
+    V16Core::kernel_resize_leg_same_side(
+        leg,
+        asset,
+        new_signed,
+        new_weight,
+        preserve_pending_obligation_weight,
+    )
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,

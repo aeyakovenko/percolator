@@ -10,7 +10,7 @@ use percolator::v16::{
     kani_backing_utilization_rate_e9_for_source_state, kani_close_progress_blocks_exposure_clear,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
-    kani_kernel_advance_leg_b_snap,
+    kani_kernel_advance_leg_b_snap, kani_kernel_resize_leg_same_side,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -3423,6 +3423,120 @@ fn proof_v16_view_trade_position_delta_preserves_oi_symmetry() {
     assert_eq!(asset.f_short_num, before.f_short_num);
     assert_eq!(asset.b_long_num, before.b_long_num);
     assert_eq!(asset.b_short_num, before.b_short_num);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_resize_leg_same_side_is_exact_and_side_isolated() {
+    let long_side: bool = kani::any();
+    let preserve_weight: bool = kani::any();
+    let old_abs_raw: u8 = kani::any();
+    let new_abs_raw: u8 = kani::any();
+    let old_weight_raw: u8 = kani::any();
+    let new_weight_raw: u8 = kani::any();
+    let selected_oi_extra_raw: u8 = kani::any();
+    let selected_weight_extra_raw: u8 = kani::any();
+    let other_oi_raw: u8 = kani::any();
+    let other_weight_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&old_abs_raw));
+    kani::assume((1..=8).contains(&new_abs_raw));
+    kani::assume(old_weight_raw <= 8);
+    kani::assume(new_weight_raw <= 8);
+    kani::assume(selected_oi_extra_raw <= 8);
+    kani::assume(selected_weight_extra_raw <= 8);
+    kani::assume(other_oi_raw <= 8);
+    kani::assume(other_weight_raw <= 8);
+
+    let old_abs = old_abs_raw as u128;
+    let new_abs = new_abs_raw as u128;
+    let old_weight = old_weight_raw as u128;
+    let new_weight = new_weight_raw as u128;
+    let selected_oi = old_abs + selected_oi_extra_raw as u128;
+    let selected_weight = old_weight + selected_weight_extra_raw as u128;
+    let other_oi = other_oi_raw as u128;
+    let other_weight = other_weight_raw as u128;
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let old_signed = if long_side {
+        old_abs as i128
+    } else {
+        -(old_abs as i128)
+    };
+    let new_signed = if long_side {
+        new_abs as i128
+    } else {
+        -(new_abs as i128)
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        side,
+        basis_pos_q: old_signed,
+        loss_weight: old_weight,
+        ..PortfolioLegV16::default()
+    };
+    let mut asset = AssetStateV16::default();
+    if long_side {
+        asset.oi_eff_long_q = selected_oi;
+        asset.loss_weight_sum_long = selected_weight;
+        asset.oi_eff_short_q = other_oi;
+        asset.loss_weight_sum_short = other_weight;
+    } else {
+        asset.oi_eff_short_q = selected_oi;
+        asset.loss_weight_sum_short = selected_weight;
+        asset.oi_eff_long_q = other_oi;
+        asset.loss_weight_sum_long = other_weight;
+    }
+
+    let (next_leg, next_asset) =
+        kani_kernel_resize_leg_same_side(leg, asset, new_signed, new_weight, preserve_weight)
+            .unwrap();
+    let expected_selected_oi = selected_oi - old_abs + new_abs;
+    let expected_selected_weight = if preserve_weight {
+        selected_weight
+    } else {
+        selected_weight - old_weight + new_weight
+    };
+
+    kani::cover!(
+        long_side && new_abs > old_abs && !preserve_weight && old_weight != new_weight,
+        "resize kernel covers long expansion with loss-weight recompute"
+    );
+    kani::cover!(
+        !long_side && new_abs < old_abs && preserve_weight,
+        "resize kernel covers short shrink preserving pending-obligation weight"
+    );
+    assert_eq!(next_leg.side, side);
+    assert_eq!(next_leg.basis_pos_q, new_signed);
+    assert_eq!(
+        next_leg.loss_weight,
+        if preserve_weight {
+            old_weight
+        } else {
+            new_weight
+        }
+    );
+    if long_side {
+        assert_eq!(next_asset.oi_eff_long_q, expected_selected_oi);
+        assert_eq!(next_asset.loss_weight_sum_long, expected_selected_weight);
+        assert_eq!(next_asset.oi_eff_short_q, other_oi);
+        assert_eq!(next_asset.loss_weight_sum_short, other_weight);
+    } else {
+        assert_eq!(next_asset.oi_eff_short_q, expected_selected_oi);
+        assert_eq!(next_asset.loss_weight_sum_short, expected_selected_weight);
+        assert_eq!(next_asset.oi_eff_long_q, other_oi);
+        assert_eq!(next_asset.loss_weight_sum_long, other_weight);
+    }
+    assert_eq!(next_asset.market_id, asset.market_id);
+    assert_eq!(next_asset.a_long, asset.a_long);
+    assert_eq!(next_asset.a_short, asset.a_short);
+    assert_eq!(next_asset.k_long, asset.k_long);
+    assert_eq!(next_asset.k_short, asset.k_short);
+    assert_eq!(next_asset.b_long_num, asset.b_long_num);
+    assert_eq!(next_asset.b_short_num, asset.b_short_num);
 }
 
 #[kani::proof]
