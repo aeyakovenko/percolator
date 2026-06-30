@@ -10,8 +10,9 @@ use percolator::v16::{
     kani_backing_utilization_rate_e9_for_source_state, kani_close_progress_blocks_exposure_clear,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
-    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_classify_position_delta,
-    kani_kernel_clear_leg, kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
+    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_cert_is_current,
+    kani_kernel_classify_position_delta, kani_kernel_clear_leg, kani_kernel_reduce_position_delta,
+    kani_kernel_resize_leg_same_side,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -3776,6 +3777,99 @@ fn proof_v16_kernel_classify_position_delta_is_total_exclusive_route_partition()
             assert!(resize);
             assert!(!attach && !clear && !flip);
         }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_cert_currentness_is_exact_epoch_and_bitmap_match() {
+    let valid: bool = kani::any();
+    let cert_oracle_raw: u8 = kani::any();
+    let cert_funding_raw: u8 = kani::any();
+    let cert_risk_raw: u8 = kani::any();
+    let cert_asset_set_raw: u8 = kani::any();
+    let oracle_raw: u8 = kani::any();
+    let funding_raw: u8 = kani::any();
+    let risk_raw: u8 = kani::any();
+    let asset_set_raw: u8 = kani::any();
+    let cert_bits: u64 = kani::any();
+    let account_bits: u64 = kani::any();
+    kani::assume(cert_oracle_raw <= 8);
+    kani::assume(cert_funding_raw <= 8);
+    kani::assume(cert_risk_raw <= 8);
+    kani::assume(cert_asset_set_raw <= 8);
+    kani::assume(oracle_raw <= 8);
+    kani::assume(funding_raw <= 8);
+    kani::assume(risk_raw <= 8);
+    kani::assume(asset_set_raw <= 8);
+    kani::assume(cert_bits <= 0xff);
+    kani::assume(account_bits <= 0xff);
+
+    let mut cert_bitmap = [0u64; V16_ACTIVE_BITMAP_WORDS];
+    let mut account_bitmap = [0u64; V16_ACTIVE_BITMAP_WORDS];
+    cert_bitmap[0] = cert_bits;
+    account_bitmap[0] = account_bits;
+    let cert = HealthCertV16 {
+        cert_oracle_epoch: cert_oracle_raw as u64,
+        cert_funding_epoch: cert_funding_raw as u64,
+        cert_risk_epoch: cert_risk_raw as u64,
+        cert_asset_set_epoch: cert_asset_set_raw as u64,
+        active_bitmap_at_cert: cert_bitmap,
+        valid,
+        ..HealthCertV16::default()
+    };
+    let oracle_epoch = oracle_raw as u64;
+    let funding_epoch = funding_raw as u64;
+    let risk_epoch = risk_raw as u64;
+    let asset_set_epoch = asset_set_raw as u64;
+    let expected = valid
+        && cert.cert_oracle_epoch == oracle_epoch
+        && cert.cert_funding_epoch == funding_epoch
+        && cert.cert_risk_epoch == risk_epoch
+        && cert.cert_asset_set_epoch == asset_set_epoch
+        && cert.active_bitmap_at_cert == account_bitmap;
+
+    let current = kani_kernel_cert_is_current(
+        cert,
+        oracle_epoch,
+        funding_epoch,
+        risk_epoch,
+        asset_set_epoch,
+        account_bitmap,
+    );
+
+    kani::cover!(expected, "cert currentness covers exact valid match");
+    kani::cover!(
+        !valid
+            && cert.cert_oracle_epoch == oracle_epoch
+            && cert.cert_funding_epoch == funding_epoch
+            && cert.cert_risk_epoch == risk_epoch
+            && cert.cert_asset_set_epoch == asset_set_epoch
+            && cert.active_bitmap_at_cert == account_bitmap,
+        "cert currentness covers invalid flag rejection despite matching state"
+    );
+    kani::cover!(
+        valid && cert.cert_oracle_epoch != oracle_epoch,
+        "cert currentness covers oracle epoch mismatch"
+    );
+    kani::cover!(
+        valid
+            && cert.cert_oracle_epoch == oracle_epoch
+            && cert.cert_funding_epoch == funding_epoch
+            && cert.cert_risk_epoch == risk_epoch
+            && cert.cert_asset_set_epoch == asset_set_epoch
+            && cert.active_bitmap_at_cert != account_bitmap,
+        "cert currentness covers active bitmap mismatch"
+    );
+    assert_eq!(current, expected);
+    if current {
+        assert!(cert.valid);
+        assert_eq!(cert.cert_oracle_epoch, oracle_epoch);
+        assert_eq!(cert.cert_funding_epoch, funding_epoch);
+        assert_eq!(cert.cert_risk_epoch, risk_epoch);
+        assert_eq!(cert.cert_asset_set_epoch, asset_set_epoch);
+        assert_eq!(cert.active_bitmap_at_cert, account_bitmap);
     }
 }
 

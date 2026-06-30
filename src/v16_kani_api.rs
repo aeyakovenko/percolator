@@ -209,6 +209,24 @@ pub fn kani_kernel_classify_position_delta(current: i128, new: i128) -> Position
     V16Core::kernel_classify_position_delta(current, new)
 }
 
+pub fn kani_kernel_cert_is_current(
+    cert: HealthCertV16,
+    oracle_epoch: u64,
+    funding_epoch: u64,
+    risk_epoch: u64,
+    asset_set_epoch: u64,
+    account_bitmap: V16ActiveBitmap,
+) -> bool {
+    V16Core::kernel_cert_is_current(
+        cert,
+        oracle_epoch,
+        funding_epoch,
+        risk_epoch,
+        asset_set_epoch,
+        account_bitmap,
+    )
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,
