@@ -6626,6 +6626,48 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
 }
 
 #[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_ok_implies_activation_clock_metadata() {
+    let activation_count: u64 = kani::any();
+    let last_activation_slot: u64 = kani::any();
+    let current_slot: u64 = kani::any();
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.asset_activation_count = V16PodU64::new(activation_count);
+    header.last_asset_activation_slot = V16PodU64::new(last_activation_slot);
+    header.current_slot = V16PodU64::new(current_slot);
+    // Isolate this proof to activation-clock metadata; the scalar-clock lemma
+    // covers slot_last <= current_slot.
+    header.slot_last = V16PodU64::new(0);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+
+    kani::cover!(
+        activation_count == 0 && last_activation_slot > 0 && result == Err(V16Error::InvalidConfig),
+        "validator rejects nonzero last activation slot when no activation is recorded"
+    );
+    kani::cover!(
+        activation_count > 0
+            && last_activation_slot > current_slot
+            && result == Err(V16Error::InvalidConfig),
+        "validator rejects future activation metadata"
+    );
+    kani::cover!(
+        activation_count > 0 && last_activation_slot <= current_slot && result == Ok(()),
+        "validator accepts coherent activation metadata"
+    );
+
+    if result == Ok(()) {
+        if activation_count == 0 {
+            assert_eq!(last_activation_slot, 0);
+        } else {
+            assert!(last_activation_slot <= current_slot);
+        }
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
