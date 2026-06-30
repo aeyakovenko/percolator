@@ -14369,6 +14369,57 @@ fn proof_v16_auto_crank_classifier_b_stale_leg_selects_settle_b_without_observat
     assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
 }
 
+// Permissionless no-DoS refresh classifier seam: a fresh Live account with no
+// current certificate is actionable exactly as a refresh target. With no active
+// leg there is no engine-selected asset, so the plan is the documented fallback
+// RefreshAccount(None), the only plan requiring a caller observation.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_classifier_uncertified_idle_account_selects_refresh_fallback() {
+    let c_tot_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    let surplus_raw: u16 = kani::any();
+    kani::assume(c_tot_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    kani::assume(surplus_raw <= 1024);
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(c_tot);
+    account_header.health_cert = HealthCertV16Account::default();
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        0,
+        0,
+        None,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+
+    kani::cover!(
+        c_tot > 0 && insurance > 0 && surplus > 0,
+        "auto-crank classifier covers uncertified idle account with symbolic senior stock and junior surplus"
+    );
+    assert!(summary.stale);
+    assert!(!summary.b_stale);
+    assert!(!summary.pending_close);
+    assert!(!summary.expired_close);
+    assert!(!summary.liquidatable);
+    assert!(!summary.recovery_eligible);
+    assert!(!summary.resolved_winner);
+    assert_eq!(plan, AutoCrankPlanV16::RefreshAccount { asset_index: None });
+    assert!(percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
+}
+
 // No-DoS selector theorem for the production auto-crank plan kernel. Over every
 // classifier signal combination reachable by the production classifier
 // (`pending_close == false`), an actionable summary selects exactly one
