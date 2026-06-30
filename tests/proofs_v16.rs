@@ -3376,6 +3376,100 @@ fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate(
 }
 
 #[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_v16_favorable_action_guard_exactly_requires_unlocked_current_no_target_lag() {
+    let hmax_lock: bool = kani::any();
+    let cert_current: bool = kani::any();
+    let target_lag: bool = kani::any();
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.threshold_stress_active = hmax_lock as u8;
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    let market_id = asset.market_id;
+    asset.effective_price = 100;
+    asset.raw_oracle_target_price = if target_lag { 101 } else { 100 };
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.capital = V16PodU128::new(10_000);
+    account_header.pnl = V16PodI128::new(0);
+    account_header.fee_credits = V16PodI128::new(0);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 10_000,
+        certified_initial_req: 1,
+        certified_maintenance_req: 1,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 1,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        valid: cert_current,
+    });
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let capital_before = account_header.capital.get();
+    let pnl_before = account_header.pnl.get();
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.kani_ensure_favorable_action_allowed(&account.as_view());
+    let expected_ok = !hmax_lock && cert_current && !target_lag;
+
+    kani::cover!(
+        expected_ok,
+        "favorable-action guard admits only unlocked current no-target-lag account"
+    );
+    kani::cover!(
+        hmax_lock && cert_current && !target_lag && result == Err(V16Error::LockActive),
+        "favorable-action guard rejects market hmax before value exit"
+    );
+    kani::cover!(
+        !hmax_lock && !cert_current && !target_lag && result == Err(V16Error::Stale),
+        "favorable-action guard rejects stale health certificate"
+    );
+    kani::cover!(
+        !hmax_lock && cert_current && target_lag && result == Err(V16Error::LockActive),
+        "favorable-action guard rejects active target/effective lag exposure"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if hmax_lock {
+        assert_eq!(result, Err(V16Error::LockActive));
+    } else if !cert_current {
+        assert_eq!(result, Err(V16Error::Stale));
+    } else if target_lag {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(account.header.capital.get(), capital_before);
+    assert_eq!(account.header.pnl.get(), pnl_before);
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_view_trade_position_delta_preserves_oi_symmetry() {

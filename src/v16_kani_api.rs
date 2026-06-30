@@ -940,6 +940,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.h_lock_lane(account, instruction_bankruptcy_candidate)
     }
 
+    pub fn kani_ensure_favorable_action_allowed(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        self.ensure_favorable_action_allowed(account)
+    }
+
     pub fn kani_can_ignore_unrelated_loss_stale_for_trade(
         &self,
         long_account: &PortfolioV16View<'_>,
