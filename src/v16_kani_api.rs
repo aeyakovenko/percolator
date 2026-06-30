@@ -634,6 +634,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.leg_is_dead_for_forfeit(asset_index, side)
     }
 
+    pub fn kani_require_asset_active_for_risk_increase(&self, asset_index: usize) -> V16Result<()> {
+        self.require_asset_active_for_risk_increase(asset_index)
+    }
+
+    pub fn kani_require_asset_live_reducible(&self, asset_index: usize) -> V16Result<()> {
+        self.require_asset_live_reducible(asset_index)
+    }
+
     pub fn kani_credit_account_from_insurance_delta(
         insurance: u128,
         budget_remaining: u128,

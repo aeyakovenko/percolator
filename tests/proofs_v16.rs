@@ -9260,6 +9260,62 @@ fn proof_v16_forfeit_dead_leg_classifier_is_exact() {
     assert_eq!(dead, expected);
 }
 
+// Lifecycle gates must separate risk creation from risk exit. Permissionless
+// asset shutdown is safe only if new/increasing risk is blocked outside Active,
+// while users can still reduce exposure in DrainOnly.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_lifecycle_gates_risk_increase_and_reduction_exactly() {
+    let lifecycle_raw: u8 = kani::any();
+    kani::assume(lifecycle_raw <= 5);
+    let lifecycle = match lifecycle_raw {
+        0 => AssetLifecycleV16::Disabled,
+        1 => AssetLifecycleV16::PendingActivation,
+        2 => AssetLifecycleV16::Active,
+        3 => AssetLifecycleV16::DrainOnly,
+        4 => AssetLifecycleV16::Retired,
+        _ => AssetLifecycleV16::Recovery,
+    };
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = lifecycle;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let risk_increase = market.kani_require_asset_active_for_risk_increase(0);
+    let reducible = market.kani_require_asset_live_reducible(0);
+    let expected_risk_increase_ok = lifecycle == AssetLifecycleV16::Active;
+    let expected_reducible_ok =
+        lifecycle == AssetLifecycleV16::Active || lifecycle == AssetLifecycleV16::DrainOnly;
+
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::Active && risk_increase.is_ok() && reducible.is_ok(),
+        "lifecycle gates cover active risk increase and reduction"
+    );
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::DrainOnly
+            && risk_increase == Err(V16Error::LockActive)
+            && reducible.is_ok(),
+        "lifecycle gates cover drain-only reduction without risk increase"
+    );
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::Recovery
+            && risk_increase == Err(V16Error::LockActive)
+            && reducible == Err(V16Error::LockActive),
+        "lifecycle gates cover recovery blocking both ordinary paths"
+    );
+    assert_eq!(risk_increase.is_ok(), expected_risk_increase_ok);
+    assert_eq!(reducible.is_ok(), expected_reducible_ok);
+    if !expected_risk_increase_ok {
+        assert_eq!(risk_increase, Err(V16Error::LockActive));
+    }
+    if !expected_reducible_ok {
+        assert_eq!(reducible, Err(V16Error::LockActive));
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
