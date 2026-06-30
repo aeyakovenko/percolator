@@ -6571,6 +6571,8 @@ fn proof_v16_retire_nonempty_asset_rejects() {
     asset.stored_pos_count_long = 1;
     asset.loss_weight_sum_long = units_raw as u128 * POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let header_before = header;
+    let asset_before = markets[0].engine.asset.try_to_runtime().unwrap();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let result = market.retire_empty_asset_not_atomic(0, retire_slot_raw as u64);
@@ -6580,6 +6582,16 @@ fn proof_v16_retire_nonempty_asset_rejects() {
         "nonempty asset retirement reaches fail-closed guard for wide OI and slot"
     );
     assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(market.header.current_slot, header_before.current_slot);
+    assert_eq!(market.header.asset_set_epoch, header_before.asset_set_epoch);
+    assert_eq!(market.header.risk_epoch, header_before.risk_epoch);
+    assert_eq!(
+        market.markets[0].engine.asset.try_to_runtime().unwrap(),
+        asset_before
+    );
 }
 
 #[kani::proof]
