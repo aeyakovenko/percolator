@@ -14585,6 +14585,140 @@ fn proof_v16_auto_crank_classifier_resolved_winner_blocked_by_any_payout_blocker
     assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
 }
 
+// Permissionless anti-LOF mode-isolation seam: positive PnL plus payout-ready
+// resolved counters must not route to CloseResolved while the market is still
+// Live. The fixture deliberately also sets stale/b-stale/deficit/expired-close
+// signals so the theorem proves resolved payout eligibility is mode-gated and
+// cannot be smuggled through a live crank with overlapping action classes.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_classifier_live_positive_pnl_never_selects_close_resolved() {
+    let pnl_raw: u16 = kani::any();
+    let residual_raw: u16 = kani::any();
+    let deficit_raw: u16 = kani::any();
+    let capital_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    kani::assume(pnl_raw > 0);
+    kani::assume(residual_raw > 0);
+    kani::assume(deficit_raw > 0);
+    kani::assume(capital_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    let pnl = pnl_raw as i128;
+    let residual = residual_raw as u128;
+    let deficit = deficit_raw as u128;
+    let capital = capital_raw as u128;
+    let insurance = insurance_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 0; // Live
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    header.resolved_slot = V16PodU64::new(1);
+    header.vault = V16PodU128::new(capital + insurance);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.b_stale_account_count = V16PodU64::new(0);
+    header.stale_certificate_count = V16PodU64::new(0);
+    header.negative_pnl_account_count = V16PodU64::new(0);
+    header.resolved_payout_blocker_count = V16PodU64::new(0);
+    header.payout_snapshot_captured = 1;
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(pnl);
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: true,
+        stale: false,
+    });
+    let mut active_bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut active_bitmap, 0).unwrap();
+    account_header.active_bitmap = active_bitmap.map(V16PodU64::new);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 0,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: deficit,
+        certified_worst_case_loss: deficit,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: active_bitmap,
+        valid: true,
+    });
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id: asset.market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: residual,
+            drift_reference_slot: 1,
+            max_close_slot: 9,
+            support_consumed: 0,
+            junior_face_burned: 0,
+            insurance_spent: 0,
+            b_loss_booked: 0,
+            explicit_loss_assigned: 0,
+            quantity_adl_applied_q: 0,
+            drift_consumed: 0,
+            residual_remaining: residual,
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+    let (b_stale_asset, active_asset) = kani_project_auto_crank_selected_assets(&account).unwrap();
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        b_stale_asset.unwrap_or(0),
+        active_asset.unwrap_or(0),
+        active_asset,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+
+    kani::cover!(
+        pnl > 1
+            && residual > 1
+            && deficit > 1
+            && capital > 0
+            && insurance > 0
+            && b_stale_asset == Some(0),
+        "live positive-pnl account covers payout-ready fields plus overlapping live work"
+    );
+    assert!(summary.b_stale);
+    assert!(summary.expired_close);
+    assert!(summary.liquidatable);
+    assert!(!summary.pending_close);
+    assert!(!summary.recovery_eligible);
+    assert!(!summary.resolved_winner);
+    assert_ne!(plan, AutoCrankPlanV16::CloseResolved);
+    assert_eq!(
+        plan,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
+    assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
+}
+
 // Permissionless no-DoS b-settlement seam: a current Live account with an active
 // b-stale leg must be routed to SettleBChunk with the engine-selected asset.
 // This prevents a keeper from requiring a fresh oracle refresh before the
