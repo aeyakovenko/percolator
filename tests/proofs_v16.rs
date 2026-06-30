@@ -16027,6 +16027,170 @@ fn proof_v16_validator_sound_account_reserves() {
     ); // U19b
 }
 
+// Account/source-domain validator soundness: if a persisted portfolio row with
+// source credit validates against the concrete market it is being executed
+// against, then the row is bound to the real market/domain, its source claim is
+// fully attributed to positive PnL, and all lien/backing subledgers are
+// internally conserved in the same units.
+// This is the single-account persistence theorem for the wrapper-facing
+// zero-copy account view; aggregate all-account lien totals are maintained by
+// the public lien mutation proofs because they are not derivable from one
+// account alone.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_account_source_domain_claim_and_lien_shape() {
+    let account_claim_raw: u8 = kani::any();
+    let lien_raw: u8 = kani::any();
+    let counterparty_face_raw: u8 = kani::any();
+    let insurance_face_raw: u8 = kani::any();
+    let impaired_raw: u8 = kani::any();
+    let effective_raw: u8 = kani::any();
+    let counterparty_backing_raw: u8 = kani::any();
+    let insurance_backing_raw: u8 = kani::any();
+    let impaired_effective_raw: u8 = kani::any();
+    let pnl_raw: u8 = kani::any();
+
+    kani::assume((1..=12).contains(&account_claim_raw));
+    kani::assume(lien_raw <= 12);
+    kani::assume(counterparty_face_raw <= 12);
+    kani::assume(insurance_face_raw <= 12);
+    kani::assume(impaired_raw <= 12);
+    kani::assume(effective_raw <= 12);
+    kani::assume(counterparty_backing_raw <= 12);
+    kani::assume(insurance_backing_raw <= 12);
+    kani::assume(impaired_effective_raw <= 12);
+    kani::assume(pnl_raw <= 12);
+
+    let market_claim = 12u128;
+    let market_claim_num = market_claim * BOUND_SCALE;
+    let account_claim = account_claim_raw as u128;
+    let account_claim_num = account_claim * BOUND_SCALE;
+    let lien_num = (lien_raw as u128) * BOUND_SCALE;
+    let counterparty_face_num = (counterparty_face_raw as u128) * BOUND_SCALE;
+    let insurance_face_num = (insurance_face_raw as u128) * BOUND_SCALE;
+    let impaired_num = (impaired_raw as u128) * BOUND_SCALE;
+    let effective = effective_raw as u128;
+    let counterparty_backing_num = (counterparty_backing_raw as u128) * BOUND_SCALE;
+    let insurance_backing_num = (insurance_backing_raw as u128) * BOUND_SCALE;
+    let impaired_effective = impaired_effective_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(market_claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(market_claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(market_claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(market_claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(market_claim_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: market_claim_num,
+            exact_positive_claim_num: market_claim_num,
+            fresh_reserved_backing_num: market_claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: market_claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    account_header.pnl = V16PodI128::new(pnl_raw as i128);
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_claim_bound_num: V16PodU128::new(account_claim_num),
+        source_claim_liened_num: V16PodU128::new(lien_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(counterparty_face_num),
+        source_claim_insurance_liened_num: V16PodU128::new(insurance_face_num),
+        source_lien_effective_reserved: V16PodU128::new(effective),
+        source_lien_counterparty_backing_num: V16PodU128::new(counterparty_backing_num),
+        source_lien_insurance_backing_num: V16PodU128::new(insurance_backing_num),
+        source_lien_fee_last_slot: V16PodU64::new(if counterparty_backing_num == 0 {
+            0
+        } else {
+            header.current_slot.get()
+        }),
+        source_claim_impaired_num: V16PodU128::new(impaired_num),
+        source_lien_impaired_effective_reserved: V16PodU128::new(impaired_effective),
+        source_lien_capital_at_risk_fee_revenue: V16PodU128::new(0),
+        source_lien_impaired_capital_at_risk_fee_revenue: V16PodU128::new(0),
+    };
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    kani::assume(account.as_view().validate_with_market(&market.as_view()) == Ok(()));
+
+    let source = account.header.source_domains[0];
+    let backing_num = source
+        .source_lien_counterparty_backing_num
+        .get()
+        .checked_add(source.source_lien_insurance_backing_num.get())
+        .unwrap();
+    let locked_or_impaired = source
+        .source_claim_liened_num
+        .get()
+        .checked_add(source.source_claim_impaired_num.get())
+        .unwrap();
+    let backing_face = source
+        .source_claim_counterparty_liened_num
+        .get()
+        .checked_add(source.source_claim_insurance_liened_num.get())
+        .unwrap();
+
+    kani::cover!(
+        source.source_claim_bound_num.get() != 0
+            && source.source_claim_counterparty_liened_num.get() != 0
+            && source.source_claim_insurance_liened_num.get() != 0
+            && source.source_claim_impaired_num.get() != 0,
+        "account source-domain validator theorem covers mixed counterparty/insurance lien plus impairment"
+    );
+    assert_eq!(source.domain.get(), 0);
+    assert_eq!(source.source_claim_market_id.get(), market_id);
+    assert!(
+        source.source_claim_bound_num.get()
+            <= market.markets[0]
+                .engine
+                .source_credit_long
+                .positive_claim_bound_num
+                .get()
+    );
+    if account.header.pnl.get() > 0 {
+        assert!(
+            source.source_claim_bound_num.get() >= (account.header.pnl.get() as u128) * BOUND_SCALE
+        );
+    }
+    assert!(locked_or_impaired <= source.source_claim_bound_num.get());
+    assert_eq!(backing_face, source.source_claim_liened_num.get());
+    assert!(
+        source.source_lien_effective_reserved.get()
+            <= source.source_claim_liened_num.get() / BOUND_SCALE
+    );
+    assert_eq!(
+        backing_num,
+        source.source_lien_effective_reserved.get() * BOUND_SCALE
+    );
+    assert_eq!(
+        source.source_lien_counterparty_backing_num.get() % BOUND_SCALE,
+        0
+    );
+    assert_eq!(
+        source.source_lien_insurance_backing_num.get() % BOUND_SCALE,
+        0
+    );
+    if source.source_lien_impaired_effective_reserved.get() != 0 {
+        assert!(source.source_claim_impaired_num.get() != 0);
+    }
+    if source.source_lien_counterparty_backing_num.get() == 0 {
+        assert_eq!(source.source_lien_fee_last_slot.get(), 0);
+    } else {
+        assert!(source.source_lien_fee_last_slot.get() <= market.header.current_slot.get());
+    }
+}
+
 // REALIZABILITY (no-DoS auto-crank dispatch seam): only the no-active-asset
 // RefreshAccount fallback hard-requires a caller-supplied observation; active-
 // asset refresh and every other plan are dispatchable from committed state.
