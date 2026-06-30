@@ -575,6 +575,74 @@ fn proof_v16_account_validator_ok_implies_provenance_and_owner_binding() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+fn proof_v16_account_validator_rejects_bitmap_leg_mismatch_and_dirty_inactive_slot() {
+    let bit_set: bool = kani::any();
+    let leg_active: bool = kani::any();
+    let inactive_dirty: bool = kani::any();
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    let candidate_leg = PortfolioLegV16 {
+        active: leg_active,
+        asset_index: 0,
+        market_id,
+        side: SideV16::Long,
+        basis_pos_q: 0,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: 0,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    account_header.legs[0] = if leg_active || inactive_dirty {
+        PortfolioLegV16Account::from_runtime(&candidate_leg)
+    } else {
+        PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY)
+    };
+    if bit_set {
+        let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
+        active_bitmap_set(&mut bitmap, 0).unwrap();
+        account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = account.as_view().validate_with_market(&market.as_view());
+
+    kani::cover!(
+        bit_set && !leg_active && !inactive_dirty && result == Err(V16Error::HiddenLeg),
+        "account validator rejects bitmap-only hidden leg"
+    );
+    kani::cover!(
+        !bit_set && leg_active && result.is_err(),
+        "account validator rejects leg-active record without bitmap bit"
+    );
+    kani::cover!(
+        !bit_set && !leg_active && inactive_dirty && result == Err(V16Error::HiddenLeg),
+        "account validator rejects dirty inactive leg slot"
+    );
+    kani::cover!(
+        !bit_set && !leg_active && !inactive_dirty && result == Ok(()),
+        "account validator accepts empty canonical account leg state"
+    );
+
+    if result == Ok(()) {
+        assert!(!bit_set);
+        assert!(!leg_active);
+        assert!(!inactive_dirty);
+    } else if bit_set != leg_active || (!leg_active && inactive_dirty) {
+        assert!(result.is_err());
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
 fn proof_v16_public_materialized_portfolio_register_is_value_neutral() {
     let count_raw: u8 = kani::any();
     let c_tot_raw: u8 = kani::any();
