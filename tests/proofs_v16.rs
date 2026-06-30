@@ -10,7 +10,8 @@ use percolator::v16::{
     kani_backing_utilization_rate_e9_for_source_state, kani_close_progress_blocks_exposure_clear,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
-    kani_kernel_advance_leg_b_snap, kani_kernel_resize_leg_same_side,
+    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_clear_leg,
+    kani_kernel_resize_leg_same_side,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -3537,6 +3538,150 @@ fn proof_v16_kernel_resize_leg_same_side_is_exact_and_side_isolated() {
     assert_eq!(next_asset.k_short, asset.k_short);
     assert_eq!(next_asset.b_long_num, asset.b_long_num);
     assert_eq!(next_asset.b_short_num, asset.b_short_num);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_attach_then_clear_is_asset_identity_for_real_position() {
+    let long_side: bool = kani::any();
+    let abs_raw: u8 = kani::any();
+    let loss_weight_raw: u8 = kani::any();
+    let long_oi_raw: u8 = kani::any();
+    let short_oi_raw: u8 = kani::any();
+    let long_weight_raw: u8 = kani::any();
+    let short_weight_raw: u8 = kani::any();
+    let long_count_raw: u8 = kani::any();
+    let short_count_raw: u8 = kani::any();
+    let market_id_raw: u8 = kani::any();
+    let asset_index_raw: u8 = kani::any();
+    let k_long_raw: i8 = kani::any();
+    let k_short_raw: i8 = kani::any();
+    let f_long_raw: i8 = kani::any();
+    let f_short_raw: i8 = kani::any();
+    let b_long_raw: u8 = kani::any();
+    let b_short_raw: u8 = kani::any();
+    let epoch_long_raw: u8 = kani::any();
+    let epoch_short_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&abs_raw));
+    kani::assume((1..=8).contains(&loss_weight_raw));
+    kani::assume(long_oi_raw <= 8);
+    kani::assume(short_oi_raw <= 8);
+    kani::assume(long_weight_raw <= 8);
+    kani::assume(short_weight_raw <= 8);
+    kani::assume(long_count_raw <= 8);
+    kani::assume(short_count_raw <= 8);
+    kani::assume((-8..=8).contains(&k_long_raw));
+    kani::assume((-8..=8).contains(&k_short_raw));
+    kani::assume((-8..=8).contains(&f_long_raw));
+    kani::assume((-8..=8).contains(&f_short_raw));
+    kani::assume(b_long_raw <= 8);
+    kani::assume(b_short_raw <= 8);
+
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let abs_q = abs_raw as u128;
+    let basis_pos_q = if long_side {
+        abs_q as i128
+    } else {
+        -(abs_q as i128)
+    };
+    let loss_weight = loss_weight_raw as u128;
+    let mut asset = AssetStateV16::default();
+    asset.market_id = market_id_raw as u64;
+    asset.a_long = ADL_ONE;
+    asset.a_short = ADL_ONE;
+    asset.k_long = k_long_raw as i128;
+    asset.k_short = k_short_raw as i128;
+    asset.f_long_num = f_long_raw as i128;
+    asset.f_short_num = f_short_raw as i128;
+    asset.b_long_num = b_long_raw as u128;
+    asset.b_short_num = b_short_raw as u128;
+    asset.epoch_long = epoch_long_raw as u64;
+    asset.epoch_short = epoch_short_raw as u64;
+    asset.oi_eff_long_q = long_oi_raw as u128;
+    asset.oi_eff_short_q = short_oi_raw as u128;
+    asset.loss_weight_sum_long = long_weight_raw as u128;
+    asset.loss_weight_sum_short = short_weight_raw as u128;
+    asset.stored_pos_count_long = long_count_raw as u64;
+    asset.stored_pos_count_short = short_count_raw as u64;
+    let before = asset;
+    let asset_index = asset_index_raw as u32;
+
+    let (attached_asset, leg) =
+        kani_kernel_attach_leg(asset, side, basis_pos_q, loss_weight, asset_index).unwrap();
+    let cleared_asset = kani_kernel_clear_leg(leg, attached_asset).unwrap();
+
+    kani::cover!(
+        long_side && abs_q > 1 && loss_weight > 1,
+        "attach-clear round trip covers nontrivial long position"
+    );
+    kani::cover!(
+        !long_side && abs_q > 1 && loss_weight > 1,
+        "attach-clear round trip covers nontrivial short position"
+    );
+    assert!(leg.active);
+    assert_eq!(leg.asset_index, asset_index);
+    assert_eq!(leg.market_id, before.market_id);
+    assert_eq!(leg.side, side);
+    assert_eq!(leg.basis_pos_q, basis_pos_q);
+    assert_eq!(leg.loss_weight, loss_weight);
+    assert_eq!(leg.b_rem, 0);
+    assert!(!leg.b_stale);
+    assert!(!leg.stale);
+    if long_side {
+        assert_eq!(leg.a_basis, before.a_long);
+        assert_eq!(leg.k_snap, before.k_long);
+        assert_eq!(leg.f_snap, before.f_long_num);
+        assert_eq!(leg.b_snap, before.b_long_num);
+        assert_eq!(leg.epoch_snap, before.epoch_long);
+        assert_eq!(attached_asset.oi_eff_long_q, before.oi_eff_long_q + abs_q);
+        assert_eq!(
+            attached_asset.loss_weight_sum_long,
+            before.loss_weight_sum_long + loss_weight
+        );
+        assert_eq!(
+            attached_asset.stored_pos_count_long,
+            before.stored_pos_count_long + 1
+        );
+        assert_eq!(attached_asset.oi_eff_short_q, before.oi_eff_short_q);
+        assert_eq!(
+            attached_asset.loss_weight_sum_short,
+            before.loss_weight_sum_short
+        );
+        assert_eq!(
+            attached_asset.stored_pos_count_short,
+            before.stored_pos_count_short
+        );
+    } else {
+        assert_eq!(leg.a_basis, before.a_short);
+        assert_eq!(leg.k_snap, before.k_short);
+        assert_eq!(leg.f_snap, before.f_short_num);
+        assert_eq!(leg.b_snap, before.b_short_num);
+        assert_eq!(leg.epoch_snap, before.epoch_short);
+        assert_eq!(attached_asset.oi_eff_short_q, before.oi_eff_short_q + abs_q);
+        assert_eq!(
+            attached_asset.loss_weight_sum_short,
+            before.loss_weight_sum_short + loss_weight
+        );
+        assert_eq!(
+            attached_asset.stored_pos_count_short,
+            before.stored_pos_count_short + 1
+        );
+        assert_eq!(attached_asset.oi_eff_long_q, before.oi_eff_long_q);
+        assert_eq!(
+            attached_asset.loss_weight_sum_long,
+            before.loss_weight_sum_long
+        );
+        assert_eq!(
+            attached_asset.stored_pos_count_long,
+            before.stored_pos_count_long
+        );
+    }
+    assert_eq!(cleared_asset, before);
 }
 
 #[kani::proof]

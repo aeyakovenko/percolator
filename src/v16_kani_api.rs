@@ -180,6 +180,23 @@ pub fn kani_kernel_resize_leg_same_side(
     )
 }
 
+pub fn kani_kernel_clear_leg(
+    leg: PortfolioLegV16,
+    asset: AssetStateV16,
+) -> V16Result<AssetStateV16> {
+    V16Core::kernel_clear_leg(leg, asset)
+}
+
+pub fn kani_kernel_attach_leg(
+    asset: AssetStateV16,
+    side: SideV16,
+    basis_pos_q: i128,
+    loss_weight: u128,
+    asset_index_u32: u32,
+) -> V16Result<(AssetStateV16, PortfolioLegV16)> {
+    V16Core::kernel_attach_leg(asset, side, basis_pos_q, loss_weight, asset_index_u32)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,
