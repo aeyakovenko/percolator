@@ -13,9 +13,10 @@ use percolator::v16::{
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
-    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    kani_select_auto_crank_plan, kani_source_credit_state_realizable_support_for_face,
+    kani_target_effective_lag_adverse_delta, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
+    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
@@ -14143,6 +14144,138 @@ fn proof_v16_auto_crank_classifier_current_idle_account_is_not_actionable() {
     assert!(!summary.recovery_eligible);
     assert!(!summary.resolved_winner);
     assert!(!summary.is_actionable());
+}
+
+// No-DoS selector theorem for the production auto-crank plan kernel. Over every
+// classifier signal combination reachable by the production classifier
+// (`pending_close == false`), an actionable summary selects exactly one
+// highest-priority plan; a non-actionable summary selects NoAction; asset-bearing
+// plans carry the engine-selected asset argument unchanged.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_plan_selector_is_total_priority_and_asset_faithful() {
+    let stale: bool = kani::any();
+    let b_stale: bool = kani::any();
+    let expired_close: bool = kani::any();
+    let liquidatable: bool = kani::any();
+    let recovery_eligible: bool = kani::any();
+    let resolved_winner: bool = kani::any();
+    let b_stale_slot_raw: u8 = kani::any();
+    let liq_slot_raw: u8 = kani::any();
+    let refresh_slot_raw: u8 = kani::any();
+    let refresh_present: bool = kani::any();
+    kani::assume((b_stale_slot_raw as usize) < V16_MAX_PORTFOLIO_ASSETS_N);
+    kani::assume((liq_slot_raw as usize) < V16_MAX_PORTFOLIO_ASSETS_N);
+    kani::assume((refresh_slot_raw as usize) < V16_MAX_PORTFOLIO_ASSETS_N);
+
+    let summary = ActionableSummaryV16 {
+        stale,
+        b_stale,
+        pending_close: false,
+        expired_close,
+        liquidatable,
+        recovery_eligible,
+        resolved_winner,
+    };
+    let b_stale_slot = b_stale_slot_raw as usize;
+    let liq_slot = liq_slot_raw as usize;
+    let refresh_asset = if refresh_present {
+        Some(refresh_slot_raw as usize)
+    } else {
+        None
+    };
+    let recovery_reason = PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress;
+
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        b_stale_slot,
+        liq_slot,
+        refresh_asset,
+        recovery_reason,
+    );
+    let recovery = summary.expired_close || summary.recovery_eligible;
+    let expected = if recovery {
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: recovery_reason,
+        }
+    } else if summary.resolved_winner {
+        AutoCrankPlanV16::CloseResolved
+    } else if summary.b_stale {
+        AutoCrankPlanV16::SettleBChunk {
+            asset_index: b_stale_slot,
+        }
+    } else if summary.liquidatable {
+        AutoCrankPlanV16::Liquidate {
+            asset_index: liq_slot,
+        }
+    } else if summary.stale {
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: refresh_asset,
+        }
+    } else {
+        AutoCrankPlanV16::NoAction
+    };
+
+    kani::cover!(
+        recovery
+            && summary.resolved_winner
+            && summary.b_stale
+            && summary.liquidatable
+            && summary.stale,
+        "auto-crank selector covers all classes active; recovery priority wins"
+    );
+    kani::cover!(
+        !recovery
+            && !summary.resolved_winner
+            && !summary.b_stale
+            && summary.liquidatable
+            && summary.stale
+            && refresh_asset.is_some(),
+        "auto-crank selector covers liquidation beating refresh"
+    );
+    kani::cover!(
+        !summary.is_actionable(),
+        "auto-crank selector covers the no-action fixed point"
+    );
+
+    assert_eq!(plan, expected);
+    assert_eq!(
+        matches!(plan, AutoCrankPlanV16::NoAction),
+        !summary.is_actionable()
+    );
+    match plan {
+        AutoCrankPlanV16::NoAction => assert!(!summary.is_actionable()),
+        AutoCrankPlanV16::DeclareRecovery { reason } => {
+            assert!(recovery);
+            assert_eq!(reason, recovery_reason);
+        }
+        AutoCrankPlanV16::CloseResolved => {
+            assert!(!recovery);
+            assert!(summary.resolved_winner);
+        }
+        AutoCrankPlanV16::SettleBChunk { asset_index } => {
+            assert!(!recovery);
+            assert!(!summary.resolved_winner);
+            assert!(summary.b_stale);
+            assert_eq!(asset_index, b_stale_slot);
+        }
+        AutoCrankPlanV16::Liquidate { asset_index } => {
+            assert!(!recovery);
+            assert!(!summary.resolved_winner);
+            assert!(!summary.b_stale);
+            assert!(summary.liquidatable);
+            assert_eq!(asset_index, liq_slot);
+        }
+        AutoCrankPlanV16::RefreshAccount { asset_index } => {
+            assert!(!recovery);
+            assert!(!summary.resolved_winner);
+            assert!(!summary.b_stale);
+            assert!(!summary.liquidatable);
+            assert!(summary.stale);
+            assert_eq!(asset_index, refresh_asset);
+        }
+    }
 }
 
 // ROADMAP Phase 1 (Pillar F soundness lemma U3): validate_shape's Ok-exit

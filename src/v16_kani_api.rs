@@ -40,6 +40,22 @@ pub fn kani_health_cert_after_capital_debit(
     health_cert_after_capital_debit(cert, amount)
 }
 
+pub fn kani_select_auto_crank_plan(
+    summary: ActionableSummaryV16,
+    b_stale_slot: usize,
+    liq_slot: usize,
+    refresh_asset: Option<usize>,
+    recovery_reason: PermissionlessRecoveryReasonV16,
+) -> AutoCrankPlanV16 {
+    V16Core::select_auto_crank_plan(
+        summary,
+        b_stale_slot,
+        liq_slot,
+        refresh_asset,
+        recovery_reason,
+    )
+}
+
 pub fn kani_active_bitmap_set(
     bitmap: &mut V16ActiveBitmap,
     leg_slot_index: usize,
