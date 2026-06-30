@@ -227,6 +227,14 @@ pub fn kani_kernel_cert_is_current(
     )
 }
 
+pub fn kani_kernel_settle_resolved_pnl_after_booking(
+    pnl: i128,
+    booked_loss: u128,
+    explicit_loss: u128,
+) -> V16Result<i128> {
+    V16Core::kernel_settle_resolved_pnl_after_booking(pnl, booked_loss, explicit_loss)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,

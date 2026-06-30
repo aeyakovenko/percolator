@@ -12,7 +12,7 @@ use percolator::v16::{
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
     kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_cert_is_current,
     kani_kernel_classify_position_delta, kani_kernel_clear_leg, kani_kernel_reduce_position_delta,
-    kani_kernel_resize_leg_same_side,
+    kani_kernel_resize_leg_same_side, kani_kernel_settle_resolved_pnl_after_booking,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -9983,6 +9983,45 @@ fn proof_v16_principal_then_domain_insurance_waterfall_is_loss_and_domain_capped
             1
         }
     );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_pnl_booking_cap_never_creates_positive_credit() {
+    let loss_raw: u16 = kani::any();
+    let booked_raw: u16 = kani::any();
+    let explicit_raw: u16 = kani::any();
+    kani::assume((1..=1024).contains(&loss_raw));
+    kani::assume(booked_raw <= 2048);
+    kani::assume(explicit_raw <= 2048);
+
+    let loss = loss_raw as u128;
+    let booked_loss = booked_raw as u128;
+    let explicit_loss = explicit_raw as u128;
+    let pnl = -(loss as i128);
+    let total_booked = booked_loss + explicit_loss;
+    let cleared = total_booked.min(loss);
+    let new_pnl =
+        kani_kernel_settle_resolved_pnl_after_booking(pnl, booked_loss, explicit_loss).unwrap();
+
+    kani::cover!(
+        total_booked > 0 && total_booked < loss,
+        "resolved pnl booking covers partial negative-pnl settlement"
+    );
+    kani::cover!(
+        total_booked == loss,
+        "resolved pnl booking covers exact full negative-pnl settlement"
+    );
+    kani::cover!(
+        total_booked > loss,
+        "resolved pnl booking covers over-booking capped at zero pnl"
+    );
+    assert_eq!(new_pnl, pnl + cleared as i128);
+    assert!(new_pnl <= 0);
+    assert!(new_pnl >= pnl);
+    assert_eq!(new_pnl.unsigned_abs(), loss - cleared);
+    assert_eq!(new_pnl == 0, total_booked >= loss);
 }
 
 #[kani::proof]
