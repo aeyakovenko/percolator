@@ -1098,6 +1098,56 @@ fn proof_v16_sparse_source_domain_validation_accepts_domain_indexed_claim() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_sparse_source_domain_validation_rejects_unconfigured_domain_claim() {
+    let domain_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    kani::assume(domain_raw <= 5);
+    kani::assume((1..=16).contains(&claim_raw));
+
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    account_header.pnl = V16PodI128::new(claim_raw as i128);
+    account_header.source_domains[0].domain = V16PodU32::new(domain_raw as u32);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    let credit = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: claim_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    markets[0].engine.source_credit_long = credit;
+    markets[0].engine.source_credit_short = credit;
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = account.kani_validate_source_credit_shape_with_market(&market.as_view());
+    let configured_domain = domain_raw < 2;
+
+    kani::cover!(
+        domain_raw == 0 && claim_raw > 1,
+        "source-domain validator admits funded configured long domain"
+    );
+    kani::cover!(
+        domain_raw == 1 && claim_raw > 1,
+        "source-domain validator admits funded configured short domain"
+    );
+    kani::cover!(
+        domain_raw >= 2,
+        "source-domain validator rejects occupied claim in unconfigured domain"
+    );
+    assert_eq!(result.is_ok(), configured_domain);
+    if configured_domain {
+        assert_eq!(result, Ok(()));
+    } else {
+        assert_eq!(result, Err(V16Error::HiddenLeg));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_mutable_view_compacts_persisted_source_domain_tail() {
     let claim_raw: u8 = kani::any();
     kani::assume(claim_raw > 0);
