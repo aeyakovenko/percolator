@@ -9328,34 +9328,87 @@ fn proof_v16_resolved_bankruptcy_attribution_classifier_is_exact() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v16_resolved_unattributed_bad_debt_clears_without_recovery() {
-    let loss_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&loss_raw));
-    let loss = loss_raw as i128;
+fn proof_v16_resolved_unattributed_bad_debt_branch_is_exact_and_value_framed() {
+    let pnl_raw: i8 = kani::any();
+    let resolved_mode: bool = kani::any();
+    kani::assume((-8..=8).contains(&pnl_raw));
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.mode = 1; // Resolved
+    header.mode = if resolved_mode { 1 } else { 0 };
     header.current_slot = V16PodU64::new(2);
     header.resolved_slot = V16PodU64::new(2);
     header.slot_last = V16PodU64::new(2);
-    header.negative_pnl_account_count = V16PodU64::new(1);
-    account_header.pnl = V16PodI128::new(-loss);
+    header.negative_pnl_account_count = V16PodU64::new((pnl_raw < 0) as u64);
+    account_header.pnl = V16PodI128::new(pnl_raw as i128);
     account_header.last_fee_slot = V16PodU64::new(2);
+    account_header.health_cert.valid = 1;
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let account_before = account_header;
 
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header);
-    let result = market.kani_settle_resolved_bankruptcy_negative_pnl(&mut account);
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.kani_settle_resolved_bankruptcy_negative_pnl(&mut account)
+    };
 
     kani::cover!(
-        loss > 3,
-        "resolved close covers nontrivial unattributed terminal bad debt"
+        pnl_raw < -3 && resolved_mode,
+        "resolved unattributed negative PnL clears without recovery"
     );
-    assert_ne!(result, Err(V16Error::RecoveryRequired));
-    assert_eq!(result, Ok(()));
-    assert_eq!(account.header.pnl.get(), 0);
-    assert!(active_bitmap_is_empty(
-        account.header.active_bitmap.map(V16PodU64::get)
-    ));
-    assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    kani::cover!(
+        pnl_raw < 0 && !resolved_mode,
+        "live unattributed negative PnL rejects without mutation"
+    );
+    kani::cover!(
+        pnl_raw >= 0,
+        "nonnegative PnL is an exact no-op before mode checks"
+    );
+
+    assert_eq!(
+        kani_eq_engine_asset_slot_v16_account(&slot_before, &markets[0].engine),
+        true
+    );
+    if pnl_raw >= 0 {
+        assert_eq!(result, Ok(()));
+        assert!(kani_eq_market_group_v16_header_account(
+            &header_before,
+            &header
+        ));
+        assert!(kani_eq_portfolio_account_v16_account(
+            &account_before,
+            &account_header
+        ));
+    } else if !resolved_mode {
+        assert_eq!(result, Err(V16Error::LockActive));
+        assert!(kani_eq_market_group_v16_header_account(
+            &header_before,
+            &header
+        ));
+        assert!(kani_eq_portfolio_account_v16_account(
+            &account_before,
+            &account_header
+        ));
+    } else {
+        assert_eq!(result, Ok(()));
+        let mut expected_header = header_before;
+        expected_header.bankruptcy_hlock_active = 1;
+        expected_header.negative_pnl_account_count = V16PodU64::new(0);
+        let mut expected_account = account_before;
+        expected_account.pnl = V16PodI128::new(0);
+        expected_account.health_cert.valid = 0;
+        assert!(kani_eq_market_group_v16_header_account(
+            &expected_header,
+            &header
+        ));
+        assert!(kani_eq_portfolio_account_v16_account(
+            &expected_account,
+            &account_header
+        ));
+        assert!(active_bitmap_is_empty(
+            account_header.active_bitmap.map(V16PodU64::get)
+        ));
+        assert_ne!(result, Err(V16Error::RecoveryRequired));
+    }
 }
 
 #[kani::proof]
