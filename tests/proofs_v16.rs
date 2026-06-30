@@ -6766,6 +6766,124 @@ fn proof_v16_source_support_partition_is_subadditive_under_conservative_rate() {
     assert!(support_b <= b);
 }
 
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_cross_account_source_support_external_exits_cannot_overdraw_backing() {
+    let a_raw: u8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let extra_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume((1..=31).contains(&a_raw));
+    kani::assume((1..=31).contains(&b_raw));
+    let a = a_raw as u128;
+    let b = b_raw as u128;
+    let total_claim = a + b;
+    let backing = backing_raw as u128;
+    kani::assume(backing <= total_claim);
+
+    let mut source_credit = SourceCreditStateV16 {
+        positive_claim_bound_num: total_claim * BOUND_SCALE,
+        exact_positive_claim_num: total_claim * BOUND_SCALE,
+        fresh_reserved_backing_num: backing * BOUND_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    source_credit.credit_rate_num =
+        kani_expected_source_credit_rate_num_for_state(source_credit).unwrap();
+
+    let support_a = kani_source_credit_state_realizable_support_for_face(source_credit, a).unwrap();
+    let support_b = kani_source_credit_state_realizable_support_for_face(source_credit, b).unwrap();
+    let support_total = support_a + support_b;
+
+    let senior_capital = extra_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let junior = surplus_raw as u128;
+    let initial_vault = senior_capital + backing + insurance + junior;
+    let initial = StockReconciliationProofV16 {
+        token_vault: initial_vault,
+        senior_capital_total: senior_capital,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: backing,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    assert_eq!(initial.validate(), Ok(()));
+
+    let support_proof = TokenValueFlowProofV16::support_to_account_capital(
+        support_total,
+        support_total,
+        0,
+        0,
+        initial_vault,
+        initial_vault,
+    )
+    .unwrap();
+    assert_eq!(support_proof.validate(), Ok(()));
+    let supported = StockReconciliationProofV16 {
+        token_vault: initial_vault,
+        senior_capital_total: senior_capital + support_total,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: backing - support_total,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    assert_eq!(supported.validate(), Ok(()));
+
+    let final_vault = initial_vault - support_total;
+    let exit_proof = TokenValueFlowProofV16::account_capital_to_external_out(
+        support_total,
+        initial_vault,
+        final_vault,
+    )
+    .unwrap();
+    assert_eq!(exit_proof.validate(), Ok(()));
+    let final_state = StockReconciliationProofV16 {
+        token_vault: final_vault,
+        senior_capital_total: senior_capital,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: backing - support_total,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    assert_eq!(final_state.validate(), Ok(()));
+
+    kani::cover!(
+        backing < total_claim && support_a > 0 && support_b > 0,
+        "two claimants can both exit under haircut without overdrawing backing"
+    );
+    kani::cover!(
+        backing == total_claim && support_total == total_claim,
+        "two claimants can fully exit when source backing exactly matches claims"
+    );
+    assert!(support_total <= backing);
+    assert!(support_a <= a);
+    assert!(support_b <= b);
+    assert_eq!(
+        support_proof.credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize],
+        support_total
+    );
+    assert_eq!(
+        exit_proof.credits[TokenValueClassV16::ExternalQuote as usize],
+        support_total
+    );
+    assert_eq!(final_state.token_vault, initial.token_vault - support_total);
+    assert_eq!(final_state.senior_capital_total, senior_capital);
+    assert_eq!(
+        final_state.counterparty_backing_principal,
+        initial.counterparty_backing_principal - support_total
+    );
+    assert_eq!(final_state.insurance_capital, initial.insurance_capital);
+    assert_eq!(
+        final_state.unallocated_protocol_surplus,
+        initial.unallocated_protocol_surplus
+    );
+}
+
 // Global junior-bound aggregation invariant: the group-level junior claim bound
 // (`pnl_pos_bound_tot_num`) is the denominator for the non-source haircut
 // (`haircut_effective_support`) and the resolved-payout snapshot, so it must
