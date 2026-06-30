@@ -13,8 +13,9 @@ use percolator::v16::{
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
     kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_bresidual_step,
     kani_kernel_cert_is_current, kani_kernel_classify_position_delta, kani_kernel_clear_leg,
-    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
-    kani_kernel_resolved_close_progress, kani_kernel_resolved_payout_step,
+    kani_kernel_consume_insurance_layer, kani_kernel_reduce_position_delta,
+    kani_kernel_resize_leg_same_side, kani_kernel_resolved_close_progress,
+    kani_kernel_resolved_payout_step, kani_kernel_settle_principal,
     kani_kernel_settle_resolved_pnl_after_booking, kani_kernel_social_loss_chunk_cap,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
@@ -13921,6 +13922,93 @@ fn inv_senior_accounting(vault: u128, c_tot: u128, insurance: u128) -> bool {
         .checked_add(insurance)
         .map(|s| s <= vault)
         .unwrap_or(false)
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_liquidation_waterfall_is_senior_safe_and_domain_capped() {
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let capital: u128 = kani::any();
+    let domain_available: u128 = kani::any();
+    let spent: u128 = kani::any();
+    let pnl: i128 = kani::any();
+
+    kani::assume(inv_senior_accounting(vault, c_tot, insurance));
+    kani::assume(capital <= c_tot);
+    kani::assume(domain_available <= insurance);
+    kani::assume(spent <= u128::MAX - domain_available);
+    kani::assume(pnl > i128::MIN);
+    kani::assume(pnl < 0);
+
+    let loss = pnl.unsigned_abs();
+    let expected_principal = capital.min(loss);
+    let residual_after_principal = loss - expected_principal;
+    let expected_insurance = domain_available.min(residual_after_principal);
+
+    let (principal_paid, capital_after, c_tot_after, pnl_after_principal) =
+        kani_kernel_settle_principal(capital, c_tot, pnl).unwrap();
+
+    let mut insurance_used = 0u128;
+    let mut insurance_after = insurance;
+    let mut spent_after = spent;
+    let mut final_pnl = pnl_after_principal;
+    if pnl_after_principal < 0 {
+        let (used, next_insurance, next_spent, next_pnl) = kani_kernel_consume_insurance_layer(
+            domain_available,
+            insurance,
+            spent,
+            pnl_after_principal,
+        )
+        .unwrap();
+        insurance_used = used;
+        insurance_after = next_insurance;
+        spent_after = next_spent;
+        final_pnl = next_pnl;
+    }
+
+    kani::cover!(
+        capital > 0
+            && capital < loss
+            && domain_available > 0
+            && domain_available < residual_after_principal,
+        "kernel waterfall covers loss capped by both principal and domain insurance"
+    );
+    kani::cover!(
+        capital < loss
+            && residual_after_principal > 0
+            && domain_available >= residual_after_principal,
+        "kernel waterfall covers residual fully absorbed by domain insurance"
+    );
+    kani::cover!(
+        capital >= loss && domain_available > 0,
+        "kernel waterfall covers principal-only settlement despite available insurance"
+    );
+    kani::cover!(
+        capital < loss && domain_available == 0,
+        "kernel waterfall covers no-domain-insurance residual"
+    );
+
+    assert_eq!(principal_paid, expected_principal);
+    assert_eq!(insurance_used, expected_insurance);
+    assert!(principal_paid <= loss);
+    assert!(insurance_used <= domain_available);
+    assert!(insurance_used <= residual_after_principal);
+    assert!(principal_paid + insurance_used <= loss);
+    assert_eq!(capital_after, capital - principal_paid);
+    assert_eq!(c_tot_after, c_tot - principal_paid);
+    assert_eq!(insurance_after, insurance - insurance_used);
+    assert_eq!(spent_after, spent + insurance_used);
+    assert_eq!(
+        final_pnl,
+        pnl + i128::try_from(principal_paid + insurance_used).unwrap()
+    );
+    assert!(final_pnl <= 0);
+    assert_eq!(final_pnl == 0, principal_paid + insurance_used == loss);
+    assert!(capital_after <= c_tot_after);
+    assert!(inv_senior_accounting(vault, c_tot_after, insurance_after));
 }
 
 #[kani::proof]

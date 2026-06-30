@@ -243,6 +243,23 @@ pub fn kani_kernel_settle_resolved_pnl_after_booking(
     V16Core::kernel_settle_resolved_pnl_after_booking(pnl, booked_loss, explicit_loss)
 }
 
+pub fn kani_kernel_settle_principal(
+    capital: u128,
+    c_tot: u128,
+    pnl: i128,
+) -> V16Result<(u128, u128, u128, i128)> {
+    V16Core::kernel_settle_principal(capital, c_tot, pnl)
+}
+
+pub fn kani_kernel_consume_insurance_layer(
+    domain_available: u128,
+    insurance: u128,
+    spent: u128,
+    pnl: i128,
+) -> V16Result<(u128, u128, u128, i128)> {
+    V16Core::kernel_consume_insurance_layer(domain_available, insurance, spent, pnl)
+}
+
 pub fn kani_kernel_bresidual_step(
     residual_remaining: u128,
     booked: Option<BResidualBookingOutcomeV16>,
