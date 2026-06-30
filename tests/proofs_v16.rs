@@ -16,7 +16,8 @@ use percolator::v16::{
     kani_project_auto_crank_selected_assets, kani_select_auto_crank_plan,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    ActionableSummaryV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
+    v16_domain_count_for_market_slots, v16_domain_pair_for_asset_index, ActionableSummaryV16,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
     BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
     CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
     HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
@@ -2347,6 +2348,68 @@ fn proof_v16_dynamic_market_extension_slots_must_be_zero_fill() {
     assert_eq!(dirty_extension_result, Err(V16Error::InvalidConfig));
     assert_eq!(configured_dirty_result, Ok(()));
     assert_eq!(out_of_capacity_result, Err(V16Error::InvalidConfig));
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_domain_count_and_pair_mapping_admits_only_configured_assets() {
+    let max_market_slots: u32 = kani::any();
+    let asset_index_raw: u32 = kani::any();
+    let other_asset_raw: u32 = kani::any();
+    let asset_index = asset_index_raw as usize;
+    let other_asset = other_asset_raw as usize;
+
+    let domain_count = v16_domain_count_for_market_slots(max_market_slots);
+    let expected_domain_count = (max_market_slots as usize)
+        .checked_mul(2)
+        .ok_or(V16Error::ArithmeticOverflow);
+    assert_eq!(domain_count, expected_domain_count);
+
+    let pair = v16_domain_pair_for_asset_index(asset_index).unwrap();
+    assert_eq!(pair.0, asset_index * 2);
+    assert_eq!(pair.1, pair.0 + 1);
+    assert_eq!(pair.0 / 2, asset_index);
+    assert_eq!(pair.1 / 2, asset_index);
+    assert_eq!(pair.0 % 2, 0);
+    assert_eq!(pair.1 % 2, 1);
+
+    kani::cover!(
+        max_market_slots > 1 && asset_index_raw < max_market_slots,
+        "domain pair proof covers a configured nonzero market set"
+    );
+    kani::cover!(
+        max_market_slots > 0 && asset_index_raw == max_market_slots,
+        "domain pair proof covers the first unconfigured market boundary"
+    );
+    kani::cover!(
+        max_market_slots == 0,
+        "domain pair proof covers zero configured markets"
+    );
+
+    if let Ok(count) = domain_count {
+        let configured = asset_index_raw < max_market_slots;
+        let in_configured_domain_range = pair.0 < count && pair.1 < count;
+        assert_eq!(in_configured_domain_range, configured);
+        if configured {
+            assert!(pair.0 < count);
+            assert!(pair.1 < count);
+        } else {
+            assert!(pair.0 >= count);
+            assert!(pair.1 >= count);
+        }
+    }
+
+    let other_pair = v16_domain_pair_for_asset_index(other_asset).unwrap();
+    if asset_index_raw != other_asset_raw
+        && asset_index_raw < max_market_slots
+        && other_asset_raw < max_market_slots
+    {
+        assert_ne!(pair.0, other_pair.0);
+        assert_ne!(pair.0, other_pair.1);
+        assert_ne!(pair.1, other_pair.0);
+        assert_ne!(pair.1, other_pair.1);
+    }
 }
 
 #[kani::proof]
