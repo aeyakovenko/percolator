@@ -903,6 +903,51 @@ fn proof_v16_loss_stale_trade_scope_allows_only_unrelated_current_assets() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v16_view_loss_stale_ignore_empty_accounts_matches_current_trade_scope() {
+    let global_loss_stale: bool = kani::any();
+    let trade_asset_stale: bool = kani::any();
+
+    let (mut header, mut markets, long_header) = two_market_view_fixture();
+    let short_header = empty_account_fixture(header.market_group_id, 3);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(9);
+    header.loss_stale_active = if global_loss_stale { 1 } else { 0 };
+
+    let mut trade_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    trade_asset.slot_last = if trade_asset_stale { 9 } else { 10 };
+    trade_asset.oi_eff_long_q = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&trade_asset);
+    let mut stale_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    stale_asset.slot_last = 9;
+    stale_asset.oi_eff_long_q = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&stale_asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let long = PortfolioV16View::new(&long_header);
+    let short = PortfolioV16View::new(&short_header);
+    let allowed = market
+        .kani_can_ignore_unrelated_loss_stale_for_trade(&long, &short, 0)
+        .unwrap();
+    let expected = global_loss_stale && !trade_asset_stale;
+
+    kani::cover!(
+        expected,
+        "view loss-stale scope ignores unrelated stale asset for empty accounts"
+    );
+    kani::cover!(
+        global_loss_stale && trade_asset_stale && !allowed,
+        "view loss-stale scope rejects stale trade asset"
+    );
+    kani::cover!(
+        !global_loss_stale && !allowed,
+        "view loss-stale scope does not fabricate ignore when global flag is clear"
+    );
+    assert_eq!(allowed, expected);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v16_sparse_source_domain_insert_roundtrips_occupied_domain() {
     let domain_raw: u8 = kani::any();
     let claim_raw: u8 = kani::any();
