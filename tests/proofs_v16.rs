@@ -4250,6 +4250,137 @@ fn proof_v16_batch_outcome_accumulator_is_exact_and_overflow_checked() {
 }
 
 #[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_batch_accumulator_two_fill_fold_is_order_independent() {
+    let fill_count: u32 = kani::any();
+    let fee_a: u128 = kani::any();
+    let fee_b: u128 = kani::any();
+    let notional: u128 = kani::any();
+    let fee_a0: u128 = kani::any();
+    let fee_b0: u128 = kani::any();
+    let notional0: u128 = kani::any();
+    let fee_a1: u128 = kani::any();
+    let fee_b1: u128 = kani::any();
+    let notional1: u128 = kani::any();
+    let risk_before: bool = kani::any();
+    let long_claim_before: bool = kani::any();
+    let short_claim_before: bool = kani::any();
+    let risk0: bool = kani::any();
+    let long_claim0: bool = kani::any();
+    let short_claim0: bool = kani::any();
+    let risk1: bool = kani::any();
+    let long_claim1: bool = kani::any();
+    let short_claim1: bool = kani::any();
+
+    kani::assume(fill_count <= u32::MAX - 2);
+    kani::assume(fee_a0 <= u128::MAX - fee_a1);
+    kani::assume(fee_b0 <= u128::MAX - fee_b1);
+    kani::assume(notional0 <= u128::MAX - notional1);
+    let fee_a_add = fee_a0 + fee_a1;
+    let fee_b_add = fee_b0 + fee_b1;
+    let notional_add = notional0 + notional1;
+    kani::assume(fee_a <= u128::MAX - fee_a_add);
+    kani::assume(fee_b <= u128::MAX - fee_b_add);
+    kani::assume(notional <= u128::MAX - notional_add);
+
+    let initial = BatchTradeOutcomeV16 {
+        fill_count,
+        fee_a,
+        fee_b,
+        notional,
+    };
+    let mut outcome_01 = initial;
+    let mut risk_01 = risk_before;
+    let mut long_claim_01 = long_claim_before;
+    let mut short_claim_01 = short_claim_before;
+    let mut outcome_10 = initial;
+    let mut risk_10 = risk_before;
+    let mut long_claim_10 = long_claim_before;
+    let mut short_claim_10 = short_claim_before;
+
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_01,
+        &mut risk_01,
+        &mut long_claim_01,
+        &mut short_claim_01,
+        fee_a0,
+        fee_b0,
+        notional0,
+        risk0,
+        long_claim0,
+        short_claim0,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_01,
+        &mut risk_01,
+        &mut long_claim_01,
+        &mut short_claim_01,
+        fee_a1,
+        fee_b1,
+        notional1,
+        risk1,
+        long_claim1,
+        short_claim1,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_10,
+        &mut risk_10,
+        &mut long_claim_10,
+        &mut short_claim_10,
+        fee_a1,
+        fee_b1,
+        notional1,
+        risk1,
+        long_claim1,
+        short_claim1,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_10,
+        &mut risk_10,
+        &mut long_claim_10,
+        &mut short_claim_10,
+        fee_a0,
+        fee_b0,
+        notional0,
+        risk0,
+        long_claim0,
+        short_claim0,
+    )
+    .unwrap();
+
+    kani::cover!(
+        fee_a0 > 0 && fee_b1 > 0 && notional0 > 0 && notional1 > 0,
+        "two-fill batch fold covers nonzero fees and notional on both fills"
+    );
+    kani::cover!(
+        risk0 && !risk1 && !long_claim0 && long_claim1 && short_claim0 && !short_claim1,
+        "two-fill batch fold covers asymmetric risk and source-claim flags"
+    );
+
+    assert_eq!(outcome_01, outcome_10);
+    assert_eq!(risk_01, risk_10);
+    assert_eq!(long_claim_01, long_claim_10);
+    assert_eq!(short_claim_01, short_claim_10);
+    assert_eq!(outcome_01.fill_count, fill_count + 2);
+    assert_eq!(outcome_01.fee_a, fee_a + fee_a_add);
+    assert_eq!(outcome_01.fee_b, fee_b + fee_b_add);
+    assert_eq!(outcome_01.notional, notional + notional_add);
+    assert_eq!(risk_01, risk_before || risk0 || risk1);
+    assert_eq!(
+        long_claim_01,
+        long_claim_before || long_claim0 || long_claim1
+    );
+    assert_eq!(
+        short_claim_01,
+        short_claim_before || short_claim0 || short_claim1
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_wrapper_shape_distinct_asset_batch_projection_preserves_oi_and_outcome() {
