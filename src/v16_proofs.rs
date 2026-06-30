@@ -308,7 +308,11 @@ fn contract_check_prepare_counterparty_backing_add_delta() {
     kani::assume(bucket.fresh_unliened_backing_num < 1u128 << 96);
     kani::assume(source.fresh_reserved_backing_num < 1u128 << 96);
     let _ = V16Core::prepare_counterparty_backing_add_delta(
-        bucket, source, amount, current_slot, expiry_slot,
+        bucket,
+        source,
+        amount,
+        current_slot,
+        expiry_slot,
     );
 }
 
@@ -451,7 +455,11 @@ fn contract_check_credit_account_from_insurance_delta() {
     let capital: u128 = kani::any();
     let amount: u128 = kani::any();
     let _ = MarketGroupV16ViewMut::<Market<u64>>::credit_account_from_insurance_delta(
-        insurance, budget_remaining, c_tot, capital, amount,
+        insurance,
+        budget_remaining,
+        c_tot,
+        capital,
+        amount,
     );
 }
 
@@ -478,7 +486,9 @@ fn contract_check_prepare_source_positive_claim_bound_delta() {
     let exact_claim_num: u128 = kani::any();
     kani::assume(exact_claim_num <= claim_bound_num);
     let _ = V16Core::prepare_source_positive_claim_bound_delta(
-        source, claim_bound_num, exact_claim_num,
+        source,
+        claim_bound_num,
+        exact_claim_num,
     );
 }
 
@@ -514,7 +524,9 @@ fn contract_check_flow_external_in_to_account_capital() {
     let vault_before: u128 = kani::any();
     let vault_after = vault_before.wrapping_add(amount);
     kani::assume(vault_after >= vault_before);
-    if let Ok(p) = TokenValueFlowProofV16::external_in_to_account_capital(amount, vault_before, vault_after) {
+    if let Ok(p) =
+        TokenValueFlowProofV16::external_in_to_account_capital(amount, vault_before, vault_after)
+    {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         ed[TokenValueClassV16::AccountCapital as usize] = amount;
@@ -545,7 +557,9 @@ fn contract_check_flow_account_capital_to_external_out() {
     let vault_before: u128 = kani::any();
     kani::assume(vault_before >= amount);
     let vault_after = vault_before - amount;
-    if let Ok(p) = TokenValueFlowProofV16::account_capital_to_external_out(amount, vault_before, vault_after) {
+    if let Ok(p) =
+        TokenValueFlowProofV16::account_capital_to_external_out(amount, vault_before, vault_after)
+    {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         ed[TokenValueClassV16::AccountCapital as usize] = amount;
@@ -575,7 +589,9 @@ fn contract_check_flow_account_capital_to_insurance() {
     let amount: u128 = kani::any();
     let vault_before: u128 = kani::any();
     let vault_after = vault_before; // internal relabel: vault flat
-    if let Ok(p) = TokenValueFlowProofV16::account_capital_to_insurance(amount, vault_before, vault_after) {
+    if let Ok(p) =
+        TokenValueFlowProofV16::account_capital_to_insurance(amount, vault_before, vault_after)
+    {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         ed[TokenValueClassV16::AccountCapital as usize] = amount;
@@ -606,7 +622,9 @@ fn contract_check_flow_external_in_to_insurance_capital() {
     let vault_before: u128 = kani::any();
     let vault_after = vault_before.wrapping_add(amount);
     kani::assume(vault_after >= vault_before);
-    if let Ok(p) = TokenValueFlowProofV16::external_in_to_insurance_capital(amount, vault_before, vault_after) {
+    if let Ok(p) =
+        TokenValueFlowProofV16::external_in_to_insurance_capital(amount, vault_before, vault_after)
+    {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         ed[TokenValueClassV16::InsuranceCapital as usize] = amount;
@@ -637,7 +655,9 @@ fn contract_check_flow_insurance_capital_to_external_out() {
     let vault_before: u128 = kani::any();
     kani::assume(vault_before >= amount);
     let vault_after = vault_before - amount;
-    if let Ok(p) = TokenValueFlowProofV16::insurance_capital_to_external_out(amount, vault_before, vault_after) {
+    if let Ok(p) =
+        TokenValueFlowProofV16::insurance_capital_to_external_out(amount, vault_before, vault_after)
+    {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         ed[TokenValueClassV16::InsuranceCapital as usize] = amount;
@@ -667,7 +687,11 @@ fn contract_check_flow_insurance_capital_to_account_capital() {
     let amount: u128 = kani::any();
     let vault_before: u128 = kani::any();
     let vault_after = vault_before; // internal relabel: vault flat
-    if let Ok(p) = TokenValueFlowProofV16::insurance_capital_to_account_capital(amount, vault_before, vault_after) {
+    if let Ok(p) = TokenValueFlowProofV16::insurance_capital_to_account_capital(
+        amount,
+        vault_before,
+        vault_after,
+    ) {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         ed[TokenValueClassV16::InsuranceCapital as usize] = amount;
@@ -697,7 +721,9 @@ fn contract_check_flow_account_capital_to_realized_loss() {
     let amount: u128 = kani::any();
     let vault_before: u128 = kani::any();
     let vault_after = vault_before; // internal relabel: vault flat
-    if let Ok(p) = TokenValueFlowProofV16::account_capital_to_realized_loss(amount, vault_before, vault_after) {
+    if let Ok(p) =
+        TokenValueFlowProofV16::account_capital_to_realized_loss(amount, vault_before, vault_after)
+    {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         ed[TokenValueClassV16::AccountCapital as usize] = amount;
@@ -727,7 +753,11 @@ fn contract_check_flow_insurance_to_close_insurance_spent() {
     let amount: u128 = kani::any();
     let vault_before: u128 = kani::any();
     let vault_after = vault_before; // internal relabel: vault flat
-    if let Ok(p) = TokenValueFlowProofV16::insurance_to_close_insurance_spent(amount, vault_before, vault_after) {
+    if let Ok(p) = TokenValueFlowProofV16::insurance_to_close_insurance_spent(
+        amount,
+        vault_before,
+        vault_after,
+    ) {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         ed[TokenValueClassV16::InsuranceCapital as usize] = amount;
@@ -768,7 +798,11 @@ fn contract_check_flow_close_cure_to_account_capital() {
     let vault_after = vault_before.wrapping_add(deposit);
     kani::assume(vault_after >= vault_before);
     if let Ok(p) = TokenValueFlowProofV16::close_cure_to_account_capital(
-        deposit, escrow, capital_credit, vault_before, vault_after,
+        deposit,
+        escrow,
+        capital_credit,
+        vault_before,
+        vault_after,
     ) {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
@@ -803,7 +837,12 @@ fn contract_check_flow_support_to_account_capital() {
         None => return,
     };
     if let Ok(p) = TokenValueFlowProofV16::support_to_account_capital(
-        credit, cp, ins, surplus, vault_before, vault_before,
+        credit,
+        cp,
+        ins,
+        surplus,
+        vault_before,
+        vault_before,
     ) {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
@@ -840,7 +879,11 @@ fn contract_check_flow_capital_and_resolved_payout_to_external_out() {
     kani::assume(vault_before >= total);
     let vault_after = vault_before - total;
     if let Ok(p) = TokenValueFlowProofV16::capital_and_resolved_payout_to_external_out(
-        capital_paid, payout_paid, total, vault_before, vault_after,
+        capital_paid,
+        payout_paid,
+        total,
+        vault_before,
+        vault_after,
     ) {
         let mut ed = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
         let mut ec = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
@@ -867,7 +910,13 @@ fn contract_check_flow_capital_and_resolved_payout_to_external_out() {
 #[kani::solver(cadical)]
 fn contract_check_withdraw_domain_insurance_delta() {
     let _ = MarketGroupV16ViewMut::<Market<u64>>::withdraw_domain_insurance_delta(
-        kani::any(), kani::any(), kani::any(), kani::any(), kani::any(), kani::any(), kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
     );
 }
 
@@ -877,7 +926,12 @@ fn contract_check_withdraw_domain_insurance_delta() {
 #[kani::solver(cadical)]
 fn contract_check_credit_backing_provider_earnings_delta() {
     let _ = MarketGroupV16ViewMut::<Market<u64>>::credit_backing_provider_earnings_delta(
-        kani::any(), kani::any(), kani::any(), kani::any(), kani::any(), kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
     );
 }
 
@@ -893,7 +947,11 @@ fn contract_check_set_domain_insurance_spent_delta() {
     let new_spent: u128 = kani::any();
     kani::assume(old_spent <= budget && new_spent <= budget);
     let _ = MarketGroupV16ViewMut::<Market<u64>>::set_domain_insurance_spent_delta(
-        total_remaining, insurance, budget, old_spent, new_spent,
+        total_remaining,
+        insurance,
+        budget,
+        old_spent,
+        new_spent,
     );
 }
 
@@ -909,7 +967,11 @@ fn contract_check_set_domain_insurance_budget_delta() {
     let new_budget: u128 = kani::any();
     kani::assume(spent <= old_budget && spent <= new_budget);
     let _ = MarketGroupV16ViewMut::<Market<u64>>::set_domain_insurance_budget_delta(
-        total_remaining, insurance_limit, old_budget, spent, new_budget,
+        total_remaining,
+        insurance_limit,
+        old_budget,
+        spent,
+        new_budget,
     );
 }
 
@@ -941,7 +1003,10 @@ fn contract_check_available_backing_num_for_source_credit_state() {
 #[kani::solver(cadical)]
 fn contract_check_health_requirements_from_base_and_target_lag() {
     let _ = V16Core::health_requirements_from_base_and_target_lag(
-        kani::any(), kani::any(), kani::any(), kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
     );
 }
 
@@ -959,8 +1024,7 @@ fn kani_ledger_inv(
     s: &SourceCreditStateV16,
     r: &InsuranceCreditReservationV16,
 ) -> bool {
-    s.fresh_reserved_backing_num
-        == b.fresh_unliened_backing_num + b.valid_liened_backing_num
+    s.fresh_reserved_backing_num == b.fresh_unliened_backing_num + b.valid_liened_backing_num
         && s.provider_receivable_num == b.consumed_liened_backing_num
         && s.valid_liened_backing_num == b.valid_liened_backing_num
         && s.impaired_liened_backing_num == b.impaired_liened_backing_num
@@ -971,7 +1035,11 @@ fn kani_ledger_inv(
 }
 
 #[cfg(all(kani, feature = "closure"))]
-fn kani_any_ledger_triple() -> (BackingBucketV16, SourceCreditStateV16, InsuranceCreditReservationV16) {
+fn kani_any_ledger_triple() -> (
+    BackingBucketV16,
+    SourceCreditStateV16,
+    InsuranceCreditReservationV16,
+) {
     let b = BackingBucketV16 {
         market_id: kani::any(),
         fresh_unliened_backing_num: kani::any(),
@@ -1037,7 +1105,8 @@ fn closure_ledger_inv_prepare_counterparty_lien_create_delta() {
     let amount: u128 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
-    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_create_delta(b, s, kani::any(), amount) {
+    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_create_delta(b, s, kani::any(), amount)
+    {
         // Reservation untouched by counterparty deltas.
         assert!(kani_ledger_inv(&b2, &s2, &r));
     }
@@ -1052,7 +1121,9 @@ fn closure_ledger_inv_prepare_counterparty_lien_release_delta() {
     let amount: u128 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
-    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_release_delta(b, s, kani::any(), amount) {
+    if let Ok((b2, s2)) =
+        V16Core::prepare_counterparty_lien_release_delta(b, s, kani::any(), amount)
+    {
         // Reservation untouched by counterparty deltas.
         assert!(kani_ledger_inv(&b2, &s2, &r));
     }
@@ -1127,7 +1198,9 @@ fn closure_ledger_inv_prepare_counterparty_backing_add_delta() {
     let amount: u128 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
-    if let Ok((b2, s2)) = V16Core::prepare_counterparty_backing_add_delta(b, s, amount, kani::any(), kani::any()) {
+    if let Ok((b2, s2)) =
+        V16Core::prepare_counterparty_backing_add_delta(b, s, amount, kani::any(), kani::any())
+    {
         // Reservation untouched by counterparty deltas.
         assert!(kani_ledger_inv(&b2, &s2, &r));
     }
@@ -1241,7 +1314,9 @@ fn closure_bucket_status_machine_prepare_counterparty_lien_create_delta() {
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
     kani::assume(V16Core::validate_backing_bucket_static(b) == Ok(()));
-    if let Ok((b2, _s2)) = V16Core::prepare_counterparty_lien_create_delta(b, s, kani::any(), amount) {
+    if let Ok((b2, _s2)) =
+        V16Core::prepare_counterparty_lien_create_delta(b, s, kani::any(), amount)
+    {
         assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
     }
 }
@@ -1256,7 +1331,9 @@ fn closure_bucket_status_machine_prepare_counterparty_lien_release_delta() {
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
     kani::assume(V16Core::validate_backing_bucket_static(b) == Ok(()));
-    if let Ok((b2, _s2)) = V16Core::prepare_counterparty_lien_release_delta(b, s, kani::any(), amount) {
+    if let Ok((b2, _s2)) =
+        V16Core::prepare_counterparty_lien_release_delta(b, s, kani::any(), amount)
+    {
         assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
     }
 }
@@ -1275,7 +1352,6 @@ fn closure_bucket_status_machine_prepare_counterparty_lien_terminal_release_delt
         assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
     }
 }
-
 
 #[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
@@ -1315,7 +1391,11 @@ fn contract_check_kernel_resize_leg_same_side() {
         active: true,
         asset_index: kani::any(),
         market_id: kani::any(),
-        side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        side: if kani::any() {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
         basis_pos_q: kani::any(),
         a_basis: kani::any(),
         k_snap: kani::any(),
@@ -1368,8 +1448,16 @@ fn contract_check_kernel_resize_leg_same_side() {
         explicit_unallocated_loss_short: kani::any(),
         epoch_long: kani::any(),
         epoch_short: kani::any(),
-        mode_long: if kani::any() { SideModeV16::Normal } else { SideModeV16::ResetPending },
-        mode_short: if kani::any() { SideModeV16::Normal } else { SideModeV16::ResetPending },
+        mode_long: if kani::any() {
+            SideModeV16::Normal
+        } else {
+            SideModeV16::ResetPending
+        },
+        mode_short: if kani::any() {
+            SideModeV16::Normal
+        } else {
+            SideModeV16::ResetPending
+        },
     };
     let new_signed: i128 = kani::any();
     let new_weight: u128 = kani::any();
@@ -1377,7 +1465,11 @@ fn contract_check_kernel_resize_leg_same_side() {
     kani::assume(new_signed != 0);
     kani::assume(new_signed > i128::MIN);
     let _ = V16Core::kernel_resize_leg_same_side(
-        portfoliolegv16, assetstatev16, new_signed, new_weight, preserve,
+        portfoliolegv16,
+        assetstatev16,
+        new_signed,
+        new_weight,
+        preserve,
     );
 }
 
@@ -1426,15 +1518,33 @@ fn contract_check_kernel_attach_leg() {
         explicit_unallocated_loss_short: kani::any(),
         epoch_long: kani::any(),
         epoch_short: kani::any(),
-        mode_long: if kani::any() { SideModeV16::Normal } else { SideModeV16::ResetPending },
-        mode_short: if kani::any() { SideModeV16::Normal } else { SideModeV16::ResetPending },
+        mode_long: if kani::any() {
+            SideModeV16::Normal
+        } else {
+            SideModeV16::ResetPending
+        },
+        mode_short: if kani::any() {
+            SideModeV16::Normal
+        } else {
+            SideModeV16::ResetPending
+        },
     };
-    let side = if kani::any() { SideV16::Long } else { SideV16::Short };
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
     let basis_pos_q: i128 = kani::any();
     let loss_weight: u128 = kani::any();
     let asset_index_u32: u32 = kani::any();
     kani::assume(basis_pos_q != 0 && basis_pos_q > i128::MIN);
-    let _ = V16Core::kernel_attach_leg(assetstatev16, side, basis_pos_q, loss_weight, asset_index_u32);
+    let _ = V16Core::kernel_attach_leg(
+        assetstatev16,
+        side,
+        basis_pos_q,
+        loss_weight,
+        asset_index_u32,
+    );
 }
 
 #[cfg(all(kani, feature = "contracts"))]
@@ -1446,7 +1556,11 @@ fn contract_check_kernel_clear_leg() {
         active: true,
         asset_index: kani::any(),
         market_id: kani::any(),
-        side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        side: if kani::any() {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
         basis_pos_q: kani::any(),
         a_basis: kani::any(),
         k_snap: kani::any(),
@@ -1499,8 +1613,16 @@ fn contract_check_kernel_clear_leg() {
         explicit_unallocated_loss_short: kani::any(),
         epoch_long: kani::any(),
         epoch_short: kani::any(),
-        mode_long: if kani::any() { SideModeV16::Normal } else { SideModeV16::ResetPending },
-        mode_short: if kani::any() { SideModeV16::Normal } else { SideModeV16::ResetPending },
+        mode_long: if kani::any() {
+            SideModeV16::Normal
+        } else {
+            SideModeV16::ResetPending
+        },
+        mode_short: if kani::any() {
+            SideModeV16::Normal
+        } else {
+            SideModeV16::ResetPending
+        },
     };
     kani::assume(leg.basis_pos_q > i128::MIN);
     let _ = V16Core::kernel_clear_leg(leg, asset);
@@ -1515,7 +1637,11 @@ fn contract_check_kernel_advance_leg_b_snap() {
         active: kani::any(),
         asset_index: kani::any(),
         market_id: kani::any(),
-        side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        side: if kani::any() {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
         basis_pos_q: kani::any(),
         a_basis: kani::any(),
         k_snap: kani::any(),
@@ -1548,7 +1674,11 @@ fn closure_kernel_advance_close_ledger_rank_witness() {
         close_id: kani::any(),
         asset_index: kani::any(),
         market_id: kani::any(),
-        domain_side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        domain_side: if kani::any() {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
         gross_loss_at_close_start: kani::any(),
         drift_reference_slot: kani::any(),
         max_close_slot: kani::any(),
@@ -1575,8 +1705,10 @@ fn closure_kernel_advance_close_ledger_rank_witness() {
     kani::assume(ledger.b_loss_booked < 1u128 << 64);
     kani::assume(ledger.explicit_loss_assigned < 1u128 << 64);
     let total = ledger.gross_loss_at_close_start + ledger.drift_consumed;
-    let pre_progress = ledger.support_consumed + ledger.insurance_spent
-        + ledger.b_loss_booked + ledger.explicit_loss_assigned;
+    let pre_progress = ledger.support_consumed
+        + ledger.insurance_spent
+        + ledger.b_loss_booked
+        + ledger.explicit_loss_assigned;
     kani::assume(pre_progress <= total);
     kani::assume(ledger.residual_remaining == total - pre_progress);
 
@@ -1596,7 +1728,10 @@ fn closure_kernel_advance_close_ledger_rank_witness() {
         assert_eq!(l.finalized, ledger.finalized || l.residual_remaining == 0);
         // immutable identity frozen
         assert_eq!(l.close_id, ledger.close_id);
-        assert_eq!(l.gross_loss_at_close_start, ledger.gross_loss_at_close_start);
+        assert_eq!(
+            l.gross_loss_at_close_start,
+            ledger.gross_loss_at_close_start
+        );
         assert_eq!(l.drift_reference_slot, ledger.drift_reference_slot);
         assert_eq!(l.max_close_slot, ledger.max_close_slot);
         assert_eq!(l.asset_index, ledger.asset_index);
@@ -1662,7 +1797,11 @@ fn contract_check_kernel_accumulate_batch_trade() {
         short_has_source_claims: kani::any(),
     };
     let _ = V16Core::kernel_accumulate_batch_trade(
-        outcome, kani::any(), kani::any(), kani::any(), applied,
+        outcome,
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        applied,
     );
 }
 
@@ -1672,7 +1811,10 @@ fn contract_check_kernel_accumulate_batch_trade() {
 #[kani::solver(cadical)]
 fn contract_check_asset_restart_next_counters() {
     let _ = MarketGroupV16ViewMut::<Market<u64>>::asset_restart_next_counters(
-        kani::any(), kani::any(), kani::any(), kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
     );
 }
 
@@ -1712,7 +1854,6 @@ fn closure_restarted_slot_preserves_budget_witness() {
     assert_eq!(s.insurance_domain_spent_short.get(), 0);
 }
 
-
 // ============ COMPOSITION via division-stub (kernel-proofs) ============
 // Whole-body frame for attach_leg_at_slot, made tractable by stubbing ONLY
 // the documented-intractable division primitive loss_weight_for_basis to an
@@ -1750,13 +1891,20 @@ fn composition_attach_body_frame_division_stubbed() {
     account_header.last_fee_slot = V16PodU64::new(1);
     let basis: i128 = kani::any();
     kani::assume(basis != 0 && basis > i128::MIN);
-    let side = if kani::any() { SideV16::Long } else { SideV16::Short };
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
 
     let a0 = account_header;
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
-        if market.kani_attach_leg_at_slot(&mut account, 0, side, basis, 0).is_err() {
+        if market
+            .kani_attach_leg_at_slot(&mut account, 0, side, basis, 0)
+            .is_err()
+        {
             return;
         }
     }
@@ -1767,7 +1915,10 @@ fn composition_attach_body_frame_division_stubbed() {
     expected.legs[0] = account_header.legs[0];
     expected.active_bitmap = account_header.active_bitmap;
     expected.health_cert = account_header.health_cert;
-    assert!(kani_eq_portfolio_account_v16_account(&expected, &account_header));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected,
+        &account_header
+    ));
     // and only slot 0 became active
     let mut i = 1;
     while i < V16_MAX_PORTFOLIO_ASSETS_N {
@@ -1810,7 +1961,10 @@ fn composition_clear_leg_body_frame() {
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
-        if market.kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0).is_err() {
+        if market
+            .kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0)
+            .is_err()
+        {
             return;
         }
     }
@@ -1828,7 +1982,10 @@ fn composition_clear_leg_body_frame() {
     expected.legs[0] = account_header.legs[0];
     expected.active_bitmap = account_header.active_bitmap;
     expected.health_cert = account_header.health_cert;
-    assert!(kani_eq_portfolio_account_v16_account(&expected, &account_header));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected,
+        &account_header
+    ));
     // leg[0] is now empty/inactive
     assert!(!account_header.legs[0].try_to_runtime().unwrap().active);
 }
@@ -1855,7 +2012,11 @@ fn liveness_pending_close_has_rank_decreasing_advance() {
         close_id: kani::any(),
         asset_index: kani::any(),
         market_id: kani::any(),
-        domain_side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        domain_side: if kani::any() {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
         gross_loss_at_close_start: kani::any(),
         drift_reference_slot: kani::any(),
         max_close_slot: kani::any(),
@@ -1876,8 +2037,10 @@ fn liveness_pending_close_has_rank_decreasing_advance() {
     kani::assume(ledger.b_loss_booked < 1u128 << 64);
     kani::assume(ledger.explicit_loss_assigned < 1u128 << 64);
     let total = ledger.gross_loss_at_close_start + ledger.drift_consumed;
-    let progress = ledger.support_consumed + ledger.insurance_spent
-        + ledger.b_loss_booked + ledger.explicit_loss_assigned;
+    let progress = ledger.support_consumed
+        + ledger.insurance_spent
+        + ledger.b_loss_booked
+        + ledger.explicit_loss_assigned;
     kani::assume(progress <= total);
     kani::assume(ledger.residual_remaining == total - progress);
     kani::assume(ledger.residual_remaining > 0); // ACTIONABLE
@@ -1885,10 +2048,15 @@ fn liveness_pending_close_has_rank_decreasing_advance() {
     // WITNESS: booking exactly 1 unit of explicit loss is a valid successful
     // continuation (the simplest progress) and strictly decreases the rank.
     let r = V16Core::kernel_advance_close_ledger(ledger, 0, 0, 0, 0, 1);
-    assert!(r.is_ok(), "an actionable pending close ALWAYS admits a progress booking");
+    assert!(
+        r.is_ok(),
+        "an actionable pending close ALWAYS admits a progress booking"
+    );
     let after = r.unwrap();
-    assert!(after.residual_remaining < ledger.residual_remaining,
-        "the successful continuation strictly decreases the close rank");
+    assert!(
+        after.residual_remaining < ledger.residual_remaining,
+        "the successful continuation strictly decreases the close rank"
+    );
 }
 
 // A2 b-stale leg: any leg behind its B target (b_target > b_snap) admits a
@@ -1902,7 +2070,11 @@ fn liveness_b_stale_leg_has_advancing_chunk() {
         active: true,
         asset_index: kani::any(),
         market_id: kani::any(),
-        side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        side: if kani::any() {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
         basis_pos_q: kani::any(),
         a_basis: kani::any(),
         k_snap: kani::any(),
@@ -1918,15 +2090,24 @@ fn liveness_b_stale_leg_has_advancing_chunk() {
     let b_target: u128 = kani::any();
     kani::assume(leg.b_snap < 1u128 << 64);
     kani::assume(b_target > leg.b_snap); // ACTIONABLE: behind target
-    // WITNESS: a chunk of delta_b = min(target - snap, ...) advances toward the
-    // target; use delta_b = 1 (>=1 since target > snap) -- proven monotone.
+                                         // WITNESS: a chunk of delta_b = min(target - snap, ...) advances toward the
+                                         // target; use delta_b = 1 (>=1 since target > snap) -- proven monotone.
     let delta_b: u128 = 1;
     let remaining_after = b_target - leg.b_snap - delta_b;
     let r = V16Core::kernel_advance_leg_b_snap(leg, delta_b, 0, remaining_after);
-    assert!(r.is_ok(), "an actionable b-stale leg ALWAYS admits an advancing chunk");
+    assert!(
+        r.is_ok(),
+        "an actionable b-stale leg ALWAYS admits an advancing chunk"
+    );
     let after = r.unwrap();
-    assert!(after.b_snap > leg.b_snap, "the chunk strictly advances b_snap toward target");
-    assert!(after.b_snap <= b_target, "advance never overshoots the target");
+    assert!(
+        after.b_snap > leg.b_snap,
+        "the chunk strictly advances b_snap toward target"
+    );
+    assert!(
+        after.b_snap <= b_target,
+        "advance never overshoots the target"
+    );
 }
 
 // ============ DIVISION-AXIOM ROUTE (kernel-proofs) ============
@@ -1996,12 +2177,25 @@ fn composition_attach_value_conservation_under_axiom() {
     let basis: i128 = kani::any();
     kani::assume(basis > 0 && basis <= MAX_POSITION_ABS_Q as i128);
     let abs = basis.unsigned_abs();
-    let oi0 = markets[0].engine.asset.try_to_runtime().unwrap().oi_eff_long_q;
-    let ws0 = markets[0].engine.asset.try_to_runtime().unwrap().loss_weight_sum_long;
+    let oi0 = markets[0]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap()
+        .oi_eff_long_q;
+    let ws0 = markets[0]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap()
+        .loss_weight_sum_long;
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
-        if market.kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0).is_err() {
+        if market
+            .kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0)
+            .is_err()
+        {
             return;
         }
     }
@@ -2051,12 +2245,25 @@ fn composition_clear_leg_value_conservation() {
     account_header.last_fee_slot = V16PodU64::new(1);
     let basis: i128 = kani::any();
     kani::assume(basis > 0 && basis <= MAX_POSITION_ABS_Q as i128);
-    let oi0 = markets[0].engine.asset.try_to_runtime().unwrap().oi_eff_long_q;
-    let ws0 = markets[0].engine.asset.try_to_runtime().unwrap().loss_weight_sum_long;
+    let oi0 = markets[0]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap()
+        .oi_eff_long_q;
+    let ws0 = markets[0]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap()
+        .loss_weight_sum_long;
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
-        if market.kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0).is_err() {
+        if market
+            .kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0)
+            .is_err()
+        {
             return;
         }
     }
@@ -2153,7 +2360,11 @@ fn contract_check_kernel_classify_position_delta() {
 #[kani::solver(cadical)]
 fn contract_check_kernel_reduce_position_delta() {
     let pre: i128 = kani::any();
-    let side = if kani::any() { SideV16::Long } else { SideV16::Short };
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
     let requested: u128 = kani::any();
     let _ = V16Core::kernel_reduce_position_delta(pre, side, requested);
 }
@@ -2225,7 +2436,8 @@ fn contract_check_build_trade_request_guard_summary() {
     };
     let max_market_slots: u32 = kani::any();
     let max_trading_fee_bps: u64 = kani::any();
-    let _ = V16Core::build_trade_request_guard_summary(request, max_market_slots, max_trading_fee_bps);
+    let _ =
+        V16Core::build_trade_request_guard_summary(request, max_market_slots, max_trading_fee_bps);
 }
 
 // ROADMAP 3C step 2 (NB1 preflight fidelity): full-domain contract check that the
@@ -2265,7 +2477,12 @@ fn contract_check_kernel_cert_is_current() {
         valid: kani::any(),
     };
     let _ = V16Core::kernel_cert_is_current(
-        cert, kani::any(), kani::any(), kani::any(), kani::any(), kani::any(),
+        cert,
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
     );
 }
 
@@ -2279,7 +2496,12 @@ fn contract_check_kernel_cert_is_current() {
 #[kani::solver(cadical)]
 fn contract_check_build_resolved_close_rank() {
     let _ = V16Core::build_resolved_close_rank(
-        kani::any(), kani::any(), kani::any(), kani::any(), kani::any(), kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
     );
 }
 
@@ -2385,7 +2607,11 @@ fn closure_close_ledger_absorbs_booking_outcome() {
         close_id: kani::any(),
         asset_index: kani::any(),
         market_id: kani::any(),
-        domain_side: if kani::any() { SideV16::Long } else { SideV16::Short },
+        domain_side: if kani::any() {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
         gross_loss_at_close_start: kani::any(),
         drift_reference_slot: kani::any(),
         max_close_slot: kani::any(),
@@ -2427,12 +2653,16 @@ fn closure_close_ledger_absorbs_booking_outcome() {
     kani::assume(booked_loss + explicit_loss + remaining_after == ledger.residual_remaining);
 
     // book_bankruptcy_residual_chunk_for_account_core advances by (0,0,0, booked, explicit).
-    if let Ok(l) = V16Core::kernel_advance_close_ledger(ledger, 0, 0, 0, booked_loss, explicit_loss) {
+    if let Ok(l) = V16Core::kernel_advance_close_ledger(ledger, 0, 0, 0, booked_loss, explicit_loss)
+    {
         // CROSS-LAYER AGREEMENT: the ledger's carried-forward residual equals the
         // booking step's remaining_after — booking and ledger never drift apart.
         assert_eq!(l.residual_remaining, remaining_after);
         // and the ledger's residual dropped by exactly what was booked + lost.
-        assert_eq!(l.residual_remaining + booked_loss + explicit_loss, ledger.residual_remaining);
+        assert_eq!(
+            l.residual_remaining + booked_loss + explicit_loss,
+            ledger.residual_remaining
+        );
     }
 }
 
@@ -2468,12 +2698,14 @@ fn contract_check_flow_insurance_to_close_rejects_vault_movement() {
     let vault_before: u128 = kani::any();
     let vault_after: u128 = kani::any();
     kani::assume(vault_before != vault_after);
-    assert!(TokenValueFlowProofV16::validate_insurance_to_close_insurance_spent(
-        amount,
-        vault_before,
-        vault_after
-    )
-    .is_err());
+    assert!(
+        TokenValueFlowProofV16::validate_insurance_to_close_insurance_spent(
+            amount,
+            vault_before,
+            vault_after
+        )
+        .is_err()
+    );
 }
 
 // ROADMAP Phase 2 (NB1 admission): an economically-valid trade is admitted, and
@@ -2531,6 +2763,10 @@ fn contract_check_select_auto_crank_plan() {
     };
     let recovery_reason: PermissionlessRecoveryReasonV16 = kani::any();
     let _ = V16Core::select_auto_crank_plan(
-        summary, b_stale_slot, liq_slot, refresh_asset, recovery_reason,
+        summary,
+        b_stale_slot,
+        liq_slot,
+        refresh_asset,
+        recovery_reason,
     );
 }

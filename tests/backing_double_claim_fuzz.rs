@@ -14,9 +14,9 @@ use percolator::BOUND_SCALE;
 use percolator::{
     BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
     Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
-    ResolvedCloseOutcomeV16, SourceCreditStateV16, SourceCreditStateV16Account, V16Config,
-    V16PodI128, V16PodU128, V16PodU32, V16PodU64, CREDIT_RATE_SCALE,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    SourceCreditStateV16, SourceCreditStateV16Account, V16Config, V16PodI128, V16PodU128,
+    V16PodU32, V16PodU64, CREDIT_RATE_SCALE,
 };
 use proptest::prelude::*;
 
@@ -412,10 +412,15 @@ fn realization_after_snapshot_refines_unreceipted_bound() {
     assert_eq!(b.header.capital.get(), 0);
 
     // The refined bound lets A top up to its full honest entitlement and FINALIZE.
-    let topped = market.claim_resolved_payout_topup_not_atomic(&mut a).unwrap();
+    let topped = market
+        .claim_resolved_payout_topup_not_atomic(&mut a)
+        .unwrap();
     let a_receipt = a.header.resolved_payout_receipt.try_to_runtime().unwrap();
     assert_eq!(a_receipt.paid_effective, pnl_a);
-    assert!(a_receipt.finalized, "stale unreceipted bound left A unfinalizable");
+    assert!(
+        a_receipt.finalized,
+        "stale unreceipted bound left A unfinalizable"
+    );
     assert!(topped > 0);
     assert_eq!(market.header.vault.get(), 0);
     assert_eq!(market.validate_shape(), Ok(()));
@@ -467,7 +472,11 @@ fn terminal_close_with_expired_backing_does_not_strand() {
     assert_eq!(account.header.pnl.get(), 0);
     // The bucket is processed (Expired) and the provider cannot recover lapsed
     // principal afterwards.
-    let bucket = market.markets[0].engine.backing_long.try_to_runtime().unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
     assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
     assert!(market
         .withdraw_fresh_counterparty_backing_not_atomic(0, backing)

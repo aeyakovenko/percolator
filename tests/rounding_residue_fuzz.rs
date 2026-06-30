@@ -199,7 +199,10 @@ mod rate_differential {
 /// compile time — every Active asset's support weight is exactly 1.0.
 #[test]
 fn support_weight_is_constant_one() {
-    assert_eq!(percolator::FULL_SUPPORT_WEIGHT, percolator::SUPPORT_WEIGHT_SCALE);
+    assert_eq!(
+        percolator::FULL_SUPPORT_WEIGHT,
+        percolator::SUPPORT_WEIGHT_SCALE
+    );
 }
 
 /// DIVISION-AXIOM DISCHARGE (the narrow empirical obligation): the production

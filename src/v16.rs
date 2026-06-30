@@ -195,7 +195,10 @@ pub fn auto_crank_plan_requires_caller_observation(plan: &AutoCrankPlanV16) -> b
     }
 }
 
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum V16Error {
     InvalidConfig,
@@ -874,8 +877,8 @@ impl V16Core {
         certified_initial_req: u128,
     ) -> V16Result<()> {
         let capital_i = i128::try_from(capital).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let fee_debt = i128::try_from(fee_credits.unsigned_abs())
-            .map_err(|_| V16Error::ArithmeticOverflow)?;
+        let fee_debt =
+            i128::try_from(fee_credits.unsigned_abs()).map_err(|_| V16Error::ArithmeticOverflow)?;
         let equity = capital_i
             .checked_add(pnl.min(0))
             .ok_or(V16Error::ArithmeticOverflow)?
@@ -1026,10 +1029,14 @@ impl V16Core {
     ) -> V16Result<(u128, u128, u128, i128)> {
         let loss = pnl.unsigned_abs();
         let paid = capital.min(loss);
-        let new_capital = capital.checked_sub(paid).ok_or(V16Error::CounterUnderflow)?;
+        let new_capital = capital
+            .checked_sub(paid)
+            .ok_or(V16Error::CounterUnderflow)?;
         let new_c_tot = c_tot.checked_sub(paid).ok_or(V16Error::CounterUnderflow)?;
         let paid_i128 = i128::try_from(paid).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let new_pnl = pnl.checked_add(paid_i128).ok_or(V16Error::ArithmeticOverflow)?;
+        let new_pnl = pnl
+            .checked_add(paid_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
         Ok((paid, new_capital, new_c_tot, new_pnl))
     }
 
@@ -1064,10 +1071,16 @@ impl V16Core {
     ) -> V16Result<(u128, u128, u128, i128)> {
         let residual = pnl.unsigned_abs();
         let used = residual.min(domain_available);
-        let new_insurance = insurance.checked_sub(used).ok_or(V16Error::CounterUnderflow)?;
-        let new_spent = spent.checked_add(used).ok_or(V16Error::ArithmeticOverflow)?;
+        let new_insurance = insurance
+            .checked_sub(used)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let new_spent = spent
+            .checked_add(used)
+            .ok_or(V16Error::ArithmeticOverflow)?;
         let used_i128 = i128::try_from(used).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let new_pnl = pnl.checked_add(used_i128).ok_or(V16Error::ArithmeticOverflow)?;
+        let new_pnl = pnl
+            .checked_add(used_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
         Ok((used, new_insurance, new_spent, new_pnl))
     }
 
@@ -1150,12 +1163,13 @@ impl V16Core {
         let reduce_q = requested.min(pre_abs);
         let reduce_i128 = i128::try_from(reduce_q).map_err(|_| V16Error::ArithmeticOverflow)?;
         let delta = match side {
-            SideV16::Long => reduce_i128.checked_neg().ok_or(V16Error::ArithmeticOverflow)?,
+            SideV16::Long => reduce_i128
+                .checked_neg()
+                .ok_or(V16Error::ArithmeticOverflow)?,
             SideV16::Short => reduce_i128,
         };
         Ok((reduce_q, delta))
     }
-
 
     /// PRODUCTION KERNEL (engine.md asset self-selection): the bounded first-match
     /// leg/asset scan. Given a per-leg actionability flag array (the caller sets
@@ -1268,9 +1282,6 @@ impl V16Core {
         }
     }
 
-
-
-
     /// PRODUCTION FIDELITY BUILDER (roadmap 3C): map a trade request + config to
     /// the scalar request-guard summary. Each flag is EXACTLY the corresponding
     /// validate_trade_request leaf, so the public validator's accept/reject
@@ -1299,7 +1310,6 @@ impl V16Core {
             fee_bps_in_cap: request.fee_bps <= max_trading_fee_bps,
         }
     }
-
 
     /// PRODUCTION FIDELITY (roadmap 3C step 2, NB1 accounts_current leaf): a
     /// health certificate is current/certifiable for a favorable action IFF it
@@ -1332,7 +1342,6 @@ impl V16Core {
             && cert.cert_asset_set_epoch == asset_set_epoch
             && cert.active_bitmap_at_cert == account_bitmap
     }
-
 
     /// PRODUCTION FIDELITY BUILDER (roadmap 3C step 4, actionable-state
     /// classifier): assemble the ActionableState summary from the seven evaluated
@@ -1383,7 +1392,10 @@ impl V16Core {
             && *result <= residual_remaining   // never books beyond the residual
             && *result <= public_chunk_cap      // never books beyond the per-call cap
     }))]
-    pub(crate) fn kernel_social_loss_chunk_cap(residual_remaining: u128, public_chunk_cap: u128) -> u128 {
+    pub(crate) fn kernel_social_loss_chunk_cap(
+        residual_remaining: u128,
+        public_chunk_cap: u128,
+    ) -> u128 {
         residual_remaining.min(public_chunk_cap)
     }
 
@@ -2613,14 +2625,20 @@ pub enum HLockLaneV16 {
     HMax,
 }
 
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SideV16 {
     Long,
     Short,
 }
 
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SideModeV16 {
     Normal,
@@ -2628,7 +2646,10 @@ pub enum SideModeV16 {
     ResetPending,
 }
 
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssetLifecycleV16 {
     Disabled,
@@ -2646,7 +2667,10 @@ pub enum MarketModeV16 {
     Recovery,
 }
 
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackingBucketStatusV16 {
     Empty,
@@ -2655,7 +2679,10 @@ pub enum BackingBucketStatusV16 {
     Impaired,
 }
 
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionlessRecoveryReasonV16 {
     BelowProgressFloor,
@@ -3243,11 +3270,13 @@ impl V16Config {
         self.validate_public_user_fund_shape()?;
         self.validate_exact_solvency_envelope()
     }
-
 }
 
 #[repr(C)]
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssetStateV16 {
     pub market_id: u64,
@@ -3342,7 +3371,10 @@ impl Default for AssetStateV16 {
 }
 
 #[repr(C)]
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceCreditStateV16 {
     pub positive_claim_bound_num: u128,
@@ -3397,7 +3429,10 @@ impl Default for SourceCreditStateV16 {
 }
 
 #[repr(C)]
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BackingBucketV16 {
     pub market_id: u64,
@@ -3453,7 +3488,10 @@ impl Default for BackingBucketV16 {
 }
 
 #[repr(C)]
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InsuranceCreditReservationV16 {
     pub insurance_credit_reserved_num: u128,
@@ -3605,7 +3643,6 @@ impl<'a> PortfolioV16View<'a> {
             None => PortfolioSourceDomainV16Account::default(),
         })
     }
-
 }
 
 impl<'a> PortfolioV16ViewMut<'a> {
@@ -4029,13 +4066,7 @@ impl<'a> PortfolioV16View<'a> {
         }
 
         let close_progress = self.header.close_progress.try_to_runtime()?;
-        let inert_canceled_close = close_progress.canceled
-            && !close_progress.active
-            && !close_progress.finalized
-            && close_progress.close_id != 0
-            && !close_progress.has_irreversible_progress()
-            && close_progress.residual_remaining == close_progress.gross_loss_at_close_start;
-        if !close_progress.is_empty() && !inert_canceled_close {
+        if !close_progress.is_inert_lifecycle_watermark() {
             return Ok(false);
         }
 
@@ -4062,7 +4093,10 @@ impl<'a> PortfolioV16ViewMut<'a> {
 }
 
 #[repr(C)]
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortfolioLegV16 {
     pub active: bool,
@@ -4189,6 +4223,24 @@ impl CloseProgressLedgerV16 {
 
     fn has_pending_residual(self) -> bool {
         self.active && !self.finalized && !self.canceled && self.residual_remaining != 0
+    }
+
+    fn is_terminal_zero_residual(self) -> bool {
+        self.active
+            && self.finalized
+            && !self.canceled
+            && self.close_id != 0
+            && self.residual_remaining == 0
+    }
+
+    fn is_inert_lifecycle_watermark(self) -> bool {
+        let canceled = self.canceled
+            && !self.active
+            && !self.finalized
+            && self.close_id != 0
+            && !self.has_irreversible_progress()
+            && self.residual_remaining == self.gross_loss_at_close_start;
+        self.is_empty() || canceled || self.is_terminal_zero_residual()
     }
 
     fn has_irreversible_progress(self) -> bool {
@@ -4407,7 +4459,10 @@ struct TradePositionPreflightV16 {
 }
 
 /// The leg route a position change dispatches to (roadmap 3A.1).
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PositionRouteV16 {
     Attach,
@@ -4420,16 +4475,19 @@ pub enum PositionRouteV16 {
 /// ActionableState classes are live for an account/market. The liveness
 /// selector reads only this — never per-class witnesses that another active
 /// class could invalidate.
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActionableSummaryV16 {
-    pub stale: bool,            // A1
-    pub b_stale: bool,          // A2
-    pub pending_close: bool,    // A3
-    pub expired_close: bool,    // A4
-    pub liquidatable: bool,     // A5
+    pub stale: bool,             // A1
+    pub b_stale: bool,           // A2
+    pub pending_close: bool,     // A3
+    pub expired_close: bool,     // A4
+    pub liquidatable: bool,      // A5
     pub recovery_eligible: bool, // A6
-    pub resolved_winner: bool,  // A7
+    pub resolved_winner: bool,   // A7
 }
 
 impl ActionableSummaryV16 {
@@ -4473,10 +4531,18 @@ pub struct AutoCrankWorkV16<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutoCrankPlanV16 {
     NoAction,
-    RefreshAccount { asset_index: Option<usize> },
-    SettleBChunk { asset_index: usize },
-    Liquidate { asset_index: usize },
-    DeclareRecovery { reason: PermissionlessRecoveryReasonV16 },
+    RefreshAccount {
+        asset_index: Option<usize>,
+    },
+    SettleBChunk {
+        asset_index: usize,
+    },
+    Liquidate {
+        asset_index: usize,
+    },
+    DeclareRecovery {
+        reason: PermissionlessRecoveryReasonV16,
+    },
     CloseResolved,
 }
 
@@ -4502,7 +4568,10 @@ pub struct AutoCrankResultV16 {
 /// per-leaf decisions validate_trade_request makes. build_trade_request_guard_
 /// summary computes these from the request + config, and validate_trade_request
 /// admits IFF all pass — so this summary is production-faithful, not a model.
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TradeRequestGuardSummaryV16 {
     pub asset_configured: bool, // asset_index < max_market_slots
@@ -4523,7 +4592,6 @@ impl TradeRequestGuardSummaryV16 {
             && self.fee_bps_in_cap
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PositionDeltaLookupV16 {
@@ -4594,7 +4662,10 @@ enum TokenValueClassV16 {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(all(kani, any(feature = "contracts", feature = "closure")), derive(kani::Arbitrary))]
+#[cfg_attr(
+    all(kani, any(feature = "contracts", feature = "closure")),
+    derive(kani::Arbitrary)
+)]
 #[cfg(kani)]
 pub struct TokenValueFlowProofV16 {
     pub debits: [u128; V16_TOKEN_VALUE_CLASS_COUNT],
@@ -6476,9 +6547,7 @@ impl<'a, T> MarketGroupV16View<'a, T> {
         // re-credits c_tot debits backing first, so the strengthened stack must
         // always be covered. A state violating it is double-promising atoms.
         let senior_with_backing = senior
-            .checked_add(
-                self.header.source_fresh_backing_total_num.get() / BOUND_SCALE,
-            )
+            .checked_add(self.header.source_fresh_backing_total_num.get() / BOUND_SCALE)
             .ok_or(V16Error::ArithmeticOverflow)?;
         if senior_with_backing > self.header.vault.get() {
             return Err(V16Error::InvalidConfig);
@@ -11233,8 +11302,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // a stale cert can still report a deficit after the position was already
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
-        let liquidatable =
-            live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
+        let liquidatable = live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
         // Permissionless recovery (declare_permissionless_recovery) is a LIVE-mode
         // action — it rejects Resolved mode with LockActive. The proactive Live
         // recovery condition the auto-crank declares is an EXPIRED outstanding
@@ -11340,8 +11408,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         work: AutoCrankWorkV16<'_>,
     ) -> V16Result<AutoCrankResultV16> {
         let summary = self.build_actionable_summary(&account.as_view())?;
-        let (b_stale_asset, active_asset) =
-            Self::auto_crank_selected_assets(&account.as_view())?;
+        let (b_stale_asset, active_asset) = Self::auto_crank_selected_assets(&account.as_view())?;
         let recovery_reason = if summary.expired_close {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {
@@ -11358,7 +11425,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         );
 
         let obs_or_current_asset = |me: &Self, i: usize| -> V16Result<AutoCrankObservationV16> {
-            match work.observations.iter().copied().find(|o| o.asset_index == i) {
+            match work
+                .observations
+                .iter()
+                .copied()
+                .find(|o| o.asset_index == i)
+            {
                 Some(obs) => Ok(obs),
                 None => {
                     let asset = me.asset_state(i)?;
@@ -11370,24 +11442,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
             }
         };
-        let crank_with =
-            |me: &mut Self,
-             account: &mut PortfolioV16ViewMut<'_>,
-             asset_index: usize,
-             obs: AutoCrankObservationV16,
-             action: PermissionlessCrankActionV16|
-             -> V16Result<PermissionlessProgressOutcomeV16> {
-                me.permissionless_crank_not_atomic(
-                    account,
-                    PermissionlessCrankRequestV16 {
-                        now_slot: work.now_slot,
-                        asset_index,
-                        effective_price: obs.effective_price,
-                        funding_rate_e9: obs.funding_rate_e9,
-                        action,
-                    },
-                )
-            };
+        let crank_with = |me: &mut Self,
+                          account: &mut PortfolioV16ViewMut<'_>,
+                          asset_index: usize,
+                          obs: AutoCrankObservationV16,
+                          action: PermissionlessCrankActionV16|
+         -> V16Result<PermissionlessProgressOutcomeV16> {
+            me.permissionless_crank_not_atomic(
+                account,
+                PermissionlessCrankRequestV16 {
+                    now_slot: work.now_slot,
+                    asset_index,
+                    effective_price: obs.effective_price,
+                    funding_rate_e9: obs.funding_rate_e9,
+                    action,
+                },
+            )
+        };
 
         let outcome = match plan {
             AutoCrankPlanV16::NoAction => AutoCrankOutcomeV16::NoAction,
@@ -11427,7 +11498,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             AutoCrankPlanV16::Liquidate { asset_index } => {
                 let obs = obs_or_current_asset(self, asset_index)?;
                 // CONFIG fee policy — never a caller hint (engine.md).
-                let fee_bps = self.header.config.try_to_runtime_shape()?.liquidation_fee_bps;
+                let fee_bps = self
+                    .header
+                    .config
+                    .try_to_runtime_shape()?
+                    .liquidation_fee_bps;
                 AutoCrankOutcomeV16::Progressed(crank_with(
                     self,
                     account,
@@ -11453,14 +11528,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     },
                 )?)
             }
-            AutoCrankPlanV16::CloseResolved => AutoCrankOutcomeV16::ResolvedClose(
-                self.close_resolved_account_not_atomic(
+            AutoCrankPlanV16::CloseResolved => {
+                AutoCrankOutcomeV16::ResolvedClose(self.close_resolved_account_not_atomic(
                     account,
                     work.resolved_close_fee_rate_per_slot,
-                )?,
-            ),
+                )?)
+            }
         };
-        Ok(AutoCrankResultV16 { selected: plan, outcome })
+        Ok(AutoCrankResultV16 {
+            selected: plan,
+            outcome,
+        })
     }
 
     fn active_leg_slot_for_asset(
@@ -12317,13 +12395,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             SideV16::Short => asset.a_short,
         };
         let loss_weight = loss_weight_for_basis(basis_pos_q.unsigned_abs(), a_basis)?;
-        let (asset, new_leg) = V16Core::kernel_attach_leg(
-            asset,
-            side,
-            basis_pos_q,
-            loss_weight,
-            asset_index as u32,
-        )?;
+        let (asset, new_leg) =
+            V16Core::kernel_attach_leg(asset, side, basis_pos_q, loss_weight, asset_index as u32)?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
         active_bitmap_set(&mut bitmap, leg_slot)?;
@@ -12617,14 +12690,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if gross_loss == 0 {
             return Ok(());
         }
-        if account.header.close_progress.try_to_runtime()?.active {
+        let current = account.header.close_progress.try_to_runtime()?;
+        if current.active && !current.is_terminal_zero_residual() {
             return Err(V16Error::LockActive);
         }
         let domain = self.insurance_domain_index(asset_index, domain_side)?;
         if self.pending_domain_loss_barrier_count(asset_index, domain_side)? != 0 {
             return Err(V16Error::LockActive);
         }
-        let current = account.header.close_progress.try_to_runtime()?;
         let close_id = current.close_id.saturating_add(1).max(1);
         let asset = self.asset_state(asset_index)?;
         let ledger = CloseProgressLedgerV16 {
@@ -12713,7 +12786,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Ok(());
         }
-        let mut ledger = account.header.close_progress.try_to_runtime()?;
+        let ledger = account.header.close_progress.try_to_runtime()?;
         self.ensure_close_progress_not_expired(ledger)?;
         let was_pending = ledger.has_pending_residual();
         let domain_side = ledger.domain_side;
@@ -12729,8 +12802,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             b_loss_booked,
             explicit_loss_assigned,
         )?;
-        let mut ledger = ledger_advanced;
-        let _ = &mut ledger;
+        let ledger = ledger_advanced;
         if was_pending && !ledger.has_pending_residual() {
             let count = self.pending_domain_loss_barrier_count(asset_index, domain_side)?;
             self.set_pending_domain_loss_barrier_count(
@@ -14488,14 +14560,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)) {
             return Err(V16Error::Stale);
         }
-        // A `canceled` close ledger (left behind by cure_and_cancel_close) is inert:
-        // validate_close_progress_ledger_with_market guarantees it carries no
-        // irreversible progress and residual_remaining == gross_loss_at_close_start,
-        // so it represents no obligation. Blocking withdraw on it permanently freezes a
-        // flat, solvent user who cured a forced close. Only an active/in-progress close
-        // ledger must block withdrawal.
+        // Canceled cure ledgers and finalized zero-residual close ledgers are inert
+        // watermarks. Only a non-terminal in-progress close must block withdrawal.
         let close_progress = account.header.close_progress.try_to_runtime()?;
-        if close_progress != CloseProgressLedgerV16::EMPTY && !close_progress.canceled {
+        if !close_progress.is_inert_lifecycle_watermark() {
             return Err(V16Error::LockActive);
         }
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
@@ -15676,7 +15744,6 @@ impl PortfolioSourceDomainV16Account {
     fn is_sparse_tail_default(self) -> bool {
         self.has_default_sparse_tag() && !self.is_occupied()
     }
-
 }
 
 #[repr(C)]

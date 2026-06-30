@@ -1,4 +1,8 @@
 use percolator::{
+    auto_crank_plan_requires_caller_observation, AutoCrankObservationV16, AutoCrankOutcomeV16,
+    AutoCrankPlanV16, AutoCrankWorkV16,
+};
+use percolator::{
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
     BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
     HealthCertV16, HealthCertV16Account, LiquidationRequestV16, Market,
@@ -12,10 +16,6 @@ use percolator::{
     V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
-use percolator::{
-    auto_crank_plan_requires_caller_observation, AutoCrankObservationV16, AutoCrankOutcomeV16,
-    AutoCrankPlanV16, AutoCrankWorkV16,
-};
 
 const FUNDING_COUNTER_PRICE: u64 = 1_000_000;
 const FUNDING_COUNTER_RATE_E9: i128 = 10_000;
@@ -209,13 +209,7 @@ fn v16_funding_counters_record_long_pays_short_once_on_refresh() {
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         open_one_lot_pair(&mut market, &mut long, &mut short);
         market
-            .accrue_asset_to_not_atomic(
-                0,
-                2,
-                FUNDING_COUNTER_PRICE,
-                FUNDING_COUNTER_RATE_E9,
-                true,
-            )
+            .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
             .unwrap();
     }
 
@@ -271,13 +265,7 @@ fn v16_funding_counters_record_short_pays_long_on_negative_funding() {
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         open_one_lot_pair(&mut market, &mut long, &mut short);
         market
-            .accrue_asset_to_not_atomic(
-                0,
-                2,
-                FUNDING_COUNTER_PRICE,
-                -FUNDING_COUNTER_RATE_E9,
-                true,
-            )
+            .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, -FUNDING_COUNTER_RATE_E9, true)
             .unwrap();
     }
 
@@ -317,13 +305,7 @@ fn v16_funding_counters_settle_before_same_side_resize() {
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         open_one_lot_pair(&mut market, &mut long, &mut short);
         market
-            .accrue_asset_to_not_atomic(
-                0,
-                2,
-                FUNDING_COUNTER_PRICE,
-                FUNDING_COUNTER_RATE_E9,
-                true,
-            )
+            .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
             .unwrap();
         market
             .execute_trade_with_fee_loss_stale_scoped_not_atomic(
@@ -379,13 +361,7 @@ fn v16_funding_counters_settle_before_trade_close_clears_leg() {
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         open_one_lot_pair(&mut market, &mut long, &mut short);
         market
-            .accrue_asset_to_not_atomic(
-                0,
-                2,
-                FUNDING_COUNTER_PRICE,
-                FUNDING_COUNTER_RATE_E9,
-                true,
-            )
+            .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
             .unwrap();
         market
             .execute_trade_with_fee_loss_stale_scoped_not_atomic(
@@ -425,13 +401,7 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         open_one_lot_pair(&mut market, &mut long, &mut short);
         market
-            .accrue_asset_to_not_atomic(
-                0,
-                2,
-                FUNDING_COUNTER_PRICE,
-                FUNDING_COUNTER_RATE_E9,
-                true,
-            )
+            .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
             .unwrap();
         market.force_asset_recovery_not_atomic(0, 2).unwrap();
         market
@@ -465,13 +435,7 @@ fn v16_funding_counters_ignore_inactive_accounts_when_market_funding_moves() {
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         open_one_lot_pair(&mut market, &mut long, &mut short);
         market
-            .accrue_asset_to_not_atomic(
-                0,
-                2,
-                FUNDING_COUNTER_PRICE,
-                FUNDING_COUNTER_RATE_E9,
-                true,
-            )
+            .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
             .unwrap();
     }
 
@@ -2610,7 +2574,10 @@ fn v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean() {
     let r = market
         .permissionless_auto_crank_not_atomic(&mut account, work)
         .unwrap();
-    assert!(matches!(r.selected, AutoCrankPlanV16::RefreshAccount { .. }));
+    assert!(matches!(
+        r.selected,
+        AutoCrankPlanV16::RefreshAccount { .. }
+    ));
     assert_eq!(
         r.outcome,
         AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
@@ -2735,8 +2702,16 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
 
     // The engine escalated: it refreshed the stale account, then liquidated
     // the underwater position — and reached a non-actionable fixed point.
-    assert!(saw_refresh, "must refresh the uncertified account: {:?}", plans);
-    assert!(saw_liquidate, "must liquidate the underwater position: {:?}", plans);
+    assert!(
+        saw_refresh,
+        "must refresh the uncertified account: {:?}",
+        plans
+    );
+    assert!(
+        saw_liquidate,
+        "must liquidate the underwater position: {:?}",
+        plans
+    );
     assert_eq!(
         account.header.active_bitmap[0].get(),
         0,
@@ -2809,7 +2784,10 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
         .permissionless_auto_crank_not_atomic(&mut account, work)
         .expect("current liquidation must not require a fresh observation");
 
-    assert_eq!(result.selected, AutoCrankPlanV16::Liquidate { asset_index: 0 });
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::Liquidate { asset_index: 0 }
+    );
     assert!(matches!(
         result.outcome,
         AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
@@ -2838,26 +2816,27 @@ fn v16_auto_crank_declares_recovery_for_expired_live_close() {
 
     // An active, outstanding (residual>0), EXPIRED close ledger on asset 0.
     let market_id = markets[0].engine.asset.try_to_runtime().unwrap().market_id;
-    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
-        active: true,
-        finalized: false,
-        canceled: false,
-        close_id: 1,
-        asset_index: 0,
-        market_id,
-        domain_side: SideV16::Short,
-        gross_loss_at_close_start: 10,
-        drift_reference_slot: 1,
-        max_close_slot: 2, // < current_slot 10 => expired
-        support_consumed: 0,
-        junior_face_burned: 0,
-        insurance_spent: 0,
-        b_loss_booked: 0,
-        explicit_loss_assigned: 0,
-        quantity_adl_applied_q: 0,
-        drift_consumed: 0,
-        residual_remaining: 10,
-    });
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id,
+            domain_side: SideV16::Short,
+            gross_loss_at_close_start: 10,
+            drift_reference_slot: 1,
+            max_close_slot: 2, // < current_slot 10 => expired
+            support_consumed: 0,
+            junior_face_burned: 0,
+            insurance_spent: 0,
+            b_loss_booked: 0,
+            explicit_loss_assigned: 0,
+            quantity_adl_applied_q: 0,
+            drift_consumed: 0,
+            residual_remaining: 10,
+        });
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -2979,7 +2958,10 @@ fn v16_auto_crank_settles_b_stale_leg() {
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     let summary = market.build_actionable_summary(&account.as_view()).unwrap();
-    assert!(summary.b_stale, "b-stale leg must classify b_stale: {summary:?}");
+    assert!(
+        summary.b_stale,
+        "b-stale leg must classify b_stale: {summary:?}"
+    );
 
     let work = AutoCrankWorkV16 {
         now_slot: 10,
@@ -2994,7 +2976,10 @@ fn v16_auto_crank_settles_b_stale_leg() {
     // with the engine-chosen asset (the b-stale leg's asset) and dispatched to the
     // real B-chunk settle entrypoint (AccountBChunk outcome). The rank-decreasing
     // B-advance for a genuinely drifted leg (delta_b>0) is proven at the A2 kernel.
-    assert_eq!(r.selected, AutoCrankPlanV16::SettleBChunk { asset_index: 0 });
+    assert_eq!(
+        r.selected,
+        AutoCrankPlanV16::SettleBChunk { asset_index: 0 }
+    );
     assert!(matches!(
         r.outcome,
         AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountBChunk(_))
@@ -3122,7 +3107,10 @@ fn assert_observation_independent(
              from committed state)"
         );
         if let Ok(res) = r_empty {
-            assert_eq!(res.selected, expected_plan, "{label}: unexpected selected plan");
+            assert_eq!(
+                res.selected, expected_plan,
+                "{label}: unexpected selected plan"
+            );
         }
     }
 }

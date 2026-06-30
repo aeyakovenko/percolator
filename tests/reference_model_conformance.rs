@@ -108,14 +108,14 @@ fn tier_b_seed_corpus_edges() {
     let corpus: &[(u128, u128, u128, u128)] = &[
         (0, 0, 1, 0),
         (1, 1, 1, 0),
-        (1, 1, 1, 1),                  // gross == paid -> 0
-        (big, big, 1, 0),              // large product, den 1
-        (big, 1, big, 0),              // floors to 0
-        (7, 3, 4, 0),                  // floor(21/4) = 5
-        (7, 3, 4, 5),                  // gross 5, paid 5 -> 0
-        (100, 999, 1000, 0),           // floor(99900/1000) = 99 (one-less edge)
-        (big, big, big, big - 1),      // gross ~ big, paid just below
-        (big, big, big, big + 1),      // paid > gross -> Err
+        (1, 1, 1, 1),             // gross == paid -> 0
+        (big, big, 1, 0),         // large product, den 1
+        (big, 1, big, 0),         // floors to 0
+        (7, 3, 4, 0),             // floor(21/4) = 5
+        (7, 3, 4, 5),             // gross 5, paid 5 -> 0
+        (100, 999, 1000, 0),      // floor(99900/1000) = 99 (one-less edge)
+        (big, big, big, big - 1), // gross ~ big, paid just below
+        (big, big, big, big + 1), // paid > gross -> Err
     ];
     for &(f, rn, rd, p) in corpus {
         if f.checked_mul(rn).is_none() || f.checked_mul(BOUND_SCALE).is_none() {
@@ -285,8 +285,8 @@ proptest! {
 // wide multiply/ceil-divide the engine computes via U256). Independent native
 // references over the stated u128-product domain (realistic inputs: the U256
 // path is only for products > u128, out of this reference's bound). ----
-const POS_SCALE_REF: u128 = 1_000_000;        // POS_SCALE
-const MAX_MARGIN_BPS_REF: u128 = 10_000;      // MAX_MARGIN_BPS
+const POS_SCALE_REF: u128 = 1_000_000; // POS_SCALE
+const MAX_MARGIN_BPS_REF: u128 = 10_000; // MAX_MARGIN_BPS
 
 // fee = ceil(notional*fee_bps / MAX_MARGIN_BPS), 0 if either operand 0
 fn ref_fee(notional: u128, fee_bps: u64) -> Result<u128, ()> {
@@ -295,7 +295,11 @@ fn ref_fee(notional: u128, fee_bps: u64) -> Result<u128, ()> {
     }
     let p = notional.checked_mul(fee_bps as u128).ok_or(())?;
     let q = p / MAX_MARGIN_BPS_REF;
-    Ok(if p % MAX_MARGIN_BPS_REF != 0 { q + 1 } else { q })
+    Ok(if p % MAX_MARGIN_BPS_REF != 0 {
+        q + 1
+    } else {
+        q
+    })
 }
 // notional_floor = floor(size*price / POS_SCALE), 0 if size 0
 fn ref_notional_floor(size: u128, price: u64) -> Result<u128, ()> {
@@ -378,8 +382,13 @@ proptest! {
 // (delta_b*ws + new_rem == numerator, new_rem < ws) is the property Kani cannot
 // prove (symbolic u128 division by ws); discharged here over a stated domain. ----
 fn ref_split(chunk: u128, rem: u128, ws: u128) -> Result<(u128, u128), ()> {
-    if ws == 0 { return Err(()); }
-    let num = chunk.checked_mul(SOCIAL_LOSS_DEN).and_then(|v| v.checked_add(rem)).ok_or(())?;
+    if ws == 0 {
+        return Err(());
+    }
+    let num = chunk
+        .checked_mul(SOCIAL_LOSS_DEN)
+        .and_then(|v| v.checked_add(rem))
+        .ok_or(())?;
     Ok((num / ws, num % ws))
 }
 fn check_split(chunk: u128, rem: u128, ws: u128) {
@@ -390,7 +399,10 @@ fn check_split(chunk: u128, rem: u128, ws: u128) {
             assert!(nr < ws, "remainder >= weight_sum");
             // exact integer identity: delta_b*ws + new_rem == numerator
             let num = chunk * SOCIAL_LOSS_DEN + rem;
-            assert_eq!(db.checked_mul(ws).and_then(|v| v.checked_add(nr)), Some(num));
+            assert_eq!(
+                db.checked_mul(ws).and_then(|v| v.checked_add(nr)),
+                Some(num)
+            );
             // PROGRESS (3C #5): delta_b advances IFF the numerator reaches one
             // full weight_sum of capacity — so a chunk makes B progress exactly
             // when there is capacity for it (the engine's delta_b==0 -> no-op).
@@ -435,15 +447,30 @@ fn arithmetic_boundary_vectors_fee_notional_risk() {
     let big = (1u128 << 80) - 1;
     let max_px = 1_000_000_000_000u64 - 1;
     // fee: zero size, zero bps, max bps cap, max size x cap
-    for &(n, bps) in &[(0u128, 0u64), (0, 10_000), (1, 10_000), (big, 0),
-                       (big, 10_000), (MAX_MARGIN_BPS_REF, 10_000),
-                       (MAX_MARGIN_BPS_REF - 1, 10_000), (MAX_MARGIN_BPS_REF + 1, 1)] {
+    for &(n, bps) in &[
+        (0u128, 0u64),
+        (0, 10_000),
+        (1, 10_000),
+        (big, 0),
+        (big, 10_000),
+        (MAX_MARGIN_BPS_REF, 10_000),
+        (MAX_MARGIN_BPS_REF - 1, 10_000),
+        (MAX_MARGIN_BPS_REF + 1, 1),
+    ] {
         check_fee(n, bps);
     }
     // notional/risk: zero, max, and exactly on the POS_SCALE denominator boundary
-    for &(s, px) in &[(0u128, 0u64), (0, max_px), (big, 0), (big, max_px),
-                      (POS_SCALE_REF, 1), (POS_SCALE_REF - 1, 1), (POS_SCALE_REF + 1, 1),
-                      (1, max_px), (POS_SCALE_REF, max_px)] {
+    for &(s, px) in &[
+        (0u128, 0u64),
+        (0, max_px),
+        (big, 0),
+        (big, max_px),
+        (POS_SCALE_REF, 1),
+        (POS_SCALE_REF - 1, 1),
+        (POS_SCALE_REF + 1, 1),
+        (1, max_px),
+        (POS_SCALE_REF, max_px),
+    ] {
         check_notional(s, px);
         check_risk(s, px);
     }
@@ -454,14 +481,14 @@ fn arithmetic_boundary_vectors_social_loss_split() {
     // split at the weight_sum / SOCIAL_LOSS_DEN boundaries: db progresses IFF
     // numerator >= ws, so pin num just below / at / just above ws.
     for &(chunk, rem, ws) in &[
-        (0u128, 0u128, 1u128),                       // zero chunk
-        (0, 0, SOCIAL_LOSS_DEN),                      // zero chunk, large ws
-        (1, 0, SOCIAL_LOSS_DEN),                      // num == ws exactly -> db==1, nr==0
-        (1, 0, SOCIAL_LOSS_DEN + 1),                  // num == ws-1 -> db==0
-        (1, 1, SOCIAL_LOSS_DEN),                      // num == ws+1 -> db==1, nr==1
-        (1, SOCIAL_LOSS_DEN - 1, SOCIAL_LOSS_DEN),    // max remainder < ws
-        (1000, 0, 1),                                 // ws==1 -> nr==0, db==num
-        ((1u128 << 50), 0, SOCIAL_LOSS_DEN),          // large chunk
+        (0u128, 0u128, 1u128),                     // zero chunk
+        (0, 0, SOCIAL_LOSS_DEN),                   // zero chunk, large ws
+        (1, 0, SOCIAL_LOSS_DEN),                   // num == ws exactly -> db==1, nr==0
+        (1, 0, SOCIAL_LOSS_DEN + 1),               // num == ws-1 -> db==0
+        (1, 1, SOCIAL_LOSS_DEN),                   // num == ws+1 -> db==1, nr==1
+        (1, SOCIAL_LOSS_DEN - 1, SOCIAL_LOSS_DEN), // max remainder < ws
+        (1000, 0, 1),                              // ws==1 -> nr==0, db==num
+        ((1u128 << 50), 0, SOCIAL_LOSS_DEN),       // large chunk
     ] {
         check_split(chunk, rem, ws);
     }
