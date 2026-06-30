@@ -11,7 +11,7 @@ use percolator::v16::{
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
     kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_clear_leg,
-    kani_kernel_resize_leg_same_side,
+    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -3682,6 +3682,58 @@ fn proof_v16_kernel_attach_then_clear_is_asset_identity_for_real_position() {
         );
     }
     assert_eq!(cleared_asset, before);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_reduce_position_delta_strictly_moves_toward_zero() {
+    let long_side: bool = kani::any();
+    let pre_raw: u16 = kani::any();
+    let requested_raw: u16 = kani::any();
+    kani::assume((1..=1024).contains(&pre_raw));
+    kani::assume(requested_raw <= 2048);
+
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let pre_abs = pre_raw as u128;
+    let requested = requested_raw as u128;
+    let pre_basis_signed = if long_side {
+        pre_abs as i128
+    } else {
+        -(pre_abs as i128)
+    };
+
+    let (reduce_q, delta) =
+        kani_kernel_reduce_position_delta(pre_basis_signed, side, requested).unwrap();
+    let post = pre_basis_signed.checked_add(delta).unwrap();
+    let expected_reduce = requested.min(pre_abs);
+
+    kani::cover!(
+        long_side && requested > 0 && requested < pre_abs,
+        "reduce kernel covers partial long close"
+    );
+    kani::cover!(
+        !long_side && requested >= pre_abs,
+        "reduce kernel covers full short close"
+    );
+    kani::cover!(requested == 0, "reduce kernel covers zero request");
+    assert_eq!(reduce_q, expected_reduce);
+    assert!(reduce_q <= pre_abs);
+    assert_eq!(post.unsigned_abs(), pre_abs - reduce_q);
+    assert!(post.unsigned_abs() <= pre_abs);
+    assert!(requested == 0 || post.unsigned_abs() < pre_abs);
+    assert!(requested < pre_abs || post == 0);
+    if long_side {
+        assert!(delta <= 0);
+        assert!(post >= 0);
+    } else {
+        assert!(delta >= 0);
+        assert!(post <= 0);
+    }
 }
 
 #[kani::proof]

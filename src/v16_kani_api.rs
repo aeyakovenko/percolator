@@ -197,6 +197,14 @@ pub fn kani_kernel_attach_leg(
     V16Core::kernel_attach_leg(asset, side, basis_pos_q, loss_weight, asset_index_u32)
 }
 
+pub fn kani_kernel_reduce_position_delta(
+    pre_basis_signed: i128,
+    side: SideV16,
+    requested: u128,
+) -> V16Result<(u128, i128)> {
+    V16Core::kernel_reduce_position_delta(pre_basis_signed, side, requested)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,
