@@ -17266,6 +17266,148 @@ fn proof_v16_auto_crank_plan_selector_is_total_priority_and_asset_faithful() {
     }
 }
 
+// Production classifier mode-gating theorem: the real wrapper-facing summary
+// builder may expose Live crank actions only in Live mode, resolved payout close
+// only in Resolved mode, and no action in Recovery mode. This keeps
+// permissionless keepers from dispatching a cross-mode continuation even before
+// the proven plan selector runs.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_actionable_summary_builder_is_exact_and_mode_gated() {
+    let mode_raw: u8 = kani::any();
+    let cert_current: bool = kani::any();
+    let active_leg: bool = kani::any();
+    let b_stale_leg: bool = kani::any();
+    let close_outstanding: bool = kani::any();
+    let close_expired: bool = kani::any();
+    let liquidatable_cert: bool = kani::any();
+    let resolved_positive_pnl: bool = kani::any();
+    let resolved_blocked: bool = kani::any();
+    kani::assume(mode_raw <= 2);
+
+    let current_slot = 10u64;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.mode = mode_raw;
+    header.current_slot = V16PodU64::new(current_slot);
+    header.slot_last = V16PodU64::new(current_slot);
+    header.b_stale_account_count = V16PodU64::new(0);
+    header.stale_certificate_count = V16PodU64::new(0);
+    header.negative_pnl_account_count = V16PodU64::new(0);
+    header.resolved_payout_blocker_count = V16PodU64::new(if resolved_blocked { 1 } else { 0 });
+
+    let mut active_bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    if active_leg {
+        active_bitmap_set(&mut active_bitmap, 0).unwrap();
+        account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index: 0,
+            market_id,
+            side: SideV16::Long,
+            basis_pos_q: POS_SCALE as i128,
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: POS_SCALE,
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: b_stale_leg,
+            stale: false,
+        });
+    }
+    account_header.active_bitmap = active_bitmap.map(V16PodU64::new);
+
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: if liquidatable_cert { -1 } else { 1 },
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: if liquidatable_cert { 1 } else { 0 },
+        certified_worst_case_loss: if liquidatable_cert { 1 } else { 0 },
+        cert_oracle_epoch: if cert_current {
+            header.oracle_epoch.get()
+        } else {
+            header.oracle_epoch.get() + 1
+        },
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: active_bitmap,
+        valid: true,
+    });
+
+    account_header.pnl = V16PodI128::new(if resolved_positive_pnl { 1 } else { 0 });
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: close_outstanding,
+            finalized: false,
+            canceled: false,
+            close_id: if close_outstanding { 1 } else { 0 },
+            asset_index: 0,
+            market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: if close_outstanding { 1 } else { 0 },
+            drift_reference_slot: 1,
+            max_close_slot: if close_expired {
+                current_slot - 1
+            } else {
+                current_slot
+            },
+            support_consumed: 0,
+            junior_face_burned: 0,
+            insurance_spent: 0,
+            b_loss_booked: 0,
+            explicit_loss_assigned: 0,
+            quantity_adl_applied_q: 0,
+            drift_consumed: 0,
+            residual_remaining: if close_outstanding { 1 } else { 0 },
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+
+    let live = mode_raw == 0;
+    let resolved = mode_raw == 1;
+    let expected = ActionableSummaryV16 {
+        stale: live && !cert_current,
+        b_stale: live && active_leg && b_stale_leg,
+        pending_close: false,
+        expired_close: live && close_outstanding && close_expired,
+        liquidatable: live && cert_current && liquidatable_cert && active_leg,
+        recovery_eligible: false,
+        resolved_winner: resolved && resolved_positive_pnl && !resolved_blocked,
+    };
+
+    kani::cover!(
+        mode_raw == 0 && summary.b_stale && summary.liquidatable,
+        "actionable summary builder covers live b-stale/liquidatable account"
+    );
+    kani::cover!(
+        mode_raw == 1 && summary.resolved_winner,
+        "actionable summary builder covers resolved payout-ready winner"
+    );
+    kani::cover!(
+        mode_raw == 2 && !summary.is_actionable(),
+        "actionable summary builder covers recovery-mode no-action gate"
+    );
+    assert_eq!(summary, expected);
+
+    if !live {
+        assert!(!summary.stale);
+        assert!(!summary.b_stale);
+        assert!(!summary.expired_close);
+        assert!(!summary.liquidatable);
+    }
+    if !resolved {
+        assert!(!summary.resolved_winner);
+    }
+    assert!(!summary.pending_close);
+    assert!(!summary.recovery_eligible);
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemma U3): validate_shape's Ok-exit
 // IMPLIES the senior stack is covered by the vault — c_tot + insurance +
 // backing_provider_earnings_total <= vault. An importable safety-floor lemma
