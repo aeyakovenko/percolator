@@ -15797,6 +15797,93 @@ fn proof_v16_validator_sound_senior_stack_within_vault() {
     assert!(senior <= market.header.vault.get());
 }
 
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_senior_backing_and_domain_insurance_caps() {
+    let capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let domain_budget_raw: u8 = kani::any();
+    let reserved_raw: u8 = kani::any();
+    let extra_vault_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&capital_raw));
+    kani::assume((1..=8).contains(&insurance_raw));
+    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume(domain_budget_raw <= insurance_raw);
+    kani::assume(reserved_raw <= domain_budget_raw);
+
+    let capital = capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let backing = backing_raw as u128;
+    let budget = domain_budget_raw as u128;
+    let reserved = reserved_raw as u128;
+    let backing_num = backing * BOUND_SCALE;
+    let reserved_num = reserved * BOUND_SCALE;
+    let vault = capital + insurance + backing + extra_vault_raw as u128;
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(vault);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(reserved);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: backing_num,
+            insurance_credit_reserved_num: reserved_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: reserved_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budget);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    kani::assume(market.validate_shape() == Ok(()));
+
+    let senior = market
+        .header
+        .c_tot
+        .get()
+        .checked_add(market.header.insurance.get())
+        .and_then(|v| v.checked_add(market.header.backing_provider_earnings_total.get()))
+        .unwrap();
+    let senior_with_backing = senior
+        .checked_add(market.header.source_fresh_backing_total_num.get() / BOUND_SCALE)
+        .unwrap();
+
+    kani::cover!(
+        backing > 0 && reserved > 0 && budget > reserved && extra_vault_raw > 0,
+        "validator cap theorem covers senior capital, source backing, reserved insurance, and spare vault"
+    );
+    assert!(senior_with_backing <= market.header.vault.get());
+    assert!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get()
+            <= market.header.insurance.get()
+    );
+    assert!(
+        market.header.insurance_domain_budget_remaining_total.get()
+            <= market.header.insurance.get()
+    );
+    assert!(reserved <= budget);
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
