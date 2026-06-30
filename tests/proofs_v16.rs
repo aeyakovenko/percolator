@@ -786,6 +786,83 @@ fn proof_v16_asset_recovery_transition_is_idempotent_after_recovery() {
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_force_asset_recovery_is_value_neutral_and_epoch_scoped() {
+    let use_drain_only: bool = kani::any();
+    let c_tot_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    let surplus_raw: u16 = kani::any();
+    let effective_price_raw: u16 = kani::any();
+    let raw_target_price_raw: u16 = kani::any();
+    kani::assume(c_tot_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    kani::assume(surplus_raw <= 1024);
+    kani::assume((1..=10_000).contains(&effective_price_raw));
+    kani::assume((1..=10_000).contains(&raw_target_price_raw));
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let effective_price = effective_price_raw as u64;
+    let raw_target_price = raw_target_price_raw as u64;
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = if use_drain_only {
+        AssetLifecycleV16::DrainOnly
+    } else {
+        AssetLifecycleV16::Active
+    };
+    asset.effective_price = effective_price;
+    asset.fund_px_last = effective_price;
+    asset.raw_oracle_target_price = raw_target_price;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let asset_set_epoch_before = header.asset_set_epoch.get();
+    let risk_epoch_before = header.risk_epoch.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    market.force_asset_recovery_not_atomic(0, 1).unwrap();
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        use_drain_only
+            && raw_target_price != effective_price
+            && c_tot > 0
+            && insurance > 0
+            && surplus > 0,
+        "force recovery covers drain-only mark freeze with nontrivial senior balances"
+    );
+    kani::cover!(
+        !use_drain_only && raw_target_price != effective_price && effective_price > 100,
+        "force recovery covers active asset mark freeze"
+    );
+    assert_eq!(asset_after.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(asset_after.market_id, asset.market_id);
+    assert_eq!(asset_after.effective_price, effective_price);
+    assert_eq!(asset_after.fund_px_last, effective_price);
+    assert_eq!(asset_after.raw_oracle_target_price, effective_price);
+    assert_eq!(asset_after.oi_eff_long_q, asset.oi_eff_long_q);
+    assert_eq!(asset_after.oi_eff_short_q, asset.oi_eff_short_q);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(
+        market.header.asset_set_epoch.get(),
+        asset_set_epoch_before + 1
+    );
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
+    // Asset-0/admin recovery is bounded: it freezes the mark and invalidates
+    // risk certs without moving vault, senior balances, or junior residual.
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
 #[kani::solver(cadical)]
 fn proof_v16_loss_stale_trade_scope_allows_only_unrelated_current_assets() {
     let market_loss_stale_active: bool = kani::any();
