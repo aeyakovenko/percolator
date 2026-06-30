@@ -14420,6 +14420,98 @@ fn proof_v16_auto_crank_classifier_uncertified_idle_account_selects_refresh_fall
     assert!(percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
 }
 
+// Permissionless no-DoS terminal-close seam: an outstanding close residual that
+// has passed its bounded progress window must be classified as expired_close and
+// routed to terminal recovery. No keeper observation is needed; otherwise an
+// account with no active leg could be stranded behind an unadvanceable close
+// ledger. This drives the production classifier over a symbolic residual.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_classifier_expired_close_selects_recovery_without_observation() {
+    let residual_raw: u16 = kani::any();
+    let capital_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    kani::assume(residual_raw > 0);
+    kani::assume(capital_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    let residual = residual_raw as u128;
+    let capital = capital_raw as u128;
+    let insurance = insurance_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    header.vault = V16PodU128::new(capital + insurance);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+    });
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id: markets[0].engine.asset.market_id.get(),
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: residual,
+            drift_reference_slot: 1,
+            max_close_slot: 9,
+            support_consumed: 0,
+            junior_face_burned: 0,
+            insurance_spent: 0,
+            b_loss_booked: 0,
+            explicit_loss_assigned: 0,
+            quantity_adl_applied_q: 0,
+            drift_consumed: 0,
+            residual_remaining: residual,
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        0,
+        0,
+        None,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+
+    kani::cover!(
+        residual > 1 && capital > 0 && insurance > 0,
+        "auto-crank classifier covers expired close residual with nontrivial balances"
+    );
+    assert!(!summary.stale);
+    assert!(!summary.b_stale);
+    assert!(!summary.pending_close);
+    assert!(summary.expired_close);
+    assert!(!summary.liquidatable);
+    assert!(!summary.recovery_eligible);
+    assert!(!summary.resolved_winner);
+    assert_eq!(
+        plan,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
+    assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
+}
+
 // No-DoS selector theorem for the production auto-crank plan kernel. Over every
 // classifier signal combination reachable by the production classifier
 // (`pending_close == false`), an actionable summary selects exactly one
