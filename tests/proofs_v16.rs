@@ -2403,6 +2403,76 @@ fn proof_v16_dynamic_market_extension_slots_must_be_zero_fill() {
 }
 
 #[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_unconfigured_market_tail_validator_rejects_hidden_engine_state() {
+    let dirty_second_tail_slot: bool = kani::any();
+    let dirty_kind: u8 = kani::any();
+    kani::assume(dirty_kind <= 3);
+    let dirty_index = if dirty_second_tail_slot { 3 } else { 2 };
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 4, 0).unwrap();
+    let mut clean_markets = [
+        Market::new(10u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(20u64, EngineAssetSlotV16Account::empty_for_market(2)),
+        Market::new(30u64, EngineAssetSlotV16Account::default()),
+        Market::new(40u64, EngineAssetSlotV16Account::default()),
+    ];
+    clean_markets[3].engine.insurance_domain_budget_long = V16PodU128::new(MAX_VAULT_TVL);
+    clean_markets[3].engine.insurance_domain_budget_short = V16PodU128::new(MAX_VAULT_TVL);
+
+    let clean_result = MarketGroupV16ViewMut::new(&mut header, &mut clean_markets)
+        .kani_validate_unconfigured_market_tail();
+
+    let mut dirty_header = header;
+    let mut dirty_markets = clean_markets;
+    match dirty_kind {
+        0 => {
+            dirty_markets[dirty_index]
+                .engine
+                .insurance_domain_spent_long = V16PodU128::new(1)
+        }
+        1 => {
+            dirty_markets[dirty_index]
+                .engine
+                .pending_domain_loss_barrier_short = V16PodU64::new(1)
+        }
+        2 => dirty_markets[dirty_index].engine.asset.market_id = V16PodU64::new(99),
+        _ => {
+            dirty_markets[dirty_index]
+                .engine
+                .source_credit_long
+                .positive_claim_bound_num = V16PodU128::new(BOUND_SCALE)
+        }
+    }
+    let dirty_result = MarketGroupV16ViewMut::new(&mut dirty_header, &mut dirty_markets)
+        .kani_validate_unconfigured_market_tail();
+
+    kani::cover!(
+        dirty_second_tail_slot && dirty_kind == 0,
+        "tail validator covers dirty spent budget in later extension slot"
+    );
+    kani::cover!(
+        !dirty_second_tail_slot && dirty_kind == 1,
+        "tail validator covers dirty pending barrier in first extension slot"
+    );
+    kani::cover!(
+        dirty_kind == 2,
+        "tail validator covers dirty asset identity in extension slot"
+    );
+    kani::cover!(
+        dirty_kind == 3,
+        "tail validator covers dirty source-credit ledger in extension slot"
+    );
+
+    assert_eq!(clean_result, Ok(()));
+    assert_eq!(dirty_result, Err(V16Error::InvalidConfig));
+    assert_eq!(dirty_markets[0].wrapper, clean_markets[0].wrapper);
+    assert_eq!(dirty_markets[1].wrapper, clean_markets[1].wrapper);
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_insurance_domain_mapping_is_in_bounds_unique_and_roundtrips() {

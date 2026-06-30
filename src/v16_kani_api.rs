@@ -356,6 +356,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.residual()
     }
 
+    pub fn kani_validate_unconfigured_market_tail(&self) -> V16Result<()> {
+        self.validate_unconfigured_market_tail()
+    }
+
     pub fn kani_domain_asset_side(&self, domain: usize) -> V16Result<(usize, SideV16)> {
         self.domain_asset_side(domain)
     }
