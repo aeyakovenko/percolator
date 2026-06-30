@@ -14090,6 +14090,61 @@ fn proof_v16_frame_crank_touches_only_clock_and_cert_state() {
     assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
 }
 
+// Permissionless no-DoS classifier floor: a current, empty Live account with
+// no close/resolved/recovery state must not be classified as actionable. This
+// pins the production classifier seam without forcing the full dispatcher to
+// symbolically explore every unreachable continuation.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_classifier_current_idle_account_is_not_actionable() {
+    let c_tot_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    let surplus_raw: u16 = kani::any();
+    kani::assume(c_tot_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    kani::assume(surplus_raw <= 1024);
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(c_tot);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: c_tot as i128,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+    });
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+
+    let summary = market.build_actionable_summary(&account).unwrap();
+
+    kani::cover!(
+        c_tot > 0 && insurance > 0 && surplus > 0,
+        "auto-crank classifier covers idle account with symbolic senior stock and junior surplus"
+    );
+    assert!(!summary.stale);
+    assert!(!summary.b_stale);
+    assert!(!summary.pending_close);
+    assert!(!summary.expired_close);
+    assert!(!summary.liquidatable);
+    assert!(!summary.recovery_eligible);
+    assert!(!summary.resolved_winner);
+    assert!(!summary.is_actionable());
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemma U3): validate_shape's Ok-exit
 // IMPLIES the senior stack is covered by the vault — c_tot + insurance +
 // backing_provider_earnings_total <= vault. An importable safety-floor lemma
