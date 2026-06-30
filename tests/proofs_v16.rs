@@ -14326,6 +14326,74 @@ fn proof_v16_auto_crank_classifier_stale_deficit_open_risk_selects_refresh_not_l
     assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
 }
 
+// Permissionless anti-DoS/no-false-positive classifier seam: a current
+// certificate with a nonzero deficit but no committed active leg is not a valid
+// liquidation target. This pins the open-risk gate so old certified deficits
+// cannot strand a flat account behind a liquidation continuation with no leg to
+// close.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_classifier_current_deficit_without_open_risk_is_not_actionable() {
+    let deficit_raw: u16 = kani::any();
+    let capital_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    kani::assume(deficit_raw > 0);
+    kani::assume(capital_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    let deficit = deficit_raw as u128;
+    let capital = capital_raw as u128;
+    let insurance = insurance_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(capital + insurance);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(0);
+    account_header.active_bitmap = V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 0,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: deficit,
+        certified_worst_case_loss: deficit,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+    });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+    let (_, active_asset) = kani_project_auto_crank_selected_assets(&account).unwrap();
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        0,
+        active_asset.unwrap_or(0),
+        active_asset,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+
+    kani::cover!(
+        deficit > 1 && capital > 0 && insurance > 0 && active_asset.is_none(),
+        "auto-crank classifier covers current nonzero deficit with no open risk"
+    );
+    assert!(!summary.stale);
+    assert!(!summary.b_stale);
+    assert!(!summary.pending_close);
+    assert!(!summary.expired_close);
+    assert!(!summary.liquidatable);
+    assert!(!summary.recovery_eligible);
+    assert!(!summary.resolved_winner);
+    assert!(!summary.is_actionable());
+    assert_eq!(plan, AutoCrankPlanV16::NoAction);
+    assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
+}
+
 // Permissionless no-DoS resolved-winner seam: the first positive-PnL winner in a
 // Resolved market must be classified and routed to CloseResolved even before the
 // payout snapshot is captured. Otherwise no account could trigger the lazy
