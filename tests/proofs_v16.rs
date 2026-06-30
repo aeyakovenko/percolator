@@ -7,14 +7,15 @@ use percolator::v16::{
     kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
-    kani_backing_utilization_rate_e9_for_source_state, kani_build_trade_request_guard_summary,
-    kani_close_progress_blocks_exposure_clear, kani_expected_source_credit_rate_num_for_state,
-    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
-    kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg,
-    kani_kernel_bresidual_step, kani_kernel_cert_is_current, kani_kernel_classify_position_delta,
-    kani_kernel_clear_leg, kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
-    kani_kernel_resolved_payout_step, kani_kernel_settle_resolved_pnl_after_booking,
-    kani_kernel_social_loss_chunk_cap,
+    kani_backing_utilization_rate_e9_for_source_state, kani_build_resolved_close_rank,
+    kani_build_trade_request_guard_summary, kani_close_progress_blocks_exposure_clear,
+    kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
+    kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
+    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_bresidual_step,
+    kani_kernel_cert_is_current, kani_kernel_classify_position_delta, kani_kernel_clear_leg,
+    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
+    kani_kernel_resolved_close_progress, kani_kernel_resolved_payout_step,
+    kani_kernel_settle_resolved_pnl_after_booking, kani_kernel_social_loss_chunk_cap,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -32,11 +33,11 @@ use percolator::v16::{
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     PositionRouteV16, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
-    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
-    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
-    SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
-    TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
-    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
+    ResolvedCloseStepV16, ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account,
+    ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
+    SourceCreditStateV16, SourceCreditStateV16Account, StockReconciliationProofV16,
+    TokenValueClassV16, TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount,
+    V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
 };
@@ -10193,6 +10194,68 @@ fn proof_v16_bresidual_step_conserves_or_declares_recovery() {
         BResidualStepV16::DeclareRecovery => {
             assert!(!has_booked);
             assert!(!resolved);
+        }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_close_rank_progress_classifier_is_total_and_exact() {
+    let b_stale: bool = kani::any();
+    let negative_pnl: bool = kani::any();
+    let active_leg: bool = kani::any();
+    let capital_pending: bool = kani::any();
+    let receipt_present: bool = kani::any();
+    let recovery_required: bool = kani::any();
+    let mut active_bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    if active_leg {
+        active_bitmap_set(&mut active_bitmap, 0).unwrap();
+    }
+    let pnl = if negative_pnl { -1 } else { 0 };
+    let capital = if capital_pending { 1 } else { 0 };
+
+    let rank = kani_build_resolved_close_rank(
+        b_stale,
+        pnl,
+        active_bitmap,
+        capital,
+        receipt_present,
+        recovery_required,
+    );
+    let step = kani_kernel_resolved_close_progress(rank);
+    let pending = b_stale || negative_pnl || active_leg || capital_pending || receipt_present;
+
+    kani::cover!(
+        recovery_required && pending,
+        "resolved-close rank classifier covers recovery priority over pending work"
+    );
+    kani::cover!(
+        !recovery_required && pending && active_leg && receipt_present,
+        "resolved-close rank classifier covers progress with multiple pending rank components"
+    );
+    kani::cover!(
+        !recovery_required && !pending,
+        "resolved-close rank classifier covers fully closed fixed point"
+    );
+
+    assert_eq!(rank.b_stale, b_stale);
+    assert_eq!(rank.negative_pnl, negative_pnl);
+    assert_eq!(rank.active_leg, active_leg);
+    assert_eq!(rank.capital, capital_pending);
+    assert_eq!(rank.receipt_claim, receipt_present);
+    assert_eq!(rank.recovery_required, recovery_required);
+    assert_eq!(rank.has_pending(), pending);
+
+    match step {
+        ResolvedCloseStepV16::RecoveryRequired => assert!(recovery_required),
+        ResolvedCloseStepV16::ProgressOnly => {
+            assert!(!recovery_required);
+            assert!(pending);
+        }
+        ResolvedCloseStepV16::Closed => {
+            assert!(!recovery_required);
+            assert!(!pending);
         }
     }
 }

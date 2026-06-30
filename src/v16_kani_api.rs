@@ -251,6 +251,28 @@ pub fn kani_kernel_bresidual_step(
     V16Core::kernel_bresidual_step(residual_remaining, booked, resolved)
 }
 
+pub fn kani_build_resolved_close_rank(
+    b_stale: bool,
+    pnl: i128,
+    active_bitmap: V16ActiveBitmap,
+    capital: u128,
+    receipt_present: bool,
+    recovery_required: bool,
+) -> ResolvedCloseRankV16 {
+    V16Core::build_resolved_close_rank(
+        b_stale,
+        pnl,
+        active_bitmap,
+        capital,
+        receipt_present,
+        recovery_required,
+    )
+}
+
+pub fn kani_kernel_resolved_close_progress(rank: ResolvedCloseRankV16) -> ResolvedCloseStepV16 {
+    V16Core::kernel_resolved_close_progress(rank)
+}
+
 pub fn kani_kernel_resolved_payout_step(claimable: u128, vault: u128) -> (u128, u128) {
     V16Core::kernel_resolved_payout_step(claimable, vault)
 }
