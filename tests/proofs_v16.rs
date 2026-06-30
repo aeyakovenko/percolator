@@ -14396,6 +14396,44 @@ fn proof_v16_frame_mark_drain_only_touches_only_declared_state() {
     ));
 }
 
+// retire-empty frame: exactly {current_slot, asset_set_epoch, risk_epoch} on
+// the header and {asset.lifecycle, asset.retired_slot} on the selected slot.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_retire_empty_asset_touches_only_declared_state() {
+    let delta_raw: u8 = kani::any();
+    kani::assume(delta_raw >= 1 && delta_raw <= 8);
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let retire_slot = header.current_slot.get() + delta_raw as u64;
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .retire_empty_asset_not_atomic(0, retire_slot)
+            .unwrap();
+    }
+    kani::cover!(
+        delta_raw > 1,
+        "retire-empty frame reaches nontrivial slot advance"
+    );
+    let mut eh = h0;
+    eh.current_slot = V16PodU64::new(retire_slot);
+    eh.asset_set_epoch = V16PodU64::new(h0.asset_set_epoch.get() + 1);
+    eh.risk_epoch = V16PodU64::new(h0.risk_epoch.get() + 1);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    let mut asset = s0.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Retired;
+    asset.retired_slot = retire_slot;
+    es.asset = AssetStateV16Account::from_runtime(&asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &es,
+        &markets[0].engine
+    ));
+}
+
 // budget-credit frame: exactly {insurance_domain_budget_remaining_total} on
 // the header and {insurance_domain_budget_long} on the slot — pure capacity
 // relabel, every value field frozen.
