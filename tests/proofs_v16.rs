@@ -11812,6 +11812,116 @@ fn proof_v16_counterparty_source_credit_support_is_prebacked_by_realized_capital
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_supported_external_exit_preserves_stock_reconciliation() {
+    let amount_raw: u8 = kani::any();
+    let initial_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let junior_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&amount_raw));
+    kani::assume(initial_capital_raw >= amount_raw && initial_capital_raw <= 16);
+    let amount = amount_raw as u128;
+    let initial_c_tot = initial_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let junior = junior_raw as u128;
+    let initial_vault = initial_c_tot + insurance + junior;
+
+    let initial = StockReconciliationProofV16 {
+        token_vault: initial_vault,
+        senior_capital_total: initial_c_tot,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: 0,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    assert_eq!(initial.validate(), Ok(()));
+
+    let reserve_proof = TokenValueFlowProofV16::account_capital_to_realized_loss(
+        amount,
+        initial_vault,
+        initial_vault,
+    )
+    .unwrap();
+    assert_eq!(reserve_proof.validate(), Ok(()));
+    let reserved = StockReconciliationProofV16 {
+        token_vault: initial_vault,
+        senior_capital_total: initial_c_tot - amount,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: amount,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    assert_eq!(reserved.validate(), Ok(()));
+
+    let support_proof = TokenValueFlowProofV16::support_to_account_capital(
+        amount,
+        amount,
+        0,
+        0,
+        initial_vault,
+        initial_vault,
+    )
+    .unwrap();
+    assert_eq!(support_proof.validate(), Ok(()));
+    let supported = StockReconciliationProofV16 {
+        token_vault: initial_vault,
+        senior_capital_total: initial_c_tot,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: 0,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    assert_eq!(supported.validate(), Ok(()));
+
+    let final_vault = initial_vault - amount;
+    let exit_proof =
+        TokenValueFlowProofV16::account_capital_to_external_out(amount, initial_vault, final_vault)
+            .unwrap();
+    assert_eq!(exit_proof.validate(), Ok(()));
+    let final_state = StockReconciliationProofV16 {
+        token_vault: final_vault,
+        senior_capital_total: initial_c_tot - amount,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: 0,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    assert_eq!(final_state.validate(), Ok(()));
+
+    kani::cover!(
+        amount > 1 && initial_c_tot > amount && insurance > 0 && junior > 0,
+        "counterparty support lifecycle covers nontrivial capital, insurance, and junior pool"
+    );
+    assert_eq!(
+        reserve_proof.credits[TokenValueClassV16::ExplicitBackedLoss as usize],
+        amount
+    );
+    assert_eq!(
+        support_proof.credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize],
+        amount
+    );
+    assert_eq!(
+        exit_proof.credits[TokenValueClassV16::ExternalQuote as usize],
+        amount
+    );
+    assert_eq!(final_state.token_vault, initial.token_vault - amount);
+    assert_eq!(
+        final_state.senior_capital_total,
+        initial.senior_capital_total - amount
+    );
+    assert_eq!(final_state.insurance_capital, initial.insurance_capital);
+    assert_eq!(
+        final_state.unallocated_protocol_surplus,
+        initial.unallocated_protocol_surplus
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_target_effective_lag_adverse_delta_is_side_specific() {
