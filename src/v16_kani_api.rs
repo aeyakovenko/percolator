@@ -243,6 +243,10 @@ pub fn kani_kernel_bresidual_step(
     V16Core::kernel_bresidual_step(residual_remaining, booked, resolved)
 }
 
+pub fn kani_kernel_resolved_payout_step(claimable: u128, vault: u128) -> (u128, u128) {
+    V16Core::kernel_resolved_payout_step(claimable, vault)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,

@@ -13,7 +13,7 @@ use percolator::v16::{
     kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_bresidual_step,
     kani_kernel_cert_is_current, kani_kernel_classify_position_delta, kani_kernel_clear_leg,
     kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
-    kani_kernel_settle_resolved_pnl_after_booking,
+    kani_kernel_resolved_payout_step, kani_kernel_settle_resolved_pnl_after_booking,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -10097,6 +10097,39 @@ fn proof_v16_bresidual_step_conserves_or_declares_recovery() {
             assert!(!resolved);
         }
     }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_payout_step_is_claim_and_vault_capped_and_conserving() {
+    let claimable_raw: u16 = kani::any();
+    let vault_raw: u16 = kani::any();
+    kani::assume(claimable_raw <= 4096);
+    kani::assume(vault_raw <= 4096);
+
+    let claimable = claimable_raw as u128;
+    let vault = vault_raw as u128;
+    let (payout, new_vault) = kani_kernel_resolved_payout_step(claimable, vault);
+    let expected_payout = claimable.min(vault);
+
+    kani::cover!(
+        claimable > 0 && claimable < vault,
+        "resolved payout step covers claim-limited payout"
+    );
+    kani::cover!(
+        vault > 0 && vault < claimable,
+        "resolved payout step covers vault-limited payout"
+    );
+    kani::cover!(
+        claimable == 0 || vault == 0,
+        "resolved payout step covers zero payout boundary"
+    );
+    assert_eq!(payout, expected_payout);
+    assert!(payout <= claimable);
+    assert!(payout <= vault);
+    assert_eq!(new_vault, vault - payout);
+    assert_eq!(new_vault + payout, vault);
 }
 
 #[kani::proof]
