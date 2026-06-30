@@ -421,6 +421,16 @@ pub fn kani_trade_preflight_risk_gate(
     )
 }
 
+pub fn kani_kernel_trade_admit(guards: TradeGuardSummaryV16) -> Result<(), TradeRejectReasonV16> {
+    V16Core::kernel_trade_admit(guards)
+}
+
+pub fn kani_kernel_economically_valid_trade_admits(
+    event: EconomicallyValidTradeV16,
+) -> Result<(), TradeRejectReasonV16> {
+    V16Core::kernel_economically_valid_trade_admits(event)
+}
+
 pub fn kani_trade_notional_floor(size_q: u128, exec_price: u64) -> V16Result<u128> {
     trade_notional_floor(size_q, exec_price)
 }

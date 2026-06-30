@@ -13,12 +13,12 @@ use percolator::v16::{
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
     kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_bresidual_step,
     kani_kernel_cert_is_current, kani_kernel_classify_position_delta, kani_kernel_clear_leg,
-    kani_kernel_consume_insurance_layer, kani_kernel_locked_margin_gate,
-    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
-    kani_kernel_resolved_close_progress, kani_kernel_resolved_payout_step,
-    kani_kernel_settle_principal, kani_kernel_settle_resolved_pnl_after_booking,
-    kani_kernel_social_loss_chunk_cap,
-    kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
+    kani_kernel_consume_insurance_layer, kani_kernel_economically_valid_trade_admits,
+    kani_kernel_locked_margin_gate, kani_kernel_reduce_position_delta,
+    kani_kernel_resize_leg_same_side, kani_kernel_resolved_close_progress,
+    kani_kernel_resolved_payout_step, kani_kernel_settle_principal,
+    kani_kernel_settle_resolved_pnl_after_booking, kani_kernel_social_loss_chunk_cap,
+    kani_kernel_trade_admit, kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
     kani_project_auto_crank_selected_assets, kani_select_auto_crank_plan,
@@ -28,18 +28,19 @@ use percolator::v16::{
     AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
     BResidualBookingOutcomeV16, BResidualStepV16, BackingBucketStatusV16, BackingBucketV16,
     BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
-    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    PositionRouteV16, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
-    ResolvedCloseStepV16, ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account,
-    ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
-    SourceCreditStateV16, SourceCreditStateV16Account, StockReconciliationProofV16,
-    TokenValueClassV16, TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount,
-    V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
+    CloseProgressLedgerV16Account, EconomicallyValidTradeV16, EngineAssetSlotV16Account,
+    HLockLaneV16, HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, PositionRouteV16, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
+    ResolvedCloseOutcomeV16, ResolvedCloseStepV16, ResolvedPayoutLedgerV16,
+    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
+    SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
+    StockReconciliationProofV16, TokenValueClassV16, TokenValueFlowProofV16, TradeGuardSummaryV16,
+    TradeRejectReasonV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
+    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
 };
@@ -4268,6 +4269,301 @@ fn proof_v16_trade_preflight_risk_gate_blocks_only_unsafe_risk_increase() {
         assert_eq!(result, Err(V16Error::LockActive));
     } else {
         assert_eq!(result, Ok(()));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_guard_stack_is_exact_first_failure_and_no_spurious_reject() {
+    let guards = TradeGuardSummaryV16 {
+        request_valid: kani::any(),
+        size_nonzero: kani::any(),
+        price_in_range: kani::any(),
+        fee_bps_in_cap: kani::any(),
+        accounts_current: kani::any(),
+        no_loss_stale_block: kani::any(),
+        no_adverse_lag: kani::any(),
+        no_barrier_touch: kani::any(),
+        margin_ok: kani::any(),
+        locked_lane_ok: kani::any(),
+    };
+    let result = kani_kernel_trade_admit(guards);
+    let all_pass = guards.request_valid
+        && guards.size_nonzero
+        && guards.price_in_range
+        && guards.fee_bps_in_cap
+        && guards.accounts_current
+        && guards.no_loss_stale_block
+        && guards.no_adverse_lag
+        && guards.no_barrier_touch
+        && guards.margin_ok
+        && guards.locked_lane_ok;
+
+    kani::cover!(all_pass, "trade guard stack admits fully valid trade");
+    kani::cover!(
+        !guards.request_valid,
+        "trade guard stack covers first request-shape rejection"
+    );
+    kani::cover!(
+        guards.request_valid
+            && guards.size_nonzero
+            && guards.price_in_range
+            && guards.fee_bps_in_cap
+            && guards.accounts_current
+            && guards.no_loss_stale_block
+            && guards.no_adverse_lag
+            && guards.no_barrier_touch
+            && !guards.margin_ok,
+        "trade guard stack covers late margin rejection"
+    );
+
+    assert_eq!(result.is_ok(), all_pass);
+    match result {
+        Ok(()) => assert!(all_pass),
+        Err(TradeRejectReasonV16::InvalidRequest) => assert!(!guards.request_valid),
+        Err(TradeRejectReasonV16::ZeroSize) => {
+            assert!(guards.request_valid);
+            assert!(!guards.size_nonzero);
+        }
+        Err(TradeRejectReasonV16::PriceOutOfRange) => {
+            assert!(guards.request_valid && guards.size_nonzero);
+            assert!(!guards.price_in_range);
+        }
+        Err(TradeRejectReasonV16::FeeBpsOverCap) => {
+            assert!(guards.request_valid && guards.size_nonzero && guards.price_in_range);
+            assert!(!guards.fee_bps_in_cap);
+        }
+        Err(TradeRejectReasonV16::AccountsStale) => {
+            assert!(
+                guards.request_valid
+                    && guards.size_nonzero
+                    && guards.price_in_range
+                    && guards.fee_bps_in_cap
+            );
+            assert!(!guards.accounts_current);
+        }
+        Err(TradeRejectReasonV16::LossStaleBlocked) => {
+            assert!(
+                guards.request_valid
+                    && guards.size_nonzero
+                    && guards.price_in_range
+                    && guards.fee_bps_in_cap
+                    && guards.accounts_current
+            );
+            assert!(!guards.no_loss_stale_block);
+        }
+        Err(TradeRejectReasonV16::AdverseLag) => {
+            assert!(
+                guards.request_valid
+                    && guards.size_nonzero
+                    && guards.price_in_range
+                    && guards.fee_bps_in_cap
+                    && guards.accounts_current
+                    && guards.no_loss_stale_block
+            );
+            assert!(!guards.no_adverse_lag);
+        }
+        Err(TradeRejectReasonV16::BarrierTouch) => {
+            assert!(
+                guards.request_valid
+                    && guards.size_nonzero
+                    && guards.price_in_range
+                    && guards.fee_bps_in_cap
+                    && guards.accounts_current
+                    && guards.no_loss_stale_block
+                    && guards.no_adverse_lag
+            );
+            assert!(!guards.no_barrier_touch);
+        }
+        Err(TradeRejectReasonV16::MarginFail) => {
+            assert!(
+                guards.request_valid
+                    && guards.size_nonzero
+                    && guards.price_in_range
+                    && guards.fee_bps_in_cap
+                    && guards.accounts_current
+                    && guards.no_loss_stale_block
+                    && guards.no_adverse_lag
+                    && guards.no_barrier_touch
+            );
+            assert!(!guards.margin_ok);
+        }
+        Err(TradeRejectReasonV16::LockedLaneFail) => {
+            assert!(
+                guards.request_valid
+                    && guards.size_nonzero
+                    && guards.price_in_range
+                    && guards.fee_bps_in_cap
+                    && guards.accounts_current
+                    && guards.no_loss_stale_block
+                    && guards.no_adverse_lag
+                    && guards.no_barrier_touch
+                    && guards.margin_ok
+            );
+            assert!(!guards.locked_lane_ok);
+        }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_economically_valid_trade_admission_matches_scalar_predicate() {
+    let event = EconomicallyValidTradeV16 {
+        asset_configured: kani::any(),
+        size_q: kani::any(),
+        price: kani::any(),
+        price_lo: kani::any(),
+        price_hi: kani::any(),
+        fee_bps: kani::any(),
+        max_fee_bps: kani::any(),
+        accounts_current: kani::any(),
+        not_loss_stale_blocked: kani::any(),
+        no_adverse_lag: kani::any(),
+        no_barrier_touch: kani::any(),
+        margin_ok: kani::any(),
+        locked_lane_ok: kani::any(),
+    };
+    let guards = event.to_guards();
+    let result = kani_kernel_economically_valid_trade_admits(event);
+
+    kani::cover!(
+        event.is_economically_valid(),
+        "economically valid trade reaches admission"
+    );
+    kani::cover!(
+        event.asset_configured
+            && event.size_q != 0
+            && event.price < event.price_lo
+            && event.fee_bps <= event.max_fee_bps,
+        "economic trade predicate covers price-envelope rejection"
+    );
+    kani::cover!(
+        event.asset_configured
+            && event.size_q != 0
+            && event.price >= event.price_lo
+            && event.price <= event.price_hi
+            && event.fee_bps <= event.max_fee_bps
+            && event.accounts_current
+            && event.not_loss_stale_blocked
+            && event.no_adverse_lag
+            && event.no_barrier_touch
+            && !event.margin_ok,
+        "economic trade predicate covers late margin rejection"
+    );
+
+    assert_eq!(guards.request_valid, event.asset_configured);
+    assert_eq!(guards.size_nonzero, event.size_q != 0);
+    assert_eq!(
+        guards.price_in_range,
+        event.price >= event.price_lo && event.price <= event.price_hi
+    );
+    assert_eq!(guards.fee_bps_in_cap, event.fee_bps <= event.max_fee_bps);
+    assert_eq!(guards.accounts_current, event.accounts_current);
+    assert_eq!(guards.no_loss_stale_block, event.not_loss_stale_blocked);
+    assert_eq!(guards.no_adverse_lag, event.no_adverse_lag);
+    assert_eq!(guards.no_barrier_touch, event.no_barrier_touch);
+    assert_eq!(guards.margin_ok, event.margin_ok);
+    assert_eq!(guards.locked_lane_ok, event.locked_lane_ok);
+
+    assert_eq!(result, kani_kernel_trade_admit(guards));
+    assert_eq!(result.is_ok(), event.is_economically_valid());
+    match result {
+        Ok(()) => assert!(event.is_economically_valid()),
+        Err(TradeRejectReasonV16::InvalidRequest) => assert!(!event.asset_configured),
+        Err(TradeRejectReasonV16::ZeroSize) => {
+            assert!(event.asset_configured);
+            assert_eq!(event.size_q, 0);
+        }
+        Err(TradeRejectReasonV16::PriceOutOfRange) => {
+            assert!(event.asset_configured && event.size_q != 0);
+            assert!(event.price < event.price_lo || event.price > event.price_hi);
+        }
+        Err(TradeRejectReasonV16::FeeBpsOverCap) => {
+            assert!(
+                event.asset_configured
+                    && event.size_q != 0
+                    && event.price >= event.price_lo
+                    && event.price <= event.price_hi
+            );
+            assert!(event.fee_bps > event.max_fee_bps);
+        }
+        Err(TradeRejectReasonV16::AccountsStale) => {
+            assert!(
+                event.asset_configured
+                    && event.size_q != 0
+                    && event.price >= event.price_lo
+                    && event.price <= event.price_hi
+                    && event.fee_bps <= event.max_fee_bps
+            );
+            assert!(!event.accounts_current);
+        }
+        Err(TradeRejectReasonV16::LossStaleBlocked) => {
+            assert!(
+                event.asset_configured
+                    && event.size_q != 0
+                    && event.price >= event.price_lo
+                    && event.price <= event.price_hi
+                    && event.fee_bps <= event.max_fee_bps
+                    && event.accounts_current
+            );
+            assert!(!event.not_loss_stale_blocked);
+        }
+        Err(TradeRejectReasonV16::AdverseLag) => {
+            assert!(
+                event.asset_configured
+                    && event.size_q != 0
+                    && event.price >= event.price_lo
+                    && event.price <= event.price_hi
+                    && event.fee_bps <= event.max_fee_bps
+                    && event.accounts_current
+                    && event.not_loss_stale_blocked
+            );
+            assert!(!event.no_adverse_lag);
+        }
+        Err(TradeRejectReasonV16::BarrierTouch) => {
+            assert!(
+                event.asset_configured
+                    && event.size_q != 0
+                    && event.price >= event.price_lo
+                    && event.price <= event.price_hi
+                    && event.fee_bps <= event.max_fee_bps
+                    && event.accounts_current
+                    && event.not_loss_stale_blocked
+                    && event.no_adverse_lag
+            );
+            assert!(!event.no_barrier_touch);
+        }
+        Err(TradeRejectReasonV16::MarginFail) => {
+            assert!(
+                event.asset_configured
+                    && event.size_q != 0
+                    && event.price >= event.price_lo
+                    && event.price <= event.price_hi
+                    && event.fee_bps <= event.max_fee_bps
+                    && event.accounts_current
+                    && event.not_loss_stale_blocked
+                    && event.no_adverse_lag
+                    && event.no_barrier_touch
+            );
+            assert!(!event.margin_ok);
+        }
+        Err(TradeRejectReasonV16::LockedLaneFail) => {
+            assert!(
+                event.asset_configured
+                    && event.size_q != 0
+                    && event.price >= event.price_lo
+                    && event.price <= event.price_hi
+                    && event.fee_bps <= event.max_fee_bps
+                    && event.accounts_current
+                    && event.not_loss_stale_blocked
+                    && event.no_adverse_lag
+                    && event.no_barrier_touch
+                    && event.margin_ok
+            );
+            assert!(!event.locked_lane_ok);
+        }
     }
 }
 
