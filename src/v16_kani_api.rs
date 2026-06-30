@@ -107,6 +107,22 @@ pub fn kani_loss_stale_trade_scope_allowed(
     )
 }
 
+pub fn kani_select_auto_crank_plan(
+    summary: ActionableSummaryV16,
+    b_stale_slot: usize,
+    liq_slot: usize,
+    refresh_asset: Option<usize>,
+    recovery_reason: PermissionlessRecoveryReasonV16,
+) -> AutoCrankPlanV16 {
+    V16Core::select_auto_crank_plan(
+        summary,
+        b_stale_slot,
+        liq_slot,
+        refresh_asset,
+        recovery_reason,
+    )
+}
+
 pub fn kani_prepare_asset_recovery_transition(
     asset: AssetStateV16,
     asset_set_epoch: u64,

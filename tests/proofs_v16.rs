@@ -13,9 +13,10 @@ use percolator::v16::{
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
-    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    kani_select_auto_crank_plan, kani_source_credit_state_realizable_support_for_face,
+    kani_target_effective_lag_adverse_delta, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
+    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
@@ -15054,6 +15055,149 @@ fn proof_v16_frame_crank_touches_only_clock_and_cert_state() {
     ea.b_stale_state = account_header.b_stale_state;
     ea.last_fee_slot = account_header.last_fee_slot;
     assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
+}
+
+// Auto-crank selector no-griefing boundary: over every combination of
+// classifier flags that the production builder may emit (`pending_close` is
+// unreachable in the auto-crank selector), NoAction is selected IFF there is no
+// actionable work. This is the broad permissionless safety theorem behind the
+// wrapper's "NoAction => do nothing" behavior: a clean/current account cannot be
+// routed into a mutating crank branch, while any real work class cannot be hidden
+// behind NoAction.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_selector_noaction_iff_no_actionable_work() {
+    use percolator::v16::auto_crank_plan_requires_caller_observation;
+
+    let stale: bool = kani::any();
+    let b_stale: bool = kani::any();
+    let expired_close: bool = kani::any();
+    let liquidatable: bool = kani::any();
+    let recovery_eligible: bool = kani::any();
+    let resolved_winner: bool = kani::any();
+    let b_stale_slot_raw: u8 = kani::any();
+    let liq_slot_raw: u8 = kani::any();
+    let refresh_asset_raw: u8 = kani::any();
+    let has_refresh_asset: bool = kani::any();
+    let use_loss_or_dust_reason: bool = kani::any();
+    kani::assume((b_stale_slot_raw as usize) < V16_MAX_PORTFOLIO_ASSETS_N);
+    kani::assume((liq_slot_raw as usize) < V16_MAX_PORTFOLIO_ASSETS_N);
+    kani::assume((refresh_asset_raw as usize) < V16_MAX_PORTFOLIO_ASSETS_N);
+
+    let summary = ActionableSummaryV16 {
+        stale,
+        b_stale,
+        pending_close: false,
+        expired_close,
+        liquidatable,
+        recovery_eligible,
+        resolved_winner,
+    };
+    let b_stale_slot = b_stale_slot_raw as usize;
+    let liq_slot = liq_slot_raw as usize;
+    let refresh_asset = if has_refresh_asset {
+        Some(refresh_asset_raw as usize)
+    } else {
+        None
+    };
+    let recovery_reason = if use_loss_or_dust_reason {
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
+    } else {
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
+    };
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        b_stale_slot,
+        liq_slot,
+        refresh_asset,
+        recovery_reason,
+    );
+
+    let recovery = expired_close || recovery_eligible;
+    kani::cover!(
+        !summary.is_actionable() && plan == AutoCrankPlanV16::NoAction,
+        "selector covers clean/current NoAction"
+    );
+    kani::cover!(
+        recovery
+            && plan
+                == AutoCrankPlanV16::DeclareRecovery {
+                    reason: recovery_reason,
+                },
+        "selector covers highest-priority recovery"
+    );
+    kani::cover!(
+        !recovery && resolved_winner && plan == AutoCrankPlanV16::CloseResolved,
+        "selector covers resolved close before lower-priority work"
+    );
+    kani::cover!(
+        !recovery
+            && !resolved_winner
+            && b_stale
+            && plan
+                == AutoCrankPlanV16::SettleBChunk {
+                    asset_index: b_stale_slot,
+                },
+        "selector covers b-stale settlement with engine-selected asset"
+    );
+    kani::cover!(
+        !recovery
+            && !resolved_winner
+            && !b_stale
+            && liquidatable
+            && plan
+                == AutoCrankPlanV16::Liquidate {
+                    asset_index: liq_slot
+                },
+        "selector covers liquidation with engine-selected asset"
+    );
+    kani::cover!(
+        !recovery
+            && !resolved_winner
+            && !b_stale
+            && !liquidatable
+            && stale
+            && plan
+                == AutoCrankPlanV16::RefreshAccount {
+                    asset_index: refresh_asset
+                },
+        "selector covers refresh after higher-priority work is absent"
+    );
+
+    assert_eq!(plan == AutoCrankPlanV16::NoAction, !summary.is_actionable());
+    assert_eq!(
+        auto_crank_plan_requires_caller_observation(&plan),
+        !recovery
+            && !resolved_winner
+            && !b_stale
+            && !liquidatable
+            && stale
+            && refresh_asset.is_none()
+    );
+
+    match plan {
+        AutoCrankPlanV16::NoAction => assert!(!summary.is_actionable()),
+        AutoCrankPlanV16::DeclareRecovery { reason } => {
+            assert!(recovery);
+            assert_eq!(reason, recovery_reason);
+        }
+        AutoCrankPlanV16::CloseResolved => {
+            assert!(!recovery);
+            assert!(resolved_winner);
+        }
+        AutoCrankPlanV16::SettleBChunk { asset_index } => {
+            assert!(!recovery && !resolved_winner && b_stale);
+            assert_eq!(asset_index, b_stale_slot);
+        }
+        AutoCrankPlanV16::Liquidate { asset_index } => {
+            assert!(!recovery && !resolved_winner && !b_stale && liquidatable);
+            assert_eq!(asset_index, liq_slot);
+        }
+        AutoCrankPlanV16::RefreshAccount { asset_index } => {
+            assert!(!recovery && !resolved_winner && !b_stale && !liquidatable && stale);
+            assert_eq!(asset_index, refresh_asset);
+        }
+    }
 }
 
 // ROADMAP Phase 1 (Pillar F soundness lemma U3): validate_shape's Ok-exit
