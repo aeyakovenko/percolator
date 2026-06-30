@@ -14911,6 +14911,63 @@ fn proof_v16_validator_sound_insurance_capacity_covers_budget_and_reservations()
     );
 }
 
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_global_bound_covers_source_claims() {
+    let claim_raw: u8 = kani::any();
+    let pnl_bound_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&claim_raw));
+    kani::assume(pnl_bound_raw <= 16);
+    let claim_atoms = claim_raw as u128;
+    let claim_num = claim_atoms * BOUND_SCALE;
+    let pnl_bound_atoms = pnl_bound_raw as u128;
+    let pnl_bound_num = pnl_bound_atoms * BOUND_SCALE;
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(claim_atoms);
+    header.pnl_pos_bound_tot = V16PodU128::new(pnl_bound_atoms);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(pnl_bound_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        status: BackingBucketStatusV16::Fresh,
+        market_id,
+        expiry_slot: header.current_slot.get() + 1,
+        fresh_unliened_backing_num: claim_num,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+
+    kani::cover!(
+        pnl_bound_raw < claim_raw && result == Err(V16Error::InvalidConfig),
+        "validator rejects source claims above the global positive-PnL bound numerator"
+    );
+    kani::cover!(
+        pnl_bound_raw >= claim_raw && claim_raw > 1 && result == Ok(()),
+        "validator accepts nontrivial backed source claims covered by the global bound"
+    );
+
+    if result == Ok(()) {
+        assert!(
+            market.header.pnl_pos_bound_tot_num.get()
+                >= market.header.source_claim_bound_total_num.get()
+        );
+    } else if pnl_bound_raw < claim_raw {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    }
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
