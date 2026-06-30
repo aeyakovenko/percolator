@@ -14759,6 +14759,125 @@ fn proof_v16_auto_crank_classifier_expired_close_selects_recovery_without_observ
     assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
 }
 
+// Permissionless terminal-progress priority seam: an expired outstanding close
+// residual must route to recovery even if the account also has a committed
+// b-stale leg and a current liquidation deficit. This proves the real
+// classifier/selector pair cannot keep sending an unadvanceable close account to
+// lower-priority per-leg work.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_classifier_expired_close_wins_over_b_stale_and_liquidation() {
+    let residual_raw: u16 = kani::any();
+    let deficit_raw: u16 = kani::any();
+    let capital_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    kani::assume(residual_raw > 0);
+    kani::assume(deficit_raw > 0);
+    kani::assume(capital_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    let residual = residual_raw as u128;
+    let deficit = deficit_raw as u128;
+    let capital = capital_raw as u128;
+    let insurance = insurance_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    header.vault = V16PodU128::new(capital + insurance);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(0);
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: true,
+        stale: false,
+    });
+    let mut active_bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut active_bitmap, 0).unwrap();
+    account_header.active_bitmap = active_bitmap.map(V16PodU64::new);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 0,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: deficit,
+        certified_worst_case_loss: deficit,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: active_bitmap,
+        valid: true,
+    });
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id: asset.market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: residual,
+            drift_reference_slot: 1,
+            max_close_slot: 9,
+            support_consumed: 0,
+            junior_face_burned: 0,
+            insurance_spent: 0,
+            b_loss_booked: 0,
+            explicit_loss_assigned: 0,
+            quantity_adl_applied_q: 0,
+            drift_consumed: 0,
+            residual_remaining: residual,
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+    let (b_stale_asset, active_asset) = kani_project_auto_crank_selected_assets(&account).unwrap();
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        b_stale_asset.unwrap_or(0),
+        active_asset.unwrap_or(0),
+        active_asset,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+
+    kani::cover!(
+        residual > 1 && deficit > 1 && capital > 0 && insurance > 0 && b_stale_asset == Some(0),
+        "auto-crank classifier covers expired close overlapping b-stale and liquidation"
+    );
+    assert!(!summary.stale);
+    assert!(summary.b_stale);
+    assert!(!summary.pending_close);
+    assert!(summary.expired_close);
+    assert!(summary.liquidatable);
+    assert!(!summary.recovery_eligible);
+    assert!(!summary.resolved_winner);
+    assert_eq!(
+        plan,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
+    assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
+}
+
 // Engine-selected asset theorem over the real zero-copy portfolio layout:
 // committed bitmap + leg POD fields determine the first active b-stale asset and
 // first active asset. This closes the caller-bypass seam at the selector
