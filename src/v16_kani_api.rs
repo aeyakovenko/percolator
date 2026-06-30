@@ -235,6 +235,14 @@ pub fn kani_kernel_settle_resolved_pnl_after_booking(
     V16Core::kernel_settle_resolved_pnl_after_booking(pnl, booked_loss, explicit_loss)
 }
 
+pub fn kani_kernel_bresidual_step(
+    residual_remaining: u128,
+    booked: Option<BResidualBookingOutcomeV16>,
+    resolved: bool,
+) -> BResidualStepV16 {
+    V16Core::kernel_bresidual_step(residual_remaining, booked, resolved)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,

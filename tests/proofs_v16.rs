@@ -10,9 +10,10 @@ use percolator::v16::{
     kani_backing_utilization_rate_e9_for_source_state, kani_close_progress_blocks_exposure_clear,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
-    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_cert_is_current,
-    kani_kernel_classify_position_delta, kani_kernel_clear_leg, kani_kernel_reduce_position_delta,
-    kani_kernel_resize_leg_same_side, kani_kernel_settle_resolved_pnl_after_booking,
+    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_bresidual_step,
+    kani_kernel_cert_is_current, kani_kernel_classify_position_delta, kani_kernel_clear_leg,
+    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
+    kani_kernel_settle_resolved_pnl_after_booking,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -21,19 +22,20 @@ use percolator::v16::{
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
     v16_domain_count_for_market_slots, v16_domain_pair_for_asset_index, ActionableSummaryV16,
     AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
-    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
-    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
-    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
-    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
-    PortfolioV16ViewMut, PositionRouteV16, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
-    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account,
-    ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
-    SourceCreditStateV16, SourceCreditStateV16Account, StockReconciliationProofV16,
-    TokenValueClassV16, TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount,
-    V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
+    BResidualBookingOutcomeV16, BResidualStepV16, BackingBucketStatusV16, BackingBucketV16,
+    BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
+    PositionRouteV16, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
+    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
+    SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
+    TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
+    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
 };
@@ -10022,6 +10024,79 @@ fn proof_v16_resolved_pnl_booking_cap_never_creates_positive_credit() {
     assert!(new_pnl >= pnl);
     assert_eq!(new_pnl.unsigned_abs(), loss - cleared);
     assert_eq!(new_pnl == 0, total_booked >= loss);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_bresidual_step_conserves_or_declares_recovery() {
+    let has_booked: bool = kani::any();
+    let resolved: bool = kani::any();
+    let booked_raw: u8 = kani::any();
+    let explicit_raw: u8 = kani::any();
+    let remaining_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    let delta_b_raw: u8 = kani::any();
+    kani::assume(booked_raw <= 32);
+    kani::assume(explicit_raw <= 32);
+    kani::assume(remaining_raw <= 32);
+    kani::assume(residual_raw <= 64);
+    kani::assume(delta_b_raw <= 32);
+
+    let booked_loss = booked_raw as u128;
+    let explicit_loss = explicit_raw as u128;
+    let remaining_after = remaining_raw as u128;
+    let booked_outcome = BResidualBookingOutcomeV16 {
+        booked_loss,
+        explicit_loss,
+        delta_b: delta_b_raw as u128,
+        remaining_after,
+    };
+    let residual_remaining = if has_booked {
+        booked_loss + explicit_loss + remaining_after
+    } else {
+        residual_raw as u128
+    };
+    let booked = if has_booked {
+        Some(booked_outcome)
+    } else {
+        None
+    };
+    let step = kani_kernel_bresidual_step(residual_remaining, booked, resolved);
+
+    kani::cover!(
+        has_booked && booked_loss > 0 && remaining_after > 0,
+        "bresidual step covers conserving booked live chunk"
+    );
+    kani::cover!(
+        !has_booked && resolved && residual_remaining > 0,
+        "bresidual step covers resolved explicit-loss terminal booking"
+    );
+    kani::cover!(
+        !has_booked && !resolved && residual_remaining > 0,
+        "bresidual step covers live unbookable residual recovery"
+    );
+    match step {
+        BResidualStepV16::Outcome(outcome) => {
+            assert!(has_booked || resolved);
+            assert_eq!(
+                outcome.booked_loss + outcome.explicit_loss + outcome.remaining_after,
+                residual_remaining
+            );
+            if has_booked {
+                assert_eq!(outcome, booked_outcome);
+            } else {
+                assert_eq!(outcome.booked_loss, 0);
+                assert_eq!(outcome.explicit_loss, residual_remaining);
+                assert_eq!(outcome.delta_b, 0);
+                assert_eq!(outcome.remaining_after, 0);
+            }
+        }
+        BResidualStepV16::DeclareRecovery => {
+            assert!(!has_booked);
+            assert!(!resolved);
+        }
+    }
 }
 
 #[kani::proof]
