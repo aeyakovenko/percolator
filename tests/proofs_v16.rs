@@ -13,10 +13,11 @@ use percolator::v16::{
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
     kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_bresidual_step,
     kani_kernel_cert_is_current, kani_kernel_classify_position_delta, kani_kernel_clear_leg,
-    kani_kernel_consume_insurance_layer, kani_kernel_reduce_position_delta,
-    kani_kernel_resize_leg_same_side, kani_kernel_resolved_close_progress,
-    kani_kernel_resolved_payout_step, kani_kernel_settle_principal,
-    kani_kernel_settle_resolved_pnl_after_booking, kani_kernel_social_loss_chunk_cap,
+    kani_kernel_consume_insurance_layer, kani_kernel_locked_margin_gate,
+    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
+    kani_kernel_resolved_close_progress, kani_kernel_resolved_payout_step,
+    kani_kernel_settle_principal, kani_kernel_settle_resolved_pnl_after_booking,
+    kani_kernel_social_loss_chunk_cap,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -4499,6 +4500,77 @@ fn proof_v16_locked_trade_margin_gate_cannot_use_positive_pnl_credit() {
     assert_eq!(locked_result.is_ok(), expected_locked_ok);
     if expected_certified_ok && !expected_locked_ok {
         assert_eq!(locked_result, Err(V16Error::LockActive));
+    }
+}
+
+fn locked_margin_reference_admits(
+    capital: u128,
+    pnl: i128,
+    fee_credits: i128,
+    certified_initial_req: u128,
+) -> bool {
+    let Some(capital_i) = i128::try_from(capital).ok() else {
+        return false;
+    };
+    if fee_credits == i128::MIN {
+        return false;
+    }
+    let Some(fee_debt) = i128::try_from(fee_credits.unsigned_abs()).ok() else {
+        return false;
+    };
+    let Some(equity_before_fee) = capital_i.checked_add(pnl.min(0)) else {
+        return false;
+    };
+    let Some(equity) = equity_before_fee.checked_sub(fee_debt) else {
+        return false;
+    };
+    equity >= 0 && (equity as u128) >= certified_initial_req
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_locked_margin_gate_exactly_ignores_positive_pnl_credit() {
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let fee_credits: i128 = kani::any();
+    let certified_initial_req: u128 = kani::any();
+    kani::assume(pnl > i128::MIN);
+    kani::assume(fee_credits > i128::MIN);
+
+    let result = kani_kernel_locked_margin_gate(capital, pnl, fee_credits, certified_initial_req);
+    let expected = locked_margin_reference_admits(capital, pnl, fee_credits, certified_initial_req);
+
+    kani::cover!(
+        pnl > 0
+            && fee_credits == 0
+            && capital < certified_initial_req
+            && (pnl as u128) >= certified_initial_req - capital
+            && result.is_err(),
+        "locked margin gate rejects IM satisfied only by positive PnL credit"
+    );
+    kani::cover!(
+        pnl > 0 && fee_credits == 0 && capital >= certified_initial_req && result.is_ok(),
+        "locked margin gate accepts positive-PnL account only when principal covers IM"
+    );
+    kani::cover!(
+        pnl < 0 && result.is_ok(),
+        "locked margin gate accepts account after negative PnL haircut when still solvent"
+    );
+    kani::cover!(
+        fee_credits < 0
+            && capital <= i128::MAX as u128
+            && capital > certified_initial_req
+            && result.is_err(),
+        "locked margin gate rejects otherwise solvent account when fee debt exhausts IM"
+    );
+
+    assert_eq!(result.is_ok(), expected);
+    if pnl > 0 {
+        assert_eq!(
+            result,
+            kani_kernel_locked_margin_gate(capital, 0, fee_credits, certified_initial_req)
+        );
     }
 }
 

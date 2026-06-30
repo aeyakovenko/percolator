@@ -235,6 +235,15 @@ pub fn kani_kernel_cert_is_current(
     )
 }
 
+pub fn kani_kernel_locked_margin_gate(
+    capital: u128,
+    pnl: i128,
+    fee_credits: i128,
+    certified_initial_req: u128,
+) -> V16Result<()> {
+    V16Core::kernel_locked_margin_gate(capital, pnl, fee_credits, certified_initial_req)
+}
+
 pub fn kani_kernel_settle_resolved_pnl_after_booking(
     pnl: i128,
     booked_loss: u128,
