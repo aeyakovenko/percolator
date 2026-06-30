@@ -16246,6 +16246,10 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     use percolator::v16::auto_crank_plan_requires_caller_observation as needs_obs;
     use percolator::v16::AutoCrankPlanV16;
     let i: usize = kani::any();
+    kani::cover!(
+        i > 1,
+        "auto-crank observation theorem covers nontrivial symbolic asset index"
+    );
     // Active-asset refresh can use the committed asset state; only the fallback
     // with no selected active asset requires a caller observation.
     assert!(!needs_obs(&AutoCrankPlanV16::RefreshAccount {
@@ -16372,6 +16376,10 @@ fn proof_v16_backing_utilization_zero_fee_carries_accrual_forward() {
         .kani_collect_account_backing_utilization_fee_for_domain_not_atomic(&mut account, 0)
         .unwrap();
 
+    kani::cover!(
+        capital > 1 && earnings_before > 0 && charged == 0,
+        "zero-fee lien-rent proof covers solvent account, provider earnings, and floored rent"
+    );
     // The rent floored to zero this interval...
     assert_eq!(charged, 0, "sub-atom rent must floor to zero this interval");
     // ...so the cursor MUST NOT advance (carry the accrual forward; no free lien).
