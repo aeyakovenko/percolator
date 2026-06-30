@@ -9179,72 +9179,150 @@ fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v16_resolved_two_active_legs_are_unattributed_for_bankruptcy() {
+fn proof_v16_resolved_bankruptcy_attribution_classifier_is_exact() {
+    let ledger_active: bool = kani::any();
+    let ledger_finalized: bool = kani::any();
+    let ledger_canceled: bool = kani::any();
+    let ledger_residual_nonzero: bool = kani::any();
+    let ledger_asset_is_one: bool = kani::any();
+    let ledger_domain_long: bool = kani::any();
+    let leg0_active: bool = kani::any();
+    let leg0_stale: bool = kani::any();
+    let leg0_b_stale: bool = kani::any();
+    let leg1_active: bool = kani::any();
+    let leg1_stale: bool = kani::any();
+    let leg1_b_stale: bool = kani::any();
     let (mut header, mut markets, mut account_header) = two_market_view_fixture();
     header.mode = 1; // Resolved
     header.current_slot = V16PodU64::new(2);
     header.resolved_slot = V16PodU64::new(2);
     header.slot_last = V16PodU64::new(2);
 
-    let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
-    active_bitmap_set(&mut bitmap, 0).unwrap();
-    active_bitmap_set(&mut bitmap, 1).unwrap();
-    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: ledger_active,
+            finalized: ledger_finalized,
+            canceled: ledger_canceled,
+            close_id: 1,
+            asset_index: if ledger_asset_is_one { 1 } else { 0 },
+            market_id: if ledger_asset_is_one {
+                markets[1].engine.asset.market_id.get()
+            } else {
+                markets[0].engine.asset.market_id.get()
+            },
+            domain_side: if ledger_domain_long {
+                SideV16::Long
+            } else {
+                SideV16::Short
+            },
+            gross_loss_at_close_start: u128::from(ledger_residual_nonzero),
+            residual_remaining: u128::from(ledger_residual_nonzero),
+            ..CloseProgressLedgerV16::EMPTY
+        });
 
     let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
     asset0.oi_eff_long_q = POS_SCALE;
     asset0.stored_pos_count_long = 1;
     asset0.loss_weight_sum_long = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
-    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
-        active: true,
-        asset_index: 0,
-        market_id: asset0.market_id,
-        side: SideV16::Long,
-        basis_pos_q: POS_SCALE as i128,
-        a_basis: ADL_ONE,
-        k_snap: asset0.k_long,
-        f_snap: asset0.f_long_num,
-        epoch_snap: asset0.epoch_long,
-        loss_weight: POS_SCALE,
-        b_snap: asset0.b_long_num,
-        b_rem: 0,
-        b_epoch_snap: asset0.epoch_long,
-        b_stale: false,
-        stale: false,
-    });
+    let leg0 = if leg0_active {
+        PortfolioLegV16 {
+            active: true,
+            asset_index: 0,
+            market_id: asset0.market_id,
+            side: SideV16::Long,
+            basis_pos_q: POS_SCALE as i128,
+            a_basis: ADL_ONE,
+            k_snap: asset0.k_long,
+            f_snap: asset0.f_long_num,
+            epoch_snap: asset0.epoch_long,
+            loss_weight: POS_SCALE,
+            b_snap: asset0.b_long_num,
+            b_rem: 0,
+            b_epoch_snap: asset0.epoch_long,
+            stale: leg0_stale,
+            b_stale: leg0_b_stale,
+        }
+    } else {
+        PortfolioLegV16::EMPTY
+    };
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg0);
 
     let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
     asset1.oi_eff_short_q = POS_SCALE;
     asset1.stored_pos_count_short = 1;
     asset1.loss_weight_sum_short = POS_SCALE;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
-    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
-        active: true,
-        asset_index: 1,
-        market_id: asset1.market_id,
-        side: SideV16::Short,
-        basis_pos_q: -(POS_SCALE as i128),
-        a_basis: ADL_ONE,
-        k_snap: asset1.k_short,
-        f_snap: asset1.f_short_num,
-        epoch_snap: asset1.epoch_short,
-        loss_weight: POS_SCALE,
-        b_snap: asset1.b_short_num,
-        b_rem: 0,
-        b_epoch_snap: asset1.epoch_short,
-        b_stale: false,
-        stale: false,
-    });
+    let leg1 = if leg1_active {
+        PortfolioLegV16 {
+            active: true,
+            asset_index: 1,
+            market_id: asset1.market_id,
+            side: SideV16::Short,
+            basis_pos_q: -(POS_SCALE as i128),
+            a_basis: ADL_ONE,
+            k_snap: asset1.k_short,
+            f_snap: asset1.f_short_num,
+            epoch_snap: asset1.epoch_short,
+            loss_weight: POS_SCALE,
+            b_snap: asset1.b_short_num,
+            b_rem: 0,
+            b_epoch_snap: asset1.epoch_short,
+            b_stale: leg1_b_stale,
+            stale: leg1_stale,
+        }
+    } else {
+        PortfolioLegV16::EMPTY
+    };
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&leg1);
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16ViewMut::new(&mut account_header);
     let attribution = market
         .kani_resolved_bankruptcy_attribution(&account.as_view())
         .unwrap();
+    let ledger_pending =
+        ledger_active && !ledger_finalized && !ledger_canceled && ledger_residual_nonzero;
+    let ledger_expected_side = if ledger_domain_long {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let leg0_candidate = leg0_active && !leg0_stale && !leg0_b_stale;
+    let leg1_candidate = leg1_active && !leg1_stale && !leg1_b_stale;
+    let expected = if ledger_pending {
+        Some((
+            if ledger_asset_is_one { 1 } else { 0 },
+            ledger_expected_side,
+        ))
+    } else if leg0_candidate && !leg1_candidate {
+        Some((0, SideV16::Long))
+    } else if leg1_candidate && !leg0_candidate {
+        Some((1, SideV16::Short))
+    } else {
+        None
+    };
 
-    kani::cover!(true, "resolved bankruptcy attribution sees two active legs");
-    assert_eq!(attribution, None);
+    kani::cover!(
+        ledger_pending && attribution.is_some(),
+        "resolved attribution prioritizes pending close ledger"
+    );
+    kani::cover!(
+        !ledger_pending
+            && leg0_candidate
+            && !leg1_candidate
+            && attribution == Some((0, SideV16::Long)),
+        "resolved attribution returns the single live leg candidate"
+    );
+    kani::cover!(
+        !ledger_pending && !leg0_candidate && !leg1_candidate && attribution.is_none(),
+        "resolved attribution leaves no-candidate bad debt unattributed"
+    );
+    kani::cover!(
+        !ledger_pending && leg0_candidate && leg1_candidate && attribution.is_none(),
+        "resolved attribution leaves multi-leg bad debt unattributed"
+    );
+    assert_eq!(attribution, expected);
 }
 
 #[kani::proof]
