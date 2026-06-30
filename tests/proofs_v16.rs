@@ -10,6 +10,7 @@ use percolator::v16::{
     kani_backing_utilization_rate_e9_for_source_state, kani_close_progress_blocks_exposure_clear,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
+    kani_kernel_advance_leg_b_snap,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -9566,6 +9567,91 @@ fn proof_v16_residual_booking_outcome_advances_close_ledger_exactly() {
     assert_eq!(asset_after.b_long_num, 0);
     assert_eq!(asset_after.social_loss_remainder_short_num, 0);
     assert_eq!(market.header.bankruptcy_hlock_active, 1);
+}
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_b_settlement_chunk_debits_loss_and_advances_rank_exactly() {
+    let target_delta_raw: u8 = kani::any();
+    let public_limit_raw: u8 = kani::any();
+    let endpoint_limit_raw: u8 = kani::any();
+    let old_pnl_raw: i8 = kani::any();
+    kani::assume(target_delta_raw > 0 && target_delta_raw <= 32);
+    kani::assume(public_limit_raw > 0 && public_limit_raw <= 32);
+    kani::assume(endpoint_limit_raw > 0 && endpoint_limit_raw <= 32);
+    kani::assume((-32..=32).contains(&old_pnl_raw));
+
+    let target_delta = target_delta_raw as u128;
+    let public_limit = public_limit_raw as u128;
+    let endpoint_limit = endpoint_limit_raw as u128;
+    let old_pnl = old_pnl_raw as i128;
+    let expected_delta = target_delta.min(public_limit).min(endpoint_limit);
+
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(public_limit);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: SOCIAL_LOSS_DEN,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: true,
+        stale: false,
+    };
+    let target = leg.b_snap + target_delta;
+
+    let chunk = market
+        .kani_account_b_settlement_chunk_from_leg(leg, target, endpoint_limit)
+        .unwrap();
+    let advanced = kani_kernel_advance_leg_b_snap(
+        leg,
+        chunk.delta_b,
+        chunk.new_remainder,
+        chunk.remaining_after,
+    )
+    .unwrap();
+    let new_pnl = old_pnl - chunk.loss as i128;
+
+    kani::cover!(
+        expected_delta < target_delta,
+        "b settlement composition covers partial rank progress"
+    );
+    kani::cover!(
+        expected_delta == target_delta,
+        "b settlement composition covers final rank progress"
+    );
+    kani::cover!(
+        old_pnl > 0 && expected_delta > 1,
+        "b settlement composition covers positive pnl debited by b loss"
+    );
+    assert_eq!(chunk.delta_b, expected_delta);
+    assert_eq!(chunk.loss, expected_delta);
+    assert_eq!(chunk.new_remainder, 0);
+    assert_eq!(chunk.remaining_after, target_delta - expected_delta);
+    assert_eq!(advanced.b_snap, leg.b_snap + expected_delta);
+    assert_eq!(advanced.b_snap - leg.b_snap, expected_delta);
+    assert_eq!(advanced.b_rem, 0);
+    assert_eq!(advanced.b_stale, expected_delta != target_delta);
+    assert_eq!(advanced.active, leg.active);
+    assert_eq!(advanced.asset_index, leg.asset_index);
+    assert_eq!(advanced.market_id, leg.market_id);
+    assert_eq!(advanced.side, leg.side);
+    assert_eq!(advanced.basis_pos_q, leg.basis_pos_q);
+    assert_eq!(advanced.loss_weight, leg.loss_weight);
+    assert_eq!(new_pnl, old_pnl - expected_delta as i128);
+    assert!(advanced.b_snap > leg.b_snap);
+    assert!(advanced.b_snap <= target);
 }
 
 #[kani::proof]

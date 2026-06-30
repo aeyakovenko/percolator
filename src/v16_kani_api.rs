@@ -155,6 +155,15 @@ pub fn kani_kernel_advance_close_ledger(
     )
 }
 
+pub fn kani_kernel_advance_leg_b_snap(
+    leg: PortfolioLegV16,
+    delta_b: u128,
+    new_remainder: u128,
+    remaining_after: u128,
+) -> V16Result<PortfolioLegV16> {
+    V16Core::kernel_advance_leg_b_snap(leg, delta_b, new_remainder, remaining_after)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,
@@ -812,6 +821,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         residual_remaining: u128,
     ) -> V16Result<BResidualBookingOutcomeV16> {
         self.book_bankruptcy_residual_chunk_internal(asset_index, bankrupt_side, residual_remaining)
+    }
+
+    pub fn kani_account_b_settlement_chunk_from_leg(
+        &self,
+        leg: PortfolioLegV16,
+        target: u128,
+        endpoint_delta_budget: u128,
+    ) -> V16Result<AccountBSettlementChunkV16> {
+        self.account_b_settlement_chunk_from_leg(leg, target, endpoint_delta_budget)
     }
 
     pub fn kani_apply_bankruptcy_residual_chunk_to_loss_side(
