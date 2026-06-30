@@ -14434,6 +14434,52 @@ fn proof_v16_frame_retire_empty_asset_touches_only_declared_state() {
     ));
 }
 
+// canonicalize-retired frame: header is frozen, and the selected retired slot is
+// rewritten to the canonical retired representation from the old asset identity.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_canonicalize_retired_slot_touches_only_selected_slot() {
+    let credit_epoch_raw: u8 = kani::any();
+    let slot_delta_raw: u8 = kani::any();
+    kani::assume(credit_epoch_raw >= 1 && credit_epoch_raw <= 8);
+    kani::assume(slot_delta_raw >= 1 && slot_delta_raw <= 8);
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let retired_slot = header.current_slot.get() + slot_delta_raw as u64;
+    let mut old_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    old_asset.lifecycle = AssetLifecycleV16::Retired;
+    old_asset.retired_slot = retired_slot;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&old_asset);
+    let inert_empty_source = SourceCreditStateV16 {
+        credit_epoch: credit_epoch_raw as u64,
+        credit_rate_num: 0,
+        ..SourceCreditStateV16::EMPTY
+    };
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&inert_empty_source);
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&inert_empty_source);
+    let h0 = header;
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .canonicalize_retired_empty_asset_slot_not_atomic(0)
+            .unwrap();
+    }
+
+    kani::cover!(
+        credit_epoch_raw > 1 && slot_delta_raw > 1,
+        "canonicalize frame covers inert noncanonical metadata"
+    );
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    let expected_slot = MarketGroupV16ViewMut::<u64>::kani_canonical_retired_asset_slot(old_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slot,
+        &markets[0].engine
+    ));
+}
+
 // budget-credit frame: exactly {insurance_domain_budget_remaining_total} on
 // the header and {insurance_domain_budget_long} on the slot — pure capacity
 // relabel, every value field frozen.
