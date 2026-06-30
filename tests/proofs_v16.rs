@@ -1297,6 +1297,10 @@ fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral(
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
+    let next_market_id_before = header.next_market_id.get();
+    let activation_count_before = header.asset_activation_count.get();
+    let asset_set_epoch_before = header.asset_set_epoch.get();
+    let risk_epoch_before = header.risk_epoch.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market
@@ -1315,6 +1319,24 @@ fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral(
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(
+        market.header.next_market_id.get(),
+        next_market_id_before + 1
+    );
+    assert_eq!(
+        market.header.asset_activation_count.get(),
+        activation_count_before + 1
+    );
+    assert_eq!(market.header.current_slot.get(), activation_slot);
+    assert_eq!(
+        market.header.last_asset_activation_slot.get(),
+        activation_slot
+    );
+    assert_eq!(
+        market.header.asset_set_epoch.get(),
+        asset_set_epoch_before + 1
+    );
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
     assert_eq!(slot.insurance_domain_budget_long.get(), 0);
     assert_eq!(slot.insurance_domain_budget_short.get(), 0);
     assert_eq!(slot.insurance_domain_spent_long.get(), 0);
