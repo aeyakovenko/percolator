@@ -5196,6 +5196,71 @@ fn proof_v16_fee_core_moves_current_capital_to_insurance_only() {
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_set_account_pnl_negative_count_crosses_zero_exactly() {
+    let old_raw: i8 = kani::any();
+    let new_raw: i8 = kani::any();
+    kani::assume((-8..=0).contains(&old_raw));
+    kani::assume((-8..=0).contains(&new_raw));
+    let old_negative = old_raw < 0;
+    let new_negative = new_raw < 0;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.negative_pnl_account_count = V16PodU64::new(old_negative as u64);
+    account_header.pnl = V16PodI128::new(old_raw as i128);
+    account_header.health_cert.valid = 1;
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let pnl_pos_tot_before = header.pnl_pos_tot;
+    let pnl_bound_before = header.pnl_pos_bound_tot;
+    let pnl_bound_num_before = header.pnl_pos_bound_tot_num;
+    let matured_before = header.pnl_matured_pos_tot;
+    let source_claim_total_before = header.source_claim_bound_total_num;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.kani_set_account_pnl(&mut account, new_raw as i128);
+
+    kani::cover!(
+        !old_negative && new_negative,
+        "pnl setter covers zero-to-negative count increment"
+    );
+    kani::cover!(
+        old_negative && !new_negative,
+        "pnl setter covers negative-to-zero count decrement"
+    );
+    kani::cover!(
+        old_negative && new_negative && old_raw != new_raw,
+        "pnl setter covers negative-to-negative count stability"
+    );
+    kani::cover!(
+        !old_negative && !new_negative,
+        "pnl setter covers zero-to-zero no-op count stability"
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(account.header.pnl.get(), new_raw as i128);
+    assert_eq!(account.header.health_cert.valid, 0);
+    assert_eq!(
+        market.header.negative_pnl_account_count.get(),
+        new_negative as u64
+    );
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.header.pnl_pos_tot, pnl_pos_tot_before);
+    assert_eq!(market.header.pnl_pos_bound_tot, pnl_bound_before);
+    assert_eq!(market.header.pnl_pos_bound_tot_num, pnl_bound_num_before);
+    assert_eq!(market.header.pnl_matured_pos_tot, matured_before);
+    assert_eq!(
+        market.header.source_claim_bound_total_num,
+        source_claim_total_before
+    );
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_negative_pnl_settlement_consumes_principal_before_residual() {
