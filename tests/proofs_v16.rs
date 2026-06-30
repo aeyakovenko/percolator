@@ -14,6 +14,7 @@ use percolator::v16::{
     kani_kernel_cert_is_current, kani_kernel_classify_position_delta, kani_kernel_clear_leg,
     kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
     kani_kernel_resolved_payout_step, kani_kernel_settle_resolved_pnl_after_booking,
+    kani_kernel_social_loss_chunk_cap,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -10130,6 +10131,36 @@ fn proof_v16_resolved_payout_step_is_claim_and_vault_capped_and_conserving() {
     assert!(payout <= vault);
     assert_eq!(new_vault, vault - payout);
     assert_eq!(new_vault + payout, vault);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_social_loss_chunk_cap_is_residual_and_public_cap_limited() {
+    let residual_raw: u16 = kani::any();
+    let cap_raw: u16 = kani::any();
+    kani::assume(residual_raw <= 4096);
+    kani::assume(cap_raw <= 4096);
+
+    let residual = residual_raw as u128;
+    let public_cap = cap_raw as u128;
+    let chunk = kani_kernel_social_loss_chunk_cap(residual, public_cap);
+
+    kani::cover!(
+        residual > 0 && residual < public_cap,
+        "social-loss chunk cap covers residual-limited chunk"
+    );
+    kani::cover!(
+        public_cap > 0 && public_cap < residual,
+        "social-loss chunk cap covers public-cap-limited chunk"
+    );
+    kani::cover!(
+        residual == 0 || public_cap == 0,
+        "social-loss chunk cap covers zero boundary"
+    );
+    assert_eq!(chunk, residual.min(public_cap));
+    assert!(chunk <= residual);
+    assert!(chunk <= public_cap);
 }
 
 #[kani::proof]

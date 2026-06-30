@@ -247,6 +247,10 @@ pub fn kani_kernel_resolved_payout_step(claimable: u128, vault: u128) -> (u128, 
     V16Core::kernel_resolved_payout_step(claimable, vault)
 }
 
+pub fn kani_kernel_social_loss_chunk_cap(residual_remaining: u128, public_chunk_cap: u128) -> u128 {
+    V16Core::kernel_social_loss_chunk_cap(residual_remaining, public_chunk_cap)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,
