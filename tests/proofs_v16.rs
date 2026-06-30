@@ -9036,6 +9036,71 @@ fn proof_v16_residual_reconciles_with_senior_stock() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_stock_reconciliation_validator_is_exact_sum() {
+    let senior_capital_total: u128 = kani::any();
+    let insurance_capital: u128 = kani::any();
+    let backing_provider_earnings: u128 = kani::any();
+    let counterparty_backing_principal: u128 = kani::any();
+    let settlement_rounding_residue_total: u128 = kani::any();
+    let unallocated_protocol_surplus: u128 = kani::any();
+    let exact_vault: bool = kani::any();
+    let token_vault_seed: u128 = kani::any();
+
+    let accounted = senior_capital_total
+        .checked_add(insurance_capital)
+        .and_then(|v| v.checked_add(backing_provider_earnings))
+        .and_then(|v| v.checked_add(counterparty_backing_principal))
+        .and_then(|v| v.checked_add(settlement_rounding_residue_total))
+        .and_then(|v| v.checked_add(unallocated_protocol_surplus));
+    let token_vault = match (accounted, exact_vault) {
+        (Some(sum), true) => sum,
+        (Some(sum), false) => sum.wrapping_add(1),
+        (None, _) => token_vault_seed,
+    };
+    let proof = StockReconciliationProofV16 {
+        token_vault,
+        senior_capital_total,
+        insurance_capital,
+        backing_provider_earnings,
+        counterparty_backing_principal,
+        settlement_rounding_residue_total,
+        unallocated_protocol_surplus,
+    };
+    let result = proof.validate();
+
+    kani::cover!(
+        accounted.is_some()
+            && exact_vault
+            && senior_capital_total > 0
+            && insurance_capital > 0
+            && counterparty_backing_principal > 0
+            && unallocated_protocol_surplus > 0,
+        "stock reconciliation accepts a nontrivial exact multi-stock state"
+    );
+    kani::cover!(
+        matches!(accounted, Some(sum) if !exact_vault && token_vault != sum),
+        "stock reconciliation rejects a vault/accounted-stock mismatch"
+    );
+    kani::cover!(
+        accounted.is_none(),
+        "stock reconciliation rejects accounted-stock arithmetic overflow"
+    );
+
+    match accounted {
+        Some(sum) => {
+            if token_vault == sum {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(result, Err(V16Error::InvalidConfig));
+            }
+        }
+        None => assert_eq!(result, Err(V16Error::ArithmeticOverflow)),
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_live_positive_kf_delta_without_source_rejects() {
