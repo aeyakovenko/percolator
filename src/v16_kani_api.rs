@@ -626,6 +626,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_leg_is_dead_for_forfeit(
+        &self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<bool> {
+        self.leg_is_dead_for_forfeit(asset_index, side)
+    }
+
     pub fn kani_credit_account_from_insurance_delta(
         insurance: u128,
         budget_remaining: u128,

@@ -9183,6 +9183,83 @@ fn proof_v16_pending_close_residual_is_exact_exposure_clear_blocker() {
     }
 }
 
+// Forfeit recovery is an exposure-exit path, so the admission classifier must
+// be exact: no user can forfeit a live/normal leg, and every admin/recovery
+// shutdown source that makes a side dead admits progress.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_forfeit_dead_leg_classifier_is_exact() {
+    let mode_raw: u8 = kani::any();
+    let lifecycle_raw: u8 = kani::any();
+    let side_mode_raw: u8 = kani::any();
+    let long_side: bool = kani::any();
+    kani::assume(mode_raw <= 2);
+    kani::assume(lifecycle_raw <= 5);
+    kani::assume(side_mode_raw <= 2);
+
+    let lifecycle = match lifecycle_raw {
+        0 => AssetLifecycleV16::Disabled,
+        1 => AssetLifecycleV16::PendingActivation,
+        2 => AssetLifecycleV16::Active,
+        3 => AssetLifecycleV16::DrainOnly,
+        4 => AssetLifecycleV16::Retired,
+        _ => AssetLifecycleV16::Recovery,
+    };
+    let selected_side_mode = match side_mode_raw {
+        0 => SideModeV16::Normal,
+        1 => SideModeV16::DrainOnly,
+        _ => SideModeV16::ResetPending,
+    };
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.mode = mode_raw;
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = lifecycle;
+    if long_side {
+        asset.mode_long = selected_side_mode;
+        asset.mode_short = SideModeV16::Normal;
+    } else {
+        asset.mode_long = SideModeV16::Normal;
+        asset.mode_short = selected_side_mode;
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let dead = market.kani_leg_is_dead_for_forfeit(0, side).unwrap();
+    let expected = mode_raw == 2
+        || lifecycle == AssetLifecycleV16::Recovery
+        || selected_side_mode == SideModeV16::DrainOnly
+        || selected_side_mode == SideModeV16::ResetPending;
+
+    kani::cover!(
+        mode_raw == 2 && selected_side_mode == SideModeV16::Normal,
+        "forfeit classifier covers global recovery"
+    );
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::Recovery && mode_raw != 2,
+        "forfeit classifier covers asset recovery"
+    );
+    kani::cover!(
+        selected_side_mode == SideModeV16::DrainOnly && mode_raw != 2,
+        "forfeit classifier covers drain-only side"
+    );
+    kani::cover!(
+        selected_side_mode == SideModeV16::ResetPending && mode_raw != 2,
+        "forfeit classifier covers reset-pending side"
+    );
+    kani::cover!(
+        !expected && lifecycle == AssetLifecycleV16::Active,
+        "forfeit classifier covers live normal rejection"
+    );
+    assert_eq!(dead, expected);
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
