@@ -14448,6 +14448,143 @@ fn proof_v16_auto_crank_classifier_resolved_winner_selects_close_without_snapsho
     assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
 }
 
+// Permissionless anti-LOF resolved-payout seam: positive PnL in Resolved mode
+// must NOT route to CloseResolved while any payout blocker remains. This drives
+// the production classifier with deliberately live-looking state (b-stale leg,
+// stale/current-deficit cert, expired close ledger) to prove mode gating plus
+// the blocker gate: winners cannot be paid before blockers are cleared.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_classifier_resolved_winner_blocked_by_any_payout_blocker() {
+    let pnl_raw: u16 = kani::any();
+    let vault_raw: u16 = kani::any();
+    let blocker_kind: u8 = kani::any();
+    let blocker_raw: u16 = kani::any();
+    kani::assume(pnl_raw > 0);
+    kani::assume(vault_raw <= 1024);
+    kani::assume(blocker_kind <= 3);
+    kani::assume(blocker_raw > 0);
+    let pnl = pnl_raw as i128;
+    let vault = vault_raw as u128;
+    let blocker = blocker_raw as u64;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1; // Resolved
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    header.resolved_slot = V16PodU64::new(1);
+    header.vault = V16PodU128::new(vault);
+    header.c_tot = V16PodU128::new(0);
+    header.insurance = V16PodU128::new(0);
+    header.b_stale_account_count = V16PodU64::new(0);
+    header.stale_certificate_count = V16PodU64::new(0);
+    header.negative_pnl_account_count = V16PodU64::new(0);
+    header.resolved_payout_blocker_count = V16PodU64::new(0);
+    match blocker_kind {
+        0 => header.b_stale_account_count = V16PodU64::new(blocker),
+        1 => header.stale_certificate_count = V16PodU64::new(blocker),
+        2 => header.negative_pnl_account_count = V16PodU64::new(blocker),
+        _ => header.resolved_payout_blocker_count = V16PodU64::new(blocker),
+    }
+    account_header.pnl = V16PodI128::new(pnl);
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: true,
+        stale: false,
+    });
+    let mut active_bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut active_bitmap, 0).unwrap();
+    account_header.active_bitmap = active_bitmap.map(V16PodU64::new);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 0,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 1,
+        certified_worst_case_loss: 1,
+        cert_oracle_epoch: header.oracle_epoch.get() + 1,
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: active_bitmap,
+        valid: true,
+    });
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id: asset.market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: 1,
+            drift_reference_slot: 1,
+            max_close_slot: 9,
+            support_consumed: 0,
+            junior_face_burned: 0,
+            insurance_spent: 0,
+            b_loss_booked: 0,
+            explicit_loss_assigned: 0,
+            quantity_adl_applied_q: 0,
+            drift_consumed: 0,
+            residual_remaining: 1,
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+    let (b_stale_asset, active_asset) = kani_project_auto_crank_selected_assets(&account).unwrap();
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        b_stale_asset.unwrap_or(0),
+        active_asset.unwrap_or(0),
+        active_asset,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+
+    kani::cover!(
+        pnl > 1 && vault > 0 && blocker_kind == 0 && blocker > 1,
+        "resolved positive-pnl winner blocked by b-stale account count"
+    );
+    kani::cover!(
+        pnl > 1 && vault > 0 && blocker_kind == 1 && blocker > 1,
+        "resolved positive-pnl winner blocked by stale certificate count"
+    );
+    kani::cover!(
+        pnl > 1 && vault > 0 && blocker_kind == 2 && blocker > 1,
+        "resolved positive-pnl winner blocked by negative pnl account count"
+    );
+    kani::cover!(
+        pnl > 1 && vault > 0 && blocker_kind == 3 && blocker > 1,
+        "resolved positive-pnl winner blocked by resolved payout blocker count"
+    );
+    assert!(!summary.stale);
+    assert!(!summary.b_stale);
+    assert!(!summary.pending_close);
+    assert!(!summary.expired_close);
+    assert!(!summary.liquidatable);
+    assert!(!summary.recovery_eligible);
+    assert!(!summary.resolved_winner);
+    assert!(!summary.is_actionable());
+    assert_eq!(plan, AutoCrankPlanV16::NoAction);
+    assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
+}
+
 // Permissionless no-DoS b-settlement seam: a current Live account with an active
 // b-stale leg must be routed to SettleBChunk with the engine-selected asset.
 // This prevents a keeper from requiring a fresh oracle refresh before the
