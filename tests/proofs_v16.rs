@@ -43,6 +43,7 @@ use percolator::v16::{
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
+    V16_TOKEN_VALUE_CLASS_COUNT,
 };
 use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
@@ -9033,6 +9034,78 @@ fn proof_v16_residual_reconciles_with_senior_stock() {
         unallocated_protocol_surplus: residual,
     };
     assert_eq!(recon.validate(), Ok(()));
+}
+
+fn checked_token_value_class_sum(values: &[u128; V16_TOKEN_VALUE_CLASS_COUNT]) -> Option<u128> {
+    let mut total = 0u128;
+    let mut i = 0usize;
+    while i < V16_TOKEN_VALUE_CLASS_COUNT {
+        total = total.checked_add(values[i])?;
+        i += 1;
+    }
+    Some(total)
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_token_value_flow_validator_is_exact_conservation_gate() {
+    let debits: [u128; V16_TOKEN_VALUE_CLASS_COUNT] = kani::any();
+    let credits: [u128; V16_TOKEN_VALUE_CLASS_COUNT] = kani::any();
+    let external_quote_in: u128 = kani::any();
+    let external_quote_out: u128 = kani::any();
+    let vault_before: u128 = kani::any();
+    let vault_after: u128 = kani::any();
+    let proof = TokenValueFlowProofV16 {
+        debits,
+        credits,
+        external_quote_in,
+        external_quote_out,
+        vault_before,
+        vault_after,
+    };
+
+    let debit_sum = checked_token_value_class_sum(&debits);
+    let credit_sum = checked_token_value_class_sum(&credits);
+    let balanced_classes = matches!((debit_sum, credit_sum), (Some(d), Some(c)) if d == c);
+    let vault_delta_matches = if vault_after >= vault_before {
+        let delta = vault_after - vault_before;
+        external_quote_in >= external_quote_out && external_quote_in - external_quote_out == delta
+    } else {
+        let delta = vault_before - vault_after;
+        external_quote_out >= external_quote_in && external_quote_out - external_quote_in == delta
+    };
+    let result = proof.validate();
+
+    kani::cover!(
+        balanced_classes
+            && vault_delta_matches
+            && external_quote_in > external_quote_out
+            && vault_after > vault_before,
+        "token flow accepts nontrivial external deposit vault increase"
+    );
+    kani::cover!(
+        debit_sum.is_some() && credit_sum.is_some() && !balanced_classes && vault_delta_matches,
+        "token flow rejects class debit/credit mismatch"
+    );
+    kani::cover!(
+        balanced_classes && !vault_delta_matches,
+        "token flow rejects vault delta mismatch despite balanced classes"
+    );
+    kani::cover!(
+        debit_sum.is_none() || credit_sum.is_none(),
+        "token flow rejects checked-sum arithmetic overflow"
+    );
+
+    let expected_ok = balanced_classes && vault_delta_matches;
+    assert_eq!(result.is_ok(), expected_ok);
+    if debit_sum.is_none() || credit_sum.is_none() {
+        assert_eq!(result, Err(V16Error::ArithmeticOverflow));
+    } else if expected_ok {
+        assert_eq!(result, Ok(()));
+    } else {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    }
 }
 
 #[kani::proof]
