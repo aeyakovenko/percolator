@@ -14480,6 +14480,61 @@ fn proof_v16_frame_canonicalize_retired_slot_touches_only_selected_slot() {
     ));
 }
 
+// canonicalize-retired rejection frame: any remaining domain budget/spent state
+// blocks slot erasure before mutation, preserving value-bearing domain capacity.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_canonicalize_retired_slot_rejects_budget_or_spent_before_mutation() {
+    let blocker_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    let slot_delta_raw: u8 = kani::any();
+    kani::assume(blocker_raw < 4);
+    kani::assume(amount_raw >= 1 && amount_raw <= 8);
+    kani::assume(slot_delta_raw >= 1 && slot_delta_raw <= 8);
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let retired_slot = header.current_slot.get() + slot_delta_raw as u64;
+    let mut old_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    old_asset.lifecycle = AssetLifecycleV16::Retired;
+    old_asset.retired_slot = retired_slot;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&old_asset);
+    let amount = amount_raw as u128;
+    match blocker_raw {
+        0 => markets[0].engine.insurance_domain_budget_long = V16PodU128::new(amount),
+        1 => markets[0].engine.insurance_domain_budget_short = V16PodU128::new(amount),
+        2 => markets[0].engine.insurance_domain_spent_long = V16PodU128::new(amount),
+        _ => markets[0].engine.insurance_domain_spent_short = V16PodU128::new(amount),
+    }
+    let h0 = header;
+    let s0 = markets[0].engine;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.canonicalize_retired_empty_asset_slot_not_atomic(0);
+
+    kani::cover!(
+        blocker_raw == 0 && amount > 1,
+        "canonicalize rejection covers nonzero long budget"
+    );
+    kani::cover!(
+        blocker_raw == 1 && amount > 1,
+        "canonicalize rejection covers nonzero short budget"
+    );
+    kani::cover!(
+        blocker_raw == 2 && amount > 1,
+        "canonicalize rejection covers nonzero long spent"
+    );
+    kani::cover!(
+        blocker_raw == 3 && amount > 1,
+        "canonicalize rejection covers nonzero short spent"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert!(kani_eq_market_group_v16_header_account(&h0, market.header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &market.markets[0].engine
+    ));
+}
+
 // budget-credit frame: exactly {insurance_domain_budget_remaining_total} on
 // the header and {insurance_domain_budget_long} on the slot — pure capacity
 // relabel, every value field frozen.
