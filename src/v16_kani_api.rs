@@ -93,6 +93,10 @@ pub fn kani_available_backing_num_for_source_credit_state(
     V16Core::available_backing_num_for_source_credit_state(state)
 }
 
+pub fn kani_close_progress_blocks_exposure_clear(ledger: CloseProgressLedgerV16) -> bool {
+    ledger.blocks_exposure_clear()
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,

@@ -7,7 +7,7 @@ use percolator::v16::{
     kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
-    kani_backing_utilization_rate_e9_for_source_state,
+    kani_backing_utilization_rate_e9_for_source_state, kani_close_progress_blocks_exposure_clear,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
@@ -8027,6 +8027,54 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     assert_eq!(ok, Ok(()));
     assert_eq!(rejected, Err(V16Error::InvalidLeg));
     assert_eq!(understated_rejected, Err(V16Error::InvalidLeg));
+}
+
+// Spec req 24/25 guard seam: exposure clear is blocked exactly while a close
+// ledger has a live pending residual. The production `clear_leg` and
+// `forfeit_recovery_leg_not_atomic` paths call this predicate, so this pins the
+// no-LoF/no-DoS lifecycle boundary without re-proving leg validation.
+#[kani::proof]
+fn proof_v16_pending_close_residual_is_exact_exposure_clear_blocker() {
+    let active: bool = kani::any();
+    let finalized: bool = kani::any();
+    let canceled: bool = kani::any();
+    let residual_raw: u8 = kani::any();
+    let residual = residual_raw as u128;
+    let ledger = CloseProgressLedgerV16 {
+        active,
+        finalized,
+        canceled,
+        close_id: 1,
+        asset_index: 0,
+        market_id: 1,
+        domain_side: SideV16::Long,
+        gross_loss_at_close_start: residual,
+        residual_remaining: residual,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+
+    let blocks = kani_close_progress_blocks_exposure_clear(ledger);
+    let expected = active && !finalized && !canceled && residual != 0;
+
+    kani::cover!(
+        expected && residual > 1,
+        "active pending close residual blocks exposure clear"
+    );
+    kani::cover!(
+        active && finalized && residual > 1 && !blocks,
+        "finalized residual-bearing ledger is not classified as pending"
+    );
+    kani::cover!(
+        active && canceled && residual > 1 && !blocks,
+        "canceled residual-bearing ledger is not classified as pending"
+    );
+    assert_eq!(blocks, expected);
+    if blocks {
+        assert!(ledger.active);
+        assert!(!ledger.finalized);
+        assert!(!ledger.canceled);
+        assert!(ledger.residual_remaining != 0);
+    }
 }
 
 #[kani::proof]

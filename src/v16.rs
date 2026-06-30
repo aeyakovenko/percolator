@@ -4225,6 +4225,10 @@ impl CloseProgressLedgerV16 {
         self.active && !self.finalized && !self.canceled && self.residual_remaining != 0
     }
 
+    fn blocks_exposure_clear(self) -> bool {
+        self.has_pending_residual()
+    }
+
     fn is_terminal_zero_residual(self) -> bool {
         self.active
             && self.finalized
@@ -12420,7 +12424,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .header
             .close_progress
             .try_to_runtime()?
-            .has_pending_residual()
+            .blocks_exposure_clear()
         {
             return Err(V16Error::LockActive);
         }
@@ -15290,7 +15294,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .header
                 .close_progress
                 .try_to_runtime()?
-                .has_pending_residual()
+                .blocks_exposure_clear()
         {
             self.clear_leg(account, asset_index)?;
             return Ok(DeadLegForfeitOutcomeV16 {
@@ -15403,7 +15407,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .header
                 .close_progress
                 .try_to_runtime()?
-                .has_pending_residual();
+                .blocks_exposure_clear();
         if detached {
             self.clear_leg(account, asset_index)?;
         }
