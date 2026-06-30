@@ -14233,6 +14233,60 @@ fn proof_v16_auto_crank_classifier_current_deficit_open_risk_selects_liquidate()
     assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
 }
 
+// Permissionless no-DoS resolved-winner seam: the first positive-PnL winner in a
+// Resolved market must be classified and routed to CloseResolved even before the
+// payout snapshot is captured. Otherwise no account could trigger the lazy
+// snapshot capture and the resolved payout path would deadlock.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_classifier_resolved_winner_selects_close_without_snapshot() {
+    let pnl_raw: u16 = kani::any();
+    let vault_raw: u16 = kani::any();
+    kani::assume(pnl_raw > 0);
+    kani::assume(vault_raw <= 1024);
+    let pnl = pnl_raw as i128;
+    let vault = vault_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1; // Resolved
+    header.resolved_slot = V16PodU64::new(1);
+    header.vault = V16PodU128::new(vault);
+    header.c_tot = V16PodU128::new(0);
+    header.insurance = V16PodU128::new(0);
+    header.b_stale_account_count = V16PodU64::new(0);
+    header.stale_certificate_count = V16PodU64::new(0);
+    header.negative_pnl_account_count = V16PodU64::new(0);
+    header.resolved_payout_blocker_count = V16PodU64::new(0);
+    header.payout_snapshot_captured = 0;
+    account_header.pnl = V16PodI128::new(pnl);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        0,
+        0,
+        None,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+
+    kani::cover!(
+        pnl > 1 && vault > 0 && market.header.payout_snapshot_captured == 0,
+        "resolved winner classification covers positive pnl before lazy payout snapshot"
+    );
+    assert!(!summary.stale);
+    assert!(!summary.b_stale);
+    assert!(!summary.pending_close);
+    assert!(!summary.expired_close);
+    assert!(!summary.liquidatable);
+    assert!(!summary.recovery_eligible);
+    assert!(summary.resolved_winner);
+    assert_eq!(plan, AutoCrankPlanV16::CloseResolved);
+    assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
+}
+
 // No-DoS selector theorem for the production auto-crank plan kernel. Over every
 // classifier signal combination reachable by the production classifier
 // (`pending_close == false`), an actionable summary selects exactly one
