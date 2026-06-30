@@ -3829,6 +3829,107 @@ fn proof_v16_live_market_validator_ok_implies_balanced_oi_and_loss_weight_shape(
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_asset_lifecycle_validator_ok_implies_price_clock_and_market_id_shape() {
+    let lifecycle_raw: u8 = kani::any();
+    let market_id_zero: bool = kani::any();
+    let effective_price_case: u8 = kani::any();
+    let raw_price_case: u8 = kani::any();
+    let fund_price_case: u8 = kani::any();
+    let current_slot_raw: u8 = kani::any();
+    let slot_last_raw: u8 = kani::any();
+    kani::assume(lifecycle_raw <= 5);
+    kani::assume(effective_price_case <= 2);
+    kani::assume(raw_price_case <= 2);
+    kani::assume(fund_price_case <= 2);
+    kani::assume((1..=16).contains(&current_slot_raw));
+    kani::assume(slot_last_raw <= 20);
+
+    let lifecycle = match lifecycle_raw {
+        0 => AssetLifecycleV16::Disabled,
+        1 => AssetLifecycleV16::PendingActivation,
+        2 => AssetLifecycleV16::Active,
+        3 => AssetLifecycleV16::DrainOnly,
+        4 => AssetLifecycleV16::Retired,
+        _ => AssetLifecycleV16::Recovery,
+    };
+    let price_for_case = |case: u8| -> u64 {
+        match case {
+            0 => 0,
+            1 => 100,
+            _ => MAX_ORACLE_PRICE + 1,
+        }
+    };
+
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.current_slot = V16PodU64::new(current_slot_raw as u64);
+    header.slot_last = V16PodU64::new(current_slot_raw as u64);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = lifecycle;
+    asset.market_id = if market_id_zero { 0 } else { 1 };
+    asset.effective_price = price_for_case(effective_price_case);
+    asset.raw_oracle_target_price = price_for_case(raw_price_case);
+    asset.fund_px_last = price_for_case(fund_price_case);
+    asset.slot_last = slot_last_raw as u64;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+
+    kani::cover!(
+        result == Ok(())
+            && lifecycle == AssetLifecycleV16::Active
+            && !market_id_zero
+            && effective_price_case == 1
+            && raw_price_case == 1
+            && fund_price_case == 1
+            && slot_last_raw < current_slot_raw,
+        "asset validator accepts active market with valid price, clock, and market id"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && lifecycle == AssetLifecycleV16::Recovery
+            && effective_price_case == 0,
+        "asset validator rejects recovery market with zero effective price"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && lifecycle == AssetLifecycleV16::Disabled
+            && !market_id_zero,
+        "asset validator rejects disabled market carrying a market id"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && lifecycle == AssetLifecycleV16::DrainOnly
+            && slot_last_raw > current_slot_raw,
+        "asset validator rejects future asset clock"
+    );
+
+    if result == Ok(()) {
+        let validated = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        if validated.lifecycle == AssetLifecycleV16::Disabled {
+            assert_eq!(validated.market_id, 0);
+        } else {
+            assert!(validated.market_id != 0);
+            assert!(validated.market_id < market.header.next_market_id.get());
+        }
+        if matches!(
+            validated.lifecycle,
+            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly | AssetLifecycleV16::Recovery
+        ) {
+            assert!(validated.effective_price != 0);
+            assert!(validated.effective_price <= MAX_ORACLE_PRICE);
+            assert!(validated.raw_oracle_target_price != 0);
+            assert!(validated.raw_oracle_target_price <= MAX_ORACLE_PRICE);
+            assert!(validated.fund_px_last != 0);
+            assert!(validated.fund_px_last <= MAX_ORACLE_PRICE);
+        }
+        assert!(validated.slot_last <= market.header.current_slot.get());
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_validator_reconciles_resolved_payout_blockers() {
     let has_long_pos: bool = kani::any();
     let has_short_pos: bool = kani::any();
