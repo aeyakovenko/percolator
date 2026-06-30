@@ -28,9 +28,10 @@ use percolator::v16::{
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
     TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
-    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
+    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU16, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
-    PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
+    PORTFOLIO_SOURCE_DOMAIN_CAP, V16_ACCOUNT_VERSION, V16_EMPTY_ACTIVE_BITMAP,
+    V16_LAYOUT_DISCRIMINATOR, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
@@ -508,6 +509,67 @@ fn proof_v16_in_place_account_init_clears_hidden_risk_state_and_validates() {
     assert_eq!(account.rebalance_lock, 0);
     assert_eq!(account.liquidation_lock, 0);
     assert_eq!(account_view.validate_with_market(&market.as_view()), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_account_validator_ok_implies_provenance_and_owner_binding() {
+    let mismatch_kind: u8 = kani::any();
+    kani::assume(mismatch_kind <= 4);
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let mut forged_market = [9u8; 32];
+    let mut forged_owner = [8u8; 32];
+    forged_market[31] = mismatch_kind;
+    forged_owner[31] = mismatch_kind;
+    match mismatch_kind {
+        1 => account_header.provenance_header.market_group_id = forged_market,
+        2 => account_header.owner = forged_owner,
+        3 => account_header.provenance_header.version = V16PodU16::new(V16_ACCOUNT_VERSION + 1),
+        4 => {
+            account_header.provenance_header.layout_discriminator =
+                V16PodU16::new(V16_LAYOUT_DISCRIMINATOR + 1)
+        }
+        _ => {}
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = account.as_view().validate_with_market(&market.as_view());
+
+    kani::cover!(
+        mismatch_kind == 0 && result == Ok(()),
+        "account validator accepts canonical provenance binding"
+    );
+    kani::cover!(
+        mismatch_kind == 1 && result == Err(V16Error::ProvenanceMismatch),
+        "account validator rejects forged market-group binding"
+    );
+    kani::cover!(
+        mismatch_kind == 2 && result == Err(V16Error::ProvenanceMismatch),
+        "account validator rejects owner/provenance mismatch"
+    );
+    kani::cover!(
+        mismatch_kind >= 3 && result == Err(V16Error::ProvenanceMismatch),
+        "account validator rejects version or layout mismatch"
+    );
+
+    if result == Ok(()) {
+        assert_eq!(
+            account.header.provenance_header.market_group_id,
+            market.header.market_group_id
+        );
+        assert_eq!(account.header.owner, account.header.provenance_header.owner);
+        assert_eq!(
+            account.header.provenance_header.version.get(),
+            V16_ACCOUNT_VERSION
+        );
+        assert_eq!(
+            account.header.provenance_header.layout_discriminator.get(),
+            V16_LAYOUT_DISCRIMINATOR
+        );
+    }
 }
 
 #[kani::proof]
