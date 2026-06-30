@@ -7,12 +7,12 @@ use percolator::v16::{
     kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
-    kani_backing_utilization_rate_e9_for_source_state, kani_close_progress_blocks_exposure_clear,
-    kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
-    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_bresidual_step,
-    kani_kernel_cert_is_current, kani_kernel_classify_position_delta, kani_kernel_clear_leg,
-    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
+    kani_backing_utilization_rate_e9_for_source_state, kani_build_trade_request_guard_summary,
+    kani_close_progress_blocks_exposure_clear, kani_expected_source_credit_rate_num_for_state,
+    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
+    kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg,
+    kani_kernel_bresidual_step, kani_kernel_cert_is_current, kani_kernel_classify_position_delta,
+    kani_kernel_clear_leg, kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
     kani_kernel_resolved_payout_step, kani_kernel_settle_resolved_pnl_after_booking,
     kani_kernel_social_loss_chunk_cap,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
@@ -3912,6 +3912,103 @@ fn proof_v16_signed_trade_request_maps_to_opposite_account_deltas() {
         assert!(abs_q > 0);
         assert!(abs_q <= MAX_TRADE_SIZE_Q);
     }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_request_guard_summary_is_exact_admission_predicate() {
+    let asset_raw: u8 = kani::any();
+    let max_slots_raw: u8 = kani::any();
+    let size_case: u8 = kani::any();
+    let negative_size: bool = kani::any();
+    let price_case: u8 = kani::any();
+    let fee_raw: u16 = kani::any();
+    let max_fee_raw: u16 = kani::any();
+    kani::assume(asset_raw <= 8);
+    kani::assume(max_slots_raw <= 8);
+    kani::assume(size_case <= 3);
+    kani::assume(price_case <= 3);
+    kani::assume(max_fee_raw <= 10_000);
+    kani::assume(fee_raw <= 10_001);
+
+    let size_abs = match size_case {
+        0 => 0,
+        1 => 1,
+        2 => MAX_TRADE_SIZE_Q,
+        _ => MAX_TRADE_SIZE_Q + 1,
+    };
+    let size_q = if negative_size {
+        -(size_abs as i128)
+    } else {
+        size_abs as i128
+    };
+    let exec_price = match price_case {
+        0 => 0,
+        1 => 1,
+        2 => MAX_ORACLE_PRICE,
+        _ => MAX_ORACLE_PRICE + 1,
+    };
+    let request = TradeRequestV16 {
+        asset_index: asset_raw as usize,
+        size_q,
+        exec_price,
+        fee_bps: fee_raw as u64,
+    };
+    let max_market_slots = max_slots_raw as u32;
+    let max_trading_fee_bps = max_fee_raw as u64;
+    let summary =
+        kani_build_trade_request_guard_summary(request, max_market_slots, max_trading_fee_bps);
+
+    let expected_asset = (request.asset_index as u64) < max_market_slots as u64;
+    let expected_size_nonzero = request.size_q != 0;
+    let expected_size_cap = request.size_q.unsigned_abs() <= MAX_TRADE_SIZE_Q;
+    let expected_price_nonzero = request.exec_price != 0;
+    let expected_price_cap = request.exec_price <= MAX_ORACLE_PRICE;
+    let expected_fee_cap = request.fee_bps <= max_trading_fee_bps;
+    let expected_all = expected_asset
+        && expected_size_nonzero
+        && expected_size_cap
+        && expected_price_nonzero
+        && expected_price_cap
+        && expected_fee_cap;
+
+    kani::cover!(
+        expected_all && size_abs == MAX_TRADE_SIZE_Q && exec_price == MAX_ORACLE_PRICE,
+        "trade request guard covers valid max-boundary admission"
+    );
+    kani::cover!(
+        !expected_asset && expected_size_nonzero && expected_price_nonzero && expected_fee_cap,
+        "trade request guard covers unconfigured asset rejection"
+    );
+    kani::cover!(
+        !expected_size_nonzero && expected_asset && expected_price_nonzero && expected_fee_cap,
+        "trade request guard covers zero-size rejection"
+    );
+    kani::cover!(
+        !expected_size_cap && expected_asset && expected_price_nonzero && expected_fee_cap,
+        "trade request guard covers oversize rejection"
+    );
+    kani::cover!(
+        !expected_price_nonzero && expected_asset && expected_size_nonzero && expected_fee_cap,
+        "trade request guard covers zero-price rejection"
+    );
+    kani::cover!(
+        !expected_price_cap && expected_asset && expected_size_nonzero && expected_fee_cap,
+        "trade request guard covers over-cap price rejection"
+    );
+    kani::cover!(
+        !expected_fee_cap && expected_asset && expected_size_nonzero && expected_price_nonzero,
+        "trade request guard covers fee-cap rejection"
+    );
+
+    assert_eq!(summary.asset_configured, expected_asset);
+    assert_eq!(summary.size_nonzero, expected_size_nonzero);
+    assert_eq!(summary.size_in_cap, expected_size_cap);
+    assert_eq!(summary.price_nonzero, expected_price_nonzero);
+    assert_eq!(summary.price_in_range, expected_price_cap);
+    assert_eq!(summary.fee_bps_in_cap, expected_fee_cap);
+    assert_eq!(summary.all_pass(), expected_all);
 }
 
 #[kani::proof]

@@ -56,6 +56,14 @@ pub fn kani_select_auto_crank_plan(
     )
 }
 
+pub fn kani_build_trade_request_guard_summary(
+    request: TradeRequestV16,
+    max_market_slots: u32,
+    max_trading_fee_bps: u64,
+) -> TradeRequestGuardSummaryV16 {
+    V16Core::build_trade_request_guard_summary(request, max_market_slots, max_trading_fee_bps)
+}
+
 pub fn kani_project_auto_crank_selected_assets(
     account: &PortfolioV16View<'_>,
 ) -> V16Result<(Option<usize>, Option<usize>)> {
