@@ -205,6 +205,10 @@ pub fn kani_kernel_reduce_position_delta(
     V16Core::kernel_reduce_position_delta(pre_basis_signed, side, requested)
 }
 
+pub fn kani_kernel_classify_position_delta(current: i128, new: i128) -> PositionRouteV16 {
+    V16Core::kernel_classify_position_delta(current, new)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,

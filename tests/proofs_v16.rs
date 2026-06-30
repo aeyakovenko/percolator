@@ -10,8 +10,8 @@ use percolator::v16::{
     kani_backing_utilization_rate_e9_for_source_state, kani_close_progress_blocks_exposure_clear,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
-    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_clear_leg,
-    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
+    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_classify_position_delta,
+    kani_kernel_clear_leg, kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -27,12 +27,12 @@ use percolator::v16::{
     MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
     PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
     PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
-    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
-    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
-    SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
-    TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
-    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
+    PortfolioV16ViewMut, PositionRouteV16, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
+    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account,
+    ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
+    SourceCreditStateV16, SourceCreditStateV16Account, StockReconciliationProofV16,
+    TokenValueClassV16, TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount,
+    V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
 };
@@ -3733,6 +3733,49 @@ fn proof_v16_kernel_reduce_position_delta_strictly_moves_toward_zero() {
     } else {
         assert!(delta >= 0);
         assert!(post <= 0);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_classify_position_delta_is_total_exclusive_route_partition() {
+    let current_raw: i8 = kani::any();
+    let new_raw: i8 = kani::any();
+    kani::assume((-8..=8).contains(&current_raw));
+    kani::assume((-8..=8).contains(&new_raw));
+
+    let current = current_raw as i128;
+    let new = new_raw as i128;
+    let route = kani_kernel_classify_position_delta(current, new);
+    let attach = current == 0;
+    let clear = current != 0 && new == 0;
+    let flip = current != 0 && new != 0 && current.signum() != new.signum();
+    let resize = current != 0 && new != 0 && current.signum() == new.signum();
+    let true_count = (attach as u8) + (clear as u8) + (flip as u8) + (resize as u8);
+
+    kani::cover!(attach && new != 0, "classifier covers attach route");
+    kani::cover!(clear, "classifier covers clear route");
+    kani::cover!(flip, "classifier covers flip route");
+    kani::cover!(resize, "classifier covers resize route");
+    assert_eq!(true_count, 1);
+    match route {
+        PositionRouteV16::Attach => {
+            assert!(attach);
+            assert!(!clear && !flip && !resize);
+        }
+        PositionRouteV16::Clear => {
+            assert!(clear);
+            assert!(!attach && !flip && !resize);
+        }
+        PositionRouteV16::Flip => {
+            assert!(flip);
+            assert!(!attach && !clear && !resize);
+        }
+        PositionRouteV16::Resize => {
+            assert!(resize);
+            assert!(!attach && !clear && !flip);
+        }
     }
 }
 
