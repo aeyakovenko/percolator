@@ -1148,6 +1148,40 @@ fn proof_v16_sparse_source_domain_validation_rejects_unconfigured_domain_claim()
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_sparse_source_domain_validation_rejects_stale_market_id_claim() {
+    let claim_raw: u8 = kani::any();
+    let domain_is_short: bool = kani::any();
+    let stale_market_id_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&claim_raw));
+    kani::assume(stale_market_id_raw as u64 != 1);
+
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let domain = if domain_is_short { 1 } else { 0 };
+    account_header.pnl = V16PodI128::new(claim_raw as i128);
+    account_header.source_domains[0].domain = V16PodU32::new(domain);
+    account_header.source_domains[0].source_claim_market_id =
+        V16PodU64::new(stale_market_id_raw as u64);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = account.kani_validate_source_credit_shape_with_market(&market.as_view());
+
+    kani::cover!(
+        !domain_is_short && stale_market_id_raw == 0 && claim_raw > 1,
+        "source-domain validator rejects occupied default-tag long claim"
+    );
+    kani::cover!(
+        domain_is_short && stale_market_id_raw > 1 && claim_raw > 1,
+        "source-domain validator rejects stale short-domain market id"
+    );
+    assert_eq!(result, Err(V16Error::HiddenLeg));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_mutable_view_compacts_persisted_source_domain_tail() {
     let claim_raw: u8 = kani::any();
     kani::assume(claim_raw > 0);
