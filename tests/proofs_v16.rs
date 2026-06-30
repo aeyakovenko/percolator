@@ -6720,6 +6720,52 @@ fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
     assert!(support_b <= b);
 }
 
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_source_support_partition_is_subadditive_under_conservative_rate() {
+    let a_raw: u8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let divisor_raw: u8 = kani::any();
+    kani::assume((1..=63).contains(&a_raw));
+    kani::assume((1..=63).contains(&b_raw));
+    kani::assume((1..=16).contains(&divisor_raw));
+    let a = a_raw as u128;
+    let b = b_raw as u128;
+    let total = a + b;
+    let backing = backing_raw as u128;
+    let divisor = divisor_raw as u128;
+    let conservative_support_total = total / divisor;
+    kani::assume(conservative_support_total <= backing);
+
+    let source_credit = SourceCreditStateV16 {
+        positive_claim_bound_num: total * BOUND_SCALE,
+        exact_positive_claim_num: total * BOUND_SCALE,
+        fresh_reserved_backing_num: backing * BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE / divisor,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let support_a = kani_source_credit_state_realizable_support_for_face(source_credit, a).unwrap();
+    let support_b = kani_source_credit_state_realizable_support_for_face(source_credit, b).unwrap();
+    let support_total =
+        kani_source_credit_state_realizable_support_for_face(source_credit, total).unwrap();
+
+    kani::cover!(
+        divisor > 1 && backing < total && support_a > 0 && support_b > 0,
+        "source support partition covers nonzero haircut on both subclaims"
+    );
+    kani::cover!(
+        divisor == 1 && backing >= total,
+        "source support partition covers full-rate fully backed claims"
+    );
+    assert!(support_a + support_b <= support_total);
+    assert!(support_total <= backing);
+    assert!(support_a <= a);
+    assert!(support_b <= b);
+}
+
 // Global junior-bound aggregation invariant: the group-level junior claim bound
 // (`pnl_pos_bound_tot_num`) is the denominator for the non-source haircut
 // (`haircut_effective_support`) and the resolved-payout snapshot, so it must
