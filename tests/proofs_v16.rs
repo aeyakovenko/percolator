@@ -9,7 +9,7 @@ use percolator::v16::{
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_close_progress_blocks_exposure_clear,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
+    kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
@@ -9489,6 +9489,83 @@ fn proof_v16_principal_then_domain_insurance_waterfall_is_loss_and_domain_capped
             1
         }
     );
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_residual_booking_outcome_advances_close_ledger_exactly() {
+    let residual_raw: u8 = kani::any();
+    let chunk_raw: u8 = kani::any();
+    kani::assume(residual_raw > 0 && residual_raw <= 32);
+    kani::assume(chunk_raw > 0 && chunk_raw <= 32);
+
+    let residual = residual_raw as u128;
+    let chunk = chunk_raw as u128;
+    let expected_booked = residual.min(chunk);
+
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(chunk);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let outcome = market
+        .kani_book_bankruptcy_residual_chunk_internal(0, SideV16::Long, residual)
+        .unwrap();
+    let base_ledger = CloseProgressLedgerV16 {
+        active: true,
+        close_id: 1,
+        asset_index: 0,
+        market_id: asset.market_id,
+        domain_side: SideV16::Short,
+        gross_loss_at_close_start: residual,
+        residual_remaining: residual,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let advanced = kani_kernel_advance_close_ledger(
+        base_ledger,
+        0,
+        0,
+        0,
+        outcome.booked_loss,
+        outcome.explicit_loss,
+    )
+    .unwrap();
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        expected_booked < residual,
+        "residual booking composition covers partial close progress"
+    );
+    kani::cover!(
+        expected_booked == residual,
+        "residual booking composition covers finalized close progress"
+    );
+    assert_eq!(outcome.booked_loss, expected_booked);
+    assert_eq!(outcome.explicit_loss, 0);
+    assert_eq!(outcome.remaining_after, residual - expected_booked);
+    assert_eq!(outcome.delta_b, expected_booked);
+    assert_eq!(advanced.active, true);
+    assert_eq!(advanced.asset_index, 0);
+    assert_eq!(advanced.market_id, asset.market_id);
+    assert_eq!(advanced.domain_side, SideV16::Short);
+    assert_eq!(advanced.gross_loss_at_close_start, residual);
+    assert_eq!(advanced.support_consumed, 0);
+    assert_eq!(advanced.insurance_spent, 0);
+    assert_eq!(advanced.b_loss_booked, expected_booked);
+    assert_eq!(advanced.explicit_loss_assigned, 0);
+    assert_eq!(advanced.residual_remaining, residual - expected_booked);
+    assert_eq!(advanced.finalized, expected_booked == residual);
+    assert_eq!(asset_after.b_short_num, expected_booked);
+    assert_eq!(asset_after.b_long_num, 0);
+    assert_eq!(asset_after.social_loss_remainder_short_num, 0);
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
 }
 
 #[kani::proof]

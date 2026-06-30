@@ -137,6 +137,24 @@ pub fn kani_close_progress_blocks_exposure_clear(ledger: CloseProgressLedgerV16)
     ledger.blocks_exposure_clear()
 }
 
+pub fn kani_kernel_advance_close_ledger(
+    ledger: CloseProgressLedgerV16,
+    support_consumed: u128,
+    junior_face_burned: u128,
+    insurance_spent: u128,
+    b_loss_booked: u128,
+    explicit_loss_assigned: u128,
+) -> V16Result<CloseProgressLedgerV16> {
+    V16Core::kernel_advance_close_ledger(
+        ledger,
+        support_consumed,
+        junior_face_burned,
+        insurance_spent,
+        b_loss_booked,
+        explicit_loss_assigned,
+    )
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,
