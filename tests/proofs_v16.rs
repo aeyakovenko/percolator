@@ -14287,6 +14287,88 @@ fn proof_v16_auto_crank_classifier_resolved_winner_selects_close_without_snapsho
     assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
 }
 
+// Permissionless no-DoS b-settlement seam: a current Live account with an active
+// b-stale leg must be routed to SettleBChunk with the engine-selected asset.
+// This prevents a keeper from requiring a fresh oracle refresh before the
+// already-committed B-index obligation can make progress.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_classifier_b_stale_leg_selects_settle_b_without_observation() {
+    let capital_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    kani::assume(capital_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    let capital = capital_raw as u128;
+    let insurance = insurance_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(capital + insurance);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: true,
+        stale: false,
+    });
+    let mut active_bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut active_bitmap, 0).unwrap();
+    account_header.active_bitmap = active_bitmap.map(V16PodU64::new);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: active_bitmap,
+        valid: true,
+    });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+    let plan = kani_select_auto_crank_plan(
+        summary,
+        0,
+        0,
+        Some(0),
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+
+    kani::cover!(
+        capital > 0 && insurance > 0,
+        "auto-crank classifier covers current b-stale account with nontrivial balances"
+    );
+    assert!(!summary.stale);
+    assert!(summary.b_stale);
+    assert!(!summary.pending_close);
+    assert!(!summary.expired_close);
+    assert!(!summary.liquidatable);
+    assert!(!summary.recovery_eligible);
+    assert!(!summary.resolved_winner);
+    assert_eq!(plan, AutoCrankPlanV16::SettleBChunk { asset_index: 0 });
+    assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
+}
+
 // No-DoS selector theorem for the production auto-crank plan kernel. Over every
 // classifier signal combination reachable by the production classifier
 // (`pending_close == false`), an actionable summary selects exactly one
