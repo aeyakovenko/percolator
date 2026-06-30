@@ -56,6 +56,30 @@ pub fn kani_select_auto_crank_plan(
     )
 }
 
+pub fn kani_project_auto_crank_selected_assets(
+    account: &PortfolioV16View<'_>,
+) -> V16Result<(Option<usize>, Option<usize>)> {
+    let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+    let mut active_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut slot = 0usize;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        let active =
+            active_bitmap_get(bitmap, slot) && decode_bool(account.header.legs[slot].active)?;
+        let b_stale = decode_bool(account.header.legs[slot].b_stale)?;
+        active_flags[slot] = active;
+        b_stale_flags[slot] = active && b_stale;
+        slot += 1;
+    }
+    let asset_of = |s: Option<usize>| -> Option<usize> {
+        s.map(|i| account.header.legs[i].asset_index.get() as usize)
+    };
+    Ok((
+        asset_of(V16Core::first_actionable_slot(b_stale_flags)),
+        asset_of(V16Core::first_actionable_slot(active_flags)),
+    ))
+}
+
 pub fn kani_active_bitmap_set(
     bitmap: &mut V16ActiveBitmap,
     leg_slot_index: usize,

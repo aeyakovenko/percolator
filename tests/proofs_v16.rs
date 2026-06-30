@@ -13,18 +13,18 @@ use percolator::v16::{
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
-    kani_select_auto_crank_plan, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preflight_risk_gate,
-    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
-    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
-    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    kani_project_auto_crank_selected_assets, kani_select_auto_crank_plan,
+    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    ActionableSummaryV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
@@ -14510,6 +14510,83 @@ fn proof_v16_auto_crank_classifier_expired_close_selects_recovery_without_observ
         }
     );
     assert!(!percolator::v16::auto_crank_plan_requires_caller_observation(&plan));
+}
+
+// Engine-selected asset theorem over the real zero-copy portfolio layout:
+// committed bitmap + leg POD fields determine the first active b-stale asset and
+// first active asset. This closes the caller-bypass seam at the selector
+// projection boundary: SettleB/Liquidate/active refresh assets are derived from
+// committed account state, not keeper input.
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_asset_selection_matches_first_committed_active_legs() {
+    let active_flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N] = kani::any();
+    let b_stale_flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N] = kani::any();
+    let (market_group_id, _, _) = ids();
+    let mut account_header = empty_account_fixture(market_group_id, 2);
+    let mut active_bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    let mut expected_b_stale = None;
+    let mut expected_active = None;
+    let mut slot = 0usize;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        if slot >= 4 {
+            kani::assume(!active_flags[slot]);
+            kani::assume(!b_stale_flags[slot]);
+        }
+        if active_flags[slot] {
+            active_bitmap_set(&mut active_bitmap, slot).unwrap();
+            if expected_active.is_none() {
+                expected_active = Some(slot);
+            }
+            if b_stale_flags[slot] && expected_b_stale.is_none() {
+                expected_b_stale = Some(slot);
+            }
+        }
+        account_header.legs[slot] = if active_flags[slot] {
+            PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+                active: true,
+                asset_index: slot as u32,
+                market_id: (slot as u64) + 1,
+                side: SideV16::Long,
+                basis_pos_q: POS_SCALE as i128,
+                a_basis: ADL_ONE,
+                k_snap: ADL_ONE as i128,
+                f_snap: 0,
+                epoch_snap: 0,
+                loss_weight: POS_SCALE,
+                b_snap: 0,
+                b_rem: 0,
+                b_epoch_snap: 0,
+                b_stale: b_stale_flags[slot],
+                stale: false,
+            })
+        } else {
+            PortfolioLegV16Account::default()
+        };
+        slot += 1;
+    }
+    account_header.active_bitmap = active_bitmap.map(V16PodU64::new);
+
+    let (selected_b_stale, selected_active) =
+        kani_project_auto_crank_selected_assets(&PortfolioV16View::new(&account_header)).unwrap();
+
+    kani::cover!(
+        expected_active.is_some()
+            && expected_b_stale.is_some()
+            && expected_active != expected_b_stale,
+        "asset selection covers distinct active and b-stale first slots"
+    );
+    kani::cover!(
+        expected_active.is_some() && expected_b_stale.is_none(),
+        "asset selection covers active account with no b-stale leg"
+    );
+    kani::cover!(
+        expected_active.is_none(),
+        "asset selection covers no active committed leg"
+    );
+    assert_eq!(selected_b_stale, expected_b_stale);
+    assert_eq!(selected_active, expected_active);
 }
 
 // No-DoS selector theorem for the production auto-crank plan kernel. Over every
