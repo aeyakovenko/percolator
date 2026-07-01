@@ -20352,7 +20352,6 @@ fn proof_v16_frame_backing_withdraw_touches_only_declared_state() {
 fn proof_v16_frame_fee_charge_touches_only_declared_state() {
     let cap_raw: u8 = kani::any();
     let fee_raw: u8 = kani::any();
-    kani::assume(cap_raw <= 8);
     kani::assume(fee_raw <= cap_raw);
     let cap = cap_raw as u128;
     let fee = fee_raw as u128;
@@ -20371,7 +20370,10 @@ fn proof_v16_frame_fee_charge_touches_only_declared_state() {
             .unwrap();
         assert_eq!(charged, fee);
     }
-    kani::cover!(fee > 0, "fee frame covers nonzero fee");
+    kani::cover!(
+        cap > 128 && fee > 64,
+        "fee frame covers large capital and fee charge"
+    );
     let mut eh = h0;
     eh.insurance = V16PodU128::new(fee);
     eh.c_tot = V16PodU128::new(cap - fee);
