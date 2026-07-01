@@ -11239,6 +11239,97 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_empty_asset_accrual_uses_per_asset_segment_dt_and_preserves_value() {
+    let max_dt_raw: u8 = kani::any();
+    let now_delta_raw: u8 = kani::any();
+    let price_raw: u8 = kani::any();
+    let c_tot_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    let surplus_raw: u16 = kani::any();
+    kani::assume((1..=8).contains(&max_dt_raw));
+    kani::assume(now_delta_raw <= 16);
+    kani::assume((80..=120).contains(&price_raw));
+    kani::assume(c_tot_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    kani::assume(surplus_raw <= 1024);
+
+    let max_dt = max_dt_raw as u64;
+    let now_delta = now_delta_raw as u64;
+    let price = price_raw as u64;
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.config.max_accrual_dt_slots = V16PodU64::new(max_dt);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(max_dt);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(1);
+    header.config.max_abs_funding_e9_per_slot = V16PodU64::new(0);
+    header.config.maintenance_margin_bps = V16PodU64::new(MAX_MARGIN_BPS as u64);
+    header.config.initial_margin_bps = V16PodU64::new(MAX_MARGIN_BPS as u64);
+    header.config.liquidation_fee_bps = V16PodU64::new(0);
+    header.config.min_liquidation_abs = V16PodU128::new(0);
+    header.config.liquidation_fee_cap = V16PodU128::new(0);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    let mut asset_before = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset_before.slot_last = 7;
+    asset_before.effective_price = 100;
+    asset_before.fund_px_last = 100;
+    asset_before.raw_oracle_target_price = 100;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset_before);
+    header.current_slot = V16PodU64::new(asset_before.slot_last);
+    header.slot_last = V16PodU64::new(asset_before.slot_last);
+
+    let header_before = header;
+    let now_slot = asset_before.slot_last + now_delta;
+    let expected_dt = now_delta.min(max_dt);
+    let expected_asset_slot = asset_before.slot_last + expected_dt;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let outcome = market
+        .accrue_asset_to_not_atomic(0, now_slot, price, 0, true)
+        .unwrap();
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        now_delta > max_dt && surplus > 0 && price != asset_before.effective_price,
+        "empty-asset accrual covers stale multi-slot catchup clamped by per-asset max dt"
+    );
+    kani::cover!(
+        now_delta <= max_dt && now_delta > 0 && c_tot > 0 && insurance > 0,
+        "empty-asset accrual covers fully caught-up per-asset segment"
+    );
+    kani::cover!(
+        now_delta == 0 && price != asset_before.effective_price,
+        "empty-asset accrual covers same-slot oracle anchor update without equity activity"
+    );
+
+    assert_eq!(outcome.dt, expected_dt);
+    assert!(!outcome.price_move_active);
+    assert!(!outcome.funding_active);
+    assert!(!outcome.equity_active);
+    assert_eq!(outcome.loss_stale_after, expected_asset_slot < now_slot);
+    assert_eq!(asset_after.slot_last, expected_asset_slot);
+    assert_eq!(asset_after.effective_price, price);
+    assert_eq!(asset_after.fund_px_last, price);
+    assert_eq!(market.header.current_slot.get(), now_slot);
+    assert_eq!(market.header.slot_last.get(), expected_asset_slot);
+    assert_eq!(
+        market.header.loss_stale_active,
+        if expected_asset_slot < now_slot { 1 } else { 0 }
+    );
+    assert_eq!(market.header.oracle_epoch, header_before.oracle_epoch);
+    assert_eq!(market.header.funding_epoch, header_before.funding_epoch);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation() {
     let price_delta_raw: u8 = kani::any();
     kani::assume(price_delta_raw > 0);
