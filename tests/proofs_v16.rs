@@ -15528,6 +15528,93 @@ fn proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance(
 }
 
 #[kani::proof]
+#[kani::unwind(12)]
+#[kani::solver(cadical)]
+fn proof_v16_crank_reward_then_domain_budget_credit_cannot_double_allocate_retained_insurance() {
+    let target_remaining_raw: u8 = kani::any();
+    let base_remaining_raw: u8 = kani::any();
+    let other_remaining_raw: u8 = kani::any();
+    let retained_raw: u8 = kani::any();
+    let reward_bps_raw: u16 = kani::any();
+    let redirect_bps_raw: u16 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    kani::assume(retained_raw > 0);
+    kani::assume(reward_bps_raw <= 10_000);
+    kani::assume(redirect_bps_raw <= 10_000);
+
+    let target_remaining = target_remaining_raw as u128;
+    let base_remaining = base_remaining_raw as u128;
+    let other_remaining = other_remaining_raw as u128;
+    let retained = retained_raw as u128;
+    let c_tot = c_tot_raw as u128;
+    let capital = capital_raw as u128;
+    let budget_remaining_before = target_remaining + base_remaining + other_remaining;
+    let insurance_after_fee = budget_remaining_before + retained;
+
+    let reward = retained * reward_bps_raw as u128 / 10_000;
+    let retained_for_domains = retained - reward;
+    let redirect = retained_for_domains * redirect_bps_raw as u128 / 10_000;
+    let target_credit = retained_for_domains - redirect;
+
+    let (insurance_after_reward, c_tot_after_reward, capital_after_reward) =
+        MarketGroupV16ViewMut::<u64>::kani_credit_account_from_insurance_delta(
+            insurance_after_fee,
+            budget_remaining_before,
+            c_tot,
+            capital,
+            reward,
+        )
+        .unwrap();
+    let total_after_target = MarketGroupV16ViewMut::<u64>::kani_set_domain_insurance_budget_delta(
+        budget_remaining_before,
+        insurance_after_reward,
+        target_remaining,
+        0,
+        target_remaining + target_credit,
+    )
+    .unwrap();
+    let total_after_base = MarketGroupV16ViewMut::<u64>::kani_set_domain_insurance_budget_delta(
+        total_after_target,
+        insurance_after_reward,
+        base_remaining,
+        0,
+        base_remaining + redirect,
+    )
+    .unwrap();
+
+    kani::cover!(
+        reward > 0 && target_credit > 0 && redirect > 0,
+        "retained insurance split covers nonzero reward plus target and base budget credits"
+    );
+    kani::cover!(
+        reward == 0 && target_credit == retained && redirect == 0,
+        "retained insurance split covers pure selected-domain budget credit"
+    );
+    kani::cover!(
+        reward == retained && retained_for_domains == 0,
+        "retained insurance split covers all-retained cranker reward"
+    );
+    assert_eq!(insurance_after_reward, insurance_after_fee - reward);
+    assert_eq!(c_tot_after_reward, c_tot + reward);
+    assert_eq!(capital_after_reward, capital + reward);
+    assert_eq!(total_after_target, budget_remaining_before + target_credit);
+    assert_eq!(
+        total_after_base,
+        budget_remaining_before + retained_for_domains
+    );
+    assert!(total_after_base <= insurance_after_reward);
+    assert_eq!(
+        insurance_after_reward - total_after_base,
+        insurance_after_fee - budget_remaining_before - retained
+    );
+    assert_eq!(
+        insurance_after_reward + c_tot_after_reward,
+        insurance_after_fee + c_tot
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() {
