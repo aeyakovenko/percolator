@@ -3693,6 +3693,95 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_live_unattributed_positive_pnl_cannot_convert_to_capital() {
+    let capital_raw: u16 = kani::any();
+    let other_capital_raw: u16 = kani::any();
+    let pnl_raw: u16 = kani::any();
+    let reserved_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    let surplus_raw: u16 = kani::any();
+    kani::assume(pnl_raw > 0);
+    kani::assume(reserved_raw < pnl_raw);
+
+    let capital = capital_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let pnl = pnl_raw as u128;
+    let reserved = reserved_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let c_tot = capital + other_capital;
+    let vault = c_tot + insurance + surplus;
+    let pnl_bound_num = pnl * BOUND_SCALE;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(vault);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(pnl_bound_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(pnl);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(pnl as i128);
+    account_header.reserved_pnl = V16PodU128::new(reserved);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: (capital + pnl) as i128,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+    });
+
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let pnl_pos_tot_before = header.pnl_pos_tot.get();
+    let pnl_pos_bound_tot_num_before = header.pnl_pos_bound_tot_num.get();
+    let pnl_pos_bound_tot_before = header.pnl_pos_bound_tot.get();
+    let capital_before = account_header.capital.get();
+    let pnl_before = account_header.pnl.get();
+    let reserved_before = account_header.reserved_pnl.get();
+    let health_cert_valid_before = account_header.health_cert.valid;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.kani_convert_released_pnl_to_capital_core_not_atomic(&mut account);
+
+    kani::cover!(
+        pnl > reserved && capital > 0 && other_capital > 0 && insurance > 0 && surplus > 0,
+        "live conversion rejects released unattributed positive PnL over nontrivial senior state"
+    );
+    kani::cover!(
+        reserved == 0 && pnl > 1024,
+        "live conversion rejects fully released unattributed positive PnL"
+    );
+    assert!(matches!(result, Err(V16Error::LockActive)));
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.pnl_pos_tot.get(), pnl_pos_tot_before);
+    assert_eq!(
+        market.header.pnl_pos_bound_tot_num.get(),
+        pnl_pos_bound_tot_num_before
+    );
+    assert_eq!(
+        market.header.pnl_pos_bound_tot.get(),
+        pnl_pos_bound_tot_before
+    );
+    assert_eq!(account.header.capital.get(), capital_before);
+    assert_eq!(account.header.pnl.get(), pnl_before);
+    assert_eq!(account.header.reserved_pnl.get(), reserved_before);
+    assert_eq!(account.header.health_cert.valid, health_cert_valid_before);
+}
+
+#[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
 fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {

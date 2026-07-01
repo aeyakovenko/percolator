@@ -963,6 +963,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && self.account_has_active_source_claim_exposure(account)?)
     }
 
+    pub fn kani_convert_released_pnl_to_capital_core_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.convert_released_pnl_to_capital_core_not_atomic(account)
+    }
+
     pub fn kani_position_change_touches_pending_domain_loss_barrier(
         &self,
         asset_index: usize,
