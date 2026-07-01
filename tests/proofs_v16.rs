@@ -3,9 +3,9 @@
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
     backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
-    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
-    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_available_backing_num_for_source_credit_state,
+    kani_add_open_interest_for_new_position, kani_amount_from_bound_num,
+    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
+    kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_build_resolved_close_rank,
     kani_build_trade_request_guard_summary, kani_close_progress_blocks_exposure_clear,
@@ -14254,6 +14254,26 @@ fn proof_v16_underbacked_source_credit_cannot_satisfy_im_lien_requirements() {
         assert!(required_backing_num > available_num);
     } else {
         assert_eq!(source.credit_rate_num, 0);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_amount_from_bound_num_rounds_up_subscale_dust() {
+    let dust_raw: u16 = kani::any();
+    let dust = dust_raw as u128;
+
+    let rounded_dust = kani_amount_from_bound_num(dust).unwrap();
+
+    kani::cover!(
+        dust > 0,
+        "bound conversion covers nonzero sub-BOUND_SCALE dust"
+    );
+    if dust == 0 {
+        assert_eq!(rounded_dust, 0);
+    } else {
+        assert_eq!(rounded_dust, 1);
     }
 }
 
