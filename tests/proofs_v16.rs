@@ -7076,8 +7076,6 @@ fn proof_v16_backing_utilization_rate_zero_and_invalid_source_branches_are_exact
     let base_raw: u8 = kani::any();
     let slope_at_raw: u8 = kani::any();
     let slope_above_raw: u8 = kani::any();
-    kani::assume(fresh_raw <= 32);
-    kani::assume(valid_raw <= 48);
     kani::assume(kink_raw <= MAX_BACKING_FEE_UTIL_BPS as u16);
     let fresh = fresh_raw as u128;
     let valid = valid_raw as u128;
@@ -7103,12 +7101,24 @@ fn proof_v16_backing_utilization_rate_zero_and_invalid_source_branches_are_exact
         "backing utilization rate covers zero-lien no-charge branch"
     );
     kani::cover!(
+        valid == 0 && fresh > 128,
+        "backing utilization rate covers large zero-lien no-charge branch"
+    );
+    kani::cover!(
         valid > 0 && fresh == 0,
         "backing utilization rate rejects liened source with zero backing"
     );
     kani::cover!(
+        valid > 128 && fresh == 0,
+        "backing utilization rate rejects large liened source with zero backing"
+    );
+    kani::cover!(
         valid > fresh && fresh > 0,
         "backing utilization rate rejects over-liened source state"
+    );
+    kani::cover!(
+        valid > fresh && fresh > 128,
+        "backing utilization rate rejects large over-liened source state"
     );
     assert_eq!(result, expected);
 }
