@@ -3478,6 +3478,70 @@ fn proof_v16_dynamic_market_account_len_roundtrips_capacity_and_offsets() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
+fn proof_v16_dynamic_market_account_len_matches_wrapper_slab_layout() {
+    const WRAPPER_LEN: usize = 512;
+    const PROFILE_LEN: usize = 400;
+
+    let capacity_raw: u8 = kani::any();
+    let index_raw: u8 = kani::any();
+    let capacity = capacity_raw as usize;
+    let index = index_raw as usize;
+    kani::assume(capacity > 0);
+    kani::assume(index < capacity);
+
+    let header_len = core::mem::size_of::<MarketGroupV16HeaderAccount>();
+    let engine_len = core::mem::size_of::<EngineAssetSlotV16Account>();
+    let engine_align = core::mem::align_of::<EngineAssetSlotV16Account>();
+    let stride = MarketGroupV16HeaderAccount::kani_dynamic_asset_slot_stride::<[u8; WRAPPER_LEN]>();
+
+    kani::cover!(
+        capacity > 1 && index + 1 == capacity,
+        "wrapper slab layout covers the final dynamic market slot"
+    );
+    kani::cover!(
+        capacity > 8 && index > 4,
+        "wrapper slab layout covers a nontrivial multi-market offset"
+    );
+
+    assert_eq!(WRAPPER_LEN % engine_align, 0);
+    assert_eq!(stride, WRAPPER_LEN + engine_len);
+    assert!(PROFILE_LEN <= WRAPPER_LEN);
+
+    let len = MarketGroupV16HeaderAccount::dynamic_market_group_account_len::<[u8; WRAPPER_LEN]>(
+        capacity,
+    )
+    .unwrap();
+    let slot_offset =
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_offset::<[u8; WRAPPER_LEN]>(index).unwrap();
+    let wrapper_start = slot_offset;
+    let profile_end = wrapper_start + PROFILE_LEN;
+    let wrapper_end = wrapper_start + WRAPPER_LEN;
+    let engine_start = wrapper_end;
+    let engine_end = engine_start + engine_len;
+
+    assert_eq!(
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len::<
+            [u8; WRAPPER_LEN],
+        >(len),
+        Ok(capacity)
+    );
+    assert_eq!(
+        MarketGroupV16HeaderAccount::validate_dynamic_market_group_account_len::<[u8; WRAPPER_LEN]>(
+            len, capacity
+        ),
+        Ok(())
+    );
+    assert_eq!(slot_offset, header_len + index * stride);
+    assert!(wrapper_start >= header_len);
+    assert!(profile_end <= wrapper_end);
+    assert_eq!(engine_start, slot_offset + WRAPPER_LEN);
+    assert_eq!(engine_end, slot_offset + stride);
+    assert!(engine_end <= len);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
 fn proof_v16_dynamic_market_account_len_fails_closed_on_arithmetic_overflow() {
     let capacity: usize = kani::any();
     let index: usize = kani::any();
