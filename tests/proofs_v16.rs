@@ -21948,9 +21948,9 @@ fn proof_v16_validator_sound_senior_backing_and_domain_insurance_caps() {
     let domain_budget_raw: u8 = kani::any();
     let reserved_raw: u8 = kani::any();
     let extra_vault_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&capital_raw));
-    kani::assume((1..=8).contains(&insurance_raw));
-    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume((1..=16).contains(&capital_raw));
+    kani::assume((1..=16).contains(&insurance_raw));
+    kani::assume((1..=16).contains(&backing_raw));
     kani::assume(domain_budget_raw <= insurance_raw);
     kani::assume(reserved_raw <= domain_budget_raw);
 
@@ -22009,6 +22009,14 @@ fn proof_v16_validator_sound_senior_backing_and_domain_insurance_caps() {
     kani::cover!(
         backing > 0 && reserved > 0 && budget > reserved && extra_vault_raw > 0,
         "validator cap theorem covers senior capital, source backing, reserved insurance, and spare vault"
+    );
+    kani::cover!(
+        capital > 8 && insurance > 8 && backing > 8 && budget > reserved && reserved > 0,
+        "validator cap theorem covers larger senior, backing, and isolated insurance budgets"
+    );
+    kani::cover!(
+        extra_vault_raw == 0 && reserved == budget && budget > 0,
+        "validator cap theorem covers tight vault and fully reserved isolated insurance budget"
     );
     assert!(senior_with_backing <= market.header.vault.get());
     assert!(
