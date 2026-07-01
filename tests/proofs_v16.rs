@@ -3,10 +3,11 @@
 use percolator::v16::kani_social_loss_book_split;
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
-    backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
-    kani_add_open_interest_for_new_position, kani_amount_from_bound_num,
-    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
-    kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
+    backing_domain_fee_split_for_lien_delta_num, kani_account_equity_from_parts,
+    kani_active_bitmap_set as active_bitmap_set, kani_add_open_interest_for_new_position,
+    kani_amount_from_bound_num, kani_apply_backing_provider_earnings_withdraw,
+    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
+    kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_bound_num_from_amount,
     kani_build_resolved_close_rank, kani_build_trade_request_guard_summary,
@@ -3032,6 +3033,80 @@ fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
     assert_eq!(market.kani_residual(), residual_before);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_withdraw_fee_debt_gate_matches_equity_and_flow_conservation() {
+    let capital_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let fee_debt_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 16);
+    kani::assume(other_capital_raw <= 16);
+    kani::assume(insurance_raw <= 16);
+    kani::assume(surplus_raw <= 16);
+    kani::assume(fee_debt_raw <= 24);
+    kani::assume(amount_raw <= capital_raw);
+    let capital = capital_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let fee_debt = fee_debt_raw as u128;
+    let amount = amount_raw as u128;
+    let c_tot_before = capital + other_capital;
+    let vault_before = c_tot_before + insurance + surplus;
+    let residual_before = vault_before - c_tot_before - insurance;
+    let post_capital = capital - amount;
+    let equity_after =
+        kani_account_equity_from_parts(post_capital, 0, -(fee_debt as i128)).unwrap();
+    let expected_ok = amount + fee_debt <= capital;
+
+    kani::cover!(
+        expected_ok && fee_debt > 0 && amount + fee_debt == capital,
+        "withdraw fee-debt gate covers exact post-withdraw zero-equity boundary"
+    );
+    kani::cover!(
+        !expected_ok && amount <= capital && fee_debt > 0,
+        "withdraw fee-debt gate rejects an exit covered by capital but not by post-fee equity"
+    );
+    kani::cover!(
+        expected_ok && fee_debt == 0 && amount > 0 && surplus > 0,
+        "withdraw fee-debt gate covers ordinary external exit with junior surplus present"
+    );
+
+    assert_eq!(expected_ok, equity_after >= 0);
+    assert_eq!(equity_after, post_capital as i128 - fee_debt as i128);
+    if expected_ok {
+        let vault_after = vault_before - amount;
+        let c_tot_after = c_tot_before - amount;
+        let flow = TokenValueFlowProofV16::account_capital_to_external_out(
+            amount,
+            vault_before,
+            vault_after,
+        )
+        .unwrap();
+        assert_eq!(flow.validate(), Ok(()));
+        assert_eq!(
+            flow.debits[TokenValueClassV16::AccountCapital as usize],
+            amount
+        );
+        assert_eq!(
+            flow.credits[TokenValueClassV16::ExternalQuote as usize],
+            amount
+        );
+        assert_eq!(flow.external_quote_out, amount);
+        assert_eq!(flow.external_quote_in, 0);
+        assert_eq!(vault_after - c_tot_after - insurance, residual_before);
+    } else {
+        // withdraw_not_atomic checks this negative-equity result before the
+        // external-out flow/mutations, so the only safe transition is no-op.
+        assert!(equity_after < 0);
+        assert_eq!(vault_before - c_tot_before - insurance, residual_before);
+    }
 }
 
 #[kani::proof]

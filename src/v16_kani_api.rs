@@ -244,6 +244,14 @@ pub fn kani_kernel_locked_margin_gate(
     V16Core::kernel_locked_margin_gate(capital, pnl, fee_credits, certified_initial_req)
 }
 
+pub fn kani_account_equity_from_parts(
+    capital: u128,
+    pnl: i128,
+    fee_credits: i128,
+) -> V16Result<i128> {
+    account_equity_from_parts(capital, pnl, fee_credits)
+}
+
 pub fn kani_kernel_settle_resolved_pnl_after_booking(
     pnl: i128,
     booked_loss: u128,
