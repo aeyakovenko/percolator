@@ -1260,6 +1260,36 @@ fn closure_ledger_inv_prepare_counterparty_backing_withdraw_delta() {
     kani::assume(kani_ledger_inv(&b, &s, &r));
     if let Ok((b2, s2)) = V16Core::prepare_counterparty_backing_withdraw_delta(b, s, amount) {
         // Reservation untouched by counterparty deltas.
+        assert_eq!(
+            b.fresh_unliened_backing_num
+                .checked_sub(b2.fresh_unliened_backing_num),
+            Some(amount)
+        );
+        assert_eq!(
+            s.fresh_reserved_backing_num
+                .checked_sub(s2.fresh_reserved_backing_num),
+            Some(amount)
+        );
+        assert_eq!(b2.valid_liened_backing_num, b.valid_liened_backing_num);
+        assert_eq!(
+            b2.consumed_liened_backing_num,
+            b.consumed_liened_backing_num
+        );
+        assert_eq!(
+            b2.impaired_liened_backing_num,
+            b.impaired_liened_backing_num
+        );
+        assert_eq!(s2.valid_liened_backing_num, s.valid_liened_backing_num);
+        assert_eq!(s2.spent_backing_num, s.spent_backing_num);
+        assert_eq!(s2.provider_receivable_num, s.provider_receivable_num);
+        kani::cover!(
+            amount > 1
+                && b.status == BackingBucketStatusV16::Fresh
+                && b.fresh_unliened_backing_num > amount
+                && s.fresh_reserved_backing_num > amount
+                && b2.status == BackingBucketStatusV16::Fresh,
+            "ledger closure covers partial nonzero backing withdrawal"
+        );
         assert!(kani_ledger_inv(&b2, &s2, &r));
     }
 }
