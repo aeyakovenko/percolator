@@ -1281,6 +1281,17 @@ fn closure_ledger_inv_prepare_insurance_lien_consume_delta() {
     if let Ok((r2, s2, _ds, _ins)) =
         V16Core::prepare_insurance_lien_consume_delta(r, s, domain_spent, insurance, amount)
     {
+        kani::cover!(
+            amount >= 2 * BOUND_SCALE
+                && r.insurance_credit_reserved_num > amount
+                && r.valid_liened_insurance_num > amount
+                && s.insurance_credit_reserved_num > amount
+                && s.valid_liened_insurance_num > amount
+                && domain_spent > 1
+                && _ds > domain_spent
+                && _ins < insurance,
+            "ledger closure covers partial nonzero insurance-lien consume with domain-budget debit"
+        );
         assert!(kani_ledger_inv(&b, &s2, &r2));
     }
 }
