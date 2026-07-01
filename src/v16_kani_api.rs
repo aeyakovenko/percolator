@@ -956,6 +956,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.account_unliened_source_realizable_support(account, face_claim)
     }
 
+    pub fn kani_source_claim_unliened_num(
+        account: &PortfolioV16View<'_>,
+        domain: usize,
+    ) -> V16Result<u128> {
+        Self::source_claim_unliened_num(account, domain)
+    }
+
     pub fn kani_reserve_new_capital_backed_loss_for_source_domain_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

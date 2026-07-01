@@ -1772,6 +1772,69 @@ fn proof_v16_source_domain_validation_accepts_exactly_conserved_lien_subledger_s
     }
 }
 
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_locked_face_claim_is_excluded_from_unliened_capacity() {
+    let claim_raw: u8 = kani::any();
+    let liened_raw: u8 = kani::any();
+    let impaired_raw: u8 = kani::any();
+    kani::assume((1..=32).contains(&claim_raw));
+    kani::assume(liened_raw <= 40);
+    kani::assume(impaired_raw <= 40);
+
+    let claim = claim_raw as u128;
+    let liened = liened_raw as u128;
+    let impaired = impaired_raw as u128;
+    let locked = liened + impaired;
+    let expected_ok = locked <= claim;
+    let expected_unliened = claim.saturating_sub(locked);
+
+    let mut account_header = PortfolioAccountV16Account::default();
+    let claim_num = claim * BOUND_SCALE;
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(1),
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_liened_num: V16PodU128::new(liened * BOUND_SCALE),
+        source_claim_counterparty_liened_num: V16PodU128::new(liened * BOUND_SCALE),
+        source_lien_effective_reserved: V16PodU128::new(liened),
+        source_lien_counterparty_backing_num: V16PodU128::new(liened * BOUND_SCALE),
+        source_lien_fee_last_slot: V16PodU64::new(if liened == 0 { 0 } else { 1 }),
+        source_claim_impaired_num: V16PodU128::new(impaired * BOUND_SCALE),
+        source_lien_impaired_effective_reserved: V16PodU128::new(impaired),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let account = PortfolioV16View::new(&account_header);
+    let unliened_num = MarketGroupV16ViewMut::<u64>::kani_source_claim_unliened_num(&account, 0);
+    let missing_domain = MarketGroupV16ViewMut::<u64>::kani_source_claim_unliened_num(&account, 1);
+
+    kani::cover!(
+        expected_ok && liened > 0 && impaired > 0 && expected_unliened > 0,
+        "locked-face exclusion covers mixed live lien and impaired face with remaining capacity"
+    );
+    kani::cover!(
+        expected_ok && locked == claim,
+        "locked-face exclusion covers fully locked/impaired claim with zero remaining capacity"
+    );
+    kani::cover!(
+        !expected_ok && liened > claim,
+        "locked-face exclusion rejects over-liened source claim"
+    );
+    kani::cover!(
+        !expected_ok && liened <= claim && locked > claim,
+        "locked-face exclusion rejects over-impaired source claim"
+    );
+
+    if expected_ok {
+        assert_eq!(unliened_num, Ok(expected_unliened * BOUND_SCALE));
+    } else {
+        assert_eq!(unliened_num, Err(V16Error::CounterUnderflow));
+    }
+    assert_eq!(missing_domain, Ok(0));
+}
+
 // Source-domain fee-cursor completeness: persisted counterparty-backed liens
 // may carry a utilization-fee cursor only while backing is actually live, and
 // that cursor cannot be in the future. This is the validator-side guard for the
