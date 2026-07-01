@@ -7181,8 +7181,8 @@ fn proof_v16_backing_utilization_rate_above_kink_matches_exact_schedule() {
     let base_raw: u8 = kani::any();
     let slope_at_raw: u8 = kani::any();
     let slope_above_raw: u8 = kani::any();
-    kani::assume((1..=32).contains(&fresh_raw));
-    kani::assume((1..=32).contains(&valid_raw));
+    kani::assume((1..=64).contains(&fresh_raw));
+    kani::assume((1..=64).contains(&valid_raw));
     kani::assume(valid_raw <= fresh_raw);
     let fresh = fresh_raw as u128;
     let valid = valid_raw as u128;
@@ -7205,6 +7205,10 @@ fn proof_v16_backing_utilization_rate_above_kink_matches_exact_schedule() {
     kani::cover!(
         util_bps > kink && valid < fresh,
         "backing utilization above-kink proof covers partial above-kink utilization"
+    );
+    kani::cover!(
+        fresh > 32 && valid > 32 && util_bps > kink && valid < fresh,
+        "backing utilization above-kink proof covers broader partial above-kink utilization"
     );
     kani::cover!(
         util_bps == MAX_BACKING_FEE_UTIL_BPS,
