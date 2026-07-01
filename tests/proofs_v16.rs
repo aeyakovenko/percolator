@@ -18703,12 +18703,7 @@ fn proof_v16_credit_account_from_insurance_is_value_neutral_and_pool_isolated() 
     let c_tot_raw: u8 = kani::any();
     let capital_raw: u8 = kani::any();
     let surplus_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&amount_raw));
-    kani::assume(budget_raw <= 4);
-    kani::assume(unbudgeted_raw <= 4);
-    kani::assume(c_tot_raw <= 8);
-    kani::assume(capital_raw <= 8);
-    kani::assume(surplus_raw <= 4);
+    kani::assume(amount_raw > 0);
     let amount = amount_raw as u128;
     let budget_remaining = budget_raw as u128;
     let unbudgeted_surplus = unbudgeted_raw as u128;
@@ -18746,6 +18741,15 @@ fn proof_v16_credit_account_from_insurance_is_value_neutral_and_pool_isolated() 
         "insurance credit covers nonzero junior surplus present"
     );
     kani::cover!(amount > 1, "insurance credit covers nontrivial amount");
+    kani::cover!(
+        amount > 128
+            && budget_remaining > 128
+            && unbudgeted_surplus > 128
+            && c_tot > 128
+            && capital > 128
+            && surplus > 128,
+        "insurance credit covers large senior, account, and junior balances"
+    );
     assert_eq!(next_insurance, insurance - amount);
     assert_eq!(next_c_tot, c_tot + amount);
     assert_eq!(next_capital, capital + amount);
