@@ -2663,6 +2663,15 @@ fn closure_close_ledger_absorbs_booking_outcome() {
     kani::assume(remaining_after < 1u128 << 65);
     kani::assume(booked_loss + explicit_loss + remaining_after == ledger.residual_remaining);
 
+    kani::cover!(
+        booked_loss > 1 && explicit_loss > 1 && remaining_after > 1,
+        "close-ledger booking absorption covers mixed booked/explicit loss with carried residual"
+    );
+    kani::cover!(
+        remaining_after == 0 && booked_loss > 0,
+        "close-ledger booking absorption covers terminal residual absorption"
+    );
+
     // book_bankruptcy_residual_chunk_for_account_core advances by (0,0,0, booked, explicit).
     if let Ok(l) = V16Core::kernel_advance_close_ledger(ledger, 0, 0, 0, booked_loss, explicit_loss)
     {
