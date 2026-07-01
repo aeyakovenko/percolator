@@ -9533,6 +9533,110 @@ fn proof_v16_token_value_flow_validator_is_exact_conservation_gate() {
 }
 
 #[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_public_value_flow_constructors_are_exact_and_balanced() {
+    let external_raw: u8 = kani::any();
+    let escrow_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    let mismatch_close_credit: bool = kani::any();
+    let vault_seed_raw: u8 = kani::any();
+
+    let external = external_raw as u128;
+    let escrow = escrow_raw as u128;
+    let amount = amount_raw as u128;
+    let vault_before = vault_seed_raw as u128;
+    let cure_vault_after = vault_before + external;
+    let expected_cure_credit = external + escrow;
+    let cure_credit = if mismatch_close_credit {
+        expected_cure_credit + 1
+    } else {
+        expected_cure_credit
+    };
+
+    let cure = TokenValueFlowProofV16::close_cure_to_account_capital(
+        external,
+        escrow,
+        cure_credit,
+        vault_before,
+        cure_vault_after,
+    );
+    kani::cover!(
+        !mismatch_close_credit && external > 0 && escrow > 0,
+        "close-cure flow covers mixed external deposit and cancel escrow funding"
+    );
+    kani::cover!(
+        mismatch_close_credit && expected_cure_credit > 0,
+        "close-cure flow rejects a capital credit not equal to its sources"
+    );
+    if mismatch_close_credit {
+        assert_eq!(cure, Err(V16Error::InvalidConfig));
+    } else {
+        let proof = cure.unwrap();
+        assert_eq!(proof.validate(), Ok(()));
+        assert_eq!(proof.external_quote_in, external);
+        assert_eq!(proof.external_quote_out, 0);
+        assert_eq!(
+            proof.credits[TokenValueClassV16::ExternalQuote as usize],
+            external
+        );
+        assert_eq!(
+            proof.credits[TokenValueClassV16::CancelDepositEscrow as usize],
+            escrow
+        );
+        assert_eq!(
+            proof.debits[TokenValueClassV16::AccountCapital as usize],
+            expected_cure_credit
+        );
+    }
+
+    let capital_to_insurance =
+        TokenValueFlowProofV16::account_capital_to_insurance(amount, vault_before, vault_before)
+            .unwrap();
+    let insurance_spent = TokenValueFlowProofV16::insurance_to_close_insurance_spent(
+        amount,
+        vault_before,
+        vault_before,
+    )
+    .unwrap();
+    kani::cover!(
+        amount > 0,
+        "insurance value-flow constructors cover nonzero internal transfer amount"
+    );
+    assert_eq!(capital_to_insurance.validate(), Ok(()));
+    assert_eq!(
+        capital_to_insurance.debits[TokenValueClassV16::AccountCapital as usize],
+        amount
+    );
+    assert_eq!(
+        capital_to_insurance.credits[TokenValueClassV16::InsuranceCapital as usize],
+        amount
+    );
+    assert_eq!(capital_to_insurance.external_quote_in, 0);
+    assert_eq!(capital_to_insurance.external_quote_out, 0);
+
+    assert_eq!(insurance_spent.validate(), Ok(()));
+    assert_eq!(
+        insurance_spent.debits[TokenValueClassV16::InsuranceCapital as usize],
+        amount
+    );
+    assert_eq!(
+        insurance_spent.credits[TokenValueClassV16::CloseInsuranceSpent as usize],
+        amount
+    );
+    assert_eq!(insurance_spent.external_quote_in, 0);
+    assert_eq!(insurance_spent.external_quote_out, 0);
+    assert_eq!(
+        TokenValueFlowProofV16::validate_insurance_to_close_insurance_spent(
+            amount,
+            vault_before,
+            vault_before
+        ),
+        Ok(())
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_stock_reconciliation_validator_is_exact_sum() {
