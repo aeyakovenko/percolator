@@ -14615,9 +14615,6 @@ fn proof_v16_counterparty_lien_create_delta_is_expiry_gated_and_exact() {
     let valid_raw: u8 = kani::any();
     let status_raw: u8 = kani::any();
     let expired: bool = kani::any();
-    kani::assume(amount_raw <= 8);
-    kani::assume(fresh_raw <= 8);
-    kani::assume(valid_raw <= 8);
     kani::assume(status_raw <= 3);
 
     let current_slot = 10u64;
@@ -14673,6 +14670,10 @@ fn proof_v16_counterparty_lien_create_delta_is_expiry_gated_and_exact() {
     kani::cover!(
         expected_ok && amount > 0 && fresh > amount && valid > 0,
         "counterparty lien create partially moves fresh backing into an existing lien"
+    );
+    kani::cover!(
+        expected_ok && amount > 128 * BOUND_SCALE && fresh > amount && valid > 128 * BOUND_SCALE,
+        "counterparty lien create covers large fresh and existing lien balances"
     );
     kani::cover!(
         expected_ok && amount > 0 && fresh == amount,
