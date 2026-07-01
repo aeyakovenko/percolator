@@ -17147,10 +17147,7 @@ fn proof_v16_source_credit_support_flow_matches_close_ledger_progress_exactly() 
     let prior_explicit_raw: u8 = kani::any();
     let residual_extra_raw: u8 = kani::any();
     let close_id_raw: u8 = kani::any();
-    kani::assume(counterparty_raw <= 8);
-    kani::assume(insurance_raw <= 8);
-    kani::assume(surplus_raw <= 8);
-    kani::assume((1..=8).contains(&close_id_raw));
+    kani::assume(close_id_raw > 0);
     let counterparty = counterparty_raw as u128;
     let insurance = insurance_raw as u128;
     let surplus = surplus_raw as u128;
@@ -17213,16 +17210,32 @@ fn proof_v16_source_credit_support_flow_matches_close_ledger_progress_exactly() 
         "close support composition covers mixed counterparty insurance and surplus support"
     );
     kani::cover!(
+        counterparty > 128 && insurance > 128 && surplus > 128,
+        "close support composition covers large mixed counterparty insurance and surplus support"
+    );
+    kani::cover!(
         residual_extra == 0,
         "close support composition covers finalizing exact residual cure"
+    );
+    kani::cover!(
+        residual_extra == 0 && support_total > 128,
+        "close support composition covers large finalizing exact residual cure"
     );
     kani::cover!(
         residual_extra > 0,
         "close support composition covers partial residual cure"
     );
     kani::cover!(
+        residual_extra > 128,
+        "close support composition covers large partial residual cure"
+    );
+    kani::cover!(
         support_total > 1 && under_advanced.is_some(),
         "close support composition covers detectable under-booked ledger progress"
+    );
+    kani::cover!(
+        support_total > 128 && under_advanced.is_some(),
+        "close support composition covers large detectable under-booked ledger progress"
     );
 
     assert_eq!(support_proof.validate(), Ok(()));
