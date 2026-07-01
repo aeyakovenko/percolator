@@ -15336,6 +15336,44 @@ fn proof_v16_symbolic_funding_profile_satisfies_mm_envelope_on_small_notionals()
     assert_eq!(cfg.kani_solvency_envelope_holds_for_notional(x), Ok(true));
 }
 
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_persisted_shape_accepts_fast_path_config_and_satisfies_small_mm_envelope() {
+    let price_move_bps: u16 = kani::any();
+    let x_raw: u8 = kani::any();
+
+    kani::assume((1..=10_000).contains(&price_move_bps));
+    kani::assume(x_raw > 0);
+
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 1, 10);
+    cfg.maintenance_margin_bps = 10_000;
+    cfg.initial_margin_bps = 10_000;
+    cfg.max_price_move_bps_per_slot = price_move_bps as u64;
+    cfg.max_accrual_dt_slots = 1;
+    cfg.min_funding_lifetime_slots = 1;
+    cfg.max_abs_funding_e9_per_slot = 0;
+    cfg.liquidation_fee_bps = 0;
+    cfg.min_liquidation_abs = 0;
+    cfg.liquidation_fee_cap = 0;
+
+    let persisted = V16ConfigAccount::from_runtime(&cfg);
+    let decoded_cfg = persisted.try_to_runtime_shape().unwrap();
+    let x = u128::from(x_raw);
+
+    kani::cover!(
+        price_move_bps > 5_000 && x > 64,
+        "persisted fast-path shape covers high price-move budget and interior notional"
+    );
+    assert_eq!(decoded_cfg, cfg);
+    let x64 = u64::from(x_raw);
+    let price64 = u64::from(price_move_bps);
+    let loss = (x64 * price64).div_ceil(10_000);
+    let maintenance = x64.max(decoded_cfg.min_nonzero_mm_req as u64);
+    assert!(loss <= x64);
+    assert!(loss <= maintenance);
+}
+
 // Clean-room inductive senior-solvency proof (independent of any external PR).
 //
 // validate_shape enforces the senior leg `c_tot + insurance (+ earnings) <= vault`
