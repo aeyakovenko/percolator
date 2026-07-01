@@ -7,18 +7,19 @@ use percolator::v16::{
     kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
     kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
-    kani_backing_utilization_rate_e9_for_source_state, kani_build_resolved_close_rank,
-    kani_build_trade_request_guard_summary, kani_close_progress_blocks_exposure_clear,
-    kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag, kani_kernel_advance_close_ledger,
-    kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg, kani_kernel_bresidual_step,
-    kani_kernel_cert_is_current, kani_kernel_classify_position_delta, kani_kernel_clear_leg,
-    kani_kernel_consume_insurance_layer, kani_kernel_economically_valid_trade_admits,
-    kani_kernel_locked_margin_gate, kani_kernel_reduce_position_delta,
-    kani_kernel_resize_leg_same_side, kani_kernel_resolved_close_progress,
-    kani_kernel_resolved_payout_step, kani_kernel_settle_principal,
-    kani_kernel_settle_resolved_pnl_after_booking, kani_kernel_social_loss_chunk_cap,
-    kani_kernel_trade_admit, kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
+    kani_backing_utilization_rate_e9_for_source_state, kani_bound_num_from_amount,
+    kani_build_resolved_close_rank, kani_build_trade_request_guard_summary,
+    kani_close_progress_blocks_exposure_clear, kani_expected_source_credit_rate_num_for_state,
+    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
+    kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg,
+    kani_kernel_bresidual_step, kani_kernel_cert_is_current, kani_kernel_classify_position_delta,
+    kani_kernel_clear_leg, kani_kernel_consume_insurance_layer,
+    kani_kernel_economically_valid_trade_admits, kani_kernel_locked_margin_gate,
+    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
+    kani_kernel_resolved_close_progress, kani_kernel_resolved_payout_step,
+    kani_kernel_settle_principal, kani_kernel_settle_resolved_pnl_after_booking,
+    kani_kernel_social_loss_chunk_cap, kani_kernel_trade_admit,
+    kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
     kani_project_auto_crank_selected_assets, kani_risk_notional_ceil, kani_select_auto_crank_plan,
@@ -14274,6 +14275,26 @@ fn proof_v16_amount_from_bound_num_rounds_up_subscale_dust() {
         assert_eq!(rounded_dust, 0);
     } else {
         assert_eq!(rounded_dust, 1);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_bound_num_from_amount_is_exact_scaled_bound() {
+    let amount_raw: u16 = kani::any();
+    let amount = amount_raw as u128;
+
+    let bound_num = kani_bound_num_from_amount(amount).unwrap();
+
+    kani::cover!(
+        amount > 1,
+        "bound conversion covers nontrivial scaled amount"
+    );
+    assert_eq!(bound_num, amount * BOUND_SCALE);
+    assert!(bound_num >= amount);
+    if amount > 0 {
+        assert!(bound_num > amount);
     }
 }
 
