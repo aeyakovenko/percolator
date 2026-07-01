@@ -14905,6 +14905,100 @@ fn proof_v16_residual_booking_outcome_advances_close_ledger_exactly() {
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
+fn proof_v16_two_residual_booking_chunks_finalize_without_overbooking() {
+    let residual_raw: u8 = kani::any();
+    let chunk_raw: u8 = kani::any();
+    kani::assume((2..=64).contains(&residual_raw));
+    kani::assume((1..=32).contains(&chunk_raw));
+    kani::assume(residual_raw > chunk_raw);
+    kani::assume((residual_raw as u16) <= 2 * (chunk_raw as u16));
+
+    let residual = residual_raw as u128;
+    let chunk = chunk_raw as u128;
+    let expected_second = residual - chunk;
+
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+
+    let base_ledger = CloseProgressLedgerV16 {
+        active: true,
+        close_id: 1,
+        asset_index: 0,
+        market_id: asset.market_id,
+        domain_side: SideV16::Short,
+        gross_loss_at_close_start: residual,
+        residual_remaining: residual,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+
+    let first = MarketGroupV16ViewMut::<u64>::kani_apply_bankruptcy_residual_chunk_to_loss_side(
+        &mut asset,
+        SideV16::Short,
+        chunk,
+        residual,
+    )
+    .unwrap()
+    .unwrap();
+    let ledger_after_first =
+        kani_kernel_advance_close_ledger(base_ledger, 0, 0, 0, first.booked_loss, 0).unwrap();
+    let second = MarketGroupV16ViewMut::<u64>::kani_apply_bankruptcy_residual_chunk_to_loss_side(
+        &mut asset,
+        SideV16::Short,
+        expected_second,
+        ledger_after_first.residual_remaining,
+    )
+    .unwrap()
+    .unwrap();
+    let ledger_after_second =
+        kani_kernel_advance_close_ledger(ledger_after_first, 0, 0, 0, second.booked_loss, 0)
+            .unwrap();
+    let inert = MarketGroupV16ViewMut::<u64>::kani_apply_bankruptcy_residual_chunk_to_loss_side(
+        &mut asset,
+        SideV16::Short,
+        0,
+        0,
+    )
+    .unwrap();
+
+    kani::cover!(
+        chunk > 1 && expected_second > 1,
+        "two residual chunks cover nontrivial second chunk"
+    );
+    kani::cover!(
+        expected_second < chunk,
+        "two residual chunks cover smaller final chunk"
+    );
+    kani::cover!(
+        expected_second == chunk,
+        "two residual chunks cover equal final chunk"
+    );
+    assert_eq!(first.booked_loss, chunk);
+    assert_eq!(first.explicit_loss, 0);
+    assert_eq!(first.remaining_after, expected_second);
+    assert_eq!(second.booked_loss, expected_second);
+    assert_eq!(second.explicit_loss, 0);
+    assert_eq!(second.remaining_after, 0);
+    assert!(inert.is_none());
+    assert_eq!(ledger_after_first.b_loss_booked, chunk);
+    assert_eq!(ledger_after_first.residual_remaining, expected_second);
+    assert!(!ledger_after_first.finalized);
+    assert_eq!(ledger_after_second.b_loss_booked, residual);
+    assert_eq!(ledger_after_second.residual_remaining, 0);
+    assert!(ledger_after_second.finalized);
+    assert_eq!(asset.b_short_num, residual);
+    assert_eq!(asset.social_loss_remainder_short_num, 0);
+    assert_eq!(asset.b_long_num, 0);
+    assert_eq!(asset.social_loss_remainder_long_num, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
 fn proof_v16_b_settlement_chunk_debits_loss_and_advances_rank_exactly() {
     let target_delta_raw: u8 = kani::any();
     let public_limit_raw: u8 = kani::any();
