@@ -313,6 +313,32 @@ pub fn kani_kernel_consume_insurance_layer(
     V16Core::kernel_consume_insurance_layer(domain_available, insurance, spent, pnl)
 }
 
+pub fn kani_kernel_apply_positive_support_conversion(
+    pnl: i128,
+    capital: u128,
+    c_tot: u128,
+    pnl_matured_pos_tot: u128,
+    converted: u128,
+    face_burn: u128,
+    counterparty_credit_consumed: u128,
+    insurance_credit_consumed: u128,
+    vault_before: u128,
+    vault_after: u128,
+) -> V16Result<(i128, u128, u128, u128)> {
+    V16Core::kernel_apply_positive_support_conversion(
+        pnl,
+        capital,
+        c_tot,
+        pnl_matured_pos_tot,
+        converted,
+        face_burn,
+        counterparty_credit_consumed,
+        insurance_credit_consumed,
+        vault_before,
+        vault_after,
+    )
+}
+
 pub fn kani_kernel_bresidual_step(
     residual_remaining: u128,
     booked: Option<BResidualBookingOutcomeV16>,

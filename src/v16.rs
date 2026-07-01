@@ -1124,6 +1124,50 @@ impl V16Core {
         Ok((used, new_insurance, new_spent, new_pnl))
     }
 
+    /// PRODUCTION KERNEL (source-credit value safety): the final accounting
+    /// step for converting positive PnL support into durable account capital.
+    /// The caller has already consumed/burned the source support; this kernel
+    /// proves the durable credit is exactly funded by the consumed support
+    /// classes, vault-flat, and paired with the PnL face burn.
+    pub(crate) fn kernel_apply_positive_support_conversion(
+        pnl: i128,
+        capital: u128,
+        c_tot: u128,
+        pnl_matured_pos_tot: u128,
+        converted: u128,
+        face_burn: u128,
+        counterparty_credit_consumed: u128,
+        insurance_credit_consumed: u128,
+        vault_before: u128,
+        vault_after: u128,
+    ) -> V16Result<(i128, u128, u128, u128)> {
+        let face_i128 = i128::try_from(face_burn).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let new_pnl = pnl
+            .checked_sub(face_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let new_capital = capital
+            .checked_add(converted)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let new_c_tot = c_tot
+            .checked_add(converted)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let new_pnl_matured_pos_tot = pnl_matured_pos_tot.saturating_sub(face_burn);
+        let protocol_surplus_consumed = converted
+            .checked_sub(counterparty_credit_consumed)
+            .and_then(|v| v.checked_sub(insurance_credit_consumed))
+            .ok_or(V16Error::CounterUnderflow)?;
+        TokenValueFlowProofV16::support_to_account_capital(
+            converted,
+            counterparty_credit_consumed,
+            insurance_credit_consumed,
+            protocol_surplus_consumed,
+            vault_before,
+            vault_after,
+        )?
+        .validate()?;
+        Ok((new_pnl, new_capital, new_c_tot, new_pnl_matured_pos_tot))
+    }
+
     /// PRODUCTION KERNEL (value safety, roadmap S-C2 / 3A.3): the resolved-payout
     /// draining step. Given the (already-computed) claimable and the vault,
     /// `payout = min(claimable, vault)` and the vault drops by EXACTLY payout —
@@ -14244,49 +14288,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 insurance_credit_consumed: 0,
             }
         };
-        let face_i128 =
-            i128::try_from(consumption.face_burn).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let new_pnl = account
-            .header
-            .pnl
-            .get()
-            .checked_sub(face_i128)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        let (new_pnl, new_capital, new_c_tot, new_pnl_matured_pos_tot) =
+            V16Core::kernel_apply_positive_support_conversion(
+                account.header.pnl.get(),
+                account.header.capital.get(),
+                self.header.c_tot.get(),
+                self.header.pnl_matured_pos_tot.get(),
+                converted,
+                consumption.face_burn,
+                consumption.counterparty_credit_consumed,
+                consumption.insurance_credit_consumed,
+                vault_before,
+                self.header.vault.get(),
+            )?;
         self.set_account_pnl(account, new_pnl)?;
-        account.header.capital = V16PodU128::new(
-            account
-                .header
-                .capital
-                .get()
-                .checked_add(converted)
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        );
-        self.header.c_tot = V16PodU128::new(
-            self.header
-                .c_tot
-                .get()
-                .checked_add(converted)
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        );
-        self.header.pnl_matured_pos_tot = V16PodU128::new(
-            self.header
-                .pnl_matured_pos_tot
-                .get()
-                .saturating_sub(consumption.face_burn),
-        );
-        let protocol_surplus_consumed = converted
-            .checked_sub(consumption.counterparty_credit_consumed)
-            .and_then(|v| v.checked_sub(consumption.insurance_credit_consumed))
-            .ok_or(V16Error::CounterUnderflow)?;
-        TokenValueFlowProofV16::support_to_account_capital(
-            converted,
-            consumption.counterparty_credit_consumed,
-            consumption.insurance_credit_consumed,
-            protocol_surplus_consumed,
-            vault_before,
-            self.header.vault.get(),
-        )?
-        .validate()?;
+        account.header.capital = V16PodU128::new(new_capital);
+        self.header.c_tot = V16PodU128::new(new_c_tot);
+        self.header.pnl_matured_pos_tot = V16PodU128::new(new_pnl_matured_pos_tot);
         account.header.health_cert.valid = 0;
         Ok(converted)
     }

@@ -13,7 +13,8 @@ use percolator::v16::{
     kani_build_resolved_close_rank, kani_build_trade_request_guard_summary,
     kani_close_progress_blocks_exposure_clear, kani_expected_source_credit_rate_num_for_state,
     kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
-    kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg,
+    kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap,
+    kani_kernel_apply_positive_support_conversion, kani_kernel_attach_leg,
     kani_kernel_bresidual_step, kani_kernel_cert_is_current, kani_kernel_classify_position_delta,
     kani_kernel_clear_leg, kani_kernel_consume_insurance_layer,
     kani_kernel_convert_clear_to_pending_obligation, kani_kernel_economically_valid_trade_admits,
@@ -18519,6 +18520,109 @@ fn proof_v16_support_to_account_capital_requires_exact_mixed_source_sum() {
             surplus
         );
         assert_eq!(proof.validate(), Ok(()));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_positive_support_conversion_requires_funded_vault_flat_credit() {
+    let face_raw: u8 = kani::any();
+    let pnl_slack_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let matured_raw: u8 = kani::any();
+    let counterparty_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let vault_raw: u16 = kani::any();
+    let underfunded: bool = kani::any();
+    let vault_drift: bool = kani::any();
+
+    let face_burn = face_raw as u128;
+    let pnl = (face_burn + pnl_slack_raw as u128) as i128;
+    let capital = capital_raw as u128;
+    let c_tot = capital + other_capital_raw as u128;
+    let pnl_matured_pos_tot = matured_raw as u128;
+    let counterparty = counterparty_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let senior_sources = counterparty + insurance;
+    let converted = if underfunded && senior_sources > 0 {
+        senior_sources - 1
+    } else {
+        senior_sources + surplus
+    };
+    let vault_before = vault_raw as u128;
+    let vault_after = if vault_drift {
+        vault_before + 1
+    } else {
+        vault_before
+    };
+    let expected_ok = !(underfunded && senior_sources > 0) && !vault_drift;
+
+    let result = kani_kernel_apply_positive_support_conversion(
+        pnl,
+        capital,
+        c_tot,
+        pnl_matured_pos_tot,
+        converted,
+        face_burn,
+        counterparty,
+        insurance,
+        vault_before,
+        vault_after,
+    );
+
+    kani::cover!(
+        expected_ok && counterparty > 0 && insurance > 0 && surplus > 0 && face_burn > 0,
+        "positive-support conversion covers mixed source funding with face burn"
+    );
+    kani::cover!(
+        expected_ok && counterparty > 0 && insurance == 0 && surplus == 0,
+        "positive-support conversion covers pure counterparty-backed durable credit"
+    );
+    kani::cover!(
+        expected_ok && surplus > 0 && senior_sources == 0,
+        "positive-support conversion covers pure junior-surplus support"
+    );
+    kani::cover!(
+        !expected_ok && underfunded && senior_sources > 0,
+        "positive-support conversion rejects credit larger than funded support"
+    );
+    kani::cover!(
+        !expected_ok && vault_drift,
+        "positive-support conversion rejects vault drift on internal support"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok((new_pnl, new_capital, new_c_tot, new_pnl_matured_pos_tot)) = result {
+        assert_eq!(new_pnl, pnl - face_burn as i128);
+        assert_eq!(new_capital, capital + converted);
+        assert_eq!(new_c_tot, c_tot + converted);
+        assert_eq!(
+            new_pnl_matured_pos_tot,
+            pnl_matured_pos_tot.saturating_sub(face_burn)
+        );
+        assert_eq!(new_capital - capital, converted);
+        assert_eq!(new_c_tot - c_tot, converted);
+        assert_eq!(
+            TokenValueFlowProofV16::support_to_account_capital(
+                converted,
+                counterparty,
+                insurance,
+                converted - senior_sources,
+                vault_before,
+                vault_after,
+            )
+            .unwrap()
+            .validate(),
+            Ok(())
+        );
+    } else if underfunded && senior_sources > 0 {
+        assert_eq!(result, Err(V16Error::CounterUnderflow));
+    } else {
+        assert!(vault_drift);
     }
 }
 
