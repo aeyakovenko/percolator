@@ -1624,6 +1624,87 @@ fn proof_v16_source_domain_validation_accepts_exactly_conserved_lien_subledger_s
     }
 }
 
+// Source-domain fee-cursor completeness: persisted counterparty-backed liens
+// may carry a utilization-fee cursor only while backing is actually live, and
+// that cursor cannot be in the future. This is the validator-side guard for the
+// no-free-lien invariant proven by the collection path: an invalid cursor must
+// be rejected before any favorable action can rely on the account row.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_source_domain_validation_accepts_exactly_valid_backing_fee_cursor() {
+    let claim_raw: u8 = kani::any();
+    let lien_raw: u8 = kani::any();
+    let cursor_raw: u8 = kani::any();
+    let current_slot_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&claim_raw));
+    kani::assume(lien_raw <= claim_raw);
+    kani::assume(cursor_raw <= 32);
+    kani::assume(current_slot_raw <= 16);
+
+    let claim = claim_raw as u128;
+    let lien = lien_raw as u128;
+    let cursor = cursor_raw as u64;
+    let current_slot = current_slot_raw as u64;
+    let claim_num = claim * BOUND_SCALE;
+    let lien_num = lien * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.current_slot = V16PodU64::new(current_slot);
+    let market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_liened_num: V16PodU128::new(lien_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(lien_num),
+        source_lien_effective_reserved: V16PodU128::new(lien),
+        source_lien_counterparty_backing_num: V16PodU128::new(lien_num),
+        source_lien_fee_last_slot: V16PodU64::new(cursor),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = account.kani_validate_source_credit_shape_with_market(&market.as_view());
+    let has_counterparty_backing = lien != 0;
+    let expected_ok = if has_counterparty_backing {
+        cursor <= current_slot
+    } else {
+        cursor == 0
+    };
+
+    kani::cover!(
+        expected_ok && has_counterparty_backing && cursor == current_slot && current_slot > 0,
+        "source-domain fee-cursor theorem accepts live backing at the current slot"
+    );
+    kani::cover!(
+        expected_ok && has_counterparty_backing && cursor < current_slot && cursor > 0,
+        "source-domain fee-cursor theorem accepts live backing with accrued elapsed time"
+    );
+    kani::cover!(
+        !expected_ok && has_counterparty_backing && cursor > current_slot,
+        "source-domain fee-cursor theorem rejects future cursor on live backing"
+    );
+    kani::cover!(
+        !expected_ok && !has_counterparty_backing && cursor > 0,
+        "source-domain fee-cursor theorem rejects cursor without counterparty backing"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if expected_ok {
+        assert_eq!(result, Ok(()));
+    } else {
+        assert_eq!(result, Err(V16Error::InvalidLeg));
+    }
+}
+
 // Multi-domain source-attribution soundness over the production account
 // validator: an account with positive PnL and claims in two different asset
 // domains validates exactly when the aggregate source claim covers the PnL and
