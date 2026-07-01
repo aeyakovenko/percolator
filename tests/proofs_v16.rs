@@ -248,6 +248,90 @@ fn proof_v16_active_bitmap_set_get_count_is_exact_and_bounds_checked() {
     }
 }
 
+// Liquidation recovery trigger soundness: after a liquidation close, recovery is
+// required exactly when principal cannot cover the negative PnL and some active
+// risk remains after applying a full-close bitmap clear. Partial closes keep the
+// bitmap unchanged; full closes validate and clear only the closed leg slot.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_uncovered_loss_with_open_risk_trigger_is_exact() {
+    let loss_present: bool = kani::any();
+    let loss_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let active0: bool = kani::any();
+    let active1: bool = kani::any();
+    let slot_raw: u8 = kani::any();
+    let close_raw: u8 = kani::any();
+    let leg_abs_raw: u8 = kani::any();
+    kani::assume(loss_raw <= 8);
+    kani::assume(capital_raw <= 8);
+    kani::assume((slot_raw as usize) <= V16_MAX_PORTFOLIO_ASSETS_N + 1);
+    kani::assume(close_raw <= 4);
+    kani::assume(leg_abs_raw <= 4);
+
+    let pnl = if loss_present {
+        -(loss_raw as i128)
+    } else {
+        loss_raw as i128
+    };
+    let capital = capital_raw as u128;
+    let slot = slot_raw as usize;
+    let close_q = close_raw as u128;
+    let leg_abs_q = leg_abs_raw as u128;
+    let full_close = close_q == leg_abs_q;
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    if active0 {
+        active_bitmap_set(&mut bitmap, 0).unwrap();
+    }
+    if active1 {
+        active_bitmap_set(&mut bitmap, 1).unwrap();
+    }
+
+    let result = kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
+        pnl, capital, bitmap, slot, close_q, leg_abs_q,
+    );
+
+    let uncovered = loss_present && (loss_raw as u128) > capital;
+    let remaining_active0 = active0 && !(full_close && slot == 0);
+    let remaining_active1 = active1 && !(full_close && slot == 1);
+    let remaining_open_risk = if full_close && slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+        false
+    } else {
+        remaining_active0 || remaining_active1
+    };
+
+    kani::cover!(
+        result == Ok(true) && !full_close && uncovered && (active0 || active1),
+        "partial liquidation with uncovered loss keeps open-risk recovery trigger"
+    );
+    kani::cover!(
+        result == Ok(false) && full_close && slot == 0 && active0 && !active1 && uncovered,
+        "full liquidation of only active leg clears open-risk recovery trigger"
+    );
+    kani::cover!(
+        result == Ok(true) && full_close && slot == 0 && active0 && active1 && uncovered,
+        "full liquidation with another active leg keeps recovery trigger"
+    );
+    kani::cover!(
+        result == Ok(false)
+            && loss_present
+            && (loss_raw as u128) <= capital
+            && (active0 || active1),
+        "principal-covered liquidation loss does not trigger recovery"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && full_close && slot >= V16_MAX_PORTFOLIO_ASSETS_N,
+        "full liquidation close rejects out-of-bounds leg slot"
+    );
+
+    if full_close && slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    } else {
+        assert_eq!(result, Ok(uncovered && remaining_open_risk));
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
