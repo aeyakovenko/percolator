@@ -4492,6 +4492,155 @@ fn proof_v16_live_unattributed_positive_pnl_cannot_convert_to_capital() {
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_source_backed_released_pnl_conversion_consumes_backing_not_soft_credit() {
+    let claim_raw: u8 = kani::any();
+    let extra_backing_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let junior_raw: u8 = kani::any();
+    kani::assume((1..=12).contains(&claim_raw));
+    kani::assume(extra_backing_raw <= 12);
+    kani::assume(other_capital_raw <= 12);
+    kani::assume(insurance_raw <= 12);
+    kani::assume(junior_raw <= 12);
+
+    let claim = claim_raw as u128;
+    let backing = claim + extra_backing_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let junior = junior_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+    let backing_num = backing * BOUND_SCALE;
+    let vault = other_capital + backing + insurance + junior;
+
+    let initial_stock = StockReconciliationProofV16 {
+        token_vault: vault,
+        senior_capital_total: other_capital,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: backing,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    assert_eq!(initial_stock.validate(), Ok(()));
+
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: backing_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let (bucket_liened, source_liened) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            bucket, source, 1, claim_num,
+        )
+        .unwrap();
+    let (bucket_consumed, source_consumed) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
+            bucket_liened,
+            source_liened,
+            claim_num,
+        )
+        .unwrap();
+    let (new_pnl, new_capital, new_c_tot, new_matured) =
+        kani_kernel_apply_positive_support_conversion(
+            claim as i128,
+            0,
+            other_capital,
+            claim,
+            claim,
+            claim,
+            claim,
+            0,
+            vault,
+            vault,
+        )
+        .unwrap();
+    let flow = TokenValueFlowProofV16::support_to_account_capital(claim, claim, 0, 0, vault, vault)
+        .unwrap();
+    let final_stock = StockReconciliationProofV16 {
+        token_vault: vault,
+        senior_capital_total: other_capital + claim,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: extra_backing_raw as u128,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+
+    kani::cover!(
+        claim > 1 && extra_backing_raw == 0 && other_capital > 0 && insurance > 0,
+        "source-backed conversion covers exact backing with other senior stock"
+    );
+    kani::cover!(
+        claim > 4 && extra_backing_raw > 0,
+        "source-backed conversion covers slack backing left after conversion"
+    );
+
+    assert_eq!(
+        bucket_liened.fresh_unliened_backing_num,
+        backing_num - claim_num
+    );
+    assert_eq!(bucket_liened.valid_liened_backing_num, claim_num);
+    assert_eq!(source_liened.fresh_reserved_backing_num, backing_num);
+    assert_eq!(source_liened.valid_liened_backing_num, claim_num);
+    assert_eq!(bucket_consumed.valid_liened_backing_num, 0);
+    assert_eq!(bucket_consumed.consumed_liened_backing_num, claim_num);
+    assert_eq!(
+        bucket_consumed.fresh_unliened_backing_num,
+        extra_backing_raw as u128 * BOUND_SCALE
+    );
+    assert_eq!(source_consumed.valid_liened_backing_num, 0);
+    assert_eq!(
+        source_consumed.fresh_reserved_backing_num,
+        extra_backing_raw as u128 * BOUND_SCALE
+    );
+    assert_eq!(source_consumed.spent_backing_num, claim_num);
+    assert_eq!(source_consumed.provider_receivable_num, claim_num);
+    assert_eq!(new_pnl, 0);
+    assert_eq!(new_capital, claim);
+    assert_eq!(new_c_tot, other_capital + claim);
+    assert_eq!(new_matured, 0);
+    assert_eq!(flow.validate(), Ok(()));
+    assert_eq!(
+        flow.credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize],
+        claim
+    );
+    assert_eq!(
+        flow.debits[TokenValueClassV16::AccountCapital as usize],
+        claim
+    );
+    assert_eq!(final_stock.validate(), Ok(()));
+    assert_eq!(final_stock.token_vault, initial_stock.token_vault);
+    assert_eq!(
+        final_stock.counterparty_backing_principal + claim,
+        initial_stock.counterparty_backing_principal
+    );
+    assert_eq!(
+        final_stock.senior_capital_total,
+        initial_stock.senior_capital_total + claim
+    );
+    assert_eq!(
+        final_stock.insurance_capital,
+        initial_stock.insurance_capital
+    );
+    assert_eq!(
+        final_stock.unallocated_protocol_surplus,
+        initial_stock.unallocated_protocol_surplus
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
 fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
