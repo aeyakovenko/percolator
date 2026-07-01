@@ -1508,6 +1508,122 @@ fn proof_v16_sparse_source_domain_validation_rejects_stale_market_id_claim() {
     assert_eq!(result, Err(V16Error::HiddenLeg));
 }
 
+// Source-domain lien-shape completeness: the persisted zero-copy account row
+// validates exactly when the row's face split, locked/impaired bound,
+// effective-credit cap, and backing split are mutually conserved. This is the
+// malformed-row rejection half of the validator soundness theorem below; it
+// protects the wrapper-facing account view from accepting a row that mints
+// source credit by overstating either claim face or reserved backing.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_source_domain_validation_accepts_exactly_conserved_lien_subledger_shape() {
+    let claim_raw: u8 = kani::any();
+    let lien_raw: u8 = kani::any();
+    let counterparty_face_raw: u8 = kani::any();
+    let insurance_face_raw: u8 = kani::any();
+    let impaired_raw: u8 = kani::any();
+    let effective_raw: u8 = kani::any();
+    let counterparty_backing_raw: u8 = kani::any();
+    let insurance_backing_raw: u8 = kani::any();
+    let impaired_effective_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&claim_raw));
+    kani::assume(lien_raw <= 16);
+    kani::assume(counterparty_face_raw <= 16);
+    kani::assume(insurance_face_raw <= 16);
+    kani::assume(impaired_raw <= 16);
+    kani::assume(effective_raw <= 16);
+    kani::assume(counterparty_backing_raw <= 16);
+    kani::assume(insurance_backing_raw <= 16);
+    kani::assume(impaired_effective_raw <= 16);
+
+    let claim = claim_raw as u128;
+    let lien = lien_raw as u128;
+    let counterparty_face = counterparty_face_raw as u128;
+    let insurance_face = insurance_face_raw as u128;
+    let impaired = impaired_raw as u128;
+    let effective = effective_raw as u128;
+    let counterparty_backing = counterparty_backing_raw as u128;
+    let insurance_backing = insurance_backing_raw as u128;
+    let impaired_effective = impaired_effective_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    let claim_num = claim * BOUND_SCALE;
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_liened_num: V16PodU128::new(lien * BOUND_SCALE),
+        source_claim_counterparty_liened_num: V16PodU128::new(counterparty_face * BOUND_SCALE),
+        source_claim_insurance_liened_num: V16PodU128::new(insurance_face * BOUND_SCALE),
+        source_lien_effective_reserved: V16PodU128::new(effective),
+        source_lien_counterparty_backing_num: V16PodU128::new(counterparty_backing * BOUND_SCALE),
+        source_lien_insurance_backing_num: V16PodU128::new(insurance_backing * BOUND_SCALE),
+        source_lien_fee_last_slot: V16PodU64::new(if counterparty_backing == 0 {
+            0
+        } else {
+            header.current_slot.get()
+        }),
+        source_claim_impaired_num: V16PodU128::new(impaired * BOUND_SCALE),
+        source_lien_impaired_effective_reserved: V16PodU128::new(impaired_effective),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = account.kani_validate_source_credit_shape_with_market(&market.as_view());
+    let face_split_ok = counterparty_face + insurance_face == lien;
+    let locked_bound_ok = lien + impaired <= claim;
+    let effective_cap_ok = effective <= lien;
+    let backing_split_ok = counterparty_backing + insurance_backing == effective;
+    let impaired_shape_ok = impaired_effective == 0 || impaired != 0;
+    let expected_ok = face_split_ok
+        && locked_bound_ok
+        && effective_cap_ok
+        && backing_split_ok
+        && impaired_shape_ok;
+
+    kani::cover!(
+        expected_ok && counterparty_face > 0 && insurance_face > 0 && impaired > 0 && effective > 0,
+        "source-domain lien-shape theorem accepts mixed conserved live and impaired support"
+    );
+    kani::cover!(
+        !face_split_ok && locked_bound_ok && effective_cap_ok && backing_split_ok,
+        "source-domain lien-shape theorem rejects mismatched counterparty/insurance face split"
+    );
+    kani::cover!(
+        face_split_ok && !locked_bound_ok && effective_cap_ok && backing_split_ok,
+        "source-domain lien-shape theorem rejects lien plus impairment above the claim bound"
+    );
+    kani::cover!(
+        face_split_ok && locked_bound_ok && (!effective_cap_ok || !backing_split_ok),
+        "source-domain lien-shape theorem rejects unfunded or over-effective source credit"
+    );
+    kani::cover!(
+        face_split_ok
+            && locked_bound_ok
+            && effective_cap_ok
+            && backing_split_ok
+            && !impaired_shape_ok,
+        "source-domain lien-shape theorem rejects impaired effective credit without impaired face"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if expected_ok {
+        assert_eq!(result, Ok(()));
+    } else {
+        assert!(result.is_err());
+    }
+}
+
 // Multi-domain source-attribution soundness over the production account
 // validator: an account with positive PnL and claims in two different asset
 // domains validates exactly when the aggregate source claim covers the PnL and
