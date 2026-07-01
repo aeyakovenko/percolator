@@ -14817,15 +14817,6 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
     let source_spent_raw: u8 = kani::any();
     let source_receivable_raw: u8 = kani::any();
     let status_raw: u8 = kani::any();
-    kani::assume(amount_raw <= 8);
-    kani::assume(bucket_fresh_raw <= 8);
-    kani::assume(bucket_valid_raw <= 8);
-    kani::assume(bucket_consumed_raw <= 8);
-    kani::assume(bucket_impaired_raw <= 8);
-    kani::assume(source_fresh_raw <= 8);
-    kani::assume(source_valid_raw <= 8);
-    kani::assume(source_spent_raw <= 8);
-    kani::assume(source_receivable_raw <= 8);
     kani::assume(status_raw <= 3);
 
     let amount = amount_raw as u128 * BOUND_SCALE;
@@ -14876,6 +14867,10 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
         "counterparty lien consume rejects insufficient bucket valid backing"
     );
     kani::cover!(
+        amount_raw > 128 && bucket_valid < amount,
+        "counterparty lien consume rejects large insufficient bucket valid backing"
+    );
+    kani::cover!(
         amount > 0 && bucket_valid >= amount && source_valid < amount,
         "counterparty lien consume rejects insufficient source valid backing"
     );
@@ -14886,6 +14881,10 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
     kani::cover!(
         expected_ok && amount > 0 && bucket_valid > amount && source_fresh > amount,
         "counterparty lien consume covers partial consumption with remaining lien"
+    );
+    kani::cover!(
+        expected_ok && amount_raw > 128 && bucket_valid > amount && source_fresh > amount,
+        "counterparty lien consume covers large partial consumption with remaining lien"
     );
     kani::cover!(
         expected_ok
@@ -14946,6 +14945,10 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
         kani::cover!(
             amount > 0 && junior_residual_before > 0 && senior_backing_after > 0,
             "counterparty lien consume reclassifies part of senior backing into junior residual"
+        );
+        kani::cover!(
+            amount_raw > 128 && junior_residual_before > 0 && senior_backing_after > 0,
+            "counterparty lien consume reclassifies larger senior backing into junior residual"
         );
     } else {
         assert_eq!(result, Err(V16Error::CounterUnderflow));
