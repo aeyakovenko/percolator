@@ -22999,10 +22999,6 @@ fn proof_v16_validator_sound_atom_aligned_pnl_bound_num() {
     let matured_raw: u8 = kani::any();
     let bound_units_raw: u8 = kani::any();
     let reported_bound_raw: u8 = kani::any();
-    kani::assume(pnl_raw <= 12);
-    kani::assume(matured_raw <= 12);
-    kani::assume(bound_units_raw <= 12);
-    kani::assume(reported_bound_raw <= 12);
 
     let pnl = pnl_raw as u128;
     let matured = matured_raw as u128;
@@ -23022,8 +23018,16 @@ fn proof_v16_validator_sound_atom_aligned_pnl_bound_num() {
         "atom-aligned pnl-bound soundness covers exact positive bound"
     );
     kani::cover!(
+        pnl > 128 && bound_units == pnl && matured < pnl,
+        "atom-aligned pnl-bound soundness covers large exact positive bound"
+    );
+    kani::cover!(
         pnl > 0 && bound_units > pnl,
         "atom-aligned pnl-bound soundness covers slack positive bound"
+    );
+    kani::cover!(
+        pnl > 128 && bound_units > pnl,
+        "atom-aligned pnl-bound soundness covers large slack positive bound"
     );
 
     let h = &market.header;
