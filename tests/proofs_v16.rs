@@ -11598,6 +11598,144 @@ fn proof_v16_forfeit_dead_leg_positive_kf_delta_detaches_without_payout() {
     assert_eq!(market.kani_residual(), residual_before);
 }
 
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_forfeit_dead_leg_negative_kf_delta_books_loss_without_positive_claim() {
+    let loss_units_raw: u16 = kani::any();
+    let support_raw: u16 = kani::any();
+    kani::assume((1..=511).contains(&loss_units_raw));
+    kani::assume(support_raw <= loss_units_raw);
+
+    let loss_units = loss_units_raw as u128;
+    let support = support_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.mode = 2;
+    header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+        PermissionlessRecoveryReasonV16::BelowProgressFloor,
+    ));
+    header.vault = V16PodU128::new(21);
+    header.c_tot = V16PodU128::new(8);
+    header.insurance = V16PodU128::new(5);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.k_long = 0;
+    asset.k_short = 0;
+    asset.f_long_num = -(loss_units as i128) * ADL_ONE as i128;
+    asset.f_short_num = 0;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    };
+
+    let source_claim_before = header.source_claim_bound_total_num;
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let pnl_pos_before = header.pnl_pos_tot;
+    let pnl_bound_before = header.pnl_pos_bound_tot_num;
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let dead = market
+        .kani_leg_is_dead_for_forfeit(0, SideV16::Long)
+        .unwrap();
+    let (k_now, f_now, net) = market.kani_leg_kf_delta_for_settlement(leg).unwrap();
+    let positive_pnl_forfeited = if net >= 0 { net as u128 } else { 0 };
+    let loss_settled = if net < 0 { net.unsigned_abs() } else { 0 };
+    let ledger = CloseProgressLedgerV16 {
+        active: true,
+        close_id: 1,
+        asset_index: 0,
+        market_id: asset.market_id,
+        domain_side: SideV16::Short,
+        gross_loss_at_close_start: loss_settled,
+        residual_remaining: loss_settled,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let support_proof =
+        TokenValueFlowProofV16::support_to_account_capital(support, support, 0, 0, 21, 21).unwrap();
+    let advanced = kani_kernel_advance_close_ledger(ledger, support, support, 0, 0, 0).unwrap();
+    let settled_leg = PortfolioLegV16 {
+        k_snap: k_now,
+        f_snap: f_now,
+        ..leg
+    };
+    let cleared_asset = kani_kernel_clear_leg(settled_leg, asset).unwrap();
+
+    kani::cover!(
+        support > 1 && support < loss_units,
+        "dead-leg adverse forfeit covers partial support progress with residual remaining"
+    );
+    kani::cover!(
+        support == loss_units && support > 1,
+        "dead-leg adverse forfeit covers exact full support progress"
+    );
+    kani::cover!(
+        support == 0 && loss_units > 1,
+        "dead-leg adverse forfeit covers unsupported residual loss"
+    );
+    kani::cover!(
+        dead && cleared_asset.oi_eff_long_q == 0 && cleared_asset.stored_pos_count_long == 0,
+        "dead-leg adverse forfeit covers post-settlement exposure clear"
+    );
+    assert!(dead);
+    assert_eq!(k_now, asset.k_long);
+    assert_eq!(f_now, asset.f_long_num);
+    assert_eq!(net, -(loss_units as i128));
+    assert_eq!(loss_settled, loss_units);
+    assert_eq!(positive_pnl_forfeited, 0);
+    assert_eq!(support_proof.validate(), Ok(()));
+    assert_eq!(
+        support_proof.credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize],
+        support
+    );
+    assert_eq!(
+        support_proof.debits[TokenValueClassV16::AccountCapital as usize],
+        support
+    );
+    assert_eq!(advanced.support_consumed, support);
+    assert_eq!(advanced.junior_face_burned, support);
+    assert_eq!(advanced.residual_remaining, loss_units - support);
+    assert_eq!(advanced.finalized, support == loss_units);
+    assert_eq!(
+        advanced.residual_remaining + support,
+        ledger.residual_remaining
+    );
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.header.pnl_pos_tot, pnl_pos_before);
+    assert_eq!(market.header.pnl_pos_bound_tot_num, pnl_bound_before);
+    assert_eq!(
+        market.header.source_claim_bound_total_num,
+        source_claim_before
+    );
+    assert_eq!(market.kani_residual(), residual_before);
+    assert_eq!(cleared_asset.oi_eff_long_q, 0);
+    assert_eq!(cleared_asset.oi_eff_short_q, 0);
+    assert_eq!(cleared_asset.stored_pos_count_long, 0);
+    assert_eq!(cleared_asset.stored_pos_count_short, 0);
+    assert_eq!(cleared_asset.loss_weight_sum_long, 0);
+    assert_eq!(cleared_asset.loss_weight_sum_short, 0);
+}
+
 // Lifecycle gates must separate risk creation from risk exit. Permissionless
 // asset shutdown is safe only if new/increasing risk is blocked outside Active,
 // while users can still reduce exposure in DrainOnly.
