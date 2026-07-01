@@ -17671,7 +17671,7 @@ fn proof_v16_symbolic_fee_and_funding_profile_satisfies_mm_envelope_on_small_not
 #[kani::solver(cadical)]
 fn proof_v16_persisted_shape_accepts_fast_path_config_and_satisfies_small_mm_envelope() {
     let price_move_bps: u16 = kani::any();
-    let x_raw: u8 = kani::any();
+    let x_raw: u16 = kani::any();
 
     kani::assume((1..=10_000).contains(&price_move_bps));
     kani::assume(x_raw > 0);
@@ -17692,8 +17692,8 @@ fn proof_v16_persisted_shape_accepts_fast_path_config_and_satisfies_small_mm_env
     let x = u128::from(x_raw);
 
     kani::cover!(
-        price_move_bps > 5_000 && x > 64,
-        "persisted fast-path shape covers high price-move budget and interior notional"
+        price_move_bps > 5_000 && x > 1_000,
+        "persisted fast-path shape covers high price-move budget and wide notional"
     );
     assert_eq!(decoded_cfg, cfg);
     let x64 = u64::from(x_raw);
