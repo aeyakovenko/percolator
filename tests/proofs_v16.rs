@@ -17446,9 +17446,6 @@ fn proof_v16_mixed_support_external_exit_debits_each_source_stock_once() {
     let extra_backing_raw: u8 = kani::any();
     let extra_insurance_raw: u8 = kani::any();
     let extra_surplus_raw: u8 = kani::any();
-    kani::assume(counterparty_raw <= 8);
-    kani::assume(insurance_raw <= 8);
-    kani::assume(surplus_raw <= 8);
     let counterparty = counterparty_raw as u128;
     let insurance_support = insurance_raw as u128;
     let surplus_support = surplus_raw as u128;
@@ -17522,6 +17519,15 @@ fn proof_v16_mixed_support_external_exit_debits_each_source_stock_once() {
             && extra_insurance_raw > 0
             && extra_surplus_raw > 0,
         "mixed support lifecycle covers all source stocks plus remaining balances"
+    );
+    kani::cover!(
+        counterparty > 128
+            && insurance_support > 128
+            && surplus_support > 128
+            && extra_backing_raw > 128
+            && extra_insurance_raw > 128
+            && extra_surplus_raw > 128,
+        "mixed support lifecycle covers large source stocks plus remaining balances"
     );
     assert_eq!(
         support_proof.credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize],
