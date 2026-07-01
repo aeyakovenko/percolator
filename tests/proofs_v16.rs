@@ -19737,6 +19737,133 @@ fn proof_v16_validator_sound_account_reserves() {
     ); // U19b
 }
 
+// Active-leg lookup soundness for the account-view helper used by close-progress
+// validation and source-domain consistency checks. An Ok(Some(slot)) result
+// means exactly one active persisted leg for the requested asset exists; hidden
+// inactive payload rows or duplicate active rows reject. This pins the
+// no-double-counting exposure invariant without dragging the full margin
+// validator's wide division into the harness.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_account_active_leg_lookup_rejects_hidden_rows_and_duplicates() {
+    let slot0_active: bool = kani::any();
+    let slot1_active: bool = kani::any();
+    let slot0_matches_target: bool = kani::any();
+    let slot1_matches_target: bool = kani::any();
+    let slot0_hidden_inactive_payload: bool = kani::any();
+    let slot1_hidden_inactive_payload: bool = kani::any();
+    let query_other_asset: bool = kani::any();
+
+    let (market_group_id, _, _) = ids();
+    let mut account_header = empty_account_fixture(market_group_id, 2);
+    let target_asset = if query_other_asset { 1usize } else { 0usize };
+    let slot0_asset = if slot0_matches_target {
+        target_asset
+    } else {
+        1usize - target_asset
+    };
+    let slot1_asset = if slot1_matches_target {
+        target_asset
+    } else {
+        1usize - target_asset
+    };
+
+    let leg0 = if slot0_active || slot0_hidden_inactive_payload {
+        PortfolioLegV16 {
+            active: slot0_active,
+            asset_index: slot0_asset as u32,
+            market_id: 1,
+            side: SideV16::Long,
+            basis_pos_q: if slot0_active { POS_SCALE as i128 } else { 0 },
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: if slot0_active { POS_SCALE } else { 0 },
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: false,
+            stale: false,
+        }
+    } else {
+        PortfolioLegV16::EMPTY
+    };
+    let leg1 = if slot1_active || slot1_hidden_inactive_payload {
+        PortfolioLegV16 {
+            active: slot1_active,
+            asset_index: slot1_asset as u32,
+            market_id: 1,
+            side: SideV16::Long,
+            basis_pos_q: if slot1_active { POS_SCALE as i128 } else { 0 },
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: if slot1_active { POS_SCALE } else { 0 },
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: false,
+            stale: false,
+        }
+    } else {
+        PortfolioLegV16::EMPTY
+    };
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg0);
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&leg1);
+
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = account
+        .as_view()
+        .kani_active_leg_slot_for_asset(target_asset);
+
+    let hidden_inactive_payload = (!slot0_active && slot0_hidden_inactive_payload)
+        || (!slot1_active && slot1_hidden_inactive_payload);
+    let slot0_hit = slot0_active && slot0_matches_target;
+    let slot1_hit = slot1_active && slot1_matches_target;
+    let duplicate_hit = slot0_hit && slot1_hit;
+
+    kani::cover!(
+        result == Ok(Some(0)) && slot0_active && slot0_matches_target,
+        "active-leg lookup finds a unique slot-0 target leg"
+    );
+    kani::cover!(
+        result == Ok(Some(1)) && slot1_active && slot1_matches_target,
+        "active-leg lookup finds a unique slot-1 target leg"
+    );
+    kani::cover!(
+        result == Ok(None) && !slot0_matches_target && !slot1_matches_target,
+        "active-leg lookup ignores active rows for other assets"
+    );
+    kani::cover!(
+        result == Err(V16Error::HiddenLeg) && hidden_inactive_payload,
+        "active-leg lookup rejects hidden inactive leg payloads"
+    );
+    kani::cover!(
+        result == Err(V16Error::HiddenLeg) && duplicate_hit,
+        "active-leg lookup rejects duplicate active rows for one asset"
+    );
+
+    if hidden_inactive_payload || duplicate_hit {
+        assert_eq!(result, Err(V16Error::HiddenLeg));
+    } else if slot0_hit {
+        assert_eq!(result, Ok(Some(0)));
+    } else if slot1_hit {
+        assert_eq!(result, Ok(Some(1)));
+    } else {
+        assert_eq!(result, Ok(None));
+    }
+
+    if let Ok(Some(slot)) = result {
+        let leg = if slot == 0 { leg0 } else { leg1 };
+        assert!(leg.active);
+        assert_eq!(leg.asset_index as usize, target_asset);
+        assert!(!(slot0_hit && slot1_hit));
+    }
+}
+
 // Account/source-domain validator soundness: if a persisted portfolio row with
 // source credit validates against the concrete market it is being executed
 // against, then the row is bound to the real market/domain, its source claim is
