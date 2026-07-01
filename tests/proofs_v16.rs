@@ -17980,6 +17980,78 @@ fn proof_v16_oracle_reset_idle_guard_detects_cross_asset_position_or_loss_state(
     assert!(has_position_or_loss);
 }
 
+// Header-level stale/loss/recovery state is also part of the same reset idle
+// contract. This proves the production predicate cannot miss global account
+// risk summaries that are not attached to a specific asset slot.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_oracle_reset_idle_guard_detects_header_risk_state() {
+    let dirty_selector: u8 = kani::any();
+    let dirty_raw: u8 = kani::any();
+    kani::assume(dirty_selector <= 7);
+    kani::assume(dirty_raw > 0);
+    let dirty = dirty_raw as u128;
+
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(1);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.next_market_id = V16PodU64::new(2);
+    header.current_slot = V16PodU64::new(1);
+    header.slot_last = V16PodU64::new(1);
+
+    match dirty_selector {
+        0 => header.pnl_pos_tot = V16PodU128::new(dirty),
+        1 => header.stale_certificate_count = V16PodU64::new(dirty as u64),
+        2 => header.b_stale_account_count = V16PodU64::new(dirty as u64),
+        3 => header.negative_pnl_account_count = V16PodU64::new(dirty as u64),
+        4 => header.bankruptcy_hlock_active = 1,
+        5 => header.threshold_stress_active = 1,
+        6 => header.loss_stale_active = 1,
+        _ => {
+            header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+                PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            ));
+        }
+    }
+
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 1;
+    let mut markets = [Market::new(
+        0u64,
+        EngineAssetSlotV16Account::empty_for_market(1),
+    )];
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let has_position_or_loss = market
+        .kani_group_has_position_or_loss_state_for_oracle_reset()
+        .unwrap();
+
+    kani::cover!(
+        dirty_selector == 1 && dirty > 1,
+        "oracle reset idle guard covers stale certificate summary"
+    );
+    kani::cover!(
+        dirty_selector == 4,
+        "oracle reset idle guard covers bankruptcy hlock"
+    );
+    kani::cover!(
+        dirty_selector == 7,
+        "oracle reset idle guard covers recovery reason"
+    );
+    assert!(has_position_or_loss);
+}
+
 // End-to-end proof for the public provider-earnings withdrawal (only the
 // arithmetic delta was proven; this pins the full transition). Withdrawing
 // earned utilization fees exits vault and the earnings class in lockstep:
