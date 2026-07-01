@@ -4111,6 +4111,121 @@ fn proof_v16_trade_request_guard_summary_is_exact_admission_predicate() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_request_guards_compose_with_admission_stack() {
+    let asset_raw: u8 = kani::any();
+    let max_slots_raw: u8 = kani::any();
+    let size_case: u8 = kani::any();
+    let negative_size: bool = kani::any();
+    let price_case: u8 = kani::any();
+    let fee_raw: u16 = kani::any();
+    let max_fee_raw: u16 = kani::any();
+    kani::assume(asset_raw <= 8);
+    kani::assume(max_slots_raw <= 8);
+    kani::assume(size_case <= 3);
+    kani::assume(price_case <= 3);
+    kani::assume(max_fee_raw <= 10_000);
+    kani::assume(fee_raw <= 10_001);
+
+    let size_abs = match size_case {
+        0 => 0,
+        1 => 1,
+        2 => MAX_TRADE_SIZE_Q,
+        _ => MAX_TRADE_SIZE_Q + 1,
+    };
+    let request = TradeRequestV16 {
+        asset_index: asset_raw as usize,
+        size_q: if negative_size {
+            -(size_abs as i128)
+        } else {
+            size_abs as i128
+        },
+        exec_price: match price_case {
+            0 => 0,
+            1 => 1,
+            2 => MAX_ORACLE_PRICE,
+            _ => MAX_ORACLE_PRICE + 1,
+        },
+        fee_bps: fee_raw as u64,
+    };
+    let request_summary =
+        kani_build_trade_request_guard_summary(request, max_slots_raw as u32, max_fee_raw as u64);
+    let guards = TradeGuardSummaryV16 {
+        request_valid: request_summary.asset_configured && request_summary.size_in_cap,
+        size_nonzero: request_summary.size_nonzero,
+        price_in_range: request_summary.price_nonzero && request_summary.price_in_range,
+        fee_bps_in_cap: request_summary.fee_bps_in_cap,
+        accounts_current: true,
+        no_loss_stale_block: true,
+        no_adverse_lag: true,
+        no_barrier_touch: true,
+        margin_ok: true,
+        locked_lane_ok: true,
+    };
+    let result = kani_kernel_trade_admit(guards);
+
+    kani::cover!(
+        request_summary.all_pass()
+            && request.exec_price == MAX_ORACLE_PRICE
+            && request.size_q.unsigned_abs() == MAX_TRADE_SIZE_Q,
+        "trade request composition admits max-boundary scalar-valid request"
+    );
+    kani::cover!(
+        !request_summary.asset_configured && request_summary.size_nonzero,
+        "trade request composition rejects unconfigured asset before later leaves"
+    );
+    kani::cover!(
+        !request_summary.size_in_cap && request_summary.asset_configured,
+        "trade request composition rejects oversize request before later leaves"
+    );
+    kani::cover!(
+        !request_summary.price_nonzero || !request_summary.price_in_range,
+        "trade request composition rejects invalid execution price before later leaves"
+    );
+    kani::cover!(
+        !request_summary.fee_bps_in_cap
+            && request_summary.asset_configured
+            && request_summary.size_nonzero
+            && request_summary.size_in_cap
+            && request_summary.price_nonzero
+            && request_summary.price_in_range,
+        "trade request composition rejects fee cap after scalar request leaves"
+    );
+
+    assert_eq!(result.is_ok(), request_summary.all_pass());
+    match result {
+        Ok(()) => assert!(request_summary.all_pass()),
+        Err(TradeRejectReasonV16::InvalidRequest) => {
+            assert!(!request_summary.asset_configured || !request_summary.size_in_cap);
+        }
+        Err(TradeRejectReasonV16::ZeroSize) => {
+            assert!(request_summary.asset_configured && request_summary.size_in_cap);
+            assert!(!request_summary.size_nonzero);
+        }
+        Err(TradeRejectReasonV16::PriceOutOfRange) => {
+            assert!(
+                request_summary.asset_configured
+                    && request_summary.size_in_cap
+                    && request_summary.size_nonzero
+            );
+            assert!(!request_summary.price_nonzero || !request_summary.price_in_range);
+        }
+        Err(TradeRejectReasonV16::FeeBpsOverCap) => {
+            assert!(
+                request_summary.asset_configured
+                    && request_summary.size_in_cap
+                    && request_summary.size_nonzero
+                    && request_summary.price_nonzero
+                    && request_summary.price_in_range
+            );
+            assert!(!request_summary.fee_bps_in_cap);
+        }
+        Err(_) => unreachable!("all post-request guard leaves are forced true"),
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
 fn proof_v16_adjust_u128_applies_exact_delta_or_fails_closed() {
