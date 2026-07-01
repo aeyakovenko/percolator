@@ -16979,6 +16979,53 @@ fn proof_v16_symbolic_funding_profile_satisfies_mm_envelope_on_small_notionals()
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_symbolic_fee_and_funding_profile_satisfies_mm_envelope_on_small_notionals() {
+    let price_move_bps: u16 = kani::any();
+    let funding_e9_raw: u16 = kani::any();
+    let liq_fee_bps: u16 = kani::any();
+    let min_liq_abs_raw: u8 = kani::any();
+    let liq_fee_cap_raw: u8 = kani::any();
+    let x_raw: u8 = kani::any();
+
+    kani::assume((1..=100).contains(&price_move_bps));
+    kani::assume(funding_e9_raw <= 25);
+    kani::assume(liq_fee_bps <= 100);
+    kani::assume(min_liq_abs_raw <= 2);
+    kani::assume(liq_fee_cap_raw <= 2);
+    kani::assume(min_liq_abs_raw <= liq_fee_cap_raw);
+    kani::assume(x_raw > 0);
+
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 1, 10);
+    cfg.maintenance_margin_bps = 10_000;
+    cfg.initial_margin_bps = 10_000;
+    cfg.max_price_move_bps_per_slot = price_move_bps as u64;
+    cfg.max_accrual_dt_slots = 1;
+    cfg.min_funding_lifetime_slots = 1;
+    cfg.max_abs_funding_e9_per_slot = funding_e9_raw as u64;
+    cfg.liquidation_fee_bps = liq_fee_bps as u64;
+    cfg.min_liquidation_abs = min_liq_abs_raw as u128;
+    cfg.liquidation_fee_cap = liq_fee_cap_raw as u128;
+    cfg.min_nonzero_mm_req = liq_fee_cap_raw as u128 + 2;
+    cfg.min_nonzero_im_req = cfg.min_nonzero_mm_req + 1;
+
+    let persisted = V16ConfigAccount::from_runtime(&cfg);
+    let decoded_cfg = persisted.try_to_runtime_shape().unwrap();
+    let x = u128::from(x_raw);
+
+    kani::cover!(
+        funding_e9_raw > 0 && liq_fee_bps > 0 && min_liq_abs_raw > 0 && x > 16,
+        "combined fee/funding profile covers nonzero funding, proportional fee, absolute fee, and interior notional"
+    );
+    assert_eq!(decoded_cfg, cfg);
+    assert_eq!(
+        decoded_cfg.kani_solvency_envelope_holds_for_notional(x),
+        Ok(true)
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_persisted_shape_accepts_fast_path_config_and_satisfies_small_mm_envelope() {
     let price_move_bps: u16 = kani::any();
     let x_raw: u8 = kani::any();
