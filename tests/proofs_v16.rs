@@ -19912,8 +19912,8 @@ fn proof_v16_frame_domain_insurance_deposit_touches_only_declared_state() {
 fn proof_v16_frame_domain_insurance_withdraw_touches_only_declared_state() {
     let amt_raw: u8 = kani::any();
     let fund_raw: u8 = kani::any();
-    kani::assume(amt_raw >= 1 && amt_raw <= 8);
-    kani::assume(fund_raw >= amt_raw && fund_raw <= 8);
+    kani::assume(amt_raw >= 1);
+    kani::assume(fund_raw >= amt_raw);
     let amt = amt_raw as u128;
     let fund = fund_raw as u128;
     let (mut header, mut markets) = one_market_only_fixture();
@@ -19927,7 +19927,10 @@ fn proof_v16_frame_domain_insurance_withdraw_touches_only_declared_state() {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         market.withdraw_domain_insurance_not_atomic(0, amt).unwrap();
     }
-    kani::cover!(amt < fund, "domain-insurance withdraw frame covers partial");
+    kani::cover!(
+        fund > 128 && amt < fund,
+        "domain-insurance withdraw frame covers large partial withdrawal"
+    );
     let mut eh = h0;
     eh.vault = V16PodU128::new(fund - amt);
     eh.insurance = V16PodU128::new(fund - amt);
