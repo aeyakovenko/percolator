@@ -1045,6 +1045,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.can_ignore_unrelated_loss_stale_for_trade(long_account, short_account, asset_index)
     }
 
+    pub fn kani_asset_is_loss_stale(&self, asset_index: usize) -> V16Result<bool> {
+        self.asset_is_loss_stale(asset_index)
+    }
+
+    pub fn kani_account_has_loss_stale_live_leg(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        self.account_has_loss_stale_live_leg(account)
+    }
+
     pub fn kani_trade_signed_size_deltas(size_q: i128) -> V16Result<(u128, i128, i128)> {
         Self::trade_signed_size_deltas(size_q)
     }

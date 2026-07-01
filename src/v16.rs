@@ -16344,6 +16344,11 @@ fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     if a_basis == 0 {
         return Err(V16Error::InvalidLeg);
     }
+    #[cfg(kani)]
+    if a_basis == SOCIAL_WEIGHT_SCALE {
+        // Exact identity; keeps unrelated high-level proofs out of U256 division.
+        return Ok(abs_basis_q);
+    }
     checked_mul_div_ceil_u256(
         U256::from_u128(abs_basis_q),
         U256::from_u128(SOCIAL_WEIGHT_SCALE),

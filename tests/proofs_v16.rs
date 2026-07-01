@@ -1234,6 +1234,147 @@ fn proof_v16_view_loss_stale_ignore_empty_accounts_matches_current_trade_scope()
     assert_eq!(allowed, expected);
 }
 
+fn assert_view_loss_stale_ignore_rejects_exposed_account<
+    const EXPOSE_LONG: bool,
+    const EXPOSE_SHORT: bool,
+>() {
+    assert!(EXPOSE_LONG || EXPOSE_SHORT);
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.current_slot = V16PodU64::new(10);
+    header.loss_stale_active = 1;
+
+    let mut trade_asset = AssetStateV16::default();
+    trade_asset.market_id = 1;
+    trade_asset.slot_last = 10;
+    trade_asset.oi_eff_long_q = 1;
+    let mut stale_asset = AssetStateV16::default();
+    stale_asset.market_id = 2;
+    stale_asset.slot_last = 9;
+    stale_asset.oi_eff_long_q = 1;
+    let mut markets = [
+        Market::new(
+            0u64,
+            EngineAssetSlotV16Account {
+                asset: AssetStateV16Account::from_runtime(&trade_asset),
+                ..EngineAssetSlotV16Account::default()
+            },
+        ),
+        Market::new(
+            0u64,
+            EngineAssetSlotV16Account {
+                asset: AssetStateV16Account::from_runtime(&stale_asset),
+                ..EngineAssetSlotV16Account::default()
+            },
+        ),
+    ];
+
+    let stale_leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: stale_asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: stale_asset.k_long,
+        f_snap: stale_asset.f_long_num,
+        epoch_snap: stale_asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: stale_asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: stale_asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    };
+    let mut long_header = PortfolioAccountV16Account::default();
+    let mut short_header = PortfolioAccountV16Account::default();
+    long_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    short_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    let mut active_bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut active_bitmap, 0).unwrap();
+    if EXPOSE_LONG {
+        long_header.legs[0] = PortfolioLegV16Account::from_runtime(&stale_leg);
+        long_header.active_bitmap = active_bitmap.map(V16PodU64::new);
+    }
+    if EXPOSE_SHORT {
+        short_header.legs[0] = PortfolioLegV16Account::from_runtime(&stale_leg);
+        short_header.active_bitmap = active_bitmap.map(V16PodU64::new);
+    }
+
+    let long_bitmap = long_header.active_bitmap.map(V16PodU64::get);
+    assert_eq!(active_bitmap_get(long_bitmap, 0), EXPOSE_LONG);
+    let long_leg = long_header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(long_leg.active, EXPOSE_LONG);
+    if EXPOSE_LONG {
+        assert_eq!(long_leg.asset_index, 1);
+        assert_eq!(long_leg.market_id, stale_asset.market_id);
+    }
+    let short_bitmap = short_header.active_bitmap.map(V16PodU64::get);
+    assert_eq!(active_bitmap_get(short_bitmap, 0), EXPOSE_SHORT);
+    let short_leg = short_header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(short_leg.active, EXPOSE_SHORT);
+    if EXPOSE_SHORT {
+        assert_eq!(short_leg.asset_index, 1);
+        assert_eq!(short_leg.market_id, stale_asset.market_id);
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let long = PortfolioV16View::new(&long_header);
+    let short = PortfolioV16View::new(&short_header);
+    assert!(!market.kani_asset_is_loss_stale(0).unwrap());
+    assert!(market.kani_asset_is_loss_stale(1).unwrap());
+    assert_eq!(
+        market.kani_account_has_loss_stale_live_leg(&long).unwrap(),
+        EXPOSE_LONG
+    );
+    assert_eq!(
+        market.kani_account_has_loss_stale_live_leg(&short).unwrap(),
+        EXPOSE_SHORT
+    );
+    let allowed = market
+        .kani_can_ignore_unrelated_loss_stale_for_trade(&long, &short, 0)
+        .unwrap();
+
+    assert!(!allowed);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_view_loss_stale_ignore_rejects_long_account_exposed_to_unrelated_stale_asset() {
+    assert_view_loss_stale_ignore_rejects_exposed_account::<true, false>();
+    kani::cover!(
+        true,
+        "view loss-stale scope rejects long account exposed to unrelated stale asset"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_view_loss_stale_ignore_rejects_short_account_exposed_to_unrelated_stale_asset() {
+    assert_view_loss_stale_ignore_rejects_exposed_account::<false, true>();
+    kani::cover!(
+        true,
+        "view loss-stale scope rejects short account exposed to unrelated stale asset"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_view_loss_stale_ignore_rejects_both_accounts_exposed_to_unrelated_stale_asset() {
+    assert_view_loss_stale_ignore_rejects_exposed_account::<true, true>();
+    kani::cover!(
+        true,
+        "view loss-stale scope rejects both accounts exposed to unrelated stale asset"
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
