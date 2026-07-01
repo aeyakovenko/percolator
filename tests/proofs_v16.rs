@@ -17333,8 +17333,8 @@ fn proof_v16_counterparty_supported_external_exit_preserves_stock_reconciliation
     let initial_capital_raw: u8 = kani::any();
     let insurance_raw: u8 = kani::any();
     let junior_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&amount_raw));
-    kani::assume(initial_capital_raw >= amount_raw && initial_capital_raw <= 16);
+    kani::assume(amount_raw > 0);
+    kani::assume(initial_capital_raw >= amount_raw);
     let amount = amount_raw as u128;
     let initial_c_tot = initial_capital_raw as u128;
     let insurance = insurance_raw as u128;
@@ -17410,6 +17410,10 @@ fn proof_v16_counterparty_supported_external_exit_preserves_stock_reconciliation
     kani::cover!(
         amount > 1 && initial_c_tot > amount && insurance > 0 && junior > 0,
         "counterparty support lifecycle covers nontrivial capital, insurance, and junior pool"
+    );
+    kani::cover!(
+        amount > 128 && initial_c_tot > amount && insurance > 128 && junior > 128,
+        "counterparty support lifecycle covers large capital, insurance, and junior pool"
     );
     assert_eq!(
         reserve_proof.credits[TokenValueClassV16::ExplicitBackedLoss as usize],
