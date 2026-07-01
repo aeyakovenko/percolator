@@ -20293,6 +20293,102 @@ fn proof_v16_seq_budget_credit_then_withdraw_caps_compose() {
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+// P2-5: wrapper-shaped market-zero insurance split — credit domains 0/1 using
+// the exact long=floor(amount/2), short=remainder split, then withdraw both
+// domains through the production arithmetic cores. The two-domain sequence is
+// an exact value round trip and neither domain can withdraw the other's share.
+#[kani::proof]
+#[kani::unwind(12)]
+#[kani::solver(cadical)]
+fn proof_v16_market_zero_insurance_split_budget_and_withdraw_deltas_compose() {
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=48).contains(&amount_raw));
+    let amount = amount_raw as u128;
+    let long_amount = amount / 2;
+    let short_amount = amount - long_amount;
+    let total_after_long = MarketGroupV16ViewMut::<u64>::kani_set_domain_insurance_budget_delta(
+        0,
+        amount,
+        0,
+        0,
+        long_amount,
+    )
+    .unwrap();
+    let total_after_short = MarketGroupV16ViewMut::<u64>::kani_set_domain_insurance_budget_delta(
+        total_after_long,
+        amount,
+        0,
+        0,
+        short_amount,
+    )
+    .unwrap();
+    let rejected_long = MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+        amount,
+        amount,
+        0,
+        long_amount,
+        0,
+        0,
+        long_amount + 1,
+    );
+    let (vault_after_long, insurance_after_long, long_budget_after) =
+        MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+            amount,
+            amount,
+            0,
+            long_amount,
+            0,
+            0,
+            long_amount,
+        )
+        .unwrap();
+    let rejected_short = MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+        vault_after_long,
+        insurance_after_long,
+        0,
+        short_amount,
+        0,
+        0,
+        short_amount + 1,
+    );
+    let (vault_after_short, insurance_after_short, short_budget_after) =
+        MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+            vault_after_long,
+            insurance_after_long,
+            0,
+            short_amount,
+            0,
+            0,
+            short_amount,
+        )
+        .unwrap();
+
+    kani::cover!(
+        amount_raw > 2 && amount_raw % 2 == 0,
+        "market-zero insurance split covers even nontrivial budget"
+    );
+    kani::cover!(
+        amount_raw > 2 && amount_raw % 2 == 1,
+        "market-zero insurance split covers odd remainder to short domain"
+    );
+    kani::cover!(
+        long_amount > 0 && short_amount > 0 && rejected_long.is_err() && rejected_short.is_err(),
+        "market-zero insurance split rejects overdraw from either isolated domain"
+    );
+
+    assert_eq!(total_after_long, long_amount);
+    assert_eq!(total_after_short, amount);
+    assert_eq!(rejected_long, Err(V16Error::LockActive));
+    assert_eq!(rejected_short, Err(V16Error::LockActive));
+    assert_eq!(vault_after_long, short_amount);
+    assert_eq!(insurance_after_long, short_amount);
+    assert_eq!(long_budget_after, 0);
+    assert_eq!(total_after_short - long_amount, short_amount);
+    assert_eq!(vault_after_short, 0);
+    assert_eq!(insurance_after_short, 0);
+    assert_eq!(short_budget_after, 0);
+}
+
 // ============ SPEC #21: CLOSE-OWNERSHIP EXCLUSION (the engine's mechanism) ============
 // The spec text describes priority-based preemption (ClosePriority tuple); the
 // ENGINE implements a simpler, stronger discipline: exclusive per-domain
