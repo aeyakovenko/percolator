@@ -3732,6 +3732,114 @@ fn proof_v16_kernel_resize_leg_same_side_is_exact_and_side_isolated() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_kernel_partial_reduce_plus_matching_drain_preserves_balanced_oi() {
+    let long_side: bool = kani::any();
+    let old_abs_raw: u8 = kani::any();
+    let reduce_raw: u8 = kani::any();
+    let old_weight_raw: u8 = kani::any();
+    let new_weight_raw: u8 = kani::any();
+    let other_weight_raw: u8 = kani::any();
+    kani::assume((2..=16).contains(&old_abs_raw));
+    kani::assume((1..old_abs_raw).contains(&reduce_raw));
+    kani::assume(old_weight_raw <= 16);
+    kani::assume(new_weight_raw <= 16);
+    kani::assume(other_weight_raw <= 16);
+
+    let old_abs = old_abs_raw as u128;
+    let reduce = reduce_raw as u128;
+    let new_abs = old_abs - reduce;
+    let old_weight = old_weight_raw as u128;
+    let new_weight = new_weight_raw as u128;
+    let other_weight = other_weight_raw as u128;
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let old_signed = if long_side {
+        old_abs as i128
+    } else {
+        -(old_abs as i128)
+    };
+    let new_signed = if long_side {
+        new_abs as i128
+    } else {
+        -(new_abs as i128)
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        side,
+        basis_pos_q: old_signed,
+        loss_weight: old_weight,
+        ..PortfolioLegV16::default()
+    };
+    let mut asset = AssetStateV16::default();
+    asset.oi_eff_long_q = old_abs;
+    asset.oi_eff_short_q = old_abs;
+    if long_side {
+        asset.loss_weight_sum_long = old_weight;
+        asset.loss_weight_sum_short = other_weight;
+    } else {
+        asset.loss_weight_sum_short = old_weight;
+        asset.loss_weight_sum_long = other_weight;
+    }
+    let before = asset;
+
+    let (next_leg, mut next_asset) =
+        kani_kernel_resize_leg_same_side(leg, asset, new_signed, new_weight, false).unwrap();
+    if long_side {
+        next_asset.oi_eff_short_q = next_asset.oi_eff_short_q.checked_sub(reduce).unwrap();
+    } else {
+        next_asset.oi_eff_long_q = next_asset.oi_eff_long_q.checked_sub(reduce).unwrap();
+    }
+
+    kani::cover!(
+        long_side && reduce > 1 && old_weight != new_weight,
+        "balanced partial reduce covers long resize plus short drain"
+    );
+    kani::cover!(
+        !long_side && reduce > 1 && old_weight != new_weight,
+        "balanced partial reduce covers short resize plus long drain"
+    );
+    assert_eq!(next_leg.side, side);
+    assert_eq!(next_leg.basis_pos_q, new_signed);
+    assert_eq!(next_leg.basis_pos_q.unsigned_abs(), new_abs);
+    assert_eq!(next_leg.loss_weight, new_weight);
+    assert_eq!(next_asset.oi_eff_long_q, new_abs);
+    assert_eq!(next_asset.oi_eff_short_q, new_abs);
+    assert_eq!(next_asset.oi_eff_long_q, next_asset.oi_eff_short_q);
+    if long_side {
+        assert_eq!(next_asset.loss_weight_sum_long, new_weight);
+        assert_eq!(
+            next_asset.loss_weight_sum_short,
+            before.loss_weight_sum_short
+        );
+    } else {
+        assert_eq!(next_asset.loss_weight_sum_short, new_weight);
+        assert_eq!(next_asset.loss_weight_sum_long, before.loss_weight_sum_long);
+    }
+    assert_eq!(next_asset.market_id, before.market_id);
+    assert_eq!(next_asset.a_long, before.a_long);
+    assert_eq!(next_asset.a_short, before.a_short);
+    assert_eq!(next_asset.k_long, before.k_long);
+    assert_eq!(next_asset.k_short, before.k_short);
+    assert_eq!(next_asset.f_long_num, before.f_long_num);
+    assert_eq!(next_asset.f_short_num, before.f_short_num);
+    assert_eq!(next_asset.b_long_num, before.b_long_num);
+    assert_eq!(next_asset.b_short_num, before.b_short_num);
+    assert_eq!(
+        next_asset.stored_pos_count_long,
+        before.stored_pos_count_long
+    );
+    assert_eq!(
+        next_asset.stored_pos_count_short,
+        before.stored_pos_count_short
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_kernel_attach_then_clear_is_asset_identity_for_real_position() {
     let long_side: bool = kani::any();
     let abs_raw: u8 = kani::any();
