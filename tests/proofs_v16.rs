@@ -22979,8 +22979,8 @@ fn proof_v16_validator_sound_atom_aligned_pnl_bound_num() {
 fn proof_v16_validator_sound_global_bound_covers_source_claim_total() {
     let source_claim_raw: u8 = kani::any();
     let global_bound_raw: u8 = kani::any();
-    kani::assume(source_claim_raw <= 8);
-    kani::assume(global_bound_raw <= 8);
+    kani::assume(source_claim_raw <= 16);
+    kani::assume(global_bound_raw <= 16);
 
     let source_claim_num = (source_claim_raw as u128) * BOUND_SCALE;
     let global_bound_num = (global_bound_raw as u128) * BOUND_SCALE;
@@ -23007,14 +23007,30 @@ fn proof_v16_validator_sound_global_bound_covers_source_claim_total() {
         "global/source bound soundness covers exact source-claim coverage"
     );
     kani::cover!(
+        result.is_ok()
+            && source_claim_num > 8 * BOUND_SCALE
+            && global_bound_num == source_claim_num,
+        "global/source bound soundness covers larger exact source-claim coverage"
+    );
+    kani::cover!(
         result.is_ok() && source_claim_num > 0 && global_bound_num > source_claim_num,
         "global/source bound soundness covers slack source-claim coverage"
+    );
+    kani::cover!(
+        result.is_ok() && source_claim_num > 8 * BOUND_SCALE && global_bound_num > source_claim_num,
+        "global/source bound soundness covers larger slack source-claim coverage"
     );
     kani::cover!(
         result == Err(V16Error::InvalidConfig)
             && source_claim_num > 0
             && global_bound_num < source_claim_num,
         "global/source bound soundness covers understated global-bound rejection"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && source_claim_num > 8 * BOUND_SCALE
+            && global_bound_num < source_claim_num,
+        "global/source bound soundness covers larger understated global-bound rejection"
     );
     if result.is_ok() {
         assert!(market.header.pnl_pos_bound_tot_num.get() >= source_claim_num);
