@@ -20890,6 +20890,73 @@ fn proof_v16_frame_earnings_withdraw_touches_only_declared_state() {
     ));
 }
 
+// provider-earnings credit frame: exactly {backing_provider_earnings_total}
+// on the header and the bucket's {utilization_fee_earnings}; the vault is
+// already funded and stays frozen, so the API cannot mint withdrawable value.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_earnings_credit_touches_only_declared_state() {
+    let existing_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(amount_raw >= 1);
+    let existing = existing_raw as u128;
+    let amount = amount_raw as u128;
+    let surplus = surplus_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(existing + amount + surplus + 1);
+    header.backing_provider_earnings_total = V16PodU128::new(existing);
+    header.source_fresh_backing_total_num = V16PodU128::new(BOUND_SCALE);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: BOUND_SCALE,
+        utilization_fee_earnings: existing,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .credit_backing_provider_earnings_not_atomic(0, amount)
+            .unwrap();
+    }
+    kani::cover!(
+        existing > 0 && amount > 128,
+        "earnings credit frame covers additive large provider earnings"
+    );
+    kani::cover!(
+        surplus == 0 && amount > 1,
+        "earnings credit frame covers exact vault-slack boundary"
+    );
+    let mut eh = h0;
+    eh.backing_provider_earnings_total = V16PodU128::new(existing + amount);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    es.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: BOUND_SCALE,
+        utilization_fee_earnings: existing + amount,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &es,
+        &markets[0].engine
+    ));
+}
+
 // resolve_market frame: exactly {mode, resolved_slot, current_slot,
 // loss_stale_active} on the header; the slot and all value fields frozen.
 #[kani::proof]
