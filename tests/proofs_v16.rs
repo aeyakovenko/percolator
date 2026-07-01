@@ -20425,8 +20425,8 @@ fn proof_v16_frame_oracle_target_update_touches_only_declared_state() {
 fn proof_v16_frame_insurance_account_credit_touches_only_declared_state() {
     let amt_raw: u8 = kani::any();
     let ins_raw: u8 = kani::any();
-    kani::assume(amt_raw >= 1 && amt_raw <= 8);
-    kani::assume(ins_raw >= amt_raw && ins_raw <= 8);
+    kani::assume(amt_raw >= 1);
+    kani::assume(ins_raw >= amt_raw);
     let amt = amt_raw as u128;
     let ins = ins_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
@@ -20443,7 +20443,10 @@ fn proof_v16_frame_insurance_account_credit_touches_only_declared_state() {
             .credit_account_from_insurance_not_atomic(&mut account, amt)
             .unwrap();
     }
-    kani::cover!(amt < ins, "insurance credit frame covers partial");
+    kani::cover!(
+        ins > 128 && amt > 64 && amt < ins,
+        "insurance credit frame covers large partial credit"
+    );
     let mut eh = h0;
     eh.insurance = V16PodU128::new(ins - amt);
     eh.c_tot = V16PodU128::new(amt);
