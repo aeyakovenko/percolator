@@ -22136,8 +22136,8 @@ fn proof_v16_validator_sound_source_claim_bound_total_matches_slots() {
     let short_claim_raw: u8 = kani::any();
     let stale_header_total: bool = kani::any();
     let stale_understates_slots: bool = kani::any();
-    kani::assume(long_claim_raw <= 8);
-    kani::assume(short_claim_raw <= 8);
+    kani::assume(long_claim_raw <= 12);
+    kani::assume(short_claim_raw <= 12);
 
     let long_claim_num = long_claim_raw as u128 * BOUND_SCALE;
     let short_claim_num = short_claim_raw as u128 * BOUND_SCALE;
@@ -22188,6 +22188,13 @@ fn proof_v16_validator_sound_source_claim_bound_total_matches_slots() {
         "source-claim aggregate validator covers two claimed source domains"
     );
     kani::cover!(
+        result.is_ok()
+            && !stale_header_total
+            && long_claim_num > 8 * BOUND_SCALE
+            && short_claim_num > 8 * BOUND_SCALE,
+        "source-claim aggregate validator covers larger two-domain source claims"
+    );
+    kani::cover!(
         result.is_ok() && !stale_header_total && long_claim_num > 0 && short_claim_num == 0,
         "source-claim aggregate validator covers one claimed source domain with an empty peer"
     );
@@ -22201,9 +22208,23 @@ fn proof_v16_validator_sound_source_claim_bound_total_matches_slots() {
     kani::cover!(
         result == Err(V16Error::InvalidConfig)
             && stale_header_total
+            && !stale_understates_slots
+            && expected_total_num > 8 * BOUND_SCALE,
+        "source-claim aggregate validator rejects larger over-reported header claims"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
             && stale_understates_slots
             && expected_total_num >= BOUND_SCALE,
         "source-claim aggregate validator rejects under-reported header claims"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && stale_understates_slots
+            && expected_total_num > 8 * BOUND_SCALE,
+        "source-claim aggregate validator rejects larger under-reported header claims"
     );
 
     assert_eq!(result.is_ok(), !stale_header_total);
