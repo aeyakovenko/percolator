@@ -19022,6 +19022,64 @@ fn proof_v16_validator_sound_atom_aligned_pnl_bound_num() {
     assert!(h.pnl_matured_pos_tot.get() <= h.pnl_pos_tot.get()); // U6
 }
 
+// Validator soundness for the source-domain junior-bound cap: any state that
+// survives validate_shape() must have a global junior claim bound that covers
+// the aggregate persisted source-domain claim total. This is the LoF-relevant
+// direction of the global-vs-domain aggregation guard: the global denominator
+// used by haircut/resolved-payout math cannot be smaller than the source claims
+// it is supposed to bound.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_global_bound_covers_source_claim_total() {
+    let source_claim_raw: u8 = kani::any();
+    let global_bound_raw: u8 = kani::any();
+    kani::assume(source_claim_raw <= 8);
+    kani::assume(global_bound_raw <= 8);
+
+    let source_claim_num = (source_claim_raw as u128) * BOUND_SCALE;
+    let global_bound_num = (global_bound_raw as u128) * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.source_claim_bound_total_num = V16PodU128::new(source_claim_num);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(global_bound_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(
+        kani_amount_from_bound_num(global_bound_num).expect("small aligned bound converts"),
+    );
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: source_claim_num,
+            exact_positive_claim_num: source_claim_num,
+            // No fresh backing: the source credit rate is exactly zero for any
+            // positive claim, which keeps this proof focused on aggregation.
+            credit_rate_num: 0,
+            ..SourceCreditStateV16::EMPTY
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+    kani::cover!(
+        result.is_ok() && source_claim_num > 0 && global_bound_num == source_claim_num,
+        "global/source bound soundness covers exact source-claim coverage"
+    );
+    kani::cover!(
+        result.is_ok() && source_claim_num > 0 && global_bound_num > source_claim_num,
+        "global/source bound soundness covers slack source-claim coverage"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && source_claim_num > 0
+            && global_bound_num < source_claim_num,
+        "global/source bound soundness covers understated global-bound rejection"
+    );
+    if result.is_ok() {
+        assert!(market.header.pnl_pos_bound_tot_num.get() >= source_claim_num);
+        assert!(
+            market.header.pnl_pos_bound_tot_num.get()
+                >= market.header.source_claim_bound_total_num.get()
+        );
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
