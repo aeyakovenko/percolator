@@ -22656,10 +22656,6 @@ fn proof_v16_validator_sound_resolved_payout_blocker_count_matches_slots() {
     let pending_short: bool = kani::any();
     let stale_header_count: bool = kani::any();
     let stale_understates_slots: bool = kani::any();
-    kani::assume(stored_long_raw <= 16);
-    kani::assume(stored_short_raw <= 16);
-    kani::assume(stale_long_raw <= 16);
-    kani::assume(stale_short_raw <= 16);
 
     let stored_long = stored_long_raw as u64;
     let stored_short = stored_short_raw as u64;
@@ -22706,13 +22702,13 @@ fn proof_v16_validator_sound_resolved_payout_blocker_count_matches_slots() {
     kani::cover!(
         result.is_ok()
             && !stale_header_count
-            && stored_long > 8
-            && stored_short > 8
-            && stale_long > 8
-            && stale_short > 8
+            && stored_long > 128
+            && stored_short > 128
+            && stale_long > 128
+            && stale_short > 128
             && pending_long
             && pending_short,
-        "resolved-payout blocker aggregate covers larger mixed slot blocker classes"
+        "resolved-payout blocker aggregate covers large mixed slot blocker classes"
     );
     kani::cover!(
         result.is_ok()
@@ -22736,8 +22732,8 @@ fn proof_v16_validator_sound_resolved_payout_blocker_count_matches_slots() {
         result == Err(V16Error::InvalidConfig)
             && stale_header_count
             && !stale_understates_slots
-            && expected_count > 34,
-        "resolved-payout blocker aggregate rejects larger over-reported header blockers"
+            && expected_count > 512,
+        "resolved-payout blocker aggregate rejects large over-reported header blockers"
     );
     kani::cover!(
         result == Err(V16Error::InvalidConfig)
@@ -22750,8 +22746,8 @@ fn proof_v16_validator_sound_resolved_payout_blocker_count_matches_slots() {
         result == Err(V16Error::InvalidConfig)
             && stale_header_count
             && stale_understates_slots
-            && expected_count > 34,
-        "resolved-payout blocker aggregate rejects larger under-reported header blockers"
+            && expected_count > 512,
+        "resolved-payout blocker aggregate rejects large under-reported header blockers"
     );
 
     assert_eq!(result.is_ok(), !stale_header_count);
