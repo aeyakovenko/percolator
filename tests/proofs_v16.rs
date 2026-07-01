@@ -13672,11 +13672,7 @@ fn proof_v16_principal_then_domain_insurance_waterfall_is_loss_and_domain_capped
     let other_budget_raw: u8 = kani::any();
     let insurance_raw: u8 = kani::any();
     let loss_raw: u8 = kani::any();
-    kani::assume(capital_raw <= 32);
-    kani::assume(budget_raw <= 32);
-    kani::assume(other_budget_raw <= 32);
-    kani::assume(insurance_raw <= 64);
-    kani::assume((1..=64).contains(&loss_raw));
+    kani::assume(loss_raw > 0);
     kani::assume((budget_raw as u16) + (other_budget_raw as u16) <= insurance_raw as u16);
 
     let capital = capital_raw as u128;
@@ -13716,16 +13712,35 @@ fn proof_v16_principal_then_domain_insurance_waterfall_is_loss_and_domain_capped
         "waterfall covers residual loss capped by domain budget"
     );
     kani::cover!(
+        capital > 128 && capital < loss && budget > 0 && budget < residual_after_principal,
+        "waterfall covers large principal debit before budget-capped domain insurance"
+    );
+    kani::cover!(
         capital < loss && budget >= residual_after_principal && residual_after_principal > 0,
         "waterfall covers residual loss fully paid by domain insurance"
+    );
+    kani::cover!(
+        capital < loss
+            && loss > 128
+            && budget >= residual_after_principal
+            && residual_after_principal > 0,
+        "waterfall covers large residual loss fully paid by domain insurance"
     );
     kani::cover!(
         capital >= loss && insurance_used == 0,
         "waterfall covers principal fully absorbs loss before insurance"
     );
     kani::cover!(
+        capital > 128 && capital >= loss && insurance_used == 0,
+        "waterfall covers large principal fully absorbs loss before insurance"
+    );
+    kani::cover!(
         other_budget > 0 && insurance_used > 0,
         "waterfall covers unrelated funded domain isolation"
+    );
+    kani::cover!(
+        other_budget > 0 && budget > 128 && insurance_used > 0,
+        "waterfall covers large selected insurance budget with unrelated funded peer"
     );
     assert_eq!(principal_paid, expected_principal);
     assert_eq!(insurance_used, expected_insurance);
