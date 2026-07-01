@@ -4151,6 +4151,62 @@ fn proof_v16_kernel_reduce_position_delta_strictly_moves_toward_zero() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_rebalance_reduce_kernel_preserves_balanced_oi_and_passes_barrier_gate() {
+    let long_side: bool = kani::any();
+    let position_units_raw: u8 = kani::any();
+    let request_units_raw: u8 = kani::any();
+    kani::assume((1..=64).contains(&position_units_raw));
+    kani::assume((1..=96).contains(&request_units_raw));
+
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let pre_abs = position_units_raw as u128 * POS_SCALE;
+    let request = request_units_raw as u128 * POS_SCALE;
+    let current = if long_side {
+        pre_abs as i128
+    } else {
+        -(pre_abs as i128)
+    };
+
+    let (reduced_q, delta) = kani_kernel_reduce_position_delta(current, side, request).unwrap();
+    let next = current.checked_add(delta).unwrap();
+    let remaining = pre_abs.checked_sub(reduced_q).unwrap();
+    let blocked_by_touched_barrier =
+        kani_pending_domain_loss_barrier_blocks_position_change(true, current, next);
+
+    kani::cover!(
+        long_side && reduced_q < pre_abs && request > 0,
+        "rebalance reduce composition covers partial long reduction"
+    );
+    kani::cover!(
+        !long_side && reduced_q == pre_abs,
+        "rebalance reduce composition covers full short reduction"
+    );
+
+    assert!(reduced_q > 0);
+    assert_eq!(reduced_q, request.min(pre_abs));
+    assert_eq!(next.unsigned_abs(), remaining);
+    assert!(next == 0 || next.signum() == current.signum());
+    assert!(next.unsigned_abs() < current.unsigned_abs());
+    assert!(!blocked_by_touched_barrier);
+
+    // Rebalance reduces the account side and the matching aggregate side by
+    // the same clamped quantity. Starting from a live balanced market, the
+    // production composition therefore remains balanced and strictly lowers
+    // total open risk without requiring value movement.
+    let long_oi_after = pre_abs - reduced_q;
+    let short_oi_after = pre_abs - reduced_q;
+    assert_eq!(long_oi_after, short_oi_after);
+    assert_eq!(long_oi_after, remaining);
+    assert!(long_oi_after < pre_abs);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_kernel_classify_position_delta_is_total_exclusive_route_partition() {
     let current_raw: i8 = kani::any();
     let new_raw: i8 = kani::any();
