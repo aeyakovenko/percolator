@@ -15196,13 +15196,6 @@ fn proof_v16_insurance_lien_consume_delta_is_aligned_and_atom_exact() {
     let domain_spent_raw: u8 = kani::any();
     let insurance_raw: u8 = kani::any();
     let force_unaligned: bool = kani::any();
-    kani::assume(amount_units_raw <= 8);
-    kani::assume(reservation_reserved_raw <= 8);
-    kani::assume(reservation_valid_raw <= 8);
-    kani::assume(source_reserved_raw <= 8);
-    kani::assume(source_valid_raw <= 8);
-    kani::assume(domain_spent_raw <= 8);
-    kani::assume(insurance_raw <= 8);
 
     let aligned_amount = amount_units_raw as u128 * BOUND_SCALE;
     let amount = if force_unaligned {
@@ -15250,6 +15243,10 @@ fn proof_v16_insurance_lien_consume_delta_is_aligned_and_atom_exact() {
         "insurance consume delta rejects non-atom-aligned bound amount"
     );
     kani::cover!(
+        amount_units_raw > 128 && force_unaligned,
+        "insurance consume delta rejects large non-atom-aligned bound amount"
+    );
+    kani::cover!(
         !force_unaligned && amount > 0 && reservation_valid < amount,
         "insurance consume delta rejects insufficient reservation valid lien"
     );
@@ -15270,6 +15267,14 @@ fn proof_v16_insurance_lien_consume_delta_is_aligned_and_atom_exact() {
     kani::cover!(
         expected_ok && amount > 0 && reservation_reserved > amount && source_valid > amount,
         "insurance consume delta covers partial aligned consume"
+    );
+    kani::cover!(
+        expected_ok
+            && amount_units_raw > 128
+            && reservation_reserved > amount
+            && source_valid > amount
+            && insurance > spend_atoms,
+        "insurance consume delta covers large partial aligned consume"
     );
 
     assert_eq!(result.is_ok(), expected_ok);
