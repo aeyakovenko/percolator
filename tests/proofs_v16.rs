@@ -20787,6 +20787,57 @@ fn proof_v16_frame_domain_insurance_withdraw_touches_only_declared_state() {
     ));
 }
 
+// domain-insurance spent setter frame: exactly
+// {insurance_domain_budget_remaining_total} on the header and the selected
+// side's {insurance_domain_spent_*}; value stocks, budgets, and the peer side
+// stay frozen.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_frame_domain_insurance_spent_setter_touches_only_declared_state() {
+    let budget_raw: u8 = kani::any();
+    let old_spent_raw: u8 = kani::any();
+    let new_spent_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(budget_raw >= 1);
+    kani::assume(old_spent_raw <= budget_raw);
+    kani::assume(new_spent_raw <= budget_raw);
+    let budget = budget_raw as u128;
+    let old_spent = old_spent_raw as u128;
+    let new_spent = new_spent_raw as u128;
+    let surplus = surplus_raw as u128;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(budget + surplus);
+    header.insurance = V16PodU128::new(budget + surplus);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget - old_spent);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budget);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(old_spent);
+    let h0 = header;
+    let s0 = markets[0].engine;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.set_domain_insurance_spent(0, new_spent).unwrap();
+    }
+
+    kani::cover!(
+        new_spent > old_spent && surplus > 128,
+        "spent setter frame covers increasing spent with unrelated insurance surplus"
+    );
+    kani::cover!(
+        new_spent < old_spent && old_spent > 128,
+        "spent setter frame covers clearing large spent capacity"
+    );
+    let mut eh = h0;
+    eh.insurance_domain_budget_remaining_total = V16PodU128::new(budget - new_spent);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    let mut es = s0;
+    es.insurance_domain_spent_long = V16PodU128::new(new_spent);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &es,
+        &markets[0].engine
+    ));
+}
+
 // provider-earnings withdraw frame: exactly {vault,
 // backing_provider_earnings_total} on the header and the bucket's
 // utilization_fee_earnings on the slot.
