@@ -10534,13 +10534,6 @@ fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_inv
     let source_valid_raw: u8 = kani::any();
     let source_impaired_raw: u8 = kani::any();
     let force_unaligned: bool = kani::any();
-    kani::assume(amount_units_raw <= 8);
-    kani::assume(reservation_reserved_raw <= 8);
-    kani::assume(reservation_valid_raw <= 8);
-    kani::assume(reservation_impaired_raw <= 8);
-    kani::assume(source_reserved_raw <= 8);
-    kani::assume(source_valid_raw <= 8);
-    kani::assume(source_impaired_raw <= 8);
 
     let aligned_amount = amount_units_raw as u128 * BOUND_SCALE;
     let amount = if force_unaligned {
@@ -10589,6 +10582,10 @@ fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_inv
         "terminal insurance release rejects unaligned bound amount"
     );
     kani::cover!(
+        amount_units_raw > 128 && force_unaligned,
+        "terminal insurance release rejects large unaligned bound amount"
+    );
+    kani::cover!(
         !force_unaligned && amount > 0 && reservation_reserved < amount,
         "terminal insurance release rejects insufficient reservation total"
     );
@@ -10612,12 +10609,27 @@ fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_inv
         "terminal insurance release covers valid-only partial release"
     );
     kani::cover!(
+        expected_ok
+            && amount_units_raw > 128
+            && valid_release == amount
+            && reservation_reserved > amount,
+        "terminal insurance release covers large valid-only partial release"
+    );
+    kani::cover!(
         expected_ok && amount > 0 && valid_release > 0 && valid_release < amount,
         "terminal insurance release covers mixed valid and impaired release"
     );
     kani::cover!(
+        expected_ok && amount_units_raw > 128 && valid_release > 0 && valid_release < amount,
+        "terminal insurance release covers large mixed valid and impaired release"
+    );
+    kani::cover!(
         expected_ok && amount > 0 && valid_release == 0,
         "terminal insurance release covers impaired-only release"
+    );
+    kani::cover!(
+        expected_ok && amount_units_raw > 128 && valid_release == 0,
+        "terminal insurance release covers large impaired-only release"
     );
 
     assert_eq!(result.is_ok(), expected_ok);
