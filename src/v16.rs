@@ -12773,7 +12773,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn advance_close_progress_ledger(
+    fn advance_close_progress_ledger_core(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         support_consumed: u128,
@@ -12817,6 +12817,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
         account.header.health_cert.valid = 0;
+        Ok(())
+    }
+
+    fn advance_close_progress_ledger(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        support_consumed: u128,
+        junior_face_burned: u128,
+        insurance_spent: u128,
+        b_loss_booked: u128,
+        explicit_loss_assigned: u128,
+    ) -> V16Result<()> {
+        self.advance_close_progress_ledger_core(
+            account,
+            support_consumed,
+            junior_face_burned,
+            insurance_spent,
+            b_loss_booked,
+            explicit_loss_assigned,
+        )?;
         account.validate_with_market(&self.as_view())
     }
 

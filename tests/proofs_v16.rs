@@ -11492,6 +11492,155 @@ fn proof_v16_close_ledger_advance_preserves_reserved_zero_drift_and_identity() {
     assert_eq!(advanced.finalized, delta == gross - prior_progress);
 }
 
+#[kani::proof]
+#[kani::unwind(56)]
+#[kani::solver(cadical)]
+fn proof_v16_close_advance_releases_domain_barrier_exactly_on_terminal_progress() {
+    let gross_raw: u8 = kani::any();
+    let prior_raw: u8 = kani::any();
+    let delta_raw: u8 = kani::any();
+    let progress_kind: u8 = kani::any();
+    let side_is_long: bool = kani::any();
+    let sibling_barrier: bool = kani::any();
+    kani::assume((1..=8).contains(&gross_raw));
+    kani::assume(prior_raw <= 8);
+    kani::assume(delta_raw <= 8);
+    kani::assume(progress_kind <= 3);
+
+    let gross = gross_raw as u128;
+    let prior = prior_raw as u128;
+    let delta = delta_raw as u128;
+    kani::assume(prior < gross);
+    kani::assume(delta > 0 && delta <= gross - prior);
+
+    let domain_side = if side_is_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let sibling = u64::from(sibling_barrier);
+    let terminal = delta == gross - prior;
+    let add_support = if progress_kind == 0 { delta } else { 0 };
+    let add_insurance = if progress_kind == 1 { delta } else { 0 };
+    let add_b_loss = if progress_kind == 2 { delta } else { 0 };
+    let add_explicit = if progress_kind == 3 { delta } else { 0 };
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.resolved_payout_blocker_count = V16PodU64::new(1 + sibling);
+    if side_is_long {
+        markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+        markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(sibling);
+    } else {
+        markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(sibling);
+        markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+    }
+    account_header.health_cert.valid = 1;
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            close_id: 1,
+            asset_index: 0,
+            market_id,
+            domain_side,
+            gross_loss_at_close_start: gross,
+            drift_reference_slot: header.current_slot.get(),
+            max_close_slot: header.current_slot.get() + 10,
+            support_consumed: prior,
+            junior_face_burned: prior,
+            residual_remaining: gross - prior,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(
+        market.header.resolved_payout_blocker_count.get(),
+        1 + sibling
+    );
+    assert_eq!(
+        account
+            .header
+            .close_progress
+            .try_to_runtime()
+            .unwrap()
+            .residual_remaining,
+        gross - prior
+    );
+
+    market
+        .kani_advance_close_progress_ledger(
+            &mut account,
+            add_support,
+            add_support,
+            add_insurance,
+            add_b_loss,
+            add_explicit,
+        )
+        .unwrap();
+    let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    let selected_barrier = if side_is_long {
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_long
+            .get()
+    } else {
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_short
+            .get()
+    };
+    let sibling_after = if side_is_long {
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_short
+            .get()
+    } else {
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_long
+            .get()
+    };
+
+    kani::cover!(
+        terminal && progress_kind == 0 && sibling_barrier,
+        "terminal close advance releases selected barrier while sibling remains held"
+    );
+    kani::cover!(
+        !terminal && progress_kind == 1,
+        "partial close advance through insurance keeps selected barrier held"
+    );
+    kani::cover!(
+        terminal && !side_is_long && progress_kind == 2,
+        "terminal close advance covers short-side domain with b-loss progress"
+    );
+    kani::cover!(
+        !terminal && progress_kind == 3 && prior > 0,
+        "partial close advance covers explicit-loss progress after prior support"
+    );
+
+    assert!(ledger.active);
+    assert_eq!(ledger.close_id, 1);
+    assert_eq!(ledger.asset_index, 0);
+    assert_eq!(ledger.market_id, market_id);
+    assert_eq!(ledger.domain_side, domain_side);
+    assert_eq!(ledger.gross_loss_at_close_start, gross);
+    assert_eq!(ledger.support_consumed, prior + add_support);
+    assert_eq!(ledger.junior_face_burned, prior + add_support);
+    assert_eq!(ledger.insurance_spent, add_insurance);
+    assert_eq!(ledger.b_loss_booked, add_b_loss);
+    assert_eq!(ledger.explicit_loss_assigned, add_explicit);
+    assert_eq!(ledger.residual_remaining, gross - prior - delta);
+    assert_eq!(ledger.finalized, terminal);
+    assert_eq!(selected_barrier, u64::from(!terminal));
+    assert_eq!(sibling_after, sibling);
+    assert_eq!(
+        market.header.resolved_payout_blocker_count.get(),
+        sibling + u64::from(!terminal)
+    );
+    assert_eq!(account.header.health_cert.valid, 0);
+}
+
 // Spec req 24/25 guard seam: exposure clear is blocked exactly while a close
 // ledger has a live pending residual. The production `clear_leg` and
 // `forfeit_recovery_leg_not_atomic` paths call this predicate, so this pins the
