@@ -3297,6 +3297,83 @@ fn proof_v16_withdraw_fee_debt_gate_matches_equity_and_flow_conservation() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_public_withdraw_respects_fee_debt_equity_gate_and_conserves_value() {
+    let capital_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let fee_debt_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 16);
+    kani::assume(other_capital_raw <= 16);
+    kani::assume(insurance_raw <= 16);
+    kani::assume(surplus_raw <= 16);
+    kani::assume(fee_debt_raw <= 16);
+    kani::assume(amount_raw > 0);
+    kani::assume(amount_raw <= 24);
+
+    let capital = capital_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let fee_debt = fee_debt_raw as u128;
+    let amount = amount_raw as u128;
+    let c_tot_before = capital + other_capital;
+    let vault_before = c_tot_before + insurance + surplus;
+    let expected_success = amount <= capital && amount + fee_debt <= capital;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.c_tot = V16PodU128::new(c_tot_before);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(vault_before);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.fee_credits = V16PodI128::new(-(fee_debt as i128));
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.withdraw_not_atomic(&mut account, amount);
+
+    kani::cover!(
+        expected_success && fee_debt > 0 && amount + fee_debt == capital,
+        "public withdraw covers exact fee-debt zero-equity boundary"
+    );
+    kani::cover!(
+        !expected_success && amount <= capital && fee_debt > 0,
+        "public withdraw rejects when fee debt would make post-withdraw equity negative"
+    );
+    kani::cover!(
+        !expected_success && amount > capital,
+        "public withdraw rejects direct overwithdraw before value exit"
+    );
+
+    if expected_success {
+        assert_eq!(result, Ok(()));
+        assert_eq!(account.header.capital.get(), capital - amount);
+        assert_eq!(account.header.fee_credits.get(), -(fee_debt as i128));
+        assert_eq!(market.header.c_tot.get(), c_tot_before - amount);
+        assert_eq!(market.header.vault.get(), vault_before - amount);
+        assert_eq!(market.header.insurance.get(), insurance);
+        assert_eq!(
+            market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get(),
+            surplus
+        );
+        assert_eq!(account.header.health_cert.valid, 0);
+    } else {
+        assert!(matches!(
+            result,
+            Err(V16Error::InvalidConfig) | Err(V16Error::LockActive)
+        ));
+        assert_eq!(account.header.capital.get(), capital);
+        assert_eq!(account.header.fee_credits.get(), -(fee_debt as i128));
+        assert_eq!(market.header.c_tot.get(), c_tot_before);
+        assert_eq!(market.header.vault.get(), vault_before);
+        assert_eq!(market.header.insurance.get(), insurance);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
     let start_capital_raw: u8 = kani::any();
     let other_capital_raw: u8 = kani::any();
