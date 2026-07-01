@@ -569,6 +569,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::active_leg_slot_for_asset(account, asset_index)
     }
 
+    pub fn kani_route_empty_leg_slot(account: &PortfolioV16View<'_>) -> V16Result<usize> {
+        Self::empty_leg_slot(account)
+    }
+
     pub fn kani_residual(&self) -> u128 {
         self.residual()
     }

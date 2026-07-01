@@ -20003,6 +20003,140 @@ fn proof_v16_route_active_leg_lookup_is_bitmap_bound_and_unique() {
     }
 }
 
+// Empty-leg route selection soundness for opening/attaching positions: the
+// helper returns the first bitmap-clear truly empty row, rejects hidden inactive
+// payload rows before any free row, skips bitmap-clear active rows, and reports
+// no capacity when every remaining row is bitmap-blocked. This prevents attach
+// from reusing stale persisted payload while keeping selection deterministic.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_route_empty_leg_slot_is_first_clear_empty_row() {
+    let slot0_active: bool = kani::any();
+    let slot1_active: bool = kani::any();
+    let slot0_bit: bool = kani::any();
+    let slot1_bit: bool = kani::any();
+    let slot0_hidden_inactive_payload: bool = kani::any();
+    let slot1_hidden_inactive_payload: bool = kani::any();
+    let tail_bitmap_blocked: bool = kani::any();
+
+    let (market_group_id, _, _) = ids();
+    let mut account_header = empty_account_fixture(market_group_id, 2);
+    let leg0 = if slot0_active || slot0_hidden_inactive_payload {
+        PortfolioLegV16 {
+            active: slot0_active,
+            asset_index: 0,
+            market_id: 1,
+            side: SideV16::Long,
+            basis_pos_q: if slot0_active { POS_SCALE as i128 } else { 0 },
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: if slot0_active { POS_SCALE } else { 0 },
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: false,
+            stale: false,
+        }
+    } else {
+        PortfolioLegV16::EMPTY
+    };
+    let leg1 = if slot1_active || slot1_hidden_inactive_payload {
+        PortfolioLegV16 {
+            active: slot1_active,
+            asset_index: 1,
+            market_id: 1,
+            side: SideV16::Long,
+            basis_pos_q: if slot1_active { POS_SCALE as i128 } else { 0 },
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: if slot1_active { POS_SCALE } else { 0 },
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: false,
+            stale: false,
+        }
+    } else {
+        PortfolioLegV16::EMPTY
+    };
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg0);
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&leg1);
+
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    if slot0_bit {
+        active_bitmap_set(&mut bitmap, 0).unwrap();
+    }
+    if slot1_bit {
+        active_bitmap_set(&mut bitmap, 1).unwrap();
+    }
+    if tail_bitmap_blocked {
+        let mut slot = 2usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            active_bitmap_set(&mut bitmap, slot).unwrap();
+            slot += 1;
+        }
+    }
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = MarketGroupV16ViewMut::<u64>::kani_route_empty_leg_slot(&account.as_view());
+
+    let slot0_hidden = !slot0_active && slot0_hidden_inactive_payload;
+    let slot1_hidden = !slot1_active && slot1_hidden_inactive_payload;
+    let slot0_selectable = !slot0_bit && !slot0_active && !slot0_hidden;
+    let slot1_selectable = !slot1_bit && !slot1_active && !slot1_hidden;
+
+    kani::cover!(
+        result == Ok(0) && slot0_selectable,
+        "empty-leg route selects slot 0 when it is the first clear empty row"
+    );
+    kani::cover!(
+        result == Ok(1) && !slot0_selectable && slot1_selectable,
+        "empty-leg route selects slot 1 after skipping slot 0"
+    );
+    kani::cover!(
+        result == Err(V16Error::HiddenLeg) && slot0_hidden,
+        "empty-leg route rejects a hidden inactive payload in slot 0"
+    );
+    kani::cover!(
+        result == Ok(1) && slot0_active && !slot0_bit && slot1_selectable,
+        "empty-leg route skips bitmap-clear active payloads"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidLeg)
+            && !slot0_selectable
+            && !slot1_selectable
+            && tail_bitmap_blocked,
+        "empty-leg route reports no capacity when every row is unavailable"
+    );
+
+    if slot0_hidden {
+        assert_eq!(result, Err(V16Error::HiddenLeg));
+    } else if slot0_selectable {
+        assert_eq!(result, Ok(0));
+    } else if slot1_hidden {
+        assert_eq!(result, Err(V16Error::HiddenLeg));
+    } else if slot1_selectable {
+        assert_eq!(result, Ok(1));
+    } else if tail_bitmap_blocked {
+        assert_eq!(result, Err(V16Error::InvalidLeg));
+    } else {
+        assert_eq!(result, Ok(2));
+    }
+
+    if let Ok(slot) = result {
+        assert!(!active_bitmap_get(bitmap, slot));
+        let selected = account.header.legs[slot].try_to_runtime().unwrap();
+        assert!(!selected.active);
+        assert!(selected.is_empty());
+    }
+}
+
 // Account/source-domain validator soundness: if a persisted portfolio row with
 // source credit validates against the concrete market it is being executed
 // against, then the row is bound to the real market/domain, its source claim is
