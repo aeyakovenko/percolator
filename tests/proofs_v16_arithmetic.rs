@@ -1,14 +1,15 @@
 #![cfg(kani)]
 
 use percolator::v16::{
-    kani_adjust_u128, kani_checked_fee_bps, kani_risk_notional_ceil, kani_scaled_adl_delta_fast,
+    kani_adjust_u128, kani_checked_fee_bps, kani_loss_weight_for_basis, kani_risk_notional_ceil,
+    kani_scaled_adl_delta_fast,
 };
 use percolator::wide_math::{
     ceil_div_positive_checked, floor_div_signed_conservative_i128, mul_div_ceil_u256,
     mul_div_floor_u256, mul_div_floor_u256_with_rem, wide_signed_mul_div_floor,
     wide_signed_mul_div_floor_from_k_pair, I256, U256,
 };
-use percolator::{ADL_ONE, POS_SCALE};
+use percolator::{ADL_ONE, POS_SCALE, SOCIAL_WEIGHT_SCALE};
 
 fn small_signed_floor_reference(n: i128, d: u128) -> i128 {
     if n >= 0 {
@@ -108,6 +109,35 @@ fn proof_v16_ceil_div_positive_checked_matches_small_reference() {
     kani::cover!(n % d == 0, "ceil-div positive exact branch");
     kani::cover!(n % d != 0, "ceil-div positive remainder branch");
     assert_eq!(got.try_into_u128(), Some(expected));
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_loss_weight_for_basis_matches_bounded_symbolic_ceil_reference() {
+    let abs_raw: u8 = kani::any();
+    let basis_raw: u8 = kani::any();
+    kani::assume(abs_raw <= 16);
+    kani::assume((1..=16).contains(&basis_raw));
+
+    let abs = abs_raw as u128;
+    let basis = basis_raw as u128;
+    let got = kani_loss_weight_for_basis(abs, basis).unwrap();
+    let numerator = abs * SOCIAL_WEIGHT_SCALE;
+    let expected = numerator / basis + u128::from(numerator % basis != 0);
+
+    kani::cover!(
+        abs > 0 && numerator % basis == 0,
+        "loss-weight helper covers exact division"
+    );
+    kani::cover!(
+        abs > 0 && numerator % basis != 0,
+        "loss-weight helper covers ceil rounding"
+    );
+    kani::cover!(abs == 0, "loss-weight helper covers zero basis position");
+    assert_eq!(got, expected);
+    assert!(got.checked_mul(basis).unwrap() >= numerator);
+    assert!(got == 0 || (got - 1).checked_mul(basis).unwrap() < numerator);
 }
 
 #[kani::proof]
