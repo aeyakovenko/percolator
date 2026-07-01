@@ -15415,9 +15415,6 @@ fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
     let insurance_raw: u8 = kani::any();
     let surplus_raw: u8 = kani::any();
     kani::assume(amount_raw > 0);
-    kani::assume(c_tot_raw <= 8);
-    kani::assume(insurance_raw <= 8);
-    kani::assume(surplus_raw <= 8);
     let amount = amount_raw as u128 * BOUND_SCALE;
     let c_tot = c_tot_raw as u128;
     let insurance = insurance_raw as u128;
@@ -15439,6 +15436,14 @@ fn proof_v16_public_insurance_reserve_rejects_unfunded_domain() {
     kani::cover!(
         result == Err(V16Error::LockActive) && insurance > 0 && surplus > 0,
         "unfunded domain insurance reservation reaches isolation guard despite global insurance"
+    );
+    kani::cover!(
+        result == Err(V16Error::LockActive)
+            && amount > 128 * BOUND_SCALE
+            && c_tot > 128
+            && insurance > 128
+            && surplus > 128,
+        "unfunded domain insurance reservation rejects large global solvency state"
     );
     assert_eq!(result, Err(V16Error::LockActive));
     assert_eq!(market.header.vault, vault_before);
