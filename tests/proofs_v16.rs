@@ -19111,6 +19111,147 @@ fn proof_v16_validator_sound_source_fresh_backing_total_matches_slots() {
     }
 }
 
+// Validator soundness for insurance-backed source credit: an accepted header
+// source_insurance_credit_reserved_total_atoms must equal the sum of aligned
+// per-domain reservation ledgers. This prevents a stale header from either
+// hiding live insurance encumbrance or inventing encumbrance that is not bound
+// to a specific domain budget.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_source_insurance_reserved_total_matches_slots() {
+    let long_reserved_raw: u8 = kani::any();
+    let short_reserved_raw: u8 = kani::any();
+    let slack_raw: u8 = kani::any();
+    let stale_header_total: bool = kani::any();
+    let stale_understates_slots: bool = kani::any();
+    kani::assume(long_reserved_raw <= 8);
+    kani::assume(short_reserved_raw <= 8);
+
+    let long_reserved = long_reserved_raw as u128;
+    let short_reserved = short_reserved_raw as u128;
+    let long_reserved_num = long_reserved * BOUND_SCALE;
+    let short_reserved_num = short_reserved * BOUND_SCALE;
+    let expected_reserved = long_reserved + short_reserved;
+    let reported_reserved = if stale_header_total {
+        if stale_understates_slots && expected_reserved > 0 {
+            expected_reserved - 1
+        } else {
+            expected_reserved + 1
+        }
+    } else {
+        expected_reserved
+    };
+    let insurance = if reported_reserved > expected_reserved {
+        reported_reserved
+    } else {
+        expected_reserved
+    } + slack_raw as u128;
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(reported_reserved);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(expected_reserved);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_reserved);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_reserved);
+    if long_reserved > 0 {
+        markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                insurance_credit_reserved_num: long_reserved_num,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[0].engine.insurance_reservation_long =
+            InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+                insurance_credit_reserved_num: long_reserved_num,
+                ..InsuranceCreditReservationV16::EMPTY
+            });
+    }
+    if short_reserved > 0 {
+        markets[0].engine.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                insurance_credit_reserved_num: short_reserved_num,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[0].engine.insurance_reservation_short =
+            InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+                insurance_credit_reserved_num: short_reserved_num,
+                ..InsuranceCreditReservationV16::EMPTY
+            });
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+    kani::cover!(
+        result.is_ok() && !stale_header_total && long_reserved > 0 && short_reserved > 0,
+        "source-insurance aggregate validator covers two reserved source domains"
+    );
+    kani::cover!(
+        result.is_ok() && !stale_header_total && long_reserved > 0 && short_reserved == 0,
+        "source-insurance aggregate validator covers one reserved source domain with an empty peer"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && !stale_understates_slots
+            && expected_reserved > 0,
+        "source-insurance aggregate validator rejects over-reported header reservation"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && stale_understates_slots
+            && expected_reserved > 0,
+        "source-insurance aggregate validator rejects under-reported header reservation"
+    );
+
+    assert_eq!(result.is_ok(), !stale_header_total);
+    if result.is_ok() {
+        let persisted_reserved = market.markets[0]
+            .engine
+            .insurance_reservation_long
+            .insurance_credit_reserved_num
+            .get()
+            / BOUND_SCALE
+            + market.markets[0]
+                .engine
+                .insurance_reservation_short
+                .insurance_credit_reserved_num
+                .get()
+                / BOUND_SCALE;
+        assert_eq!(
+            market
+                .header
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+            expected_reserved
+        );
+        assert_eq!(
+            market
+                .header
+                .source_insurance_credit_reserved_total_atoms
+                .get(),
+            persisted_reserved
+        );
+        assert!(
+            market
+                .header
+                .source_insurance_credit_reserved_total_atoms
+                .get()
+                <= market.header.insurance.get()
+        );
+        assert!(
+            market
+                .header
+                .source_insurance_credit_reserved_total_atoms
+                .get()
+                <= market.header.insurance_domain_budget_remaining_total.get()
+        );
+    }
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
