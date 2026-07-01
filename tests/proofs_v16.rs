@@ -18983,6 +18983,134 @@ fn proof_v16_validator_sound_domain_budget_remaining_total_matches_slots() {
     }
 }
 
+// Validator soundness for recoverable counterparty backing: an accepted header
+// source_fresh_backing_total_num must be exactly the persisted long+short
+// source-domain backing total. This is the aggregate guard behind the senior
+// vault coverage check; stale under-reporting would hide promised backing, and
+// stale over-reporting would reserve vault capacity with no domain stock.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_source_fresh_backing_total_matches_slots() {
+    let long_backing_raw: u8 = kani::any();
+    let short_backing_raw: u8 = kani::any();
+    let slack_raw: u8 = kani::any();
+    let stale_header_total: bool = kani::any();
+    let stale_understates_slots: bool = kani::any();
+    kani::assume(long_backing_raw <= 8);
+    kani::assume(short_backing_raw <= 8);
+
+    let long_backing_num = (long_backing_raw as u128) * BOUND_SCALE;
+    let short_backing_num = (short_backing_raw as u128) * BOUND_SCALE;
+    let expected_total_num = long_backing_num + short_backing_num;
+    let expected_total_atoms = expected_total_num / BOUND_SCALE;
+    let reported_total_num = if stale_header_total {
+        if stale_understates_slots && expected_total_num >= BOUND_SCALE {
+            expected_total_num - BOUND_SCALE
+        } else {
+            expected_total_num + BOUND_SCALE
+        }
+    } else {
+        expected_total_num
+    };
+    let reported_total_atoms = reported_total_num / BOUND_SCALE;
+    let vault = if reported_total_atoms > expected_total_atoms {
+        reported_total_atoms
+    } else {
+        expected_total_atoms
+    } + slack_raw as u128;
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(vault);
+    header.source_fresh_backing_total_num = V16PodU128::new(reported_total_num);
+    if long_backing_num > 0 {
+        markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                fresh_reserved_backing_num: long_backing_num,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: long_backing_num,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+    }
+    if short_backing_num > 0 {
+        markets[0].engine.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                fresh_reserved_backing_num: short_backing_num,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[0].engine.backing_short =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                market_id,
+                fresh_unliened_backing_num: short_backing_num,
+                expiry_slot: 10,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            });
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+    kani::cover!(
+        result.is_ok() && !stale_header_total && long_backing_num > 0 && short_backing_num > 0,
+        "fresh-backing aggregate validator covers two funded source domains"
+    );
+    kani::cover!(
+        result.is_ok() && !stale_header_total && long_backing_num > 0 && short_backing_num == 0,
+        "fresh-backing aggregate validator covers one funded source domain with an empty peer"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && !stale_understates_slots
+            && expected_total_num > 0,
+        "fresh-backing aggregate validator rejects over-reported header backing"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && stale_understates_slots
+            && expected_total_num >= BOUND_SCALE,
+        "fresh-backing aggregate validator rejects under-reported header backing"
+    );
+
+    assert_eq!(result.is_ok(), !stale_header_total);
+    if result.is_ok() {
+        let persisted_total = market.markets[0]
+            .engine
+            .source_credit_long
+            .fresh_reserved_backing_num
+            .get()
+            + market.markets[0]
+                .engine
+                .source_credit_short
+                .fresh_reserved_backing_num
+                .get();
+        assert_eq!(
+            market.header.source_fresh_backing_total_num.get(),
+            expected_total_num
+        );
+        assert_eq!(
+            market.header.source_fresh_backing_total_num.get(),
+            persisted_total
+        );
+        assert!(
+            market.header.c_tot.get()
+                + market.header.insurance.get()
+                + market.header.backing_provider_earnings_total.get()
+                + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE
+                <= market.header.vault.get()
+        );
+    }
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
