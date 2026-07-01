@@ -1322,6 +1322,46 @@ fn closure_ledger_inv_prepare_insurance_lien_terminal_release_delta() {
     kani::assume(kani_ledger_inv(&b, &s, &r));
     if let Ok((r2, s2)) = V16Core::prepare_insurance_lien_terminal_release_delta(r, s, amount) {
         // Bucket untouched by insurance deltas.
+        let valid_release = amount.min(r.valid_liened_insurance_num);
+        let impaired_release = amount - valid_release;
+        assert_eq!(
+            r.valid_liened_insurance_num
+                .checked_sub(r2.valid_liened_insurance_num),
+            Some(valid_release)
+        );
+        assert_eq!(
+            r.impaired_liened_insurance_num
+                .checked_sub(r2.impaired_liened_insurance_num),
+            Some(impaired_release)
+        );
+        assert_eq!(
+            r.insurance_credit_reserved_num
+                .checked_sub(r2.insurance_credit_reserved_num),
+            Some(amount)
+        );
+        assert_eq!(
+            s.valid_liened_insurance_num
+                .checked_sub(s2.valid_liened_insurance_num),
+            Some(valid_release)
+        );
+        assert_eq!(
+            s.impaired_liened_insurance_num
+                .checked_sub(s2.impaired_liened_insurance_num),
+            Some(impaired_release)
+        );
+        assert_eq!(
+            s.insurance_credit_reserved_num
+                .checked_sub(s2.insurance_credit_reserved_num),
+            Some(amount)
+        );
+        kani::cover!(
+            amount >= 2 * BOUND_SCALE
+                && valid_release > 0
+                && impaired_release > 0
+                && r.insurance_credit_reserved_num > amount
+                && s.insurance_credit_reserved_num > amount,
+            "ledger closure covers terminal insurance release of mixed valid and impaired liens"
+        );
         assert!(kani_ledger_inv(&b, &s2, &r2));
     }
 }
