@@ -19259,8 +19259,8 @@ fn proof_v16_seq_two_fees_compound_exactly() {
     let capital_raw: u8 = kani::any();
     let f1_raw: u8 = kani::any();
     let f2_raw: u8 = kani::any();
-    kani::assume(capital_raw <= 8);
-    kani::assume(f1_raw <= 4 && f2_raw <= 4);
+    kani::assume(capital_raw <= 64);
+    kani::assume(f1_raw <= 32 && f2_raw <= 32);
     let capital = capital_raw as u128;
     let f1 = f1_raw as u128;
     let f2 = f2_raw as u128;
@@ -19281,6 +19281,10 @@ fn proof_v16_seq_two_fees_compound_exactly() {
         .unwrap();
 
     kani::cover!(f1 > 0 && f2 > 0, "two-fee covers both nonzero");
+    kani::cover!(
+        capital > 32 && f1 > 8 && f2 > 8,
+        "two-fee covers broader nonzero fee composition"
+    );
     assert_eq!(c1, f1);
     assert_eq!(c2, f2);
     assert_eq!(market.header.insurance.get(), f1 + f2);
