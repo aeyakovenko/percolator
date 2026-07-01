@@ -10132,13 +10132,51 @@ fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_symmetric_source_support_two_claimants_cannot_overdraw_large_shared_backing() {
+    let claim_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    kani::assume((1..=127).contains(&claim_raw));
+    let claim = claim_raw as u128;
+    let total = claim * 2;
+    kani::assume(backing_raw as u128 <= total);
+    let backing = backing_raw as u128;
+
+    let mut source_credit = SourceCreditStateV16 {
+        positive_claim_bound_num: total * BOUND_SCALE,
+        exact_positive_claim_num: total * BOUND_SCALE,
+        fresh_reserved_backing_num: backing * BOUND_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    source_credit.credit_rate_num =
+        kani_expected_source_credit_rate_num_for_state(source_credit).unwrap();
+
+    let support_each =
+        kani_source_credit_state_realizable_support_for_face(source_credit, claim).unwrap();
+    let combined_support = support_each * 2;
+
+    kani::cover!(
+        claim > 64 && backing < claim && support_each > 0,
+        "large symmetric source support covers under-half-backed haircut"
+    );
+    kani::cover!(
+        claim > 64 && backing == total && support_each == claim,
+        "large symmetric source support covers fully backed large claim pair"
+    );
+
+    assert!(combined_support <= backing);
+    assert!(support_each <= claim);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_source_support_partition_is_subadditive_under_conservative_rate() {
     let a_raw: u8 = kani::any();
     let b_raw: u8 = kani::any();
     let backing_raw: u8 = kani::any();
     let divisor_raw: u8 = kani::any();
-    kani::assume((1..=63).contains(&a_raw));
-    kani::assume((1..=63).contains(&b_raw));
+    kani::assume((1..=127).contains(&a_raw));
+    kani::assume((1..=127).contains(&b_raw));
     kani::assume((1..=16).contains(&divisor_raw));
     let a = a_raw as u128;
     let b = b_raw as u128;
@@ -10164,6 +10202,10 @@ fn proof_v16_source_support_partition_is_subadditive_under_conservative_rate() {
     kani::cover!(
         divisor > 1 && backing < total && support_a > 0 && support_b > 0,
         "source support partition covers nonzero haircut on both subclaims"
+    );
+    kani::cover!(
+        total > 128 && divisor > 1 && support_a > 0 && support_b > 0,
+        "source support partition covers large conservative-rate split"
     );
     kani::cover!(
         divisor == 1 && backing >= total,
