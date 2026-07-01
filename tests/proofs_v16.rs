@@ -22120,8 +22120,6 @@ fn proof_v16_validator_sound_domain_budget_remaining_total_matches_slots() {
     let short_spent_raw: u8 = kani::any();
     let slack_raw: u8 = kani::any();
     let stale_header_total: bool = kani::any();
-    kani::assume(long_budget_raw <= 16);
-    kani::assume(short_budget_raw <= 16);
     kani::assume(long_spent_raw <= long_budget_raw);
     kani::assume(short_spent_raw <= short_budget_raw);
 
@@ -22158,11 +22156,11 @@ fn proof_v16_validator_sound_domain_budget_remaining_total_matches_slots() {
     kani::cover!(
         result.is_ok()
             && !stale_header_total
-            && long_budget > 8
-            && short_budget > 8
+            && long_budget > 128
+            && short_budget > 128
             && long_spent > 0
             && short_spent > 0,
-        "domain-budget aggregate validator covers larger two-domain spent budgets"
+        "domain-budget aggregate validator covers large two-domain spent budgets"
     );
     kani::cover!(
         result.is_ok()
@@ -22181,9 +22179,9 @@ fn proof_v16_validator_sound_domain_budget_remaining_total_matches_slots() {
     kani::cover!(
         result == Err(V16Error::InvalidConfig)
             && stale_header_total
-            && expected_remaining > 8
+            && expected_remaining > 128
             && insurance >= reported_remaining,
-        "domain-budget aggregate validator rejects larger stale header capacity despite global insurance"
+        "domain-budget aggregate validator rejects large stale header capacity despite global insurance"
     );
 
     assert_eq!(result.is_ok(), !stale_header_total);
