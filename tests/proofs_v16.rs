@@ -19762,8 +19762,7 @@ fn proof_v16_close_cancel_shape_rejects_dropped_residual() {
 fn proof_v16_frame_deposit_touches_only_declared_state() {
     let cap_raw: u8 = kani::any();
     let amt_raw: u8 = kani::any();
-    kani::assume(cap_raw <= 8);
-    kani::assume(amt_raw >= 1 && amt_raw <= 8);
+    kani::assume(amt_raw >= 1);
     let cap = cap_raw as u128;
     let amt = amt_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
@@ -19778,7 +19777,10 @@ fn proof_v16_frame_deposit_touches_only_declared_state() {
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
         market.deposit_not_atomic(&mut account, amt).unwrap();
     }
-    kani::cover!(true, "deposit frame witness reached");
+    kani::cover!(
+        cap > 128 && amt > 64,
+        "deposit frame covers large existing capital and deposit"
+    );
     let mut eh = h0;
     eh.vault = V16PodU128::new(cap + amt);
     eh.c_tot = V16PodU128::new(cap + amt);
@@ -19839,8 +19841,7 @@ fn proof_v16_frame_withdraw_touches_only_declared_state() {
 fn proof_v16_frame_overwithdraw_err_leaves_state_unchanged() {
     let cap_raw: u8 = kani::any();
     let amt_raw: u8 = kani::any();
-    kani::assume(cap_raw <= 8);
-    kani::assume(amt_raw > cap_raw && amt_raw <= 16);
+    kani::assume(amt_raw > cap_raw);
     let cap = cap_raw as u128;
     let amt = amt_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
@@ -19856,7 +19857,10 @@ fn proof_v16_frame_overwithdraw_err_leaves_state_unchanged() {
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
         market.withdraw_not_atomic(&mut account, amt)
     };
-    kani::cover!(true, "overwithdraw frame witness reached");
+    kani::cover!(
+        cap > 128 && amt > cap,
+        "overwithdraw frame covers large rejected withdrawal"
+    );
     assert!(result.is_err());
     assert!(kani_eq_market_group_v16_header_account(&h0, &header));
     assert!(kani_eq_engine_asset_slot_v16_account(
