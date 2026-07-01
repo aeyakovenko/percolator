@@ -1,5 +1,6 @@
 #![cfg(kani)]
 
+use percolator::v16::kani_social_loss_book_split;
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
     backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
@@ -10907,6 +10908,44 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
     assert_eq!(asset.b_short_num, b_short_before + expected_delta_b);
     assert_eq!(asset.social_loss_remainder_short_num, expected_rem);
     assert_eq!(asset.b_long_num, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_social_loss_book_split_exact_for_bounded_symbolic_weights() {
+    let chunk_raw: u8 = kani::any();
+    let rem_raw: u8 = kani::any();
+    let weight_raw: u8 = kani::any();
+    kani::assume(chunk_raw <= 32);
+    kani::assume(rem_raw <= 32);
+    kani::assume((1..=32).contains(&weight_raw));
+
+    let chunk = chunk_raw as u128;
+    let rem = rem_raw as u128;
+    let weight_sum = weight_raw as u128;
+    let numerator = chunk
+        .checked_mul(SOCIAL_LOSS_DEN)
+        .and_then(|v| v.checked_add(rem))
+        .unwrap();
+    let (delta_b, new_rem) = kani_social_loss_book_split(chunk, rem, weight_sum).unwrap();
+
+    kani::cover!(
+        chunk > 0 && rem > 0 && weight_sum > 1 && new_rem > 0,
+        "social-loss split covers nontrivial carried remainder under symbolic weight"
+    );
+    kani::cover!(
+        chunk == 0 && rem < weight_sum && delta_b == 0,
+        "social-loss split covers no-progress dust below one weight"
+    );
+    assert!(new_rem < weight_sum);
+    assert_eq!(
+        delta_b
+            .checked_mul(weight_sum)
+            .and_then(|v| v.checked_add(new_rem)),
+        Some(numerator)
+    );
+    assert_eq!(delta_b > 0, numerator >= weight_sum);
 }
 
 #[kani::proof]
