@@ -585,6 +585,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.residual()
     }
 
+    pub fn kani_group_has_position_or_loss_state_for_oracle_reset(&self) -> V16Result<bool> {
+        self.group_has_position_or_loss_state_for_oracle_reset()
+    }
+
     pub fn kani_domain_asset_side(&self, domain: usize) -> V16Result<(usize, SideV16)> {
         self.domain_asset_side(domain)
     }

@@ -17898,6 +17898,88 @@ fn proof_v16_reset_empty_asset_oracle_anchor_rejects_when_pnl_present() {
     );
 }
 
+// The reset idle gate is group-wide, not selected-asset-local. The exact
+// production predicate used by reset_empty_asset_oracle_anchor must classify the
+// group as non-idle if another configured asset carries any position/loss/reset-
+// barrier state; otherwise a wrapper could rebase one oracle while correlated
+// live risk remains in the same slab.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_oracle_reset_idle_guard_detects_cross_asset_position_or_loss_state() {
+    let dirty_selector: u8 = kani::any();
+    let dirty_raw: u8 = kani::any();
+    kani::assume(dirty_selector <= 10);
+    kani::assume(dirty_raw > 0);
+    let dirty = dirty_raw as u128;
+
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.current_slot = V16PodU64::new(2);
+    header.slot_last = V16PodU64::new(2);
+
+    let mut asset0 = AssetStateV16::default();
+    asset0.market_id = 1;
+    asset0.lifecycle = AssetLifecycleV16::Active;
+    asset0.raw_oracle_target_price = 100;
+    asset0.effective_price = 100;
+    asset0.fund_px_last = 100;
+    asset0.slot_last = 2;
+
+    let mut other_asset = AssetStateV16::default();
+    other_asset.market_id = 2;
+    other_asset.lifecycle = AssetLifecycleV16::Active;
+    other_asset.raw_oracle_target_price = 100;
+    other_asset.effective_price = 100;
+    other_asset.fund_px_last = 100;
+    other_asset.slot_last = 2;
+
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+    match dirty_selector {
+        0 => other_asset.oi_eff_long_q = dirty,
+        1 => other_asset.oi_eff_short_q = dirty,
+        2 => other_asset.stored_pos_count_long = dirty as u64,
+        3 => other_asset.stale_account_count_short = dirty as u64,
+        4 => other_asset.b_long_num = dirty,
+        5 => other_asset.b_epoch_start_short_num = dirty,
+        6 => other_asset.loss_weight_sum_long = dirty,
+        7 => other_asset.social_loss_remainder_short_num = dirty,
+        8 => other_asset.explicit_unallocated_loss_long = dirty,
+        9 => other_asset.mode_short = SideModeV16::ResetPending,
+        _ => markets[1].engine.pending_domain_loss_barrier_long = V16PodU64::new(dirty as u64),
+    }
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&other_asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let has_position_or_loss = market
+        .kani_group_has_position_or_loss_state_for_oracle_reset()
+        .unwrap();
+
+    kani::cover!(
+        dirty_selector == 0 && dirty > 1,
+        "cross-asset oracle reset idle guard covers unrelated long OI"
+    );
+    kani::cover!(
+        dirty_selector == 8 && dirty > 1,
+        "cross-asset oracle reset idle guard covers unrelated explicit loss"
+    );
+    kani::cover!(
+        dirty_selector == 10 && dirty > 1,
+        "cross-asset oracle reset idle guard covers unrelated pending-domain barrier"
+    );
+    assert!(has_position_or_loss);
+}
+
 // End-to-end proof for the public provider-earnings withdrawal (only the
 // arithmetic delta was proven; this pins the full transition). Withdrawing
 // earned utilization fees exits vault and the earnings class in lockstep:
