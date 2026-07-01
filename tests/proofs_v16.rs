@@ -19361,6 +19361,138 @@ fn proof_v16_validator_sound_resolved_payout_blocker_count_matches_slots() {
     }
 }
 
+// Validator soundness for provider-fee stock: accepted
+// backing_provider_earnings_total must equal the persisted utilization earnings
+// in the backing buckets. The proof builds valid non-empty buckets when
+// earnings are present, so the theorem covers the real stock-backed shape
+// rather than an invalid fee-only bucket.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_backing_provider_earnings_total_matches_slots() {
+    let long_earn_raw: u8 = kani::any();
+    let short_earn_raw: u8 = kani::any();
+    let slack_raw: u8 = kani::any();
+    let stale_header_total: bool = kani::any();
+    let stale_understates_slots: bool = kani::any();
+    kani::assume(long_earn_raw <= 8);
+    kani::assume(short_earn_raw <= 8);
+
+    let long_earn = long_earn_raw as u128;
+    let short_earn = short_earn_raw as u128;
+    let expected_earnings = long_earn + short_earn;
+    let reported_earnings = if stale_header_total {
+        if stale_understates_slots && expected_earnings > 0 {
+            expected_earnings - 1
+        } else {
+            expected_earnings + 1
+        }
+    } else {
+        expected_earnings
+    };
+    let long_backing_num = if long_earn > 0 { BOUND_SCALE } else { 0 };
+    let short_backing_num = if short_earn > 0 { BOUND_SCALE } else { 0 };
+    let backing_atoms = (long_backing_num + short_backing_num) / BOUND_SCALE;
+    let covered_earnings = if reported_earnings > expected_earnings {
+        reported_earnings
+    } else {
+        expected_earnings
+    };
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.backing_provider_earnings_total = V16PodU128::new(reported_earnings);
+    header.source_fresh_backing_total_num = V16PodU128::new(long_backing_num + short_backing_num);
+    header.vault = V16PodU128::new(covered_earnings + backing_atoms + slack_raw as u128);
+    if long_earn > 0 {
+        markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                fresh_reserved_backing_num: long_backing_num,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: long_backing_num,
+            utilization_fee_earnings: long_earn,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+    }
+    if short_earn > 0 {
+        markets[0].engine.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                fresh_reserved_backing_num: short_backing_num,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[0].engine.backing_short =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                market_id,
+                fresh_unliened_backing_num: short_backing_num,
+                utilization_fee_earnings: short_earn,
+                expiry_slot: 10,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            });
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+    kani::cover!(
+        result.is_ok() && !stale_header_total && long_earn > 0 && short_earn > 0,
+        "backing-provider earnings aggregate covers two earning source domains"
+    );
+    kani::cover!(
+        result.is_ok() && !stale_header_total && long_earn > 0 && short_earn == 0,
+        "backing-provider earnings aggregate covers one earning source domain with an empty peer"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && !stale_understates_slots
+            && expected_earnings > 0,
+        "backing-provider earnings aggregate rejects over-reported header earnings"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && stale_understates_slots
+            && expected_earnings > 0,
+        "backing-provider earnings aggregate rejects under-reported header earnings"
+    );
+
+    assert_eq!(result.is_ok(), !stale_header_total);
+    if result.is_ok() {
+        let persisted_earnings = market.markets[0]
+            .engine
+            .backing_long
+            .utilization_fee_earnings
+            .get()
+            + market.markets[0]
+                .engine
+                .backing_short
+                .utilization_fee_earnings
+                .get();
+        assert_eq!(
+            market.header.backing_provider_earnings_total.get(),
+            expected_earnings
+        );
+        assert_eq!(
+            market.header.backing_provider_earnings_total.get(),
+            persisted_earnings
+        );
+        assert!(
+            market.header.c_tot.get()
+                + market.header.insurance.get()
+                + market.header.backing_provider_earnings_total.get()
+                + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE
+                <= market.header.vault.get()
+        );
+    }
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
