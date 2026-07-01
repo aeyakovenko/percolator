@@ -14451,6 +14451,16 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
         market.header.insurance_domain_budget_remaining_total.get(),
         remaining_before - expected_used
     );
+    assert_eq!(remaining_before, budget + other_budget);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        budget - expected_used + other_budget
+    );
+    assert!(market.header.insurance.get() >= other_budget);
+    assert!(
+        market.header.insurance.get()
+            >= market.header.insurance_domain_budget_remaining_total.get()
+    );
     assert_eq!(
         market.markets[0].engine.insurance_domain_budget_short.get(),
         short_budget_before
