@@ -20368,6 +20368,139 @@ fn proof_v16_route_empty_leg_slot_is_first_clear_empty_row() {
     }
 }
 
+// Account-side insurance-lien impairment conservation: the public impairment
+// wrapper first moves insurance reservation state, then this field transition
+// moves the account's live insurance-backed lien into impaired accounting. The
+// no-LoF invariant here is that impairment is a relabeling of already-reserved
+// support: live+impaired face, live+impaired effective credit, and live+impaired
+// backing-fee revenue are conserved, while the health cert is invalidated.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_impair_account_insurance_lien_fields_conserve_support_totals() {
+    let effective_raw: u8 = kani::any();
+    let other_effective_raw: u8 = kani::any();
+    let face_extra_raw: u8 = kani::any();
+    let counterparty_face_raw: u8 = kani::any();
+    let impaired_face_raw: u8 = kani::any();
+    let impaired_effective_raw: u8 = kani::any();
+    let live_fee_raw: u8 = kani::any();
+    let impaired_fee_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&effective_raw));
+    kani::assume(other_effective_raw <= 8);
+    kani::assume(face_extra_raw <= 8);
+    kani::assume(counterparty_face_raw <= 8);
+    kani::assume(impaired_face_raw <= 8);
+    kani::assume(impaired_effective_raw <= 8);
+    kani::assume(live_fee_raw <= 32);
+    kani::assume(impaired_fee_raw <= 32);
+
+    let effective = effective_raw as u128;
+    let other_effective = other_effective_raw as u128;
+    let live_effective_before = effective + other_effective;
+    let face_num = (effective + face_extra_raw as u128) * BOUND_SCALE;
+    let counterparty_face_num = (counterparty_face_raw as u128) * BOUND_SCALE;
+    let impaired_face_num = (impaired_face_raw as u128) * BOUND_SCALE;
+    let impaired_effective = impaired_effective_raw as u128;
+    let live_fee = live_fee_raw as u128;
+    let impaired_fee = impaired_fee_raw as u128;
+    let source_claim_liened_num = face_num + counterparty_face_num;
+    let source_claim_bound_num = source_claim_liened_num + impaired_face_num + BOUND_SCALE;
+
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        valid: true,
+        ..HealthCertV16::default()
+    });
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(7),
+        source_claim_bound_num: V16PodU128::new(source_claim_bound_num),
+        source_claim_liened_num: V16PodU128::new(source_claim_liened_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(counterparty_face_num),
+        source_claim_insurance_liened_num: V16PodU128::new(face_num),
+        source_lien_effective_reserved: V16PodU128::new(live_effective_before),
+        source_lien_counterparty_backing_num: V16PodU128::new(other_effective * BOUND_SCALE),
+        source_lien_insurance_backing_num: V16PodU128::new(effective * BOUND_SCALE),
+        source_claim_impaired_num: V16PodU128::new(impaired_face_num),
+        source_lien_impaired_effective_reserved: V16PodU128::new(impaired_effective),
+        source_lien_capital_at_risk_fee_revenue: V16PodU128::new(live_fee),
+        source_lien_impaired_capital_at_risk_fee_revenue: V16PodU128::new(impaired_fee),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let before = account.header.source_domains[0];
+    let before_live_face = before.source_claim_liened_num.get();
+    let before_impaired_face = before.source_claim_impaired_num.get();
+    let before_live_effective = before.source_lien_effective_reserved.get();
+    let before_impaired_effective = before.source_lien_impaired_effective_reserved.get();
+    let before_live_fee = before.source_lien_capital_at_risk_fee_revenue.get();
+    let before_impaired_fee = before
+        .source_lien_impaired_capital_at_risk_fee_revenue
+        .get();
+
+    let moved =
+        MarketGroupV16ViewMut::<u64>::kani_impair_account_source_credit_insurance_lien_fields(
+            &mut account,
+            0,
+            face_num,
+            effective,
+        )
+        .unwrap();
+    let after = account.header.source_domains[0];
+
+    kani::cover!(
+        effective > 1 && other_effective > 0 && live_fee > 1,
+        "insurance-lien impairment covers pro-rata fee crystallization with remaining live support"
+    );
+    kani::cover!(
+        counterparty_face_num > 0 && impaired_face_num > 0,
+        "insurance-lien impairment covers mixed counterparty and pre-existing impaired face"
+    );
+    assert_eq!(moved, effective);
+    assert_eq!(after.source_claim_insurance_liened_num.get(), 0);
+    assert_eq!(after.source_lien_insurance_backing_num.get(), 0);
+    assert_eq!(
+        after.source_claim_counterparty_liened_num.get(),
+        before.source_claim_counterparty_liened_num.get()
+    );
+    assert_eq!(
+        after.source_lien_counterparty_backing_num.get(),
+        before.source_lien_counterparty_backing_num.get()
+    );
+    assert_eq!(
+        after.source_claim_liened_num.get() + after.source_claim_impaired_num.get(),
+        before_live_face + before_impaired_face
+    );
+    assert_eq!(
+        after.source_lien_effective_reserved.get()
+            + after.source_lien_impaired_effective_reserved.get(),
+        before_live_effective + before_impaired_effective
+    );
+    assert_eq!(
+        after.source_lien_capital_at_risk_fee_revenue.get()
+            + after.source_lien_impaired_capital_at_risk_fee_revenue.get(),
+        before_live_fee + before_impaired_fee
+    );
+    assert_eq!(
+        after.source_claim_liened_num.get(),
+        before.source_claim_liened_num.get() - face_num
+    );
+    assert_eq!(
+        after.source_claim_impaired_num.get(),
+        before.source_claim_impaired_num.get() + face_num
+    );
+    assert_eq!(
+        after.source_lien_effective_reserved.get(),
+        before.source_lien_effective_reserved.get() - effective
+    );
+    assert_eq!(
+        after.source_lien_impaired_effective_reserved.get(),
+        before.source_lien_impaired_effective_reserved.get() + effective
+    );
+    assert_eq!(account.header.health_cert.valid, 0);
+}
+
 // Account/source-domain validator soundness: if a persisted portfolio row with
 // source credit validates against the concrete market it is being executed
 // against, then the row is bound to the real market/domain, its source claim is

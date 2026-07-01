@@ -623,6 +623,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::burn_impaired_account_source_claim_fields(account, slot, burn_num)
     }
 
+    pub fn kani_impair_account_source_credit_insurance_lien_fields(
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+        face: u128,
+        effective: u128,
+    ) -> V16Result<u128> {
+        Self::impair_account_source_credit_insurance_lien_fields(account, domain, face, effective)
+    }
+
     pub fn kani_set_domain_insurance_spent_delta(
         total_remaining: u128,
         insurance: u128,
