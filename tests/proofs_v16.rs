@@ -7357,9 +7357,9 @@ fn proof_v16_backing_utilization_collection_full_charge_conserves_senior_value()
     let slack_raw: u8 = kani::any();
     let earnings_raw: u8 = kani::any();
     let revenue_raw: u8 = kani::any();
-    kani::assume(slack_raw <= 4);
-    kani::assume(earnings_raw <= 4);
-    kani::assume(revenue_raw <= 4);
+    kani::assume(slack_raw <= 16);
+    kani::assume(earnings_raw <= 16);
+    kani::assume(revenue_raw <= 16);
     let lien_atoms = 1u128;
     let lien_num = lien_atoms * BOUND_SCALE;
     let dt = 1u64;
@@ -7423,6 +7423,10 @@ fn proof_v16_backing_utilization_collection_full_charge_conserves_senior_value()
     kani::cover!(
         slack_raw > 0,
         "backing-utilization collection covers nontrivial full positive-capital fee charge"
+    );
+    kani::cover!(
+        slack_raw > 8 && earnings_raw > 8 && revenue_raw > 8,
+        "backing-utilization full charge covers nontrivial existing provider and account revenue"
     );
     assert_eq!(charged, expected_charged);
     assert_eq!(
