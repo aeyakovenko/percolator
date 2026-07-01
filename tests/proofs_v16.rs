@@ -492,6 +492,9 @@ fn proof_v16_public_resolved_bound_refinement_is_monotone_and_value_neutral() {
     let decrease_num = decrease_raw as u128 * BOUND_SCALE;
     let total_before = exact_num + bound_num;
     let numerator_before = residual_raw as u128 * BOUND_SCALE;
+    let expected_bound_after = bound_num - decrease_num;
+    let expected_total_after = exact_num + expected_bound_after;
+    let expected_rate_num_after = numerator_before.min(expected_total_after);
 
     let (mut header, mut markets) = one_market_persisted_slot_fixture();
     header.mode = 1; // Resolved
@@ -533,8 +536,11 @@ fn proof_v16_public_resolved_bound_refinement_is_monotone_and_value_neutral() {
     assert_eq!(result, Ok(()));
     assert_eq!(
         ledger.terminal_claim_bound_unreceipted_num,
-        bound_num - decrease_num
+        expected_bound_after
     );
+    assert_eq!(ledger.terminal_claim_exact_receipts_num, exact_num);
+    assert_eq!(ledger.current_payout_rate_num, expected_rate_num_after);
+    assert_eq!(ledger.current_payout_rate_den, expected_total_after);
     assert!(
         ledger.current_payout_rate_num * total_before
             >= numerator_before * ledger.current_payout_rate_den
