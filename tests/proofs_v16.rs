@@ -21996,6 +21996,116 @@ fn proof_v16_validator_sound_domain_budget_remaining_total_matches_slots() {
     }
 }
 
+// Validator soundness for source-claim aggregation: an accepted header
+// source_claim_bound_total_num must be exactly the persisted long+short source
+// credit claims. This is the aggregate guard for source-haircut denominators and
+// resolved-payout bounds; stale over/under reports must not validate even when
+// the global positive-PnL bound is large enough to cover the stale header.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_source_claim_bound_total_matches_slots() {
+    let long_claim_raw: u8 = kani::any();
+    let short_claim_raw: u8 = kani::any();
+    let stale_header_total: bool = kani::any();
+    let stale_understates_slots: bool = kani::any();
+    kani::assume(long_claim_raw <= 8);
+    kani::assume(short_claim_raw <= 8);
+
+    let long_claim_num = long_claim_raw as u128 * BOUND_SCALE;
+    let short_claim_num = short_claim_raw as u128 * BOUND_SCALE;
+    let expected_total_num = long_claim_num + short_claim_num;
+    let reported_total_num = if stale_header_total {
+        if stale_understates_slots && expected_total_num >= BOUND_SCALE {
+            expected_total_num - BOUND_SCALE
+        } else {
+            expected_total_num + BOUND_SCALE
+        }
+    } else {
+        expected_total_num
+    };
+    let pnl_bound_num = expected_total_num.max(reported_total_num);
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.source_claim_bound_total_num = V16PodU128::new(reported_total_num);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(pnl_bound_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(pnl_bound_num / BOUND_SCALE);
+    if long_claim_num > 0 {
+        markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                positive_claim_bound_num: long_claim_num,
+                exact_positive_claim_num: long_claim_num,
+                credit_rate_num: 0,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[0].engine.backing_long =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16::empty_for_market(market_id));
+    }
+    if short_claim_num > 0 {
+        markets[0].engine.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                positive_claim_bound_num: short_claim_num,
+                exact_positive_claim_num: short_claim_num,
+                credit_rate_num: 0,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[0].engine.backing_short =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16::empty_for_market(market_id));
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+    kani::cover!(
+        result.is_ok() && !stale_header_total && long_claim_num > 0 && short_claim_num > 0,
+        "source-claim aggregate validator covers two claimed source domains"
+    );
+    kani::cover!(
+        result.is_ok() && !stale_header_total && long_claim_num > 0 && short_claim_num == 0,
+        "source-claim aggregate validator covers one claimed source domain with an empty peer"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && !stale_understates_slots
+            && expected_total_num > 0,
+        "source-claim aggregate validator rejects over-reported header claims"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && stale_understates_slots
+            && expected_total_num >= BOUND_SCALE,
+        "source-claim aggregate validator rejects under-reported header claims"
+    );
+
+    assert_eq!(result.is_ok(), !stale_header_total);
+    if result.is_ok() {
+        let persisted_total = market.markets[0]
+            .engine
+            .source_credit_long
+            .positive_claim_bound_num
+            .get()
+            + market.markets[0]
+                .engine
+                .source_credit_short
+                .positive_claim_bound_num
+                .get();
+        assert_eq!(
+            market.header.source_claim_bound_total_num.get(),
+            expected_total_num
+        );
+        assert_eq!(
+            market.header.source_claim_bound_total_num.get(),
+            persisted_total
+        );
+        assert!(
+            market.header.pnl_pos_bound_tot_num.get()
+                >= market.header.source_claim_bound_total_num.get()
+        );
+    }
+}
+
 // Validator soundness for recoverable counterparty backing: an accepted header
 // source_fresh_backing_total_num must be exactly the persisted long+short
 // source-domain backing total. This is the aggregate guard behind the senior
