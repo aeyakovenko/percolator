@@ -15542,14 +15542,78 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
     assert_eq!(market.kani_residual(), residual_before);
 }
 
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_source_realization_is_noop_after_receipt_creation() {
+    let pnl_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&pnl_raw));
+    let pnl = pnl_raw as u128;
+    let claim_num = pnl * BOUND_SCALE;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    account_header.pnl = V16PodI128::new(pnl as i128);
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: claim_num,
+            terminal_positive_claim_face: pnl,
+            ..ResolvedPayoutReceiptV16::EMPTY
+        });
+
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let realized = market
+        .kani_realize_source_backed_claims_for_resolved_close_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(
+        pnl > 1
+            && account
+                .header
+                .resolved_payout_receipt
+                .try_to_runtime()
+                .unwrap()
+                .present
+            && account.header.source_domains[0].source_claim_bound_num.get() > 0,
+        "resolved source realization no-op covers positive source-backed PnL after receipt creation"
+    );
+    assert_eq!(realized, 0);
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
+}
+
 // Terminal realization of a source-backed claim (Issue-2 class) — KANI
 // TRACTABILITY NOTE (flagged): every harness that enters the realize/convert
 // path times out at the 900s solver budget, even fully concrete (the in-path
 // account validation forces unwind 40 and the per-domain U256 credit math
 // blows up the formula; a single concrete witness passed once at 658s and
 // timed out on three re-runs — permanently on the budget line). The realize
-// primitive therefore has NO direct Kani harness. Its coverage decomposes
-// into already-passing proofs — consume-delta exactness
+// primitive therefore has no direct Kani harness for the conversion branch;
+// the receipt-present no-double-realization guard is covered directly by
+// proof_v16_resolved_source_realization_is_noop_after_receipt_creation. Its
+// remaining coverage decomposes into already-passing proofs — consume-delta exactness
 // (proof_v16_public_counterparty_lien_consume_creates_receivable_without_
 // value_movement, proof_v16_counterparty_lien_consume_delta_is_receivable_
 // exact_and_fail_closed, proof_v16_counterparty_credit_consumption_reports_
