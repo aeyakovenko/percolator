@@ -16542,9 +16542,9 @@ fn proof_v16_counterparty_backing_add_delta_refills_or_rejects_by_bucket_state()
     let status_raw: u8 = kani::any();
     let same_expiry: bool = kani::any();
     let stale_expiry: bool = kani::any();
-    kani::assume(amount_raw <= 8);
-    kani::assume(receivable_raw <= 8);
-    kani::assume(fresh_raw <= 8);
+    kani::assume(amount_raw <= 64);
+    kani::assume(receivable_raw <= 64);
+    kani::assume(fresh_raw <= 64);
     kani::assume(status_raw <= 3);
 
     let current_slot = 10u64;
@@ -16601,12 +16601,30 @@ fn proof_v16_counterparty_backing_add_delta_refills_or_rejects_by_bucket_state()
         "counterparty backing add covers fresh empty bucket and complete receivable refill"
     );
     kani::cover!(
+        expected_ok
+            && status == BackingBucketStatusV16::Empty
+            && receivable > 32
+            && amount > receivable,
+        "counterparty backing add covers large complete receivable refill"
+    );
+    kani::cover!(
         expected_ok && status == BackingBucketStatusV16::Expired && amount < receivable,
         "counterparty backing add covers expired bucket partial receivable refill"
     );
     kani::cover!(
+        expected_ok
+            && status == BackingBucketStatusV16::Expired
+            && amount > 32
+            && receivable > amount,
+        "counterparty backing add covers large partial receivable refill"
+    );
+    kani::cover!(
         expected_ok && status == BackingBucketStatusV16::Fresh && fresh_before > 0,
         "counterparty backing add covers additive fresh bucket with matching expiry"
+    );
+    kani::cover!(
+        expected_ok && status == BackingBucketStatusV16::Fresh && amount > 32 && fresh_before > 32,
+        "counterparty backing add covers large additive fresh bucket"
     );
     kani::cover!(
         amount == 0 || stale_expiry,
