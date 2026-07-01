@@ -828,6 +828,46 @@ impl V16Core {
         Ok((leg, asset))
     }
 
+    /// PRODUCTION KERNEL: under an active domain-loss barrier, a same-side
+    /// reduction to flat cannot delete the loss participant. It removes the
+    /// open interest but keeps the leg's loss weight as a zero-basis pending
+    /// obligation until close/finalization safely clears it.
+    pub(crate) fn kernel_convert_clear_to_pending_obligation(
+        leg: PortfolioLegV16,
+        mut asset: AssetStateV16,
+    ) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
+        if !leg.active {
+            return Err(V16Error::InvalidLeg);
+        }
+        validate_basis(leg.basis_pos_q)?;
+        let old_abs = leg.basis_pos_q.unsigned_abs();
+        match leg.side {
+            SideV16::Long => {
+                asset.oi_eff_long_q = asset
+                    .oi_eff_long_q
+                    .checked_sub(old_abs)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                asset.pending_obligation_count_long = asset
+                    .pending_obligation_count_long
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+            }
+            SideV16::Short => {
+                asset.oi_eff_short_q = asset
+                    .oi_eff_short_q
+                    .checked_sub(old_abs)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                asset.pending_obligation_count_short = asset
+                    .pending_obligation_count_short
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+            }
+        }
+        let mut zero_basis_leg = leg;
+        zero_basis_leg.basis_pos_q = 0;
+        Ok((zero_basis_leg, asset))
+    }
+
     /// PRODUCTION KERNEL (spec #37 gate): the trade-finalization initial-
     /// margin decision — an EXACT total decision contract: the gate admits
     /// precisely the states with a VALID certificate whose certified equity
@@ -12590,32 +12630,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if route == PositionRouteV16::Clear {
             let leg = current_leg;
             if leg.active && self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-                let old_abs = leg.basis_pos_q.unsigned_abs();
-                let mut asset = self.asset_state(asset_index)?;
-                match leg.side {
-                    SideV16::Long => {
-                        asset.oi_eff_long_q = asset
-                            .oi_eff_long_q
-                            .checked_sub(old_abs)
-                            .ok_or(V16Error::CounterUnderflow)?;
-                        asset.pending_obligation_count_long = asset
-                            .pending_obligation_count_long
-                            .checked_add(1)
-                            .ok_or(V16Error::CounterOverflow)?;
-                    }
-                    SideV16::Short => {
-                        asset.oi_eff_short_q = asset
-                            .oi_eff_short_q
-                            .checked_sub(old_abs)
-                            .ok_or(V16Error::CounterUnderflow)?;
-                        asset.pending_obligation_count_short = asset
-                            .pending_obligation_count_short
-                            .checked_add(1)
-                            .ok_or(V16Error::CounterOverflow)?;
-                    }
-                }
-                let mut zero_basis_leg = leg;
-                zero_basis_leg.basis_pos_q = 0;
+                let asset = self.asset_state(asset_index)?;
+                let (zero_basis_leg, asset) =
+                    V16Core::kernel_convert_clear_to_pending_obligation(leg, asset)?;
                 account.header.legs[leg_slot] =
                     PortfolioLegV16Account::from_runtime(&zero_basis_leg);
                 account.header.health_cert.valid = 0;

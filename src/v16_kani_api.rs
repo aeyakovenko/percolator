@@ -224,6 +224,13 @@ pub fn kani_kernel_clear_leg(
     V16Core::kernel_clear_leg(leg, asset)
 }
 
+pub fn kani_kernel_convert_clear_to_pending_obligation(
+    leg: PortfolioLegV16,
+    asset: AssetStateV16,
+) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
+    V16Core::kernel_convert_clear_to_pending_obligation(leg, asset)
+}
+
 pub fn kani_kernel_attach_leg(
     asset: AssetStateV16,
     side: SideV16,

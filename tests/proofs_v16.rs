@@ -16,12 +16,12 @@ use percolator::v16::{
     kani_kernel_advance_close_ledger, kani_kernel_advance_leg_b_snap, kani_kernel_attach_leg,
     kani_kernel_bresidual_step, kani_kernel_cert_is_current, kani_kernel_classify_position_delta,
     kani_kernel_clear_leg, kani_kernel_consume_insurance_layer,
-    kani_kernel_economically_valid_trade_admits, kani_kernel_locked_margin_gate,
-    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
-    kani_kernel_resolved_close_progress, kani_kernel_resolved_payout_step,
-    kani_kernel_settle_principal, kani_kernel_settle_resolved_pnl_after_booking,
-    kani_kernel_social_loss_chunk_cap, kani_kernel_trade_admit,
-    kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
+    kani_kernel_convert_clear_to_pending_obligation, kani_kernel_economically_valid_trade_admits,
+    kani_kernel_locked_margin_gate, kani_kernel_reduce_position_delta,
+    kani_kernel_resize_leg_same_side, kani_kernel_resolved_close_progress,
+    kani_kernel_resolved_payout_step, kani_kernel_settle_principal,
+    kani_kernel_settle_resolved_pnl_after_booking, kani_kernel_social_loss_chunk_cap,
+    kani_kernel_trade_admit, kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_progress_from_score_parts, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_project_auto_crank_selected_assets,
@@ -7335,6 +7335,262 @@ fn proof_v16_pending_domain_loss_barrier_allows_only_same_side_reductions() {
     if touches_barrier && current != 0 && next != 0 && current.signum() != next.signum() {
         assert!(blocked);
     }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_pending_domain_clear_installs_durable_obligation_not_free_exit() {
+    let long_side: bool = kani::any();
+    let abs_raw: u8 = kani::any();
+    let loss_weight_raw: u8 = kani::any();
+    let selected_oi_extra_raw: u8 = kani::any();
+    let selected_weight_extra_raw: u8 = kani::any();
+    let other_oi_raw: u8 = kani::any();
+    let other_weight_raw: u8 = kani::any();
+    let stored_selected_extra_raw: u8 = kani::any();
+    let stored_other_raw: u8 = kani::any();
+    let pending_selected_raw: u8 = kani::any();
+    let pending_other_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&abs_raw));
+    kani::assume((1..=8).contains(&loss_weight_raw));
+    kani::assume(selected_oi_extra_raw <= 8);
+    kani::assume(selected_weight_extra_raw <= 8);
+    kani::assume(other_oi_raw <= 8);
+    kani::assume(other_weight_raw <= 8);
+    kani::assume(stored_selected_extra_raw <= 8);
+    kani::assume(stored_other_raw <= 8);
+    kani::assume(pending_selected_raw <= 8);
+    kani::assume(pending_other_raw <= 8);
+
+    let abs_q = abs_raw as u128;
+    let loss_weight = loss_weight_raw as u128;
+    let selected_oi_before = abs_q + selected_oi_extra_raw as u128;
+    let selected_weight_before = loss_weight + selected_weight_extra_raw as u128;
+    let other_oi_before = other_oi_raw as u128;
+    let other_weight_before = other_weight_raw as u128;
+    let stored_selected_before = 1 + stored_selected_extra_raw as u64;
+    let stored_other_before = stored_other_raw as u64;
+    let pending_selected_before = pending_selected_raw as u64;
+    let pending_other_before = pending_other_raw as u64;
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let basis_pos_q = if long_side {
+        abs_q as i128
+    } else {
+        -(abs_q as i128)
+    };
+
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 7;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    asset.a_long = ADL_ONE;
+    asset.a_short = ADL_ONE;
+    asset.oi_eff_long_q = if long_side {
+        selected_oi_before
+    } else {
+        other_oi_before
+    };
+    asset.oi_eff_short_q = if long_side {
+        other_oi_before
+    } else {
+        selected_oi_before
+    };
+    asset.loss_weight_sum_long = if long_side {
+        selected_weight_before
+    } else {
+        other_weight_before
+    };
+    asset.loss_weight_sum_short = if long_side {
+        other_weight_before
+    } else {
+        selected_weight_before
+    };
+    asset.stored_pos_count_long = if long_side {
+        stored_selected_before
+    } else {
+        stored_other_before
+    };
+    asset.stored_pos_count_short = if long_side {
+        stored_other_before
+    } else {
+        stored_selected_before
+    };
+    asset.pending_obligation_count_long = if long_side {
+        pending_selected_before
+    } else {
+        pending_other_before
+    };
+    asset.pending_obligation_count_short = if long_side {
+        pending_other_before
+    } else {
+        pending_selected_before
+    };
+    let asset_before = asset;
+
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+
+    let (obligation_leg, obligation_asset) =
+        kani_kernel_convert_clear_to_pending_obligation(leg, asset).unwrap();
+    let finalized_asset = kani_kernel_clear_leg(obligation_leg, obligation_asset).unwrap();
+
+    kani::cover!(
+        long_side
+            && abs_raw > 1
+            && loss_weight_raw > 1
+            && selected_oi_extra_raw > 0
+            && selected_weight_extra_raw > 0,
+        "pending-obligation proof covers nontrivial long-side barrier clear and finalization"
+    );
+    kani::cover!(
+        !long_side
+            && abs_raw > 1
+            && loss_weight_raw > 1
+            && selected_oi_extra_raw > 0
+            && selected_weight_extra_raw > 0,
+        "pending-obligation proof covers nontrivial short-side barrier clear and finalization"
+    );
+
+    assert!(obligation_leg.active);
+    assert_eq!(obligation_leg.side, side);
+    assert_eq!(obligation_leg.basis_pos_q, 0);
+    assert_eq!(obligation_leg.loss_weight, loss_weight);
+    assert_eq!(obligation_leg.asset_index, leg.asset_index);
+    assert_eq!(obligation_leg.market_id, leg.market_id);
+    assert_eq!(obligation_leg.a_basis, leg.a_basis);
+    assert_eq!(obligation_leg.k_snap, leg.k_snap);
+    assert_eq!(obligation_leg.f_snap, leg.f_snap);
+    assert_eq!(obligation_leg.epoch_snap, leg.epoch_snap);
+    assert_eq!(obligation_leg.b_snap, leg.b_snap);
+    assert_eq!(obligation_leg.b_rem, leg.b_rem);
+    assert_eq!(obligation_leg.b_epoch_snap, leg.b_epoch_snap);
+    assert_eq!(obligation_leg.b_stale, leg.b_stale);
+    assert_eq!(obligation_leg.stale, leg.stale);
+
+    if long_side {
+        assert_eq!(obligation_asset.oi_eff_long_q, selected_oi_before - abs_q);
+        assert_eq!(obligation_asset.oi_eff_short_q, other_oi_before);
+        assert_eq!(
+            obligation_asset.loss_weight_sum_long,
+            selected_weight_before
+        );
+        assert_eq!(obligation_asset.loss_weight_sum_short, other_weight_before);
+        assert_eq!(
+            obligation_asset.pending_obligation_count_long,
+            pending_selected_before + 1
+        );
+        assert_eq!(
+            obligation_asset.pending_obligation_count_short,
+            pending_other_before
+        );
+        assert_eq!(finalized_asset.oi_eff_long_q, selected_oi_before - abs_q);
+        assert_eq!(finalized_asset.oi_eff_short_q, other_oi_before);
+        assert_eq!(
+            finalized_asset.loss_weight_sum_long,
+            selected_weight_before - loss_weight
+        );
+        assert_eq!(finalized_asset.loss_weight_sum_short, other_weight_before);
+        assert_eq!(
+            finalized_asset.pending_obligation_count_long,
+            pending_selected_before
+        );
+        assert_eq!(
+            finalized_asset.pending_obligation_count_short,
+            pending_other_before
+        );
+        assert_eq!(
+            finalized_asset.stored_pos_count_long,
+            stored_selected_before - 1
+        );
+        assert_eq!(finalized_asset.stored_pos_count_short, stored_other_before);
+    } else {
+        assert_eq!(obligation_asset.oi_eff_long_q, other_oi_before);
+        assert_eq!(obligation_asset.oi_eff_short_q, selected_oi_before - abs_q);
+        assert_eq!(obligation_asset.loss_weight_sum_long, other_weight_before);
+        assert_eq!(
+            obligation_asset.loss_weight_sum_short,
+            selected_weight_before
+        );
+        assert_eq!(
+            obligation_asset.pending_obligation_count_long,
+            pending_other_before
+        );
+        assert_eq!(
+            obligation_asset.pending_obligation_count_short,
+            pending_selected_before + 1
+        );
+        assert_eq!(finalized_asset.oi_eff_long_q, other_oi_before);
+        assert_eq!(finalized_asset.oi_eff_short_q, selected_oi_before - abs_q);
+        assert_eq!(finalized_asset.loss_weight_sum_long, other_weight_before);
+        assert_eq!(
+            finalized_asset.loss_weight_sum_short,
+            selected_weight_before - loss_weight
+        );
+        assert_eq!(
+            finalized_asset.pending_obligation_count_long,
+            pending_other_before
+        );
+        assert_eq!(
+            finalized_asset.pending_obligation_count_short,
+            pending_selected_before
+        );
+        assert_eq!(finalized_asset.stored_pos_count_long, stored_other_before);
+        assert_eq!(
+            finalized_asset.stored_pos_count_short,
+            stored_selected_before - 1
+        );
+    }
+    assert_eq!(obligation_asset.market_id, asset_before.market_id);
+    assert_eq!(obligation_asset.lifecycle, asset_before.lifecycle);
+    assert_eq!(
+        obligation_asset.raw_oracle_target_price,
+        asset_before.raw_oracle_target_price
+    );
+    assert_eq!(
+        obligation_asset.effective_price,
+        asset_before.effective_price
+    );
+    assert_eq!(obligation_asset.k_long, asset_before.k_long);
+    assert_eq!(obligation_asset.k_short, asset_before.k_short);
+    assert_eq!(obligation_asset.f_long_num, asset_before.f_long_num);
+    assert_eq!(obligation_asset.f_short_num, asset_before.f_short_num);
+    assert_eq!(obligation_asset.b_long_num, asset_before.b_long_num);
+    assert_eq!(obligation_asset.b_short_num, asset_before.b_short_num);
+    assert_eq!(finalized_asset.market_id, asset_before.market_id);
+    assert_eq!(finalized_asset.lifecycle, asset_before.lifecycle);
+    assert_eq!(
+        finalized_asset.raw_oracle_target_price,
+        asset_before.raw_oracle_target_price
+    );
+    assert_eq!(
+        finalized_asset.effective_price,
+        asset_before.effective_price
+    );
+    assert_eq!(finalized_asset.k_long, asset_before.k_long);
+    assert_eq!(finalized_asset.k_short, asset_before.k_short);
+    assert_eq!(finalized_asset.f_long_num, asset_before.f_long_num);
+    assert_eq!(finalized_asset.f_short_num, asset_before.f_short_num);
+    assert_eq!(finalized_asset.b_long_num, asset_before.b_long_num);
+    assert_eq!(finalized_asset.b_short_num, asset_before.b_short_num);
 }
 
 #[kani::proof]
