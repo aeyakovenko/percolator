@@ -5885,6 +5885,175 @@ fn proof_v16_batch_accumulator_two_fill_fold_is_order_independent() {
 }
 
 #[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_batch_accumulator_three_fill_fold_is_permutation_independent() {
+    let fill_count: u32 = kani::any();
+    let fee_a: u128 = kani::any();
+    let fee_b: u128 = kani::any();
+    let notional: u128 = kani::any();
+    let fee_a0: u128 = kani::any();
+    let fee_b0: u128 = kani::any();
+    let notional0: u128 = kani::any();
+    let fee_a1: u128 = kani::any();
+    let fee_b1: u128 = kani::any();
+    let notional1: u128 = kani::any();
+    let fee_a2: u128 = kani::any();
+    let fee_b2: u128 = kani::any();
+    let notional2: u128 = kani::any();
+    let risk_before: bool = kani::any();
+    let long_claim_before: bool = kani::any();
+    let short_claim_before: bool = kani::any();
+    let risk0: bool = kani::any();
+    let long_claim0: bool = kani::any();
+    let short_claim0: bool = kani::any();
+    let risk1: bool = kani::any();
+    let long_claim1: bool = kani::any();
+    let short_claim1: bool = kani::any();
+    let risk2: bool = kani::any();
+    let long_claim2: bool = kani::any();
+    let short_claim2: bool = kani::any();
+
+    kani::assume(fill_count <= u32::MAX - 3);
+    kani::assume(fee_a0 <= u128::MAX - fee_a1);
+    kani::assume(fee_b0 <= u128::MAX - fee_b1);
+    kani::assume(notional0 <= u128::MAX - notional1);
+    let fee_a01 = fee_a0 + fee_a1;
+    let fee_b01 = fee_b0 + fee_b1;
+    let notional01 = notional0 + notional1;
+    kani::assume(fee_a01 <= u128::MAX - fee_a2);
+    kani::assume(fee_b01 <= u128::MAX - fee_b2);
+    kani::assume(notional01 <= u128::MAX - notional2);
+    let fee_a_add = fee_a01 + fee_a2;
+    let fee_b_add = fee_b01 + fee_b2;
+    let notional_add = notional01 + notional2;
+    kani::assume(fee_a <= u128::MAX - fee_a_add);
+    kani::assume(fee_b <= u128::MAX - fee_b_add);
+    kani::assume(notional <= u128::MAX - notional_add);
+
+    let initial = BatchTradeOutcomeV16 {
+        fill_count,
+        fee_a,
+        fee_b,
+        notional,
+    };
+    let mut outcome_012 = initial;
+    let mut risk_012 = risk_before;
+    let mut long_claim_012 = long_claim_before;
+    let mut short_claim_012 = short_claim_before;
+    let mut outcome_201 = initial;
+    let mut risk_201 = risk_before;
+    let mut long_claim_201 = long_claim_before;
+    let mut short_claim_201 = short_claim_before;
+
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_012,
+        &mut risk_012,
+        &mut long_claim_012,
+        &mut short_claim_012,
+        fee_a0,
+        fee_b0,
+        notional0,
+        risk0,
+        long_claim0,
+        short_claim0,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_012,
+        &mut risk_012,
+        &mut long_claim_012,
+        &mut short_claim_012,
+        fee_a1,
+        fee_b1,
+        notional1,
+        risk1,
+        long_claim1,
+        short_claim1,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_012,
+        &mut risk_012,
+        &mut long_claim_012,
+        &mut short_claim_012,
+        fee_a2,
+        fee_b2,
+        notional2,
+        risk2,
+        long_claim2,
+        short_claim2,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_201,
+        &mut risk_201,
+        &mut long_claim_201,
+        &mut short_claim_201,
+        fee_a2,
+        fee_b2,
+        notional2,
+        risk2,
+        long_claim2,
+        short_claim2,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_201,
+        &mut risk_201,
+        &mut long_claim_201,
+        &mut short_claim_201,
+        fee_a0,
+        fee_b0,
+        notional0,
+        risk0,
+        long_claim0,
+        short_claim0,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome_201,
+        &mut risk_201,
+        &mut long_claim_201,
+        &mut short_claim_201,
+        fee_a1,
+        fee_b1,
+        notional1,
+        risk1,
+        long_claim1,
+        short_claim1,
+    )
+    .unwrap();
+
+    kani::cover!(
+        fee_a0 > 0 && fee_a1 > 0 && fee_a2 > 0 && notional0 > 0 && notional1 > 0 && notional2 > 0,
+        "three-fill batch fold covers nonzero fees and notionals on all fills"
+    );
+    kani::cover!(
+        risk0 && !risk1 && risk2 && long_claim0 && !long_claim1 && short_claim2,
+        "three-fill batch fold covers mixed risk and source-claim flags"
+    );
+
+    assert_eq!(outcome_012, outcome_201);
+    assert_eq!(risk_012, risk_201);
+    assert_eq!(long_claim_012, long_claim_201);
+    assert_eq!(short_claim_012, short_claim_201);
+    assert_eq!(outcome_012.fill_count, fill_count + 3);
+    assert_eq!(outcome_012.fee_a, fee_a + fee_a_add);
+    assert_eq!(outcome_012.fee_b, fee_b + fee_b_add);
+    assert_eq!(outcome_012.notional, notional + notional_add);
+    assert_eq!(risk_012, risk_before || risk0 || risk1 || risk2);
+    assert_eq!(
+        long_claim_012,
+        long_claim_before || long_claim0 || long_claim1 || long_claim2
+    );
+    assert_eq!(
+        short_claim_012,
+        short_claim_before || short_claim0 || short_claim1 || short_claim2
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_wrapper_shape_distinct_asset_batch_projection_preserves_oi_and_outcome() {
