@@ -8593,13 +8593,13 @@ fn proof_v16_counterparty_backing_add_delta_is_selected_domain_and_aggregate_exa
     let unrelated_budget_raw: u8 = kani::any();
     let unrelated_earnings_raw: u8 = kani::any();
     let junior_slack_raw: u8 = kani::any();
-    kani::assume(selected_fresh_raw <= 8);
-    kani::assume((1..=8).contains(&amount_raw));
-    kani::assume((1..=8).contains(&receivable_raw));
-    kani::assume((1..=8).contains(&unrelated_backing_raw));
-    kani::assume((1..=4).contains(&unrelated_budget_raw));
-    kani::assume(unrelated_earnings_raw <= 4);
-    kani::assume(junior_slack_raw <= 4);
+    kani::assume(selected_fresh_raw <= 64);
+    kani::assume((1..=64).contains(&amount_raw));
+    kani::assume((1..=64).contains(&receivable_raw));
+    kani::assume((1..=64).contains(&unrelated_backing_raw));
+    kani::assume((1..=64).contains(&unrelated_budget_raw));
+    kani::assume(unrelated_earnings_raw <= 64);
+    kani::assume(junior_slack_raw <= 64);
 
     let amount_atoms = amount_raw as u128;
     let amount_num = amount_atoms * BOUND_SCALE;
@@ -8691,6 +8691,14 @@ fn proof_v16_counterparty_backing_add_delta_is_selected_domain_and_aggregate_exa
         refill_mode && amount_num >= receivable_num && unrelated_budget > 0,
         "two-asset backing isolation covers complete receivable refill beside unrelated budget"
     );
+    kani::cover!(
+        amount_atoms > 32
+            && unrelated_backing > 32
+            && unrelated_budget > 32
+            && unrelated_earnings > 32
+            && junior_slack > 32,
+        "two-asset backing add isolation covers larger selected and unrelated ledgers"
+    );
 
     assert_eq!(aggregate_after, aggregate_before + amount_num);
     assert_eq!(senior_after, senior_before + amount_atoms);
@@ -8749,16 +8757,16 @@ fn proof_v16_counterparty_backing_withdraw_delta_is_selected_domain_and_aggregat
     let unrelated_budget_raw: u8 = kani::any();
     let unrelated_earnings_raw: u8 = kani::any();
     let junior_slack_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&selected_fresh_raw));
-    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume((1..=64).contains(&selected_fresh_raw));
+    kani::assume((1..=64).contains(&withdraw_raw));
     kani::assume(withdraw_raw <= selected_fresh_raw);
-    kani::assume(selected_valid_raw <= 4);
-    kani::assume(selected_consumed_raw <= 4);
-    kani::assume(selected_impaired_raw <= 4);
-    kani::assume((1..=8).contains(&unrelated_backing_raw));
-    kani::assume((1..=4).contains(&unrelated_budget_raw));
-    kani::assume(unrelated_earnings_raw <= 4);
-    kani::assume(junior_slack_raw <= 4);
+    kani::assume(selected_valid_raw <= 64);
+    kani::assume(selected_consumed_raw <= 64);
+    kani::assume(selected_impaired_raw <= 64);
+    kani::assume((1..=64).contains(&unrelated_backing_raw));
+    kani::assume((1..=64).contains(&unrelated_budget_raw));
+    kani::assume(unrelated_earnings_raw <= 64);
+    kani::assume(junior_slack_raw <= 64);
 
     let selected_fresh_num = selected_fresh_raw as u128 * BOUND_SCALE;
     let withdraw_atoms = withdraw_raw as u128;
@@ -8849,6 +8857,15 @@ fn proof_v16_counterparty_backing_withdraw_delta_is_selected_domain_and_aggregat
             && selected_consumed_num == 0
             && unrelated_budget > 0,
         "two-asset backing isolation covers full withdrawal to empty bucket beside unrelated budget"
+    );
+    kani::cover!(
+        withdraw_atoms > 32
+            && selected_valid_num > 32 * BOUND_SCALE
+            && unrelated_backing > 32
+            && unrelated_budget > 32
+            && unrelated_earnings > 32
+            && junior_slack > 32,
+        "two-asset backing withdraw isolation covers larger selected and unrelated ledgers"
     );
 
     assert_eq!(aggregate_after, aggregate_before - withdraw_num);
