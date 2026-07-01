@@ -1271,12 +1271,46 @@ fn closure_ledger_inv_prepare_counterparty_backing_withdraw_delta() {
 fn closure_ledger_inv_prepare_counterparty_backing_add_delta() {
     let (b, s, r) = kani_any_ledger_triple();
     let amount: u128 = kani::any();
+    let current_slot: u64 = kani::any();
+    let expiry_slot: u64 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
     if let Ok((b2, s2)) =
-        V16Core::prepare_counterparty_backing_add_delta(b, s, amount, kani::any(), kani::any())
+        V16Core::prepare_counterparty_backing_add_delta(b, s, amount, current_slot, expiry_slot)
     {
         // Reservation untouched by counterparty deltas.
+        let refill = amount.min(s.provider_receivable_num);
+        assert_eq!(
+            b2.fresh_unliened_backing_num
+                .checked_sub(b.fresh_unliened_backing_num),
+            Some(amount)
+        );
+        assert_eq!(
+            s2.fresh_reserved_backing_num
+                .checked_sub(s.fresh_reserved_backing_num),
+            Some(amount)
+        );
+        assert_eq!(
+            b.consumed_liened_backing_num
+                .checked_sub(b2.consumed_liened_backing_num),
+            Some(refill)
+        );
+        assert_eq!(
+            s.provider_receivable_num
+                .checked_sub(s2.provider_receivable_num),
+            Some(refill)
+        );
+        assert_eq!(b2.valid_liened_backing_num, b.valid_liened_backing_num);
+        assert_eq!(s2.valid_liened_backing_num, s.valid_liened_backing_num);
+        assert_eq!(s2.spent_backing_num, s.spent_backing_num);
+        kani::cover!(
+            b.status == BackingBucketStatusV16::Expired
+                && b.consumed_liened_backing_num > 1
+                && amount > b.consumed_liened_backing_num
+                && expiry_slot > current_slot
+                && b2.status == BackingBucketStatusV16::Fresh,
+            "ledger closure covers expired backing bucket refill into fresh backing"
+        );
         assert!(kani_ledger_inv(&b2, &s2, &r));
     }
 }
