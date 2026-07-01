@@ -778,6 +778,191 @@ fn proof_v16_public_materialized_portfolio_deregister_rejects_value_state_before
     assert_eq!(market.header.insurance.get(), insurance_before);
 }
 
+// Dematerialization counter safety: the public register/deregister APIs are
+// the wrapper-facing gates for portfolio materialization accounting. They must
+// reject scalar value/lock state, hidden active-bit state, close obligations,
+// and unresolved payout receipts BEFORE changing the market counter or any
+// value total. Valid active-leg arithmetic and source-credit claims are covered
+// by dedicated proofs to keep each theorem tractable.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_materialized_portfolio_counter_rejects_nonempty_account_state() {
+    let deregister: bool = kani::any();
+    let blocker_raw: u8 = kani::any();
+    let count_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(blocker_raw <= 11);
+    kani::assume(if deregister {
+        count_raw > 0
+    } else {
+        count_raw < u8::MAX
+    });
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.materialized_portfolio_count = V16PodU64::new(count_raw as u64);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+
+    match blocker_raw {
+        0 => account_header.capital = V16PodU128::new(1),
+        1 => account_header.pnl = V16PodI128::new(1),
+        2 => {
+            account_header.pnl = V16PodI128::new(1);
+            account_header.reserved_pnl = V16PodU128::new(1);
+        }
+        3 => account_header.fee_credits = V16PodI128::new(-1),
+        4 => account_header.cancel_deposit_escrow = V16PodU128::new(1),
+        5 => account_header.stale_state = 1,
+        6 => account_header.b_stale_state = 1,
+        7 => account_header.rebalance_lock = 1,
+        8 => account_header.liquidation_lock = 1,
+        9 => {
+            let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
+            active_bitmap_set(&mut bitmap, 0).unwrap();
+            account_header.active_bitmap = bitmap.map(V16PodU64::new);
+        }
+        10 => {
+            account_header.close_progress =
+                CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+                    active: true,
+                    finalized: false,
+                    canceled: false,
+                    close_id: 1,
+                    asset_index: 0,
+                    market_id,
+                    domain_side: SideV16::Long,
+                    gross_loss_at_close_start: 1,
+                    residual_remaining: 1,
+                    ..CloseProgressLedgerV16::EMPTY
+                });
+        }
+        _ => {
+            account_header.resolved_payout_receipt =
+                ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+                    present: true,
+                    prior_bound_contribution_num: BOUND_SCALE,
+                    live_released_face_at_receipt: 1,
+                    terminal_positive_claim_face: 1,
+                    paid_effective: 0,
+                    finalized: false,
+                });
+        }
+    }
+
+    let count_before = header.materialized_portfolio_count.get();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let risk_epoch_before = header.risk_epoch.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = if deregister {
+        market.deregister_empty_materialized_portfolio_not_atomic(&account)
+    } else {
+        market.register_empty_materialized_portfolio_not_atomic(&account)
+    };
+
+    kani::cover!(
+        !deregister && blocker_raw == 1 && c_tot > 1 && insurance > 1 && surplus > 1,
+        "materialized register rejection covers positive PnL and nontrivial value state"
+    );
+    kani::cover!(
+        deregister && blocker_raw == 9,
+        "materialized deregister rejection covers hidden active-bitmap account state"
+    );
+    kani::cover!(
+        blocker_raw == 10,
+        "materialized counter rejection covers pending close residual obligations"
+    );
+    kani::cover!(
+        blocker_raw == 11,
+        "materialized counter rejection covers unresolved payout receipt obligations"
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        market.header.materialized_portfolio_count.get(),
+        count_before
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+}
+
+// Positive source claims are the expensive part of account validation because
+// source-credit rate validation uses wide division. Prove that path separately:
+// a valid source-attributed positive PnL account still cannot register or
+// deregister as empty, and rejection cannot move market accounting.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_materialized_portfolio_counter_rejects_source_claim_state() {
+    let deregister: bool = kani::any();
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    let count_before = if deregister { 1 } else { 0 };
+    header.materialized_portfolio_count = V16PodU64::new(count_before);
+    header.c_tot = V16PodU128::new(7);
+    header.insurance = V16PodU128::new(11);
+    header.vault = V16PodU128::new(23);
+
+    account_header.pnl = V16PodI128::new(1);
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_claim_bound_num: V16PodU128::new(BOUND_SCALE),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: BOUND_SCALE,
+            exact_positive_claim_num: BOUND_SCALE,
+            fresh_reserved_backing_num: BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let risk_epoch_before = header.risk_epoch.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = if deregister {
+        market.deregister_empty_materialized_portfolio_not_atomic(&account)
+    } else {
+        market.register_empty_materialized_portfolio_not_atomic(&account)
+    };
+
+    kani::cover!(
+        deregister,
+        "materialized deregister rejection covers valid source-attributed positive PnL"
+    );
+    kani::cover!(
+        !deregister,
+        "materialized register rejection covers valid source-attributed positive PnL"
+    );
+    assert!(result.is_err());
+    assert_eq!(
+        market.header.materialized_portfolio_count.get(),
+        count_before
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+}
+
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
