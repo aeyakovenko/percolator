@@ -2045,6 +2045,11 @@ fn liveness_pending_close_has_rank_decreasing_advance() {
     kani::assume(ledger.residual_remaining == total - progress);
     kani::assume(ledger.residual_remaining > 0); // ACTIONABLE
 
+    kani::cover!(
+        ledger.residual_remaining > 1 && progress > 0 && ledger.close_id > 0,
+        "pending-close liveness covers nontrivial prior progress and residual rank"
+    );
+
     // WITNESS: booking exactly 1 unit of explicit loss is a valid successful
     // continuation (the simplest progress) and strictly decreases the rank.
     let r = V16Core::kernel_advance_close_ledger(ledger, 0, 0, 0, 0, 1);
@@ -2090,8 +2095,14 @@ fn liveness_b_stale_leg_has_advancing_chunk() {
     let b_target: u128 = kani::any();
     kani::assume(leg.b_snap < 1u128 << 64);
     kani::assume(b_target > leg.b_snap); // ACTIONABLE: behind target
-                                         // WITNESS: a chunk of delta_b = min(target - snap, ...) advances toward the
-                                         // target; use delta_b = 1 (>=1 since target > snap) -- proven monotone.
+
+    kani::cover!(
+        b_target > leg.b_snap + 1 && leg.asset_index > 0 && leg.loss_weight > 0,
+        "b-stale liveness covers nontrivial target gap and active weighted leg"
+    );
+
+    // WITNESS: a chunk of delta_b = min(target - snap, ...) advances toward the
+    // target; use delta_b = 1 (>=1 since target > snap) -- proven monotone.
     let delta_b: u128 = 1;
     let remaining_after = b_target - leg.b_snap - delta_b;
     let r = V16Core::kernel_advance_leg_b_snap(leg, delta_b, 0, remaining_after);
