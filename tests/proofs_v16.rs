@@ -13577,10 +13577,7 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
     let other_budget_raw: u8 = kani::any();
     let insurance_raw: u8 = kani::any();
     let loss_raw: u8 = kani::any();
-    kani::assume(budget_raw <= 32);
-    kani::assume(other_budget_raw <= 32);
-    kani::assume(insurance_raw <= 32);
-    kani::assume((1..=32).contains(&loss_raw));
+    kani::assume(loss_raw > 0);
     kani::assume((budget_raw as u16) + (other_budget_raw as u16) <= insurance_raw as u16);
     let budget = budget_raw as u128;
     let other_budget = other_budget_raw as u128;
@@ -13612,12 +13609,24 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
         "domain budget spend proof covers budget-capped branch"
     );
     kani::cover!(
+        budget > 128 && budget < loss && used == budget,
+        "domain budget spend proof covers large budget-capped branch"
+    );
+    kani::cover!(
         loss < budget && used == loss,
         "domain budget spend proof covers loss-capped branch"
     );
     kani::cover!(
+        loss > 128 && loss < budget && used == loss,
+        "domain budget spend proof covers large loss-capped branch"
+    );
+    kani::cover!(
         other_budget > 0 && expected_used > 0,
         "domain budget spend proof covers unrelated funded domain isolation"
+    );
+    kani::cover!(
+        other_budget > 0 && budget > 128 && expected_used > 0,
+        "domain budget spend proof covers large selected domain with unrelated funded peer"
     );
     assert_eq!(used, expected_used);
     assert_eq!(market.header.insurance.get(), insurance - expected_used);
