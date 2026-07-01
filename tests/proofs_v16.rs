@@ -17995,7 +17995,7 @@ fn proof_v16_symbolic_fee_and_funding_profile_satisfies_mm_envelope_on_small_not
     let liq_fee_bps: u16 = kani::any();
     let min_liq_abs_raw: u8 = kani::any();
     let liq_fee_cap_raw: u8 = kani::any();
-    let x_raw: u16 = kani::any();
+    let x_raw: u32 = kani::any();
 
     kani::assume((1..=100).contains(&price_move_bps));
     kani::assume(funding_e9_raw <= 25);
@@ -18023,8 +18023,8 @@ fn proof_v16_symbolic_fee_and_funding_profile_satisfies_mm_envelope_on_small_not
     let x = u128::from(x_raw);
 
     kani::cover!(
-        funding_e9_raw > 0 && liq_fee_bps > 0 && min_liq_abs_raw > 0 && x > 1_000,
-        "combined fee/funding profile covers nonzero funding, proportional fee, absolute fee, and wider interior notional"
+        funding_e9_raw > 0 && liq_fee_bps > 0 && min_liq_abs_raw > 0 && x > 1_000_000,
+        "combined fee/funding profile covers nonzero funding, proportional fee, absolute fee, and wide interior notional"
     );
     assert_eq!(decoded_cfg, cfg);
     assert_eq!(
