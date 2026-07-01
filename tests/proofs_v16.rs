@@ -18030,6 +18030,151 @@ fn proof_v16_cure_and_cancel_close_rejects_without_active_close() {
     assert_eq!(account.header.cancel_deposit_escrow.get(), 0);
 }
 
+// Success-path proof for the production cure body, with refresh supplied as a
+// valid health certificate. A cure turns already-escrowed cancel funds plus an
+// optional external deposit into account capital, decrements exactly one pending
+// domain-loss barrier, and leaves the cured close ledger inert. This pins the
+// value movement used by the wrapper without pulling full_account_refresh into
+// the harness.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_cure_and_cancel_close_with_cert_preserves_value_and_barrier_accounting() {
+    let capital_raw: u8 = kani::any();
+    let escrow_raw: u8 = kani::any();
+    let deposit_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let gross_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&capital_raw));
+    kani::assume((1..=8).contains(&escrow_raw));
+    kani::assume(deposit_raw <= 8);
+    kani::assume(surplus_raw <= 8);
+    kani::assume((1..=8).contains(&gross_raw));
+
+    let capital = capital_raw as u128;
+    let escrow = escrow_raw as u128;
+    let deposit = deposit_raw as u128;
+    let surplus = surplus_raw as u128;
+    let barrier_count = 1u64;
+    let gross_loss = gross_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.c_tot = V16PodU128::new(capital);
+    header.resolved_payout_blocker_count = V16PodU64::new(barrier_count);
+    // Cancel escrow is already inside the vault before cure; only `deposit`
+    // enters externally during this call.
+    header.vault = V16PodU128::new(capital + escrow + surplus);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.cancel_deposit_escrow = V16PodU128::new(escrow);
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            close_id: 1,
+            asset_index: 0,
+            market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: gross_loss,
+            residual_remaining: gross_loss,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(barrier_count);
+    let cert = HealthCertV16 {
+        certified_equity: 0,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+    };
+
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let source_claim_total_before = header.source_claim_bound_total_num.get();
+    let source_backing_total_before = header.source_fresh_backing_total_num.get();
+    let short_barrier_before = markets[0].engine.pending_domain_loss_barrier_short.get();
+    let capital_before = account_header.capital.get();
+    let escrow_before = account_header.cancel_deposit_escrow.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result =
+        market.kani_cure_and_cancel_close_with_cert_core_not_atomic(&mut account, deposit, cert);
+
+    kani::cover!(
+        deposit > 0 && escrow > 0,
+        "cure body covers escrow plus external deposit"
+    );
+    kani::cover!(
+        deposit == 0 && escrow > 0,
+        "cure body covers escrow-only cure"
+    );
+    kani::cover!(
+        gross_loss > 1,
+        "cure body covers nontrivial residual identity preservation"
+    );
+    kani::cover!(surplus > 0, "cure body covers senior vault headroom");
+    assert_eq!(result, Ok(()));
+
+    let close_after = account.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(market.header.vault.get(), vault_before + deposit);
+    assert_eq!(
+        market.header.c_tot.get(),
+        c_tot_before + escrow_before + deposit
+    );
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.source_claim_bound_total_num.get(),
+        source_claim_total_before
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        source_backing_total_before
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_long
+            .get(),
+        barrier_count - 1
+    );
+    assert_eq!(market.header.resolved_payout_blocker_count.get(), 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_short
+            .get(),
+        short_barrier_before
+    );
+    assert_eq!(
+        account.header.capital.get(),
+        capital_before + escrow_before + deposit
+    );
+    assert_eq!(account.header.cancel_deposit_escrow.get(), 0);
+    assert_eq!(account.header.health_cert.valid, 0);
+    assert!(!close_after.active);
+    assert!(!close_after.finalized);
+    assert!(close_after.canceled);
+    assert_eq!(close_after.close_id, 1);
+    assert_eq!(close_after.asset_index, 0);
+    assert_eq!(close_after.market_id, market_id);
+    assert_eq!(close_after.domain_side, SideV16::Long);
+    assert_eq!(close_after.gross_loss_at_close_start, gross_loss);
+    assert_eq!(close_after.residual_remaining, gross_loss);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    assert!(inv_senior_accounting(
+        market.header.vault.get(),
+        market.header.c_tot.get(),
+        market.header.insurance.get()
+    ));
+}
+
 // ============ INTRACTABLE-TIER GRIND: realize-body verdict ============
 // CONCLUSIVELY INTRACTABLE (full elimination, 2026-06-10): the terminal-
 // realization full-backing witness exceeds the 900s budget under EVERY

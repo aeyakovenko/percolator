@@ -14418,7 +14418,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn cure_and_cancel_close_with_cert_not_atomic(
+    fn cure_and_cancel_close_with_cert_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         optional_deposit: u128,
@@ -14487,6 +14487,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?
         .validate()?;
         account.header.health_cert.valid = 0;
+        Ok(())
+    }
+
+    fn cure_and_cancel_close_with_cert_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        optional_deposit: u128,
+        cert: HealthCertV16,
+    ) -> V16Result<()> {
+        self.cure_and_cancel_close_with_cert_core_not_atomic(account, optional_deposit, cert)?;
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()
     }
