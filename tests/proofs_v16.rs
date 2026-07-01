@@ -20197,7 +20197,7 @@ fn proof_v16_canonicalize_retired_slot_rejects_budget_or_spent_before_mutation()
 #[kani::solver(cadical)]
 fn proof_v16_frame_budget_credit_touches_only_declared_state() {
     let amt_raw: u8 = kani::any();
-    kani::assume(amt_raw >= 1 && amt_raw <= 8);
+    kani::assume(amt_raw >= 1);
     let amt = amt_raw as u128;
     let (mut header, mut markets) = one_market_only_fixture();
     header.vault = V16PodU128::new(amt);
@@ -20210,7 +20210,10 @@ fn proof_v16_frame_budget_credit_touches_only_declared_state() {
             .credit_domain_insurance_budget_not_atomic(0, amt)
             .unwrap();
     }
-    kani::cover!(true, "budget-credit frame reached");
+    kani::cover!(
+        amt > 128,
+        "budget-credit frame covers large capacity credit"
+    );
     let mut eh = h0;
     eh.insurance_domain_budget_remaining_total =
         V16PodU128::new(h0.insurance_domain_budget_remaining_total.get() + amt);
