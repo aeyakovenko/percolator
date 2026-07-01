@@ -19878,7 +19878,7 @@ fn proof_v16_frame_overwithdraw_err_leaves_state_unchanged() {
 #[kani::solver(cadical)]
 fn proof_v16_frame_domain_insurance_deposit_touches_only_declared_state() {
     let amt_raw: u8 = kani::any();
-    kani::assume(amt_raw >= 1 && amt_raw <= 8);
+    kani::assume(amt_raw >= 1);
     let amt = amt_raw as u128;
     let (mut header, mut markets) = one_market_only_fixture();
     let h0 = header;
@@ -19887,7 +19887,10 @@ fn proof_v16_frame_domain_insurance_deposit_touches_only_declared_state() {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         market.deposit_domain_insurance_not_atomic(0, amt).unwrap();
     }
-    kani::cover!(true, "domain-insurance deposit frame reached");
+    kani::cover!(
+        amt > 128,
+        "domain-insurance deposit frame covers large domain funding"
+    );
     let mut eh = h0;
     eh.vault = V16PodU128::new(h0.vault.get() + amt);
     eh.insurance = V16PodU128::new(h0.insurance.get() + amt);
