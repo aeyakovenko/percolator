@@ -16787,6 +16787,18 @@ fn proof_v16_domain_insurance_spent_delta_cannot_create_unbacked_budget() {
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok(next_total) = result {
         assert_eq!(next_total, expected_total);
+        assert_eq!(next_total - new_remaining, other_remaining);
+        if new_remaining >= old_remaining {
+            assert_eq!(
+                insurance - next_total,
+                extra_insurance - (new_remaining - old_remaining)
+            );
+        } else {
+            assert_eq!(
+                insurance - next_total,
+                extra_insurance + (old_remaining - new_remaining)
+            );
+        }
         assert!(next_total <= insurance);
     }
 }
@@ -16990,6 +17002,8 @@ fn proof_v16_domain_insurance_budget_delta_cannot_overallocate_pooled_insurance(
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok(next_total) = result {
         assert_eq!(next_total, expected_total);
+        assert_eq!(next_total - new_remaining, other_remaining);
+        assert_eq!(insurance - next_total, extra_insurance - add);
         assert!(next_total <= insurance);
     }
 }
