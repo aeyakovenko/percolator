@@ -209,17 +209,12 @@ fn proof_v16_k_pair_zero_cases_return_zero() {
 #[kani::solver(cadical)]
 fn proof_v16_checked_trade_fee_is_ceil_bps_and_never_exceeds_notional() {
     let notional_raw: u8 = kani::any();
-    let fee_bps_raw: u8 = kani::any();
-    let max_fee_case: bool = kani::any();
-    kani::assume(notional_raw <= 200);
-    kani::assume(fee_bps_raw <= 250);
+    let fee_bps_raw: u16 = kani::any();
+    kani::assume(notional_raw <= 250);
+    kani::assume(fee_bps_raw <= 10_000);
 
     let notional = notional_raw as u128;
-    let fee_bps = if max_fee_case {
-        10_000
-    } else {
-        fee_bps_raw as u64
-    };
+    let fee_bps = fee_bps_raw as u64;
     let fee = kani_checked_fee_bps(notional, fee_bps).unwrap();
     let product = notional * fee_bps as u128;
     let expected = product / 10_000 + u128::from(product % 10_000 != 0);
@@ -231,6 +226,10 @@ fn proof_v16_checked_trade_fee_is_ceil_bps_and_never_exceeds_notional() {
     kani::cover!(
         fee_bps == 10_000 && notional > 0,
         "checked fee proof covers max-fee equality branch"
+    );
+    kani::cover!(
+        notional > 200 && fee_bps > 1_000,
+        "checked fee proof covers broad nontrivial fee range"
     );
     assert_eq!(fee, expected);
     assert!(fee <= notional);
