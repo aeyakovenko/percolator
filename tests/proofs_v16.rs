@@ -19864,6 +19864,145 @@ fn proof_v16_account_active_leg_lookup_rejects_hidden_rows_and_duplicates() {
     }
 }
 
+// Route active-leg lookup soundness for the production trade/withdraw/crank
+// helper: only bitmap-set rows can route an asset, bitmap-set inactive rows
+// reject, and duplicate bitmap-set target rows reject. Bitmap-clear persisted
+// payloads are ignored by this helper and left to the full account validator,
+// which keeps route selection O(active-bitmap) and prevents double routing.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_route_active_leg_lookup_is_bitmap_bound_and_unique() {
+    let slot0_active: bool = kani::any();
+    let slot1_active: bool = kani::any();
+    let slot0_bit: bool = kani::any();
+    let slot1_bit: bool = kani::any();
+    let slot0_matches_target: bool = kani::any();
+    let slot1_matches_target: bool = kani::any();
+    let query_other_asset: bool = kani::any();
+
+    let target_asset = if query_other_asset { 1usize } else { 0usize };
+    let slot0_asset = if slot0_matches_target {
+        target_asset
+    } else {
+        1usize - target_asset
+    };
+    let slot1_asset = if slot1_matches_target {
+        target_asset
+    } else {
+        1usize - target_asset
+    };
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let leg0 = if slot0_active {
+        PortfolioLegV16 {
+            active: true,
+            asset_index: slot0_asset as u32,
+            market_id: 1,
+            side: SideV16::Long,
+            basis_pos_q: POS_SCALE as i128,
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: POS_SCALE,
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: false,
+            stale: false,
+        }
+    } else {
+        PortfolioLegV16::EMPTY
+    };
+    let leg1 = if slot1_active {
+        PortfolioLegV16 {
+            active: true,
+            asset_index: slot1_asset as u32,
+            market_id: 1,
+            side: SideV16::Long,
+            basis_pos_q: POS_SCALE as i128,
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: POS_SCALE,
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: false,
+            stale: false,
+        }
+    } else {
+        PortfolioLegV16::EMPTY
+    };
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg0);
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&leg1);
+
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    if slot0_bit {
+        active_bitmap_set(&mut bitmap, 0).unwrap();
+    }
+    if slot1_bit {
+        active_bitmap_set(&mut bitmap, 1).unwrap();
+    }
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.kani_route_active_leg_slot_for_asset(&account.as_view(), target_asset);
+
+    let bitmap_inactive_row = (slot0_bit && !slot0_active) || (slot1_bit && !slot1_active);
+    let slot0_hit = slot0_bit && slot0_active && slot0_matches_target;
+    let slot1_hit = slot1_bit && slot1_active && slot1_matches_target;
+    let duplicate_hit = slot0_hit && slot1_hit;
+
+    kani::cover!(
+        result == Ok(Some(0)) && slot0_bit && slot0_active && slot0_matches_target,
+        "route lookup finds a bitmap-set slot-0 target leg"
+    );
+    kani::cover!(
+        result == Ok(Some(1))
+            && !slot0_bit
+            && slot0_active
+            && slot0_matches_target
+            && slot1_bit
+            && slot1_active
+            && slot1_matches_target,
+        "route lookup ignores bitmap-clear target payloads and routes bitmap-set target"
+    );
+    kani::cover!(
+        result == Ok(None) && slot0_active && slot0_matches_target && !slot0_bit && !slot1_bit,
+        "route lookup ignores bitmap-clear active target payloads"
+    );
+    kani::cover!(
+        result == Err(V16Error::HiddenLeg) && bitmap_inactive_row,
+        "route lookup rejects bitmap-set inactive rows"
+    );
+    kani::cover!(
+        result == Err(V16Error::HiddenLeg) && duplicate_hit,
+        "route lookup rejects duplicate bitmap-set rows for one asset"
+    );
+
+    if bitmap_inactive_row || duplicate_hit {
+        assert_eq!(result, Err(V16Error::HiddenLeg));
+    } else if slot0_hit {
+        assert_eq!(result, Ok(Some(0)));
+    } else if slot1_hit {
+        assert_eq!(result, Ok(Some(1)));
+    } else {
+        assert_eq!(result, Ok(None));
+    }
+
+    if let Ok(Some(slot)) = result {
+        let leg = if slot == 0 { leg0 } else { leg1 };
+        assert!(active_bitmap_get(bitmap, slot));
+        assert!(leg.active);
+        assert_eq!(leg.asset_index as usize, target_asset);
+        assert!(!(slot0_hit && slot1_hit));
+    }
+}
+
 // Account/source-domain validator soundness: if a persisted portfolio row with
 // source credit validates against the concrete market it is being executed
 // against, then the row is bound to the real market/domain, its source claim is
