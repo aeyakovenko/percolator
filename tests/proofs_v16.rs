@@ -1321,6 +1321,121 @@ fn proof_v16_sparse_source_domain_validation_rejects_stale_market_id_claim() {
     assert_eq!(result, Err(V16Error::HiddenLeg));
 }
 
+// Multi-domain source-attribution soundness over the production account
+// validator: an account with positive PnL and claims in two different asset
+// domains validates exactly when the aggregate source claim covers the PnL and
+// each domain claim is within that domain's persisted source-credit capacity.
+// This is the cross-asset composition theorem for the source-claim isolation
+// guard; the single-domain helper proof alone would miss a validator that checks
+// each row but forgets the portfolio-wide attribution sum.
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn proof_v16_two_domain_account_validation_composes_source_claim_attribution() {
+    let claim0_raw: u8 = kani::any();
+    let claim2_raw: u8 = kani::any();
+    let cap0_raw: u8 = kani::any();
+    let cap2_raw: u8 = kani::any();
+    let pnl_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim0_raw));
+    kani::assume((1..=8).contains(&claim2_raw));
+    kani::assume((1..=8).contains(&cap0_raw));
+    kani::assume((1..=8).contains(&cap2_raw));
+    kani::assume((1..=16).contains(&pnl_raw));
+
+    let claim0 = claim0_raw as u128;
+    let claim2 = claim2_raw as u128;
+    let cap0 = cap0_raw as u128;
+    let cap2 = cap2_raw as u128;
+    let pnl = pnl_raw as u128;
+    let claim0_num = claim0 * BOUND_SCALE;
+    let claim2_num = claim2 * BOUND_SCALE;
+    let cap0_num = cap0 * BOUND_SCALE;
+    let cap2_num = cap2 * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = two_market_view_fixture();
+    let market0_id = markets[0].engine.asset.market_id.get();
+    let market1_id = markets[1].engine.asset.market_id.get();
+
+    account_header.pnl = V16PodI128::new(pnl as i128);
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market0_id),
+        source_claim_bound_num: V16PodU128::new(claim0_num),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    account_header.source_domains[1] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(2),
+        source_claim_market_id: V16PodU64::new(market1_id),
+        source_claim_bound_num: V16PodU128::new(claim2_num),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: cap0_num,
+            exact_positive_claim_num: cap0_num,
+            credit_rate_num: 0,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: cap2_num,
+            exact_positive_claim_num: cap2_num,
+            credit_rate_num: 0,
+            ..SourceCreditStateV16::EMPTY
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = account.validate_with_market(&market.as_view());
+    let claims_cover_pnl = claim0 + claim2 >= pnl;
+    let domains_cover_claims = claim0 <= cap0 && claim2 <= cap2;
+    let expected_ok = claims_cover_pnl && domains_cover_claims;
+
+    kani::cover!(
+        result.is_ok() && claim0 > 0 && claim2 > 0 && claim0 + claim2 == pnl,
+        "two-domain account validator accepts exact split source attribution"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidLeg) && !claims_cover_pnl && domains_cover_claims,
+        "two-domain account validator rejects aggregate under-attribution"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidLeg) && claims_cover_pnl && !domains_cover_claims,
+        "two-domain account validator rejects per-domain overclaim despite aggregate coverage"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if result.is_ok() {
+        let source0 = account.kani_source_domain(0).unwrap();
+        let source2 = account.kani_source_domain(2).unwrap();
+        assert_eq!(source0.source_claim_market_id.get(), market0_id);
+        assert_eq!(source2.source_claim_market_id.get(), market1_id);
+        assert_eq!(
+            source0.source_claim_bound_num.get() + source2.source_claim_bound_num.get(),
+            (claim0 + claim2) * BOUND_SCALE
+        );
+        assert!(
+            source0.source_claim_bound_num.get() + source2.source_claim_bound_num.get()
+                >= pnl * BOUND_SCALE
+        );
+        assert!(
+            source0.source_claim_bound_num.get()
+                <= market.markets[0]
+                    .engine
+                    .source_credit_long
+                    .positive_claim_bound_num
+                    .get()
+        );
+        assert!(
+            source2.source_claim_bound_num.get()
+                <= market.markets[1]
+                    .engine
+                    .source_credit_long
+                    .positive_claim_bound_num
+                    .get()
+        );
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
