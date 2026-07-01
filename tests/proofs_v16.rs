@@ -7217,10 +7217,10 @@ fn proof_v16_backing_utilization_fee_quote_atoms_is_exact_floor_and_time_bounded
     let base_raw: u8 = kani::any();
     let slope_at_raw: u8 = kani::any();
     let slope_above_raw: u8 = kani::any();
-    kani::assume(fresh_raw <= 64);
-    kani::assume(valid_raw <= 80);
-    kani::assume(lien_raw <= 64);
-    kani::assume(dt_raw <= 16);
+    kani::assume(fresh_raw <= 128);
+    kani::assume(valid_raw <= 160);
+    kani::assume(lien_raw <= 128);
+    kani::assume(dt_raw <= 64);
     kani::assume(kink_raw <= MAX_BACKING_FEE_UTIL_BPS as u16);
     let fresh = fresh_raw as u128;
     let valid = valid_raw as u128;
@@ -7257,6 +7257,10 @@ fn proof_v16_backing_utilization_fee_quote_atoms_is_exact_floor_and_time_bounded
     kani::cover!(
         expected_ok && lien_atoms > 0 && dt > 1 && rate.unwrap_or(0) > 0,
         "backing utilization fee covers nontrivial positive fee path"
+    );
+    kani::cover!(
+        expected_ok && lien_atoms > 64 && dt > 32 && rate.unwrap_or(0) > 0,
+        "backing utilization fee covers broader lien and time range"
     );
     kani::cover!(
         !expected_ok && valid > fresh && valid > 0 && lien_atoms > 0 && dt > 0,
