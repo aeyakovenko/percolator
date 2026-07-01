@@ -15020,6 +15020,137 @@ fn proof_v16_support_to_account_capital_requires_exact_mixed_source_sum() {
 }
 
 #[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_source_credit_support_flow_matches_close_ledger_progress_exactly() {
+    let counterparty_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let prior_support_raw: u8 = kani::any();
+    let prior_insurance_raw: u8 = kani::any();
+    let prior_b_loss_raw: u8 = kani::any();
+    let prior_explicit_raw: u8 = kani::any();
+    let residual_extra_raw: u8 = kani::any();
+    let close_id_raw: u8 = kani::any();
+    kani::assume(counterparty_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume(surplus_raw <= 8);
+    kani::assume((1..=8).contains(&close_id_raw));
+    let counterparty = counterparty_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let support_total = counterparty + insurance + surplus;
+    kani::assume(support_total > 0);
+    let prior_support = prior_support_raw as u128;
+    let prior_insurance = prior_insurance_raw as u128;
+    let prior_b_loss = prior_b_loss_raw as u128;
+    let prior_explicit = prior_explicit_raw as u128;
+    let residual_extra = residual_extra_raw as u128;
+    let prior_progress = prior_support + prior_insurance + prior_b_loss + prior_explicit;
+    let residual_before = support_total + residual_extra;
+    let gross = prior_progress + residual_before;
+    let vault_raw: u16 = kani::any();
+    let vault = vault_raw as u128;
+
+    let ledger = CloseProgressLedgerV16 {
+        active: true,
+        finalized: false,
+        canceled: false,
+        close_id: close_id_raw as u64,
+        asset_index: 0,
+        market_id: 1,
+        domain_side: SideV16::Long,
+        gross_loss_at_close_start: gross,
+        support_consumed: prior_support,
+        insurance_spent: prior_insurance,
+        b_loss_booked: prior_b_loss,
+        explicit_loss_assigned: prior_explicit,
+        residual_remaining: residual_before,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+
+    let support_proof = TokenValueFlowProofV16::support_to_account_capital(
+        support_total,
+        counterparty,
+        insurance,
+        surplus,
+        vault,
+        vault,
+    )
+    .unwrap();
+    let advanced = kani_kernel_advance_close_ledger(ledger, support_total, 0, 0, 0, 0).unwrap();
+    let overbooked = kani_kernel_advance_close_ledger(
+        ledger,
+        residual_before.checked_add(1).unwrap(),
+        0,
+        0,
+        0,
+        0,
+    );
+    let under_advanced = if support_total > 1 {
+        Some(kani_kernel_advance_close_ledger(ledger, support_total - 1, 0, 0, 0, 0).unwrap())
+    } else {
+        None
+    };
+
+    kani::cover!(
+        counterparty > 0 && insurance > 0 && surplus > 0,
+        "close support composition covers mixed counterparty insurance and surplus support"
+    );
+    kani::cover!(
+        residual_extra == 0,
+        "close support composition covers finalizing exact residual cure"
+    );
+    kani::cover!(
+        residual_extra > 0,
+        "close support composition covers partial residual cure"
+    );
+    kani::cover!(
+        support_total > 1 && under_advanced.is_some(),
+        "close support composition covers detectable under-booked ledger progress"
+    );
+
+    assert_eq!(support_proof.validate(), Ok(()));
+    let source_flow_total = support_proof.credits
+        [TokenValueClassV16::CloseCounterpartyCreditConsumed as usize]
+        + support_proof.credits[TokenValueClassV16::CloseInsuranceSpent as usize]
+        + support_proof.credits[TokenValueClassV16::UnallocatedProtocolSurplus as usize];
+    assert_eq!(source_flow_total, support_total);
+    assert_eq!(
+        support_proof.debits[TokenValueClassV16::AccountCapital as usize],
+        support_total
+    );
+    assert_eq!(support_proof.vault_before, support_proof.vault_after);
+    assert_eq!(support_proof.external_quote_in, 0);
+    assert_eq!(support_proof.external_quote_out, 0);
+
+    assert_eq!(advanced.support_consumed, prior_support + support_total);
+    assert_eq!(advanced.insurance_spent, prior_insurance);
+    assert_eq!(advanced.b_loss_booked, prior_b_loss);
+    assert_eq!(advanced.explicit_loss_assigned, prior_explicit);
+    assert_eq!(advanced.residual_remaining, residual_extra);
+    assert_eq!(
+        advanced.residual_remaining
+            + support_proof.debits[TokenValueClassV16::AccountCapital as usize],
+        ledger.residual_remaining
+    );
+    assert_eq!(advanced.finalized, residual_extra == 0);
+    assert_eq!(advanced.close_id, ledger.close_id);
+    assert_eq!(overbooked, Err(V16Error::ArithmeticOverflow));
+    if let Some(under) = under_advanced {
+        assert_ne!(
+            under.residual_remaining
+                + support_proof.debits[TokenValueClassV16::AccountCapital as usize],
+            ledger.residual_remaining
+        );
+        assert_eq!(
+            under.residual_remaining + support_total - 1,
+            ledger.residual_remaining
+        );
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_source_credit_support_is_prebacked_by_realized_capital() {
