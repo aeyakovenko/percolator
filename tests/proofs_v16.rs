@@ -12954,6 +12954,89 @@ fn proof_v16_resolved_payout_topup_core_touches_only_vault_and_receipt() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v16_zero_claim_resolved_receipt_stays_live_when_rate_can_improve() {
+    let face_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    let slack_raw: u8 = kani::any();
+    kani::assume((2..=16).contains(&face_raw));
+    kani::assume((1..=16).contains(&residual_raw));
+    kani::assume((1..=16).contains(&slack_raw));
+    let face = face_raw as u128;
+    let residual = residual_raw as u128;
+    let slack = slack_raw as u128;
+    let total_face = face + slack;
+    kani::assume(residual < total_face);
+    let paid_at_current_rate = face * residual / total_face;
+    let exact_num = face * BOUND_SCALE;
+    let unreceipted_num = slack * BOUND_SCALE;
+    let total_num = exact_num + unreceipted_num;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1;
+    header.vault = V16PodU128::new(residual);
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: residual,
+            terminal_claim_exact_receipts_num: exact_num,
+            terminal_claim_bound_unreceipted_num: unreceipted_num,
+            current_payout_rate_num: residual * BOUND_SCALE,
+            current_payout_rate_den: total_num,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        });
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: exact_num,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: face,
+            paid_effective: paid_at_current_rate,
+            finalized: false,
+        });
+    let ledger_before = header.resolved_payout_ledger;
+    let receipt_before = account_header.resolved_payout_receipt;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let paid_out = market
+        .kani_claim_resolved_payout_topup_core_not_atomic(&mut account)
+        .unwrap();
+    let receipt = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        paid_at_current_rate > 0 && slack > 1,
+        "nonterminal zero-claim receipt covers already-paid positive current entitlement"
+    );
+    kani::cover!(
+        paid_at_current_rate == 0 && residual > 0,
+        "nonterminal zero-claim receipt covers dust-rate zero current entitlement"
+    );
+    kani::cover!(
+        residual > face && slack > 1 && paid_at_current_rate < face,
+        "nonterminal zero-claim receipt covers high residual diluted by remaining unreceipted bound"
+    );
+
+    assert_eq!(paid_out, 0);
+    assert_eq!(market.header.vault.get(), residual);
+    assert_eq!(market.header.resolved_payout_ledger, ledger_before);
+    assert_eq!(account.header.resolved_payout_receipt, receipt_before);
+    assert!(receipt.present);
+    assert!(!receipt.finalized);
+    assert_eq!(receipt.paid_effective, paid_at_current_rate);
+    assert_eq!(receipt.terminal_positive_claim_face, face);
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v16_resolved_external_payout_requires_exact_capital_plus_claim_sources() {
     let capital_raw: u8 = kani::any();
     let resolved_raw: u8 = kani::any();
