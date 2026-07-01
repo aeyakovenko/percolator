@@ -1662,6 +1662,89 @@ fn proof_v16_mutable_view_compacts_persisted_source_domain_tail() {
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_mutable_view_compact_then_insert_preserves_source_domain_ledger_isolation() {
+    let existing_is_short: bool = kani::any();
+    let claim_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let inserted_claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume((1..=8).contains(&inserted_claim_raw));
+
+    let existing_domain = if existing_is_short { 1usize } else { 0usize };
+    let inserted_domain = if existing_is_short { 0usize } else { 1usize };
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let inserted_claim_num = inserted_claim_raw as u128 * BOUND_SCALE;
+    let (_, _, mut account_header) = one_market_view_fixture();
+
+    account_header.source_domains[0].domain = V16PodU32::new(existing_domain as u32);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    let preserved = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(existing_domain as u32),
+        source_claim_market_id: V16PodU64::new(1),
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(backing_num),
+        source_lien_counterparty_backing_num: V16PodU128::new(backing_num),
+        source_lien_fee_last_slot: V16PodU64::new(7),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    account_header.source_domains[2] = preserved;
+    account_header.source_domains[3].domain = V16PodU32::new(63);
+    account_header.source_domains[3].source_claim_market_id = V16PodU64::new(9);
+
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(account.header.source_domains[0], preserved);
+    assert_eq!(
+        account.header.source_domains[1],
+        PortfolioSourceDomainV16Account::default()
+    );
+
+    let inserted_slot = account
+        .kani_source_domain_slot_or_insert(inserted_domain)
+        .unwrap();
+    assert_eq!(inserted_slot, 1);
+    account.header.source_domains[inserted_slot].source_claim_market_id = V16PodU64::new(1);
+    account.header.source_domains[inserted_slot].source_claim_bound_num =
+        V16PodU128::new(inserted_claim_num);
+
+    let view = account.as_view();
+    let existing_source = view.kani_source_domain(existing_domain).unwrap();
+    let inserted_source = view.kani_source_domain(inserted_domain).unwrap();
+
+    kani::cover!(
+        existing_is_short && claim_raw > 1 && backing_raw > 1 && inserted_claim_raw > 1,
+        "compact-then-insert preserves occupied short-domain ledger while adding long-domain claim"
+    );
+    kani::cover!(
+        !existing_is_short && claim_raw > 1 && backing_raw > 1 && inserted_claim_raw > 1,
+        "compact-then-insert preserves occupied long-domain ledger while adding short-domain claim"
+    );
+    assert_eq!(view.kani_source_domain_slot(existing_domain), Ok(Some(0)));
+    assert_eq!(
+        view.kani_source_domain_slot(inserted_domain),
+        Ok(Some(inserted_slot))
+    );
+    assert_eq!(existing_source, preserved);
+    assert_eq!(inserted_source.domain.get(), inserted_domain as u32);
+    assert_eq!(inserted_source.source_claim_market_id.get(), 1);
+    assert_eq!(
+        inserted_source.source_claim_bound_num.get(),
+        inserted_claim_num
+    );
+    assert_eq!(
+        account.header.source_domains[2],
+        PortfolioSourceDomainV16Account::default()
+    );
+    assert_eq!(
+        existing_source.source_claim_bound_num.get() + inserted_source.source_claim_bound_num.get(),
+        claim_num + inserted_claim_num
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
