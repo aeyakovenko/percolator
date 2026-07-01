@@ -1942,6 +1942,142 @@ fn proof_v16_mutable_view_compact_then_insert_preserves_source_domain_ledger_iso
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_source_domain_compaction_preserves_occupied_prefix_and_drops_tag_debris() {
+    let order_flip: bool = kani::any();
+    let claim_a_raw: u8 = kani::any();
+    let claim_b_raw: u8 = kani::any();
+    let lien_a_raw: u8 = kani::any();
+    let backing_b_raw: u8 = kani::any();
+    let fee_slot_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_a_raw));
+    kani::assume((1..=8).contains(&claim_b_raw));
+    kani::assume((1..=8).contains(&lien_a_raw));
+    kani::assume((1..=8).contains(&backing_b_raw));
+    kani::assume((1..=8).contains(&fee_slot_raw));
+
+    let first_domain = if order_flip { 3u32 } else { 1u32 };
+    let second_domain = if order_flip { 0u32 } else { 2u32 };
+    let claim_a_num = claim_a_raw as u128 * BOUND_SCALE;
+    let claim_b_num = claim_b_raw as u128 * BOUND_SCALE;
+    let lien_a_num = lien_a_raw as u128 * BOUND_SCALE;
+    let backing_b_num = backing_b_raw as u128 * BOUND_SCALE;
+    let fee_slot = fee_slot_raw as u64;
+    let (_, _, mut account_header) = one_market_view_fixture();
+
+    account_header.source_domains[0].domain = V16PodU32::new(31);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(77);
+    let first = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(first_domain),
+        source_claim_market_id: V16PodU64::new(11),
+        source_claim_bound_num: V16PodU128::new(claim_a_num),
+        source_claim_liened_num: V16PodU128::new(lien_a_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(lien_a_num),
+        source_lien_counterparty_backing_num: V16PodU128::new(lien_a_num),
+        source_lien_fee_last_slot: V16PodU64::new(fee_slot),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    account_header.source_domains[1] = first;
+    account_header.source_domains[2].domain = V16PodU32::new(32);
+    account_header.source_domains[2].source_claim_market_id = V16PodU64::new(78);
+    let second = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(second_domain),
+        source_claim_market_id: V16PodU64::new(22),
+        source_claim_bound_num: V16PodU128::new(claim_b_num),
+        source_claim_liened_num: V16PodU128::new(backing_b_num),
+        source_claim_insurance_liened_num: V16PodU128::new(backing_b_num),
+        source_lien_effective_reserved: V16PodU128::new(backing_b_num),
+        source_lien_insurance_backing_num: V16PodU128::new(backing_b_num),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    account_header.source_domains[3] = second;
+
+    let claim_before = account_header.source_domains[1]
+        .source_claim_bound_num
+        .get()
+        + account_header.source_domains[3]
+            .source_claim_bound_num
+            .get();
+    let lien_before = account_header.source_domains[1]
+        .source_claim_liened_num
+        .get()
+        + account_header.source_domains[3]
+            .source_claim_liened_num
+            .get();
+    let backing_before = account_header.source_domains[1]
+        .source_lien_counterparty_backing_num
+        .get()
+        + account_header.source_domains[3]
+            .source_lien_insurance_backing_num
+            .get();
+
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let view = account.as_view();
+
+    kani::cover!(
+        !order_flip && claim_a_raw > 1 && claim_b_raw > 1,
+        "source-domain compaction preserves long-before-short occupied order"
+    );
+    kani::cover!(
+        order_flip && claim_a_raw > 1 && claim_b_raw > 1,
+        "source-domain compaction preserves short-before-base occupied order"
+    );
+    kani::cover!(
+        lien_a_raw > 1 && backing_b_raw > 1 && fee_slot_raw > 1,
+        "source-domain compaction preserves nontrivial lien/backing/cursor ledgers"
+    );
+
+    assert_eq!(account.header.source_domains[0], first);
+    assert_eq!(account.header.source_domains[1], second);
+    assert_eq!(
+        account.header.source_domains[2],
+        PortfolioSourceDomainV16Account::default()
+    );
+    assert_eq!(
+        account.header.source_domains[3],
+        PortfolioSourceDomainV16Account::default()
+    );
+    assert_eq!(
+        view.kani_source_domain_slot(first_domain as usize),
+        Ok(Some(0))
+    );
+    assert_eq!(
+        view.kani_source_domain_slot(second_domain as usize),
+        Ok(Some(1))
+    );
+    assert_eq!(view.kani_source_domain_slot(31), Ok(None));
+    assert_eq!(view.kani_source_domain_slot(32), Ok(None));
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_bound_num
+            .get()
+            + account.header.source_domains[1]
+                .source_claim_bound_num
+                .get(),
+        claim_before
+    );
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_liened_num
+            .get()
+            + account.header.source_domains[1]
+                .source_claim_liened_num
+                .get(),
+        lien_before
+    );
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_lien_counterparty_backing_num
+            .get()
+            + account.header.source_domains[1]
+                .source_lien_insurance_backing_num
+                .get(),
+        backing_before
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
