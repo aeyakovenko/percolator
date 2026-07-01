@@ -6915,7 +6915,7 @@ fn proof_v16_backing_domain_fee_split_for_lien_delta_is_exact_and_conservative()
     let unaligned: bool = kani::any();
     let invalid_fee: bool = kani::any();
     let invalid_share: bool = kani::any();
-    kani::assume(atoms_raw <= 64);
+    kani::assume(atoms_raw <= 128);
     kani::assume(fee_raw <= MAX_MARGIN_BPS as u16);
     kani::assume(share_raw <= MAX_MARGIN_BPS as u16);
     let atoms = atoms_raw as u128;
@@ -6953,6 +6953,10 @@ fn proof_v16_backing_domain_fee_split_for_lien_delta_is_exact_and_conservative()
     kani::cover!(
         expected_ok && atoms > 0 && fee_bps > 0 && share_bps == MAX_MARGIN_BPS as u16,
         "backing domain fee split covers insurance-only routing"
+    );
+    kani::cover!(
+        expected_ok && atoms > 64 && fee_bps > 0 && share_bps > 0,
+        "backing domain fee split covers large lien fee routing"
     );
     kani::cover!(
         unaligned,
