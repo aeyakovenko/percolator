@@ -14582,6 +14582,16 @@ fn proof_v16_principal_then_domain_insurance_waterfall_is_loss_and_domain_capped
         market.header.insurance_domain_budget_remaining_total.get(),
         remaining_before - expected_insurance
     );
+    assert_eq!(remaining_before, budget + other_budget);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        budget - expected_insurance + other_budget
+    );
+    assert!(market.header.insurance.get() >= other_budget);
+    assert!(
+        market.header.insurance.get()
+            >= market.header.insurance_domain_budget_remaining_total.get()
+    );
     assert_eq!(
         market.markets[0].engine.insurance_domain_spent_short.get(),
         expected_insurance
