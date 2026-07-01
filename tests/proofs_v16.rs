@@ -22495,8 +22495,6 @@ fn proof_v16_validator_sound_source_insurance_reserved_total_matches_slots() {
     let slack_raw: u8 = kani::any();
     let stale_header_total: bool = kani::any();
     let stale_understates_slots: bool = kani::any();
-    kani::assume(long_reserved_raw <= 12);
-    kani::assume(short_reserved_raw <= 12);
 
     let long_reserved = long_reserved_raw as u128;
     let short_reserved = short_reserved_raw as u128;
@@ -22559,8 +22557,8 @@ fn proof_v16_validator_sound_source_insurance_reserved_total_matches_slots() {
         "source-insurance aggregate validator covers two reserved source domains"
     );
     kani::cover!(
-        result.is_ok() && !stale_header_total && long_reserved > 8 && short_reserved > 8,
-        "source-insurance aggregate validator covers larger two-domain reservations"
+        result.is_ok() && !stale_header_total && long_reserved > 128 && short_reserved > 128,
+        "source-insurance aggregate validator covers large two-domain reservations"
     );
     kani::cover!(
         result.is_ok() && !stale_header_total && long_reserved > 0 && short_reserved == 0,
@@ -22577,8 +22575,8 @@ fn proof_v16_validator_sound_source_insurance_reserved_total_matches_slots() {
         result == Err(V16Error::InvalidConfig)
             && stale_header_total
             && !stale_understates_slots
-            && expected_reserved > 8,
-        "source-insurance aggregate validator rejects larger over-reported header reservation"
+            && expected_reserved > 256,
+        "source-insurance aggregate validator rejects large over-reported header reservation"
     );
     kani::cover!(
         result == Err(V16Error::InvalidConfig)
@@ -22591,8 +22589,8 @@ fn proof_v16_validator_sound_source_insurance_reserved_total_matches_slots() {
         result == Err(V16Error::InvalidConfig)
             && stale_header_total
             && stale_understates_slots
-            && expected_reserved > 8,
-        "source-insurance aggregate validator rejects larger under-reported header reservation"
+            && expected_reserved > 256,
+        "source-insurance aggregate validator rejects large under-reported header reservation"
     );
 
     assert_eq!(result.is_ok(), !stale_header_total);
