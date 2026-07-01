@@ -16032,6 +16032,18 @@ fn proof_v16_crank_reward_then_domain_budget_credit_cannot_double_allocate_retai
         "retained insurance split covers nonzero reward plus target and base budget credits"
     );
     kani::cover!(
+        target_remaining > 128
+            && base_remaining > 128
+            && other_remaining > 128
+            && retained > 128
+            && c_tot > 128
+            && capital > 128
+            && reward > 0
+            && target_credit > 0
+            && redirect > 0,
+        "retained insurance split covers large existing budgets with reward and dual-domain credits"
+    );
+    kani::cover!(
         reward == 0 && target_credit == retained && redirect == 0,
         "retained insurance split covers pure selected-domain budget credit"
     );
