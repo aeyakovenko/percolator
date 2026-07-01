@@ -18901,6 +18901,88 @@ fn proof_v16_validator_sound_senior_backing_and_domain_insurance_caps() {
     assert!(reserved <= budget);
 }
 
+// Validator soundness for per-domain insurance-budget isolation: the header
+// aggregate accepted by validate_shape() must be exactly the sum of each
+// persisted domain budget less spent. This is the broad anti-leak theorem for
+// the pooled-vault/domain-budget split: stale or inflated header capacity is
+// rejected even when the global insurance stock can cover the inflated number.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_domain_budget_remaining_total_matches_slots() {
+    let long_budget_raw: u8 = kani::any();
+    let long_spent_raw: u8 = kani::any();
+    let short_budget_raw: u8 = kani::any();
+    let short_spent_raw: u8 = kani::any();
+    let slack_raw: u8 = kani::any();
+    let stale_header_total: bool = kani::any();
+    kani::assume(long_budget_raw <= 8);
+    kani::assume(short_budget_raw <= 8);
+    kani::assume(long_spent_raw <= long_budget_raw);
+    kani::assume(short_spent_raw <= short_budget_raw);
+
+    let long_budget = long_budget_raw as u128;
+    let long_spent = long_spent_raw as u128;
+    let short_budget = short_budget_raw as u128;
+    let short_spent = short_spent_raw as u128;
+    let expected_remaining = (long_budget - long_spent) + (short_budget - short_spent);
+    let reported_remaining = if stale_header_total {
+        expected_remaining + 1
+    } else {
+        expected_remaining
+    };
+    let insurance = reported_remaining + slack_raw as u128;
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(reported_remaining);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_budget);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(long_spent);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_budget);
+    markets[0].engine.insurance_domain_spent_short = V16PodU128::new(short_spent);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+    kani::cover!(
+        result.is_ok()
+            && !stale_header_total
+            && long_budget > long_spent
+            && short_budget > short_spent,
+        "domain-budget aggregate validator covers two funded isolated domains"
+    );
+    kani::cover!(
+        result.is_ok()
+            && !stale_header_total
+            && long_budget > long_spent
+            && short_budget == short_spent,
+        "domain-budget aggregate validator covers a single funded domain with an empty peer"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && expected_remaining > 0
+            && insurance >= reported_remaining,
+        "domain-budget aggregate validator rejects stale inflated header capacity despite global insurance"
+    );
+
+    assert_eq!(result.is_ok(), !stale_header_total);
+    if result.is_ok() {
+        assert_eq!(
+            market.header.insurance_domain_budget_remaining_total.get(),
+            expected_remaining
+        );
+        assert!(market.header.insurance_domain_budget_remaining_total.get() <= insurance);
+        assert_eq!(
+            market.header.insurance_domain_budget_remaining_total.get(),
+            (market.markets[0].engine.insurance_domain_budget_long.get()
+                - market.markets[0].engine.insurance_domain_spent_long.get())
+                + (market.markets[0].engine.insurance_domain_budget_short.get()
+                    - market.markets[0].engine.insurance_domain_spent_short.get())
+        );
+    }
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
