@@ -22346,8 +22346,6 @@ fn proof_v16_validator_sound_source_fresh_backing_total_matches_slots() {
     let slack_raw: u8 = kani::any();
     let stale_header_total: bool = kani::any();
     let stale_understates_slots: bool = kani::any();
-    kani::assume(long_backing_raw <= 12);
-    kani::assume(short_backing_raw <= 12);
 
     let long_backing_num = (long_backing_raw as u128) * BOUND_SCALE;
     let short_backing_num = (short_backing_raw as u128) * BOUND_SCALE;
@@ -22414,9 +22412,9 @@ fn proof_v16_validator_sound_source_fresh_backing_total_matches_slots() {
     kani::cover!(
         result.is_ok()
             && !stale_header_total
-            && long_backing_num > 8 * BOUND_SCALE
-            && short_backing_num > 8 * BOUND_SCALE,
-        "fresh-backing aggregate validator covers larger two-domain source backing"
+            && long_backing_num > 128 * BOUND_SCALE
+            && short_backing_num > 128 * BOUND_SCALE,
+        "fresh-backing aggregate validator covers large two-domain source backing"
     );
     kani::cover!(
         result.is_ok() && !stale_header_total && long_backing_num > 0 && short_backing_num == 0,
@@ -22433,8 +22431,8 @@ fn proof_v16_validator_sound_source_fresh_backing_total_matches_slots() {
         result == Err(V16Error::InvalidConfig)
             && stale_header_total
             && !stale_understates_slots
-            && expected_total_num > 8 * BOUND_SCALE,
-        "fresh-backing aggregate validator rejects larger over-reported header backing"
+            && expected_total_num > 256 * BOUND_SCALE,
+        "fresh-backing aggregate validator rejects large over-reported header backing"
     );
     kani::cover!(
         result == Err(V16Error::InvalidConfig)
@@ -22447,8 +22445,8 @@ fn proof_v16_validator_sound_source_fresh_backing_total_matches_slots() {
         result == Err(V16Error::InvalidConfig)
             && stale_header_total
             && stale_understates_slots
-            && expected_total_num > 8 * BOUND_SCALE,
-        "fresh-backing aggregate validator rejects larger under-reported header backing"
+            && expected_total_num > 256 * BOUND_SCALE,
+        "fresh-backing aggregate validator rejects large under-reported header backing"
     );
 
     assert_eq!(result.is_ok(), !stale_header_total);
