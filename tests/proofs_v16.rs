@@ -19252,6 +19252,115 @@ fn proof_v16_validator_sound_source_insurance_reserved_total_matches_slots() {
     }
 }
 
+// Validator soundness for resolved-payout liveness/safety blockers: an accepted
+// header count must exactly equal the blockers persisted in each market slot.
+// This bridges the aggregate gate used by resolved payout classification with
+// the slot-local counters that can still require crank/settlement progress.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_resolved_payout_blocker_count_matches_slots() {
+    let stored_long_raw: u8 = kani::any();
+    let stored_short_raw: u8 = kani::any();
+    let stale_long_raw: u8 = kani::any();
+    let stale_short_raw: u8 = kani::any();
+    let pending_long: bool = kani::any();
+    let pending_short: bool = kani::any();
+    let stale_header_count: bool = kani::any();
+    let stale_understates_slots: bool = kani::any();
+    kani::assume(stored_long_raw <= 8);
+    kani::assume(stored_short_raw <= 8);
+    kani::assume(stale_long_raw <= 8);
+    kani::assume(stale_short_raw <= 8);
+
+    let stored_long = stored_long_raw as u64;
+    let stored_short = stored_short_raw as u64;
+    let stale_long = stale_long_raw as u64;
+    let stale_short = stale_short_raw as u64;
+    let barrier_long = pending_long as u64;
+    let barrier_short = pending_short as u64;
+    let expected_count =
+        stored_long + stored_short + stale_long + stale_short + barrier_long + barrier_short;
+    let reported_count = if stale_header_count {
+        if stale_understates_slots && expected_count > 0 {
+            expected_count - 1
+        } else {
+            expected_count + 1
+        }
+    } else {
+        expected_count
+    };
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.resolved_payout_blocker_count = V16PodU64::new(reported_count);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.stored_pos_count_long = stored_long;
+    asset.stored_pos_count_short = stored_short;
+    asset.stale_account_count_long = stale_long;
+    asset.stale_account_count_short = stale_short;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(barrier_long);
+    markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(barrier_short);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+    kani::cover!(
+        result.is_ok()
+            && !stale_header_count
+            && stored_long > 0
+            && stored_short > 0
+            && stale_long > 0
+            && stale_short > 0
+            && pending_long
+            && pending_short,
+        "resolved-payout blocker aggregate covers all slot blocker classes"
+    );
+    kani::cover!(
+        result.is_ok()
+            && !stale_header_count
+            && stored_long == 0
+            && stored_short == 0
+            && stale_long == 0
+            && stale_short == 0
+            && pending_long
+            && !pending_short,
+        "resolved-payout blocker aggregate covers pending-domain-loss-only blocker"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_count
+            && !stale_understates_slots
+            && expected_count > 0,
+        "resolved-payout blocker aggregate rejects over-reported header blockers"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_count
+            && stale_understates_slots
+            && expected_count > 0,
+        "resolved-payout blocker aggregate rejects under-reported header blockers"
+    );
+
+    assert_eq!(result.is_ok(), !stale_header_count);
+    if result.is_ok() {
+        let slot = &market.markets[0].engine;
+        let persisted_count = slot.asset.stored_pos_count_long.get()
+            + slot.asset.stored_pos_count_short.get()
+            + slot.asset.stale_account_count_long.get()
+            + slot.asset.stale_account_count_short.get()
+            + slot.pending_domain_loss_barrier_long.get()
+            + slot.pending_domain_loss_barrier_short.get();
+        assert_eq!(
+            market.header.resolved_payout_blocker_count.get(),
+            expected_count
+        );
+        assert_eq!(
+            market.header.resolved_payout_blocker_count.get(),
+            persisted_count
+        );
+    }
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
