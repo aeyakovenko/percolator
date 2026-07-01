@@ -113,6 +113,35 @@ pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
     )
 }
 
+pub fn kani_liquidation_progress_from_score_parts(
+    before_certified_liq_deficit: u128,
+    before_unsettled_b_loss_bound: u128,
+    before_stale_loss_bound: u128,
+    before_gross_risk_notional: u128,
+    before_active_leg_count: u32,
+    after_certified_liq_deficit: u128,
+    after_unsettled_b_loss_bound: u128,
+    after_stale_loss_bound: u128,
+    after_gross_risk_notional: u128,
+    after_active_leg_count: u32,
+) -> bool {
+    let before = RiskScoreV16 {
+        certified_liq_deficit: before_certified_liq_deficit,
+        unsettled_b_loss_bound: before_unsettled_b_loss_bound,
+        stale_loss_bound: before_stale_loss_bound,
+        gross_risk_notional: before_gross_risk_notional,
+        active_leg_count: before_active_leg_count,
+    };
+    let after = RiskScoreV16 {
+        certified_liq_deficit: after_certified_liq_deficit,
+        unsettled_b_loss_bound: after_unsettled_b_loss_bound,
+        stale_loss_bound: after_stale_loss_bound,
+        gross_risk_notional: after_gross_risk_notional,
+        active_leg_count: after_active_leg_count,
+    };
+    V16Core::liquidation_progress_from_scores(before, after)
+}
+
 pub fn kani_add_open_interest_for_new_position(
     asset: &mut AssetStateV16,
     side: SideV16,

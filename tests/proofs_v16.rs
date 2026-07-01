@@ -22,9 +22,10 @@ use percolator::v16::{
     kani_kernel_settle_principal, kani_kernel_settle_resolved_pnl_after_booking,
     kani_kernel_social_loss_chunk_cap, kani_kernel_trade_admit,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
-    kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
-    kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
-    kani_project_auto_crank_selected_assets, kani_risk_notional_ceil, kani_select_auto_crank_plan,
+    kani_liquidation_progress_from_score_parts, kani_loss_stale_trade_scope_allowed,
+    kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
+    kani_prepare_asset_recovery_transition, kani_project_auto_crank_selected_assets,
+    kani_risk_notional_ceil, kani_select_auto_crank_plan,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
     kani_trade_fee_atoms_per_side, kani_trade_notional_floor, kani_trade_preflight_risk_gate,
     kani_validate_positive_pnl_source_attribution, v16_domain_count_for_market_slots,
@@ -4628,6 +4629,125 @@ fn proof_v16_rebalance_reduce_kernel_preserves_balanced_oi_and_passes_barrier_ga
     assert_eq!(long_oi_after, short_oi_after);
     assert_eq!(long_oi_after, remaining);
     assert!(long_oi_after < pre_abs);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_progress_gate_is_exact_lexicographic_risk_decrease() {
+    let before_def_raw: u8 = kani::any();
+    let before_b_raw: u8 = kani::any();
+    let before_stale_raw: u8 = kani::any();
+    let before_notional_raw: u8 = kani::any();
+    let before_legs_raw: u8 = kani::any();
+    let after_def_raw: u8 = kani::any();
+    let after_b_raw: u8 = kani::any();
+    let after_stale_raw: u8 = kani::any();
+    let after_notional_raw: u8 = kani::any();
+    let after_legs_raw: u8 = kani::any();
+    kani::assume(before_def_raw <= 4);
+    kani::assume(before_b_raw <= 4);
+    kani::assume(before_stale_raw <= 1);
+    kani::assume(before_notional_raw <= 4);
+    kani::assume(before_legs_raw <= 4);
+    kani::assume(after_def_raw <= 4);
+    kani::assume(after_b_raw <= 4);
+    kani::assume(after_stale_raw <= 1);
+    kani::assume(after_notional_raw <= 4);
+    kani::assume(after_legs_raw <= 4);
+
+    let before_def = before_def_raw as u128;
+    let before_b = before_b_raw as u128;
+    let before_stale = before_stale_raw as u128;
+    let before_notional = before_notional_raw as u128;
+    let before_legs = before_legs_raw as u32;
+    let after_def = after_def_raw as u128;
+    let after_b = after_b_raw as u128;
+    let after_stale = after_stale_raw as u128;
+    let after_notional = after_notional_raw as u128;
+    let after_legs = after_legs_raw as u32;
+
+    let progress = kani_liquidation_progress_from_score_parts(
+        before_def,
+        before_b,
+        before_stale,
+        before_notional,
+        before_legs,
+        after_def,
+        after_b,
+        after_stale,
+        after_notional,
+        after_legs,
+    );
+    let expected = (after_def, after_b, after_stale, after_notional, after_legs)
+        < (
+            before_def,
+            before_b,
+            before_stale,
+            before_notional,
+            before_legs,
+        );
+
+    kani::cover!(
+        progress && after_def < before_def && after_notional > before_notional,
+        "liquidation progress gate accepts deficit reduction even if later risk components increase"
+    );
+    kani::cover!(
+        progress && after_def == before_def && after_b < before_b,
+        "liquidation progress gate accepts unsettled-B-loss reduction"
+    );
+    kani::cover!(
+        progress && after_def == before_def && after_b == before_b && after_stale < before_stale,
+        "liquidation progress gate accepts stale-loss reduction"
+    );
+    kani::cover!(
+        progress
+            && after_def == before_def
+            && after_b == before_b
+            && after_stale == before_stale
+            && after_notional < before_notional,
+        "liquidation progress gate accepts gross-risk-notional reduction"
+    );
+    kani::cover!(
+        progress
+            && after_def == before_def
+            && after_b == before_b
+            && after_stale == before_stale
+            && after_notional == before_notional
+            && after_legs < before_legs,
+        "liquidation progress gate accepts active-leg-count reduction"
+    );
+    kani::cover!(
+        !progress
+            && after_def == before_def
+            && after_b == before_b
+            && after_stale == before_stale
+            && after_notional == before_notional
+            && after_legs == before_legs,
+        "liquidation progress gate rejects exact no-op score"
+    );
+    kani::cover!(
+        !progress && after_def > before_def,
+        "liquidation progress gate rejects worse leading deficit"
+    );
+
+    assert_eq!(progress, expected);
+    if progress {
+        assert!(
+            after_def < before_def
+                || (after_def == before_def && after_b < before_b)
+                || (after_def == before_def && after_b == before_b && after_stale < before_stale)
+                || (after_def == before_def
+                    && after_b == before_b
+                    && after_stale == before_stale
+                    && after_notional < before_notional)
+                || (after_def == before_def
+                    && after_b == before_b
+                    && after_stale == before_stale
+                    && after_notional == before_notional
+                    && after_legs < before_legs)
+        );
+    }
 }
 
 #[kani::proof]
