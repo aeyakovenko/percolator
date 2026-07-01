@@ -11261,6 +11261,117 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     assert_eq!(understated_rejected, Err(V16Error::InvalidLeg));
 }
 
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_close_ledger_advance_preserves_reserved_zero_drift_and_identity() {
+    let close_id_raw: u8 = kani::any();
+    let asset_index_raw: u8 = kani::any();
+    let market_id_raw: u8 = kani::any();
+    let gross_raw: u8 = kani::any();
+    let prior_support_raw: u8 = kani::any();
+    let prior_insurance_raw: u8 = kani::any();
+    let prior_b_loss_raw: u8 = kani::any();
+    let prior_explicit_raw: u8 = kani::any();
+    let add_support_raw: u8 = kani::any();
+    let add_insurance_raw: u8 = kani::any();
+    let add_b_loss_raw: u8 = kani::any();
+    let add_explicit_raw: u8 = kani::any();
+    let side_is_long: bool = kani::any();
+    kani::assume(close_id_raw > 0);
+    kani::assume(asset_index_raw <= 8);
+    kani::assume(market_id_raw > 0);
+    kani::assume(gross_raw > 0);
+
+    let gross = gross_raw as u128;
+    let prior_support = prior_support_raw as u128;
+    let prior_insurance = prior_insurance_raw as u128;
+    let prior_b_loss = prior_b_loss_raw as u128;
+    let prior_explicit = prior_explicit_raw as u128;
+    let add_support = add_support_raw as u128;
+    let add_insurance = add_insurance_raw as u128;
+    let add_b_loss = add_b_loss_raw as u128;
+    let add_explicit = add_explicit_raw as u128;
+    let prior_progress = prior_support + prior_insurance + prior_b_loss + prior_explicit;
+    let delta = add_support + add_insurance + add_b_loss + add_explicit;
+    kani::assume(prior_progress <= gross);
+    kani::assume(delta <= gross - prior_progress);
+    kani::assume(delta > 0);
+
+    let ledger = CloseProgressLedgerV16 {
+        active: true,
+        finalized: false,
+        canceled: false,
+        close_id: close_id_raw as u64,
+        asset_index: asset_index_raw as u32,
+        market_id: market_id_raw as u64,
+        domain_side: if side_is_long {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
+        gross_loss_at_close_start: gross,
+        drift_reference_slot: 3,
+        max_close_slot: 9,
+        support_consumed: prior_support,
+        junior_face_burned: prior_support,
+        insurance_spent: prior_insurance,
+        b_loss_booked: prior_b_loss,
+        explicit_loss_assigned: prior_explicit,
+        drift_consumed: 0,
+        residual_remaining: gross - prior_progress,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+
+    let advanced = kani_kernel_advance_close_ledger(
+        ledger,
+        add_support,
+        add_support,
+        add_insurance,
+        add_b_loss,
+        add_explicit,
+    )
+    .unwrap();
+
+    kani::cover!(
+        add_support > 0 && add_insurance > 0,
+        "close ledger advance covers mixed support and insurance progress"
+    );
+    kani::cover!(
+        add_b_loss > 0 && add_explicit > 0,
+        "close ledger advance covers mixed b-loss and explicit-loss progress"
+    );
+    kani::cover!(
+        delta == gross - prior_progress,
+        "close ledger advance covers exact finalizing progress"
+    );
+    kani::cover!(
+        !side_is_long && asset_index_raw > 1 && market_id_raw > 1,
+        "close ledger advance covers nondefault identity fields"
+    );
+    assert_eq!(advanced.close_id, ledger.close_id);
+    assert_eq!(advanced.asset_index, ledger.asset_index);
+    assert_eq!(advanced.market_id, ledger.market_id);
+    assert_eq!(advanced.domain_side, ledger.domain_side);
+    assert_eq!(advanced.drift_reference_slot, ledger.drift_reference_slot);
+    assert_eq!(advanced.max_close_slot, ledger.max_close_slot);
+    assert_eq!(
+        advanced.gross_loss_at_close_start,
+        ledger.gross_loss_at_close_start
+    );
+    assert_eq!(advanced.drift_consumed, 0);
+    assert_eq!(advanced.support_consumed, prior_support + add_support);
+    assert_eq!(advanced.junior_face_burned, prior_support + add_support);
+    assert_eq!(advanced.insurance_spent, prior_insurance + add_insurance);
+    assert_eq!(advanced.b_loss_booked, prior_b_loss + add_b_loss);
+    assert_eq!(
+        advanced.explicit_loss_assigned,
+        prior_explicit + add_explicit
+    );
+    assert_eq!(advanced.residual_remaining, gross - prior_progress - delta);
+    assert_eq!(advanced.finalized, delta == gross - prior_progress);
+}
+
 // Spec req 24/25 guard seam: exposure clear is blocked exactly while a close
 // ledger has a live pending residual. The production `clear_leg` and
 // `forfeit_recovery_leg_not_atomic` paths call this predicate, so this pins the
