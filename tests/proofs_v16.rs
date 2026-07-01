@@ -21,29 +21,29 @@ use percolator::v16::{
     kani_kernel_trade_admit, kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
-    kani_project_auto_crank_selected_assets, kani_select_auto_crank_plan,
+    kani_project_auto_crank_selected_assets, kani_risk_notional_ceil, kani_select_auto_crank_plan,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    v16_domain_count_for_market_slots, v16_domain_pair_for_asset_index, ActionableSummaryV16,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
-    BResidualBookingOutcomeV16, BResidualStepV16, BackingBucketStatusV16, BackingBucketV16,
-    BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EconomicallyValidTradeV16, EngineAssetSlotV16Account,
-    HLockLaneV16, HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
-    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
-    PortfolioV16ViewMut, PositionRouteV16, ProvenanceHeaderV16, ProvenanceHeaderV16Account,
-    ResolvedCloseOutcomeV16, ResolvedCloseStepV16, ResolvedPayoutLedgerV16,
-    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
-    SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
-    StockReconciliationProofV16, TokenValueClassV16, TokenValueFlowProofV16, TradeGuardSummaryV16,
-    TradeRejectReasonV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
-    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
-    BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
-    PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
-    V16_TOKEN_VALUE_CLASS_COUNT,
+    kani_trade_notional_floor, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, v16_domain_count_for_market_slots,
+    v16_domain_pair_for_asset_index, ActionableSummaryV16, AssetLifecycleV16, AssetStateV16,
+    AssetStateV16Account, AutoCrankPlanV16, BResidualBookingOutcomeV16, BResidualStepV16,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EconomicallyValidTradeV16,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
+    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
+    PositionRouteV16, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    ResolvedCloseStepV16, ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account,
+    ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
+    SourceCreditStateV16, SourceCreditStateV16Account, StockReconciliationProofV16,
+    TokenValueClassV16, TokenValueFlowProofV16, TradeGuardSummaryV16, TradeRejectReasonV16,
+    TradeRequestV16, V16Config, V16ConfigAccount, V16Error, V16OptionalRecoveryReasonAccount,
+    V16PodI128, V16PodU128, V16PodU32, V16PodU64, BACKING_FEE_RATE_DEN_E9,
+    MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS, PORTFOLIO_SOURCE_DOMAIN_CAP,
+    V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N, V16_TOKEN_VALUE_CLASS_COUNT,
 };
 use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
@@ -19246,6 +19246,48 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     assert!(!needs_obs(&AutoCrankPlanV16::DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
     }));
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_notional_floor_is_bounded_by_fee_notional_ceil() {
+    let whole_raw: u8 = kani::any();
+    let dust_raw: u16 = kani::any();
+    let price_raw: u8 = kani::any();
+    kani::assume(price_raw > 0 && price_raw <= 16);
+    let size_q = (whole_raw as u128) * POS_SCALE + dust_raw as u128;
+    let price = price_raw as u64;
+    let product = size_q * price as u128;
+
+    let floor_notional = kani_trade_notional_floor(size_q, price).unwrap();
+    let ceil_notional = kani_risk_notional_ceil(size_q, price).unwrap();
+    let expected_floor = product / POS_SCALE;
+    let expected_ceil = if product == 0 {
+        0
+    } else {
+        (product + POS_SCALE - 1) / POS_SCALE
+    };
+
+    kani::cover!(
+        whole_raw == 0 && dust_raw > 0,
+        "trade notional relation covers sub-atom fill"
+    );
+    kani::cover!(
+        whole_raw > 0 && dust_raw == 0,
+        "trade notional relation covers exact whole-position fill"
+    );
+    kani::cover!(
+        whole_raw > 0 && dust_raw > 0,
+        "trade notional relation covers whole plus fractional fill"
+    );
+    assert_eq!(floor_notional, expected_floor);
+    assert_eq!(ceil_notional, expected_ceil);
+    assert!(floor_notional <= ceil_notional);
+    assert!(ceil_notional - floor_notional <= 1);
+    if product % POS_SCALE != 0 {
+        assert_eq!(ceil_notional, floor_notional + 1);
+    }
 }
 
 // LoF — no free open interest: a risk-increasing fill with nonzero size, nonzero
