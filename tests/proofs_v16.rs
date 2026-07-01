@@ -6317,6 +6317,165 @@ fn proof_v16_batch_signed_fee_reconstruction_matches_engine_aggregate() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_batch_signed_fee_reconstruction_three_legs_matches_engine_aggregate() {
+    let first_account_long0: bool = kani::any();
+    let first_account_long1: bool = kani::any();
+    let first_account_long2: bool = kani::any();
+    let whole0_raw: u8 = kani::any();
+    let whole1_raw: u8 = kani::any();
+    let whole2_raw: u8 = kani::any();
+    let dust0_raw: u16 = kani::any();
+    let dust1_raw: u16 = kani::any();
+    let dust2_raw: u16 = kani::any();
+    let price0_raw: u8 = kani::any();
+    let price1_raw: u8 = kani::any();
+    let price2_raw: u8 = kani::any();
+    let fee_bps0_raw: u16 = kani::any();
+    let fee_bps1_raw: u16 = kani::any();
+    let fee_bps2_raw: u16 = kani::any();
+    kani::assume(whole0_raw <= 4);
+    kani::assume(whole1_raw <= 4);
+    kani::assume(whole2_raw <= 4);
+    kani::assume(dust0_raw <= 32);
+    kani::assume(dust1_raw <= 32);
+    kani::assume(dust2_raw <= 32);
+    kani::assume(price0_raw > 0 && price0_raw <= 16);
+    kani::assume(price1_raw > 0 && price1_raw <= 16);
+    kani::assume(price2_raw > 0 && price2_raw <= 16);
+    kani::assume(fee_bps0_raw <= 10_000);
+    kani::assume(fee_bps1_raw <= 10_000);
+    kani::assume(fee_bps2_raw <= 10_000);
+
+    let size0 = whole0_raw as u128 * POS_SCALE + dust0_raw as u128;
+    let size1 = whole1_raw as u128 * POS_SCALE + dust1_raw as u128;
+    let size2 = whole2_raw as u128 * POS_SCALE + dust2_raw as u128;
+    kani::assume(size0 > 0);
+    kani::assume(size1 > 0);
+    kani::assume(size2 > 0);
+    let signed0 = if first_account_long0 {
+        size0 as i128
+    } else {
+        -(size0 as i128)
+    };
+    let signed1 = if first_account_long1 {
+        size1 as i128
+    } else {
+        -(size1 as i128)
+    };
+    let signed2 = if first_account_long2 {
+        size2 as i128
+    } else {
+        -(size2 as i128)
+    };
+
+    let (abs0, delta_a0, delta_b0) =
+        MarketGroupV16ViewMut::<u64>::kani_trade_signed_size_deltas(signed0).unwrap();
+    let (abs1, delta_a1, delta_b1) =
+        MarketGroupV16ViewMut::<u64>::kani_trade_signed_size_deltas(signed1).unwrap();
+    let (abs2, delta_a2, delta_b2) =
+        MarketGroupV16ViewMut::<u64>::kani_trade_signed_size_deltas(signed2).unwrap();
+    let price0 = price0_raw as u64;
+    let price1 = price1_raw as u64;
+    let price2 = price2_raw as u64;
+    let fee_bps0 = fee_bps0_raw as u64;
+    let fee_bps1 = fee_bps1_raw as u64;
+    let fee_bps2 = fee_bps2_raw as u64;
+    let notional0 = kani_trade_notional_floor(abs0, price0).unwrap();
+    let notional1 = kani_trade_notional_floor(abs1, price1).unwrap();
+    let notional2 = kani_trade_notional_floor(abs2, price2).unwrap();
+    let fee0 = kani_trade_fee_atoms_per_side(abs0, price0, fee_bps0).unwrap();
+    let fee1 = kani_trade_fee_atoms_per_side(abs1, price1, fee_bps1).unwrap();
+    let fee2 = kani_trade_fee_atoms_per_side(abs2, price2, fee_bps2).unwrap();
+
+    let mut outcome = BatchTradeOutcomeV16 {
+        fill_count: 0,
+        fee_a: 0,
+        fee_b: 0,
+        notional: 0,
+    };
+    let mut risk_increasing = false;
+    let mut long_has_source_claims = false;
+    let mut short_has_source_claims = false;
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome,
+        &mut risk_increasing,
+        &mut long_has_source_claims,
+        &mut short_has_source_claims,
+        fee0,
+        fee0,
+        notional0,
+        delta_a0 != 0,
+        false,
+        false,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome,
+        &mut risk_increasing,
+        &mut long_has_source_claims,
+        &mut short_has_source_claims,
+        fee1,
+        fee1,
+        notional1,
+        delta_a1 != 0,
+        false,
+        false,
+    )
+    .unwrap();
+    MarketGroupV16ViewMut::<u64>::kani_accumulate_batch_trade_apply(
+        &mut outcome,
+        &mut risk_increasing,
+        &mut long_has_source_claims,
+        &mut short_has_source_claims,
+        fee2,
+        fee2,
+        notional2,
+        delta_a2 != 0,
+        false,
+        false,
+    )
+    .unwrap();
+
+    let fee_sum = fee0.checked_add(fee1).unwrap().checked_add(fee2).unwrap();
+    let reconstructed_total = fee_sum.checked_add(fee_sum).unwrap();
+    let engine_total = outcome.fee_a.checked_add(outcome.fee_b).unwrap();
+
+    kani::cover!(
+        first_account_long0 != first_account_long1
+            && first_account_long1 != first_account_long2
+            && fee0 > 0
+            && fee1 > 0
+            && fee2 > 0,
+        "three-leg fee reconstruction covers alternating signed spread with positive fees"
+    );
+    kani::cover!(
+        whole2_raw == 0 && dust2_raw > 0 && fee_bps2_raw > 0 && fee2 > 0,
+        "three-leg fee reconstruction covers sub-atom third fill with nonzero fee"
+    );
+    kani::cover!(
+        fee_bps1_raw == 0 && fee1 == 0 && fee0 > 0 && fee2 > 0,
+        "three-leg fee reconstruction covers zero-fee middle leg beside fee-paying legs"
+    );
+
+    assert_eq!(abs0, size0);
+    assert_eq!(abs1, size1);
+    assert_eq!(abs2, size2);
+    assert_eq!(delta_a0.checked_add(delta_b0), Some(0));
+    assert_eq!(delta_a1.checked_add(delta_b1), Some(0));
+    assert_eq!(delta_a2.checked_add(delta_b2), Some(0));
+    assert_eq!(outcome.fill_count, 3);
+    assert_eq!(outcome.fee_a, fee_sum);
+    assert_eq!(outcome.fee_b, fee_sum);
+    assert_eq!(outcome.notional, notional0 + notional1 + notional2);
+    assert_eq!(engine_total, reconstructed_total);
+    assert_eq!(long_has_source_claims, false);
+    assert_eq!(short_has_source_claims, false);
+    assert_eq!(risk_increasing, true);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_final_batch_margin_gate_accepts_only_final_certified_im() {
     let equity: i128 = kani::any();
     let req: u128 = kani::any();
