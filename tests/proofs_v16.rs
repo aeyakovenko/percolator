@@ -11863,6 +11863,180 @@ fn proof_v16_empty_asset_accrual_uses_per_asset_segment_dt_and_preserves_value()
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_domain_barrier_does_not_block_asset_wide_accrual_or_move_value() {
+    let max_dt_raw: u8 = kani::any();
+    let now_delta_raw: u8 = kani::any();
+    let price_raw: u8 = kani::any();
+    let barrier_long_present: bool = kani::any();
+    let barrier_short_present: bool = kani::any();
+    let c_tot_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    let surplus_raw: u16 = kani::any();
+    kani::assume((1..=8).contains(&max_dt_raw));
+    kani::assume(now_delta_raw <= 16);
+    kani::assume((80..=120).contains(&price_raw));
+    kani::assume(barrier_long_present || barrier_short_present);
+    kani::assume(c_tot_raw <= 1024);
+    kani::assume(insurance_raw <= 1024);
+    kani::assume(surplus_raw <= 1024);
+
+    let max_dt = max_dt_raw as u64;
+    let now_delta = now_delta_raw as u64;
+    let price = price_raw as u64;
+    let c_tot = c_tot_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.config.max_accrual_dt_slots = V16PodU64::new(max_dt);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(max_dt);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(1);
+    header.config.max_abs_funding_e9_per_slot = V16PodU64::new(0);
+    header.config.maintenance_margin_bps = V16PodU64::new(MAX_MARGIN_BPS as u64);
+    header.config.initial_margin_bps = V16PodU64::new(MAX_MARGIN_BPS as u64);
+    header.config.liquidation_fee_bps = V16PodU64::new(0);
+    header.config.min_liquidation_abs = V16PodU128::new(0);
+    header.config.liquidation_fee_cap = V16PodU128::new(0);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+
+    let mut asset_before = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset_before.slot_last = 7;
+    asset_before.effective_price = 100;
+    asset_before.fund_px_last = 100;
+    asset_before.raw_oracle_target_price = 100;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset_before);
+    markets[0].engine.pending_domain_loss_barrier_long =
+        V16PodU64::new(barrier_long_present as u64);
+    markets[0].engine.pending_domain_loss_barrier_short =
+        V16PodU64::new(barrier_short_present as u64);
+    header.current_slot = V16PodU64::new(asset_before.slot_last);
+    header.slot_last = V16PodU64::new(asset_before.slot_last);
+
+    let source_credit_long_before = markets[0].engine.source_credit_long;
+    let source_credit_short_before = markets[0].engine.source_credit_short;
+    let backing_long_before = markets[0].engine.backing_long;
+    let backing_short_before = markets[0].engine.backing_short;
+    let insurance_reservation_long_before = markets[0].engine.insurance_reservation_long;
+    let insurance_reservation_short_before = markets[0].engine.insurance_reservation_short;
+    let insurance_domain_budget_long_before = markets[0].engine.insurance_domain_budget_long;
+    let insurance_domain_budget_short_before = markets[0].engine.insurance_domain_budget_short;
+    let insurance_domain_spent_long_before = markets[0].engine.insurance_domain_spent_long;
+    let insurance_domain_spent_short_before = markets[0].engine.insurance_domain_spent_short;
+    let oracle_epoch_before = header.oracle_epoch;
+    let funding_epoch_before = header.funding_epoch;
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+
+    let now_slot = asset_before.slot_last + now_delta;
+    let expected_dt = now_delta.min(max_dt);
+    let expected_asset_slot = asset_before.slot_last + expected_dt;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let outcome = market
+        .accrue_asset_to_not_atomic(0, now_slot, price, 0, false)
+        .unwrap();
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        barrier_long_present && now_delta > 0 && price != asset_before.effective_price,
+        "domain barrier proof covers long-domain barrier with nontrivial oracle accrual"
+    );
+    kani::cover!(
+        barrier_short_present && now_delta > max_dt && c_tot > 0 && insurance > 0,
+        "domain barrier proof covers short-domain barrier with stale clamped catchup"
+    );
+    kani::cover!(
+        barrier_long_present && barrier_short_present && now_delta == 0,
+        "domain barrier proof covers both barriers with same-slot anchor update"
+    );
+
+    assert_eq!(outcome.dt, expected_dt);
+    assert!(!outcome.price_move_active);
+    assert!(!outcome.funding_active);
+    assert!(!outcome.equity_active);
+    assert_eq!(outcome.loss_stale_after, expected_asset_slot < now_slot);
+    assert_eq!(asset_after.slot_last, expected_asset_slot);
+    assert_eq!(asset_after.effective_price, price);
+    assert_eq!(asset_after.fund_px_last, price);
+    assert_eq!(
+        asset_after.k_long,
+        asset_before.k_long
+            + (price as i128 - asset_before.effective_price as i128) * ADL_ONE as i128
+    );
+    assert_eq!(
+        asset_after.k_short,
+        asset_before.k_short
+            - (price as i128 - asset_before.effective_price as i128) * ADL_ONE as i128
+    );
+    assert_eq!(asset_after.f_long_num, asset_before.f_long_num);
+    assert_eq!(asset_after.f_short_num, asset_before.f_short_num);
+    assert_eq!(market.header.current_slot.get(), now_slot);
+    assert_eq!(market.header.slot_last.get(), expected_asset_slot);
+    assert_eq!(
+        market.header.loss_stale_active,
+        if expected_asset_slot < now_slot { 1 } else { 0 }
+    );
+    assert_eq!(market.header.oracle_epoch, oracle_epoch_before);
+    assert_eq!(market.header.funding_epoch, funding_epoch_before);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_long
+            .get(),
+        barrier_long_present as u64
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_short
+            .get(),
+        barrier_short_present as u64
+    );
+    assert_eq!(
+        market.markets[0].engine.source_credit_long,
+        source_credit_long_before
+    );
+    assert_eq!(
+        market.markets[0].engine.source_credit_short,
+        source_credit_short_before
+    );
+    assert_eq!(market.markets[0].engine.backing_long, backing_long_before);
+    assert_eq!(market.markets[0].engine.backing_short, backing_short_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_reservation_long,
+        insurance_reservation_long_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_reservation_short,
+        insurance_reservation_short_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long,
+        insurance_domain_budget_long_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short,
+        insurance_domain_budget_short_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long,
+        insurance_domain_spent_long_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short,
+        insurance_domain_spent_short_before
+    );
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation() {
     let price_delta_raw: u8 = kani::any();
     kani::assume(price_delta_raw > 0);
