@@ -19360,8 +19360,8 @@ fn proof_v16_seq_double_crank_is_monotone_and_value_flat() {
 fn proof_v16_seq_budget_credit_then_withdraw_caps_compose() {
     let budget_raw: u8 = kani::any();
     let withdraw_raw: u8 = kani::any();
-    kani::assume(budget_raw >= 1 && budget_raw <= 6);
-    kani::assume(withdraw_raw >= 1 && withdraw_raw <= 6);
+    kani::assume(budget_raw >= 1 && budget_raw <= 48);
+    kani::assume(withdraw_raw >= 1 && withdraw_raw <= 48);
     let budget = budget_raw as u128;
     let withdraw = withdraw_raw as u128;
     kani::assume(withdraw <= budget);
@@ -19380,6 +19380,10 @@ fn proof_v16_seq_budget_credit_then_withdraw_caps_compose() {
 
     kani::cover!(withdraw < budget, "cap composition covers partial");
     kani::cover!(withdraw == budget, "cap composition covers full drain");
+    kani::cover!(
+        budget > 32 && withdraw > 16 && withdraw < budget,
+        "cap composition covers broader partial domain withdrawal"
+    );
     assert_eq!(market.header.vault.get(), budget - withdraw);
     assert_eq!(market.header.insurance.get(), budget - withdraw);
     assert_eq!(
