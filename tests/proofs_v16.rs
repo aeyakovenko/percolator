@@ -12003,6 +12003,86 @@ fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v16_resolved_payout_topup_core_touches_only_vault_and_receipt() {
+    let claimable_raw: u8 = kani::any();
+    let vault_raw: u8 = kani::any();
+    kani::assume((1..=64).contains(&claimable_raw));
+    kani::assume(vault_raw <= 64);
+    let claimable = claimable_raw as u128;
+    let vault = vault_raw as u128;
+    let paid_before = 2u128;
+    let terminal = paid_before + claimable;
+    let payout = claimable.min(vault);
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1;
+    header.vault = V16PodU128::new(vault);
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: terminal,
+            terminal_claim_exact_receipts_num: terminal * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: 1,
+            current_payout_rate_den: 1,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        });
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: terminal * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: terminal,
+            paid_effective: paid_before,
+            finalized: false,
+        });
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        assert_eq!(
+            market
+                .kani_claim_resolved_payout_topup_core_not_atomic(&mut account)
+                .unwrap(),
+            payout
+        );
+    }
+
+    kani::cover!(payout > 0, "resolved payout frame covers nonzero payout");
+    kani::cover!(
+        payout < claimable,
+        "resolved payout frame covers vault-capped payout"
+    );
+    kani::cover!(
+        payout == claimable,
+        "resolved payout frame covers full receipt payout"
+    );
+    let mut eh = h0;
+    eh.vault = V16PodU128::new(vault - payout);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    let mut ea = a0;
+    ea.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: terminal * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: terminal,
+            paid_effective: paid_before + payout,
+            finalized: payout == claimable,
+        });
+    assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v16_resolved_external_payout_requires_exact_capital_plus_claim_sources() {
     let capital_raw: u8 = kani::any();
     let resolved_raw: u8 = kani::any();
