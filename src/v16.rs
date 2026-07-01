@@ -1255,6 +1255,30 @@ impl V16Core {
         Ok((reduce_q, delta))
     }
 
+    pub(crate) fn kernel_reduce_matching_open_interest_after(
+        opp_oi_before: u128,
+        opp_a_before: u128,
+        close_q: u128,
+    ) -> V16Result<(u128, u128)> {
+        if close_q == 0 {
+            return Ok((opp_oi_before, opp_a_before));
+        }
+        if close_q > opp_oi_before {
+            return Err(V16Error::InvalidLeg);
+        }
+        let opp_oi_after = opp_oi_before - close_q;
+        let opp_a_after = if opp_oi_after == 0 {
+            ADL_ONE
+        } else {
+            let candidate = wide_mul_div_floor_u128(opp_a_before, opp_oi_after, opp_oi_before);
+            if candidate == 0 {
+                return Err(V16Error::RecoveryRequired);
+            }
+            candidate
+        };
+        Ok((opp_oi_after, opp_a_after))
+    }
+
     /// PRODUCTION KERNEL (engine.md asset self-selection): the bounded first-match
     /// leg/asset scan. Given a per-leg actionability flag array (the caller sets
     /// `flags[i]` to the production predicate for slot i — e.g. an active b-stale
@@ -13191,18 +13215,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if close_q > opp_oi_before {
             return Err(V16Error::InvalidLeg);
         }
-        let opp_oi_after = opp_oi_before - close_q;
-        let opp_a_after = if opp_oi_after == 0 {
-            ADL_ONE
-        } else {
-            let candidate = wide_mul_div_floor_u128(opp_a_before, opp_oi_after, opp_oi_before);
-            if candidate == 0 {
+        let (opp_oi_after, opp_a_after) = match V16Core::kernel_reduce_matching_open_interest_after(
+            opp_oi_before,
+            opp_a_before,
+            close_q,
+        ) {
+            Err(V16Error::RecoveryRequired) => {
                 self.declare_permissionless_recovery(
                     PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
                 )?;
                 return Err(V16Error::RecoveryRequired);
             }
-            candidate
+            other => other?,
         };
         match opp {
             SideV16::Long => {

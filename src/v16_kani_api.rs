@@ -249,6 +249,14 @@ pub fn kani_kernel_reduce_position_delta(
     V16Core::kernel_reduce_position_delta(pre_basis_signed, side, requested)
 }
 
+pub fn kani_kernel_reduce_matching_open_interest_after(
+    opp_oi_before: u128,
+    opp_a_before: u128,
+    close_q: u128,
+) -> V16Result<(u128, u128)> {
+    V16Core::kernel_reduce_matching_open_interest_after(opp_oi_before, opp_a_before, close_q)
+}
+
 pub fn kani_kernel_classify_position_delta(current: i128, new: i128) -> PositionRouteV16 {
     V16Core::kernel_classify_position_delta(current, new)
 }
@@ -637,6 +645,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
     ) -> V16Result<Option<usize>> {
         Self::active_leg_slot_for_asset(account, asset_index)
+    }
+
+    pub fn kani_reduce_matching_open_interest_for_unilateral_close(
+        &mut self,
+        asset_index: usize,
+        closed_side: SideV16,
+        close_q: u128,
+    ) -> V16Result<()> {
+        self.reduce_matching_open_interest_for_unilateral_close(asset_index, closed_side, close_q)
     }
 
     pub fn kani_route_empty_leg_slot(account: &PortfolioV16View<'_>) -> V16Result<usize> {

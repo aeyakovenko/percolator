@@ -18,11 +18,12 @@ use percolator::v16::{
     kani_kernel_bresidual_step, kani_kernel_cert_is_current, kani_kernel_classify_position_delta,
     kani_kernel_clear_leg, kani_kernel_consume_insurance_layer,
     kani_kernel_convert_clear_to_pending_obligation, kani_kernel_economically_valid_trade_admits,
-    kani_kernel_locked_margin_gate, kani_kernel_reduce_position_delta,
-    kani_kernel_resize_leg_same_side, kani_kernel_resolved_close_progress,
-    kani_kernel_resolved_payout_step, kani_kernel_settle_principal,
-    kani_kernel_settle_resolved_pnl_after_booking, kani_kernel_social_loss_chunk_cap,
-    kani_kernel_trade_admit, kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
+    kani_kernel_locked_margin_gate, kani_kernel_reduce_matching_open_interest_after,
+    kani_kernel_reduce_position_delta, kani_kernel_resize_leg_same_side,
+    kani_kernel_resolved_close_progress, kani_kernel_resolved_payout_step,
+    kani_kernel_settle_principal, kani_kernel_settle_resolved_pnl_after_booking,
+    kani_kernel_social_loss_chunk_cap, kani_kernel_trade_admit,
+    kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_progress_from_score_parts, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_project_auto_crank_selected_assets,
@@ -56,7 +57,7 @@ use percolator::v16::{
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
-    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
+    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
@@ -5260,6 +5261,260 @@ fn proof_v16_rebalance_reduce_kernel_preserves_balanced_oi_and_passes_barrier_ga
     assert_eq!(long_oi_after, short_oi_after);
     assert_eq!(long_oi_after, remaining);
     assert!(long_oi_after < pre_abs);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kernel_unilateral_close_adl_shrink_is_exact_and_fail_closed() {
+    let oi_units_raw: u8 = kani::any();
+    let close_units_raw: u8 = kani::any();
+    let a_step_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&oi_units_raw));
+    kani::assume(close_units_raw <= 20);
+    kani::assume(a_step_raw <= 10);
+
+    let opp_oi_before = oi_units_raw as u128 * POS_SCALE;
+    let close_q = close_units_raw as u128 * POS_SCALE;
+    let a_step = (ADL_ONE - MIN_A_SIDE) / 10;
+    let opp_a_before = MIN_A_SIDE + a_step * a_step_raw as u128;
+
+    let result =
+        kani_kernel_reduce_matching_open_interest_after(opp_oi_before, opp_a_before, close_q);
+
+    kani::cover!(close_q == 0, "ADL shrink kernel covers zero no-op");
+    kani::cover!(
+        close_q > 0 && close_q < opp_oi_before,
+        "ADL shrink kernel covers partial aggregate shrink"
+    );
+    kani::cover!(
+        close_q == opp_oi_before,
+        "ADL shrink kernel covers full aggregate reset"
+    );
+    kani::cover!(
+        close_q > opp_oi_before,
+        "ADL shrink kernel covers oversize fail-closed request"
+    );
+
+    if close_q == 0 {
+        assert_eq!(result, Ok((opp_oi_before, opp_a_before)));
+    } else if close_q > opp_oi_before {
+        assert_eq!(result, Err(V16Error::InvalidLeg));
+    } else {
+        let opp_oi_after = opp_oi_before - close_q;
+        let opp_a_after = if opp_oi_after == 0 {
+            ADL_ONE
+        } else {
+            opp_a_before * opp_oi_after / opp_oi_before
+        };
+        assert_eq!(result, Ok((opp_oi_after, opp_a_after)));
+        assert!(opp_a_after != 0);
+        assert!(opp_a_after * opp_oi_after <= opp_a_before * opp_oi_before);
+        assert!(opp_oi_after < opp_oi_before);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_unilateral_close_view_uses_kernel_for_partial_and_oversize_frame() {
+    let close_long_side: bool = kani::any();
+    let oversize: bool = kani::any();
+    let closed_side = if close_long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let opp_side = if close_long_side {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let opp_oi_before = 8 * POS_SCALE;
+    let close_q = if oversize {
+        9 * POS_SCALE
+    } else {
+        3 * POS_SCALE
+    };
+    let opp_a_before = ADL_ONE;
+
+    let (mut header, mut markets, _) = one_market_direct_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = opp_oi_before;
+    asset.oi_eff_short_q = opp_oi_before;
+    asset.a_long = if opp_side == SideV16::Long {
+        opp_a_before
+    } else {
+        ADL_ONE
+    };
+    asset.a_short = if opp_side == SideV16::Short {
+        opp_a_before
+    } else {
+        ADL_ONE
+    };
+    asset.mode_long = SideModeV16::Normal;
+    asset.mode_short = SideModeV16::Normal;
+    asset.k_long = 3;
+    asset.k_short = -3;
+    asset.f_long_num = 5;
+    asset.f_short_num = -5;
+    asset.b_long_num = 7;
+    asset.b_short_num = 7;
+    asset.loss_weight_sum_long = 11;
+    asset.loss_weight_sum_short = 11;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let slot_before = markets[0].engine;
+
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.kani_reduce_matching_open_interest_for_unilateral_close(0, closed_side, close_q)
+    };
+    let slot_after = markets[0].engine;
+    let asset_after = slot_after.asset.try_to_runtime().unwrap();
+    let kernel =
+        kani_kernel_reduce_matching_open_interest_after(opp_oi_before, opp_a_before, close_q);
+
+    kani::cover!(
+        !oversize && close_long_side,
+        "unilateral view integration covers partial long close"
+    );
+    kani::cover!(
+        oversize && !close_long_side,
+        "unilateral view integration covers oversize short close fail-closed"
+    );
+
+    if oversize {
+        assert_eq!(result, Err(V16Error::InvalidLeg));
+        assert_eq!(kernel, Err(V16Error::InvalidLeg));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &slot_after,
+            &slot_before
+        ));
+        return;
+    }
+
+    assert_eq!(result, Ok(()));
+    let (opp_oi_after, opp_a_after) = kernel.unwrap();
+
+    match opp_side {
+        SideV16::Long => {
+            assert_eq!(asset_after.oi_eff_long_q, opp_oi_after);
+            assert_eq!(asset_after.a_long, opp_a_after);
+            assert_eq!(asset_after.oi_eff_short_q, opp_oi_before);
+            assert_eq!(asset_after.a_short, ADL_ONE);
+            if opp_a_after < MIN_A_SIDE {
+                assert_eq!(asset_after.mode_long, SideModeV16::DrainOnly);
+            } else {
+                assert_eq!(asset_after.mode_long, SideModeV16::Normal);
+            }
+        }
+        SideV16::Short => {
+            assert_eq!(asset_after.oi_eff_short_q, opp_oi_after);
+            assert_eq!(asset_after.a_short, opp_a_after);
+            assert_eq!(asset_after.oi_eff_long_q, opp_oi_before);
+            assert_eq!(asset_after.a_long, ADL_ONE);
+            if opp_a_after < MIN_A_SIDE {
+                assert_eq!(asset_after.mode_short, SideModeV16::DrainOnly);
+            } else {
+                assert_eq!(asset_after.mode_short, SideModeV16::Normal);
+            }
+        }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_unilateral_close_full_match_resets_only_the_matching_side() {
+    let close_long_side: bool = kani::any();
+    let oi_units_raw: u8 = kani::any();
+    let a_step_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&oi_units_raw));
+    kani::assume(a_step_raw <= 4);
+
+    let closed_side = if close_long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let opp_side = if close_long_side {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let opp_oi_before = oi_units_raw as u128 * POS_SCALE;
+    let close_q = opp_oi_before;
+    let a_step = (ADL_ONE - MIN_A_SIDE) / 4;
+    let opp_a_before = MIN_A_SIDE + a_step * a_step_raw as u128;
+
+    let (mut header, mut markets, _) = one_market_direct_view_fixture();
+    let risk_epoch_before = header.risk_epoch.get();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = opp_oi_before;
+    asset.oi_eff_short_q = opp_oi_before;
+    asset.a_long = if opp_side == SideV16::Long {
+        opp_a_before
+    } else {
+        ADL_ONE
+    };
+    asset.a_short = if opp_side == SideV16::Short {
+        opp_a_before
+    } else {
+        ADL_ONE
+    };
+    asset.mode_long = SideModeV16::Normal;
+    asset.mode_short = SideModeV16::Normal;
+    asset.k_long = 3;
+    asset.k_short = -3;
+    asset.f_long_num = 5;
+    asset.f_short_num = -5;
+    asset.b_long_num = 7;
+    asset.b_short_num = 7;
+    asset.loss_weight_sum_long = 11;
+    asset.loss_weight_sum_short = 11;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.kani_reduce_matching_open_interest_for_unilateral_close(0, closed_side, close_q)
+    };
+    let asset_after = markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        close_long_side && opp_oi_before > POS_SCALE,
+        "full unilateral close covers long account closing against short aggregate reset"
+    );
+    kani::cover!(
+        !close_long_side && opp_oi_before > POS_SCALE,
+        "full unilateral close covers short account closing against long aggregate reset"
+    );
+
+    assert_eq!(result, Ok(()));
+    match opp_side {
+        SideV16::Long => {
+            assert_eq!(asset_after.oi_eff_long_q, 0);
+            assert_eq!(asset_after.a_long, ADL_ONE);
+            assert_eq!(asset_after.mode_long, SideModeV16::ResetPending);
+            assert_eq!(asset_after.k_long, 0);
+            assert_eq!(asset_after.f_long_num, 0);
+            assert_eq!(asset_after.b_long_num, 0);
+            assert_eq!(asset_after.loss_weight_sum_long, 0);
+            assert_eq!(asset_after.oi_eff_short_q, opp_oi_before);
+            assert_eq!(asset_after.a_short, ADL_ONE);
+        }
+        SideV16::Short => {
+            assert_eq!(asset_after.oi_eff_short_q, 0);
+            assert_eq!(asset_after.a_short, ADL_ONE);
+            assert_eq!(asset_after.mode_short, SideModeV16::ResetPending);
+            assert_eq!(asset_after.k_short, 0);
+            assert_eq!(asset_after.f_short_num, 0);
+            assert_eq!(asset_after.b_short_num, 0);
+            assert_eq!(asset_after.loss_weight_sum_short, 0);
+            assert_eq!(asset_after.oi_eff_long_q, opp_oi_before);
+            assert_eq!(asset_after.a_long, ADL_ONE);
+        }
+    }
+    assert_eq!(header.risk_epoch.get(), risk_epoch_before + 1);
 }
 
 #[kani::proof]
