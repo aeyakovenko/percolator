@@ -3388,13 +3388,13 @@ fn proof_v16_public_withdraw_respects_fee_debt_equity_gate_and_conserves_value()
     let surplus_raw: u8 = kani::any();
     let fee_debt_raw: u8 = kani::any();
     let amount_raw: u8 = kani::any();
-    kani::assume(capital_raw <= 16);
-    kani::assume(other_capital_raw <= 16);
-    kani::assume(insurance_raw <= 16);
-    kani::assume(surplus_raw <= 16);
-    kani::assume(fee_debt_raw <= 16);
+    kani::assume(capital_raw <= 64);
+    kani::assume(other_capital_raw <= 64);
+    kani::assume(insurance_raw <= 64);
+    kani::assume(surplus_raw <= 64);
+    kani::assume(fee_debt_raw <= 64);
     kani::assume(amount_raw > 0);
-    kani::assume(amount_raw <= 24);
+    kani::assume(amount_raw <= 96);
 
     let capital = capital_raw as u128;
     let other_capital = other_capital_raw as u128;
@@ -3428,6 +3428,10 @@ fn proof_v16_public_withdraw_respects_fee_debt_equity_gate_and_conserves_value()
     kani::cover!(
         !expected_success && amount > capital,
         "public withdraw rejects direct overwithdraw before value exit"
+    );
+    kani::cover!(
+        expected_success && capital > 32 && other_capital > 32 && surplus > 32,
+        "public withdraw covers broader funded market state"
     );
 
     if expected_success {
