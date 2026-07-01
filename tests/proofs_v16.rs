@@ -17401,11 +17401,20 @@ fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
         .unwrap();
     assert_eq!(spent, first_atoms);
     assert_eq!(insurance, second_atoms);
+    assert_eq!(spent + insurance, total_atoms);
     assert_eq!(reservation.insurance_credit_reserved_num, second_num);
     assert_eq!(reservation.valid_liened_insurance_num, second_num);
     assert_eq!(reservation.consumed_insurance_num, first_num);
+    assert_eq!(
+        reservation.insurance_credit_reserved_num + reservation.consumed_insurance_num,
+        total_num
+    );
     assert_eq!(source.insurance_credit_reserved_num, second_num);
     assert_eq!(source.valid_liened_insurance_num, second_num);
+    assert_eq!(
+        source.insurance_credit_reserved_num + reservation.consumed_insurance_num,
+        total_num
+    );
     assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
 
     let (reservation, source, spent, insurance) =
@@ -17424,6 +17433,7 @@ fn proof_v16_insurance_lien_split_consume_spends_exact_reserved_atoms() {
     );
     assert_eq!(spent, total_atoms);
     assert_eq!(insurance, 0);
+    assert_eq!(spent + insurance, total_atoms);
     assert_eq!(reservation.insurance_credit_reserved_num, 0);
     assert_eq!(reservation.valid_liened_insurance_num, 0);
     assert_eq!(reservation.consumed_insurance_num, total_num);
