@@ -8634,6 +8634,175 @@ fn proof_v16_counterparty_backing_add_delta_is_selected_domain_and_aggregate_exa
 }
 
 #[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_withdraw_delta_is_selected_domain_and_aggregate_exact() {
+    let selected_fresh_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    let selected_valid_raw: u8 = kani::any();
+    let selected_consumed_raw: u8 = kani::any();
+    let selected_impaired_raw: u8 = kani::any();
+    let unrelated_backing_raw: u8 = kani::any();
+    let unrelated_budget_raw: u8 = kani::any();
+    let unrelated_earnings_raw: u8 = kani::any();
+    let junior_slack_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&selected_fresh_raw));
+    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= selected_fresh_raw);
+    kani::assume(selected_valid_raw <= 4);
+    kani::assume(selected_consumed_raw <= 4);
+    kani::assume(selected_impaired_raw <= 4);
+    kani::assume((1..=8).contains(&unrelated_backing_raw));
+    kani::assume((1..=4).contains(&unrelated_budget_raw));
+    kani::assume(unrelated_earnings_raw <= 4);
+    kani::assume(junior_slack_raw <= 4);
+
+    let selected_fresh_num = selected_fresh_raw as u128 * BOUND_SCALE;
+    let withdraw_atoms = withdraw_raw as u128;
+    let withdraw_num = withdraw_atoms * BOUND_SCALE;
+    let selected_valid_num = selected_valid_raw as u128 * BOUND_SCALE;
+    let selected_consumed_num = selected_consumed_raw as u128 * BOUND_SCALE;
+    let selected_impaired_num = selected_impaired_raw as u128 * BOUND_SCALE;
+    let unrelated_backing = unrelated_backing_raw as u128;
+    let unrelated_backing_num = unrelated_backing * BOUND_SCALE;
+    let unrelated_budget = unrelated_budget_raw as u128;
+    let unrelated_earnings = unrelated_earnings_raw as u128;
+    let junior_slack = junior_slack_raw as u128;
+
+    let selected_bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: selected_fresh_num,
+        valid_liened_backing_num: selected_valid_num,
+        consumed_liened_backing_num: selected_consumed_num,
+        impaired_liened_backing_num: selected_impaired_num,
+        expiry_slot: 20,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let selected_source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: selected_fresh_num + selected_valid_num,
+        valid_liened_backing_num: selected_valid_num,
+        spent_backing_num: selected_consumed_num,
+        provider_receivable_num: selected_consumed_num,
+        impaired_liened_backing_num: selected_impaired_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let unrelated_bucket = BackingBucketV16 {
+        market_id: 2,
+        fresh_unliened_backing_num: unrelated_backing_num,
+        utilization_fee_earnings: unrelated_earnings,
+        expiry_slot: 20,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let unrelated_source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: unrelated_backing_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let aggregate_before =
+        selected_source.fresh_reserved_backing_num + unrelated_source.fresh_reserved_backing_num;
+    let senior_before = aggregate_before / BOUND_SCALE + unrelated_budget + unrelated_earnings;
+    let vault_before = senior_before + junior_slack;
+
+    let (next_bucket, next_source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_withdraw_delta(
+            selected_bucket,
+            selected_source,
+            withdraw_num,
+        )
+        .unwrap();
+    let aggregate_after =
+        next_source.fresh_reserved_backing_num + unrelated_source.fresh_reserved_backing_num;
+    let senior_after = aggregate_after / BOUND_SCALE + unrelated_budget + unrelated_earnings;
+    let vault_after = vault_before - withdraw_atoms;
+    let selected_remaining_num = selected_fresh_num - withdraw_num;
+
+    kani::cover!(
+        selected_remaining_num > 0 && unrelated_earnings > 0,
+        "two-asset backing isolation covers partial selected-domain withdrawal"
+    );
+    kani::cover!(
+        selected_remaining_num == 0 && selected_valid_num > 0,
+        "two-asset backing isolation covers full withdrawal while valid liens remain"
+    );
+    kani::cover!(
+        selected_remaining_num == 0 && selected_valid_num == 0 && selected_impaired_num > 0,
+        "two-asset backing isolation covers full withdrawal to impaired bucket"
+    );
+    kani::cover!(
+        selected_remaining_num == 0
+            && selected_valid_num == 0
+            && selected_impaired_num == 0
+            && selected_consumed_num > 0,
+        "two-asset backing isolation covers full withdrawal to expired receivable bucket"
+    );
+    kani::cover!(
+        selected_remaining_num == 0
+            && selected_valid_num == 0
+            && selected_impaired_num == 0
+            && selected_consumed_num == 0
+            && unrelated_budget > 0,
+        "two-asset backing isolation covers full withdrawal to empty bucket beside unrelated budget"
+    );
+
+    assert_eq!(aggregate_after, aggregate_before - withdraw_num);
+    assert_eq!(senior_after, senior_before - withdraw_atoms);
+    assert_eq!(vault_after - senior_after, junior_slack);
+    assert_eq!(
+        next_bucket.fresh_unliened_backing_num,
+        selected_remaining_num
+    );
+    assert_eq!(
+        next_source.fresh_reserved_backing_num,
+        selected_source.fresh_reserved_backing_num - withdraw_num
+    );
+    assert_eq!(next_bucket.valid_liened_backing_num, selected_valid_num);
+    assert_eq!(next_source.valid_liened_backing_num, selected_valid_num);
+    assert_eq!(
+        next_bucket.consumed_liened_backing_num,
+        selected_consumed_num
+    );
+    assert_eq!(next_source.spent_backing_num, selected_consumed_num);
+    assert_eq!(next_source.provider_receivable_num, selected_consumed_num);
+    assert_eq!(
+        next_bucket.impaired_liened_backing_num,
+        selected_impaired_num
+    );
+    assert_eq!(
+        next_source.impaired_liened_backing_num,
+        selected_impaired_num
+    );
+    if selected_remaining_num > 0 || selected_valid_num > 0 {
+        assert_eq!(next_bucket.status, BackingBucketStatusV16::Fresh);
+        assert_eq!(next_bucket.expiry_slot, 20);
+    } else if selected_impaired_num > 0 {
+        assert_eq!(next_bucket.status, BackingBucketStatusV16::Impaired);
+        assert_eq!(next_bucket.expiry_slot, 20);
+    } else if selected_consumed_num > 0 {
+        assert_eq!(next_bucket.status, BackingBucketStatusV16::Expired);
+        assert_eq!(next_bucket.expiry_slot, 20);
+    } else {
+        assert_eq!(next_bucket.status, BackingBucketStatusV16::Empty);
+        assert_eq!(next_bucket.expiry_slot, 0);
+    }
+    assert_eq!(
+        unrelated_bucket.fresh_unliened_backing_num,
+        unrelated_backing_num
+    );
+    assert_eq!(
+        unrelated_bucket.utilization_fee_earnings,
+        unrelated_earnings
+    );
+    assert_eq!(
+        unrelated_source.fresh_reserved_backing_num,
+        unrelated_backing_num
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_backing_withdraw_rejects_underbacking_source_claims() {
