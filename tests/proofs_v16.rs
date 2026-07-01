@@ -3537,6 +3537,26 @@ fn proof_v16_dynamic_market_account_len_matches_wrapper_slab_layout() {
     assert_eq!(engine_start, slot_offset + WRAPPER_LEN);
     assert_eq!(engine_end, slot_offset + stride);
     assert!(engine_end <= len);
+
+    assert_eq!(
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len::<
+            [u8; WRAPPER_LEN],
+        >(len - 1),
+        Err(V16Error::InvalidConfig)
+    );
+    assert_eq!(
+        MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len::<
+            [u8; WRAPPER_LEN],
+        >(len + 1),
+        Err(V16Error::InvalidConfig)
+    );
+    assert_eq!(
+        MarketGroupV16HeaderAccount::validate_dynamic_market_group_account_len::<[u8; WRAPPER_LEN]>(
+            len,
+            capacity + 1
+        ),
+        Err(V16Error::InvalidConfig)
+    );
 }
 
 #[kani::proof]
