@@ -13164,6 +13164,91 @@ fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+fn proof_v16_resolved_receipt_creation_migrates_unreceipted_bound_exactly() {
+    let pnl_raw: u8 = kani::any();
+    let vault_raw: u8 = kani::any();
+    kani::assume((1..=32).contains(&pnl_raw));
+    kani::assume(vault_raw <= 32);
+    let pnl = pnl_raw as u128;
+    let vault = vault_raw as u128;
+    let pnl_bound_num = pnl * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1;
+    header.current_slot = V16PodU64::new(2);
+    header.resolved_slot = V16PodU64::new(2);
+    header.vault = V16PodU128::new(vault);
+    header.c_tot = V16PodU128::new(0);
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(pnl_bound_num);
+    header.payout_snapshot_captured = 0;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16::EMPTY);
+    account_header.pnl = V16PodI128::new(pnl as i128);
+    account_header.last_fee_slot = V16PodU64::new(2);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    market
+        .kani_create_resolved_payout_receipt_if_needed(&mut account)
+        .unwrap();
+
+    let ledger = market
+        .header
+        .resolved_payout_ledger
+        .try_to_runtime()
+        .unwrap();
+    let receipt = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        vault == 0,
+        "resolved receipt creation covers zero-vault terminal haircut rate"
+    );
+    kani::cover!(
+        vault > 0 && vault < pnl,
+        "resolved receipt creation covers scarce-vault terminal haircut rate"
+    );
+    kani::cover!(
+        vault >= pnl && pnl > 1,
+        "resolved receipt creation covers full positive-pnl payout rate"
+    );
+
+    assert_eq!(market.header.payout_snapshot_captured, 1);
+    assert_eq!(market.header.payout_snapshot.get(), vault);
+    assert_eq!(market.header.payout_snapshot_pnl_pos_tot.get(), pnl);
+    assert_eq!(ledger.snapshot_residual, vault);
+    assert_eq!(ledger.terminal_claim_exact_receipts_num, pnl_bound_num);
+    assert_eq!(ledger.terminal_claim_bound_unreceipted_num, 0);
+    assert_eq!(ledger.current_payout_rate_den, pnl_bound_num);
+    assert_eq!(
+        ledger.current_payout_rate_num,
+        (vault * BOUND_SCALE).min(pnl_bound_num)
+    );
+    assert!(!ledger.payout_halted);
+    assert_eq!(market.header.vault.get(), vault);
+    assert_eq!(market.header.pnl_pos_tot.get(), pnl);
+    assert_eq!(market.header.pnl_pos_bound_tot.get(), pnl);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), pnl_bound_num);
+    assert_eq!(account.header.pnl.get(), pnl as i128);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert!(receipt.present);
+    assert!(!receipt.finalized);
+    assert_eq!(receipt.terminal_positive_claim_face, pnl);
+    assert_eq!(receipt.prior_bound_contribution_num, pnl_bound_num);
+    assert_eq!(receipt.live_released_face_at_receipt, 0);
+    assert_eq!(receipt.paid_effective, 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
 fn proof_v16_resolved_bankruptcy_attribution_classifier_is_exact() {
     let ledger_active: bool = kani::any();
     let ledger_finalized: bool = kani::any();
