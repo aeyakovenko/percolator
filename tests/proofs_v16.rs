@@ -9045,11 +9045,11 @@ fn proof_v16_counterparty_backing_withdraw_delta_status_transitions_are_exact() 
     let impaired_raw: u8 = kani::any();
     let status_raw: u8 = kani::any();
     let source_short: bool = kani::any();
-    kani::assume(amount_raw <= 8);
-    kani::assume(fresh_raw <= 8);
-    kani::assume(valid_raw <= 8);
-    kani::assume(consumed_raw <= 8);
-    kani::assume(impaired_raw <= 8);
+    kani::assume(amount_raw <= 64);
+    kani::assume(fresh_raw <= 64);
+    kani::assume(valid_raw <= 64);
+    kani::assume(consumed_raw <= 64);
+    kani::assume(impaired_raw <= 64);
     kani::assume(status_raw <= 3);
 
     let amount = amount_raw as u128 * BOUND_SCALE;
@@ -9105,6 +9105,10 @@ fn proof_v16_counterparty_backing_withdraw_delta_status_transitions_are_exact() 
         "counterparty backing withdraw rejects non-Fresh buckets"
     );
     kani::cover!(
+        amount > 32 * BOUND_SCALE && status != BackingBucketStatusV16::Fresh,
+        "counterparty backing withdraw rejects large non-Fresh bucket withdrawal"
+    );
+    kani::cover!(
         amount > 0 && status == BackingBucketStatusV16::Fresh && fresh < amount,
         "counterparty backing withdraw rejects insufficient bucket backing"
     );
@@ -9116,20 +9120,52 @@ fn proof_v16_counterparty_backing_withdraw_delta_status_transitions_are_exact() 
         "counterparty backing withdraw rejects insufficient source backing"
     );
     kani::cover!(
+        amount > 32 * BOUND_SCALE
+            && status == BackingBucketStatusV16::Fresh
+            && fresh >= amount
+            && source_fresh_reserved < amount,
+        "counterparty backing withdraw rejects large source-underbacked withdrawal"
+    );
+    kani::cover!(
         expected_ok && amount > 0 && fresh > amount,
         "counterparty backing withdraw partial success remains Fresh"
+    );
+    kani::cover!(
+        expected_ok && amount > 32 * BOUND_SCALE && fresh > amount && valid > 32 * BOUND_SCALE,
+        "counterparty backing withdraw covers large partial success with live liens"
     );
     kani::cover!(
         expected_ok && amount > 0 && fresh == amount && valid > 0,
         "counterparty backing withdraw full unliened success with valid liens remains Fresh"
     );
     kani::cover!(
+        expected_ok && amount > 32 * BOUND_SCALE && fresh == amount && valid > 32 * BOUND_SCALE,
+        "counterparty backing withdraw covers large full withdrawal with valid liens"
+    );
+    kani::cover!(
         expected_ok && amount > 0 && fresh == amount && valid == 0 && impaired > 0,
         "counterparty backing withdraw full unliened success with impaired liens becomes Impaired"
     );
     kani::cover!(
+        expected_ok
+            && amount > 32 * BOUND_SCALE
+            && fresh == amount
+            && valid == 0
+            && impaired > 32 * BOUND_SCALE,
+        "counterparty backing withdraw covers large transition to Impaired"
+    );
+    kani::cover!(
         expected_ok && amount > 0 && fresh == amount && valid == 0 && impaired == 0 && consumed > 0,
         "counterparty backing withdraw full unliened success with consumed receivable becomes Expired"
+    );
+    kani::cover!(
+        expected_ok
+            && amount > 32 * BOUND_SCALE
+            && fresh == amount
+            && valid == 0
+            && impaired == 0
+            && consumed > 32 * BOUND_SCALE,
+        "counterparty backing withdraw covers large transition to Expired"
     );
     kani::cover!(
         expected_ok
