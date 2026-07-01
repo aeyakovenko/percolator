@@ -22710,8 +22710,8 @@ fn proof_v16_validator_sound_backing_provider_earnings_total_matches_slots() {
     let slack_raw: u8 = kani::any();
     let stale_header_total: bool = kani::any();
     let stale_understates_slots: bool = kani::any();
-    kani::assume(long_earn_raw <= 8);
-    kani::assume(short_earn_raw <= 8);
+    kani::assume(long_earn_raw <= 16);
+    kani::assume(short_earn_raw <= 16);
 
     let long_earn = long_earn_raw as u128;
     let short_earn = short_earn_raw as u128;
@@ -22780,6 +22780,10 @@ fn proof_v16_validator_sound_backing_provider_earnings_total_matches_slots() {
         "backing-provider earnings aggregate covers two earning source domains"
     );
     kani::cover!(
+        result.is_ok() && !stale_header_total && long_earn > 8 && short_earn > 8,
+        "backing-provider earnings aggregate covers larger two-domain earnings"
+    );
+    kani::cover!(
         result.is_ok() && !stale_header_total && long_earn > 0 && short_earn == 0,
         "backing-provider earnings aggregate covers one earning source domain with an empty peer"
     );
@@ -22793,9 +22797,23 @@ fn proof_v16_validator_sound_backing_provider_earnings_total_matches_slots() {
     kani::cover!(
         result == Err(V16Error::InvalidConfig)
             && stale_header_total
+            && !stale_understates_slots
+            && expected_earnings > 8,
+        "backing-provider earnings aggregate rejects larger over-reported header earnings"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
             && stale_understates_slots
             && expected_earnings > 0,
         "backing-provider earnings aggregate rejects under-reported header earnings"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && stale_header_total
+            && stale_understates_slots
+            && expected_earnings > 8,
+        "backing-provider earnings aggregate rejects larger under-reported header earnings"
     );
 
     assert_eq!(result.is_ok(), !stale_header_total);
