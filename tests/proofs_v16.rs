@@ -8479,6 +8479,161 @@ fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source
 }
 
 #[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_add_delta_is_selected_domain_and_aggregate_exact() {
+    let refill_mode: bool = kani::any();
+    let selected_fresh_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    let receivable_raw: u8 = kani::any();
+    let unrelated_backing_raw: u8 = kani::any();
+    let unrelated_budget_raw: u8 = kani::any();
+    let unrelated_earnings_raw: u8 = kani::any();
+    let junior_slack_raw: u8 = kani::any();
+    kani::assume(selected_fresh_raw <= 8);
+    kani::assume((1..=8).contains(&amount_raw));
+    kani::assume((1..=8).contains(&receivable_raw));
+    kani::assume((1..=8).contains(&unrelated_backing_raw));
+    kani::assume((1..=4).contains(&unrelated_budget_raw));
+    kani::assume(unrelated_earnings_raw <= 4);
+    kani::assume(junior_slack_raw <= 4);
+
+    let amount_atoms = amount_raw as u128;
+    let amount_num = amount_atoms * BOUND_SCALE;
+    let selected_fresh_atoms = if refill_mode {
+        0
+    } else {
+        selected_fresh_raw as u128
+    };
+    let selected_fresh_num = selected_fresh_atoms * BOUND_SCALE;
+    let receivable_num = if refill_mode {
+        receivable_raw as u128 * BOUND_SCALE
+    } else {
+        0
+    };
+    let unrelated_backing = unrelated_backing_raw as u128;
+    let unrelated_backing_num = unrelated_backing * BOUND_SCALE;
+    let unrelated_budget = unrelated_budget_raw as u128;
+    let unrelated_earnings = unrelated_earnings_raw as u128;
+    let junior_slack = junior_slack_raw as u128;
+
+    let selected_bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: selected_fresh_num,
+        consumed_liened_backing_num: receivable_num,
+        expiry_slot: if selected_fresh_num == 0 { 0 } else { 20 },
+        status: if refill_mode {
+            BackingBucketStatusV16::Expired
+        } else if selected_fresh_num == 0 {
+            BackingBucketStatusV16::Empty
+        } else {
+            BackingBucketStatusV16::Fresh
+        },
+        ..BackingBucketV16::EMPTY
+    };
+    let selected_source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: selected_fresh_num,
+        spent_backing_num: receivable_num,
+        provider_receivable_num: receivable_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let unrelated_bucket = BackingBucketV16 {
+        market_id: 2,
+        fresh_unliened_backing_num: unrelated_backing_num,
+        utilization_fee_earnings: unrelated_earnings,
+        expiry_slot: 20,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let unrelated_source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: unrelated_backing_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let aggregate_before =
+        selected_source.fresh_reserved_backing_num + unrelated_source.fresh_reserved_backing_num;
+    let senior_before = aggregate_before / BOUND_SCALE + unrelated_budget + unrelated_earnings;
+    let vault_before = senior_before + junior_slack;
+
+    let (next_bucket, next_source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_add_delta(
+            selected_bucket,
+            selected_source,
+            amount_num,
+            10,
+            20,
+        )
+        .unwrap();
+    let aggregate_after =
+        next_source.fresh_reserved_backing_num + unrelated_source.fresh_reserved_backing_num;
+    let senior_after = aggregate_after / BOUND_SCALE + unrelated_budget + unrelated_earnings;
+    let vault_after = vault_before + amount_atoms;
+    let refill_num = amount_num.min(receivable_num);
+
+    kani::cover!(
+        !refill_mode && selected_fresh_atoms == 0 && amount_atoms > 1,
+        "two-asset backing isolation covers first selected-domain deposit"
+    );
+    kani::cover!(
+        !refill_mode && selected_fresh_atoms > 0 && unrelated_earnings > 0,
+        "two-asset backing isolation covers additive deposit beside unrelated earnings"
+    );
+    kani::cover!(
+        refill_mode && amount_num < receivable_num,
+        "two-asset backing isolation covers partial receivable refill"
+    );
+    kani::cover!(
+        refill_mode && amount_num >= receivable_num && unrelated_budget > 0,
+        "two-asset backing isolation covers complete receivable refill beside unrelated budget"
+    );
+
+    assert_eq!(aggregate_after, aggregate_before + amount_num);
+    assert_eq!(senior_after, senior_before + amount_atoms);
+    assert_eq!(vault_after - senior_after, junior_slack);
+    assert_eq!(
+        next_bucket.fresh_unliened_backing_num,
+        selected_fresh_num + amount_num
+    );
+    assert_eq!(
+        next_source.fresh_reserved_backing_num,
+        selected_fresh_num + amount_num
+    );
+    assert_eq!(
+        next_bucket.consumed_liened_backing_num,
+        receivable_num - refill_num
+    );
+    assert_eq!(
+        next_source.provider_receivable_num,
+        receivable_num - refill_num
+    );
+    assert_eq!(next_source.spent_backing_num, receivable_num);
+    assert_eq!(
+        next_bucket.valid_liened_backing_num,
+        selected_bucket.valid_liened_backing_num
+    );
+    assert_eq!(
+        next_source.valid_liened_backing_num,
+        selected_source.valid_liened_backing_num
+    );
+    assert_eq!(next_bucket.status, BackingBucketStatusV16::Fresh);
+    assert_eq!(next_bucket.expiry_slot, 20);
+    assert_eq!(
+        unrelated_bucket.fresh_unliened_backing_num,
+        unrelated_backing_num
+    );
+    assert_eq!(
+        unrelated_bucket.utilization_fee_earnings,
+        unrelated_earnings
+    );
+    assert_eq!(
+        unrelated_source.fresh_reserved_backing_num,
+        unrelated_backing_num
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_backing_withdraw_rejects_underbacking_source_claims() {
