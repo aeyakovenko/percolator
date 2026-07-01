@@ -6155,6 +6155,77 @@ fn proof_v16_live_market_shape_rejects_long_short_oi_mismatch() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_live_market_shape_rejects_phantom_weight_and_unweighted_oi() {
+    let case_raw: u8 = kani::any();
+    let units_raw: u8 = kani::any();
+    kani::assume(case_raw <= 3);
+    kani::assume((1..=8).contains(&units_raw));
+    let units = units_raw as u128;
+    let size_q = units * POS_SCALE;
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+
+    match case_raw {
+        0 => {
+            // Open interest with no loss weight would let a side receive/avoid
+            // social-loss allocation without a matching weight basis.
+            asset.oi_eff_long_q = size_q;
+            asset.oi_eff_short_q = size_q;
+            asset.loss_weight_sum_long = 0;
+            asset.loss_weight_sum_short = POS_SCALE;
+            asset.stored_pos_count_long = 1;
+            asset.stored_pos_count_short = 1;
+        }
+        1 => {
+            // Weight with no stored positions is phantom loss-bearing capacity.
+            asset.loss_weight_sum_long = POS_SCALE;
+            asset.stored_pos_count_long = 0;
+        }
+        2 => {
+            // Weight above the social-loss denominator would over-allocate B.
+            asset.oi_eff_long_q = size_q;
+            asset.oi_eff_short_q = size_q;
+            asset.loss_weight_sum_long = SOCIAL_LOSS_DEN + 1;
+            asset.loss_weight_sum_short = POS_SCALE;
+            asset.stored_pos_count_long = 1;
+            asset.stored_pos_count_short = 1;
+        }
+        _ => {
+            asset.oi_eff_long_q = size_q;
+            asset.oi_eff_short_q = size_q;
+            asset.loss_weight_sum_long = POS_SCALE;
+            asset.loss_weight_sum_short = 0;
+            asset.stored_pos_count_long = 1;
+            asset.stored_pos_count_short = 1;
+        }
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+
+    kani::cover!(
+        case_raw == 0 && units > 4,
+        "market shape rejects open interest with zero loss weight"
+    );
+    kani::cover!(
+        case_raw == 1,
+        "market shape rejects phantom loss weight without stored positions"
+    );
+    kani::cover!(
+        case_raw == 2 && units > 4,
+        "market shape rejects over-denominator social loss weight"
+    );
+    kani::cover!(
+        case_raw == 3 && units > 4,
+        "market shape rejects short open interest with zero loss weight"
+    );
+    assert_eq!(result, Err(V16Error::InvalidConfig));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_pending_domain_loss_barrier_detects_touching_position_changes() {
     let long_position_raw: u8 = kani::any();
     let short_position_raw: u8 = kani::any();
