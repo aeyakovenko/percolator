@@ -7583,9 +7583,9 @@ fn proof_v16_backing_utilization_collection_negative_pnl_never_draws_capital() {
     let capital_raw: u8 = kani::any();
     let earnings_raw: u8 = kani::any();
     let revenue_raw: u8 = kani::any();
-    kani::assume(capital_raw <= 16);
-    kani::assume(earnings_raw <= 16);
-    kani::assume(revenue_raw <= 16);
+    kani::assume(capital_raw <= 64);
+    kani::assume(earnings_raw <= 64);
+    kani::assume(revenue_raw <= 64);
     let capital = capital_raw as u128;
     let earnings_before = earnings_raw as u128;
     let revenue_before = revenue_raw as u128;
@@ -7645,6 +7645,10 @@ fn proof_v16_backing_utilization_collection_negative_pnl_never_draws_capital() {
     kani::cover!(
         capital > 0,
         "negative-PnL backing-utilization collection covers loss-bearing capital guard"
+    );
+    kani::cover!(
+        capital > 32 && earnings_before > 32 && revenue_before > 32,
+        "negative-PnL backing-utilization guard covers larger existing ledgers"
     );
     assert_eq!(charged, 0);
     assert_eq!(
