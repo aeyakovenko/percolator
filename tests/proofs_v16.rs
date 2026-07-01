@@ -15870,6 +15870,10 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
         assert_eq!(next_bucket.impaired_liened_backing_num, bucket_impaired);
         assert_eq!(next_bucket.status, expected_status);
         assert_eq!(
+            bucket_valid - next_bucket.valid_liened_backing_num,
+            next_bucket.consumed_liened_backing_num - bucket_consumed
+        );
+        assert_eq!(
             next_source.fresh_reserved_backing_num,
             source_fresh - amount
         );
@@ -15878,6 +15882,14 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
         assert_eq!(
             next_source.provider_receivable_num,
             source_receivable + amount
+        );
+        assert_eq!(
+            source_fresh - next_source.fresh_reserved_backing_num,
+            next_source.spent_backing_num - source_spent
+        );
+        assert_eq!(
+            source_valid - next_source.valid_liened_backing_num,
+            next_source.provider_receivable_num - source_receivable
         );
         assert_eq!(
             senior_backing_after + amount / BOUND_SCALE,
