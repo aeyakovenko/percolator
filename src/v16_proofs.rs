@@ -1753,12 +1753,25 @@ fn closure_bucket_status_machine_prepare_counterparty_lien_create_delta() {
 fn closure_bucket_status_machine_prepare_counterparty_lien_release_delta() {
     let (b, s, r) = kani_any_ledger_triple();
     let amount: u128 = kani::any();
+    let current_slot: u64 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
     kani::assume(V16Core::validate_backing_bucket_static(b) == Ok(()));
     if let Ok((b2, _s2)) =
-        V16Core::prepare_counterparty_lien_release_delta(b, s, kani::any(), amount)
+        V16Core::prepare_counterparty_lien_release_delta(b, s, current_slot, amount)
     {
+        kani::cover!(
+            amount > 1
+                && b.status == BackingBucketStatusV16::Fresh
+                && b.expiry_slot > current_slot
+                && b.fresh_unliened_backing_num == 0
+                && b.valid_liened_backing_num == amount
+                && b.impaired_liened_backing_num == 0
+                && b2.status == BackingBucketStatusV16::Fresh
+                && b2.valid_liened_backing_num == 0
+                && b2.fresh_unliened_backing_num == amount,
+            "bucket status covers final live lien release back to fresh backing"
+        );
         assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
     }
 }
