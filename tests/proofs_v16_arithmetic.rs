@@ -9,7 +9,7 @@ use percolator::wide_math::{
     mul_div_floor_u256, mul_div_floor_u256_with_rem, wide_signed_mul_div_floor,
     wide_signed_mul_div_floor_from_k_pair, I256, U256,
 };
-use percolator::{ADL_ONE, POS_SCALE, SOCIAL_WEIGHT_SCALE};
+use percolator::{V16Error, ADL_ONE, POS_SCALE, SOCIAL_WEIGHT_SCALE};
 
 fn small_signed_floor_reference(n: i128, d: u128) -> i128 {
     if n >= 0 {
@@ -299,7 +299,7 @@ fn proof_v16_adjust_u128_applies_exact_delta_or_fails_closed() {
     } else if old - new <= current {
         assert_eq!(result, Ok(current - (old - new)));
     } else {
-        assert!(result.is_err());
+        assert_eq!(result, Err(V16Error::CounterUnderflow));
     }
 }
 
