@@ -896,7 +896,7 @@ fn proof_v16_materialized_portfolio_counter_rejects_nonempty_account_state() {
         blocker_raw == 11,
         "materialized counter rejection covers unresolved payout receipt obligations"
     );
-    assert!(result.is_err());
+    assert_eq!(result, Err(V16Error::LockActive));
     assert_eq!(
         market.header.materialized_portfolio_count.get(),
         count_before
