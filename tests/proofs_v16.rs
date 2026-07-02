@@ -20304,6 +20304,103 @@ fn proof_v16_persisted_shape_accepts_fast_path_config_and_satisfies_small_mm_env
     assert!(loss <= maintenance);
 }
 
+// Public fund config-gate soundness: any config accepted by the production
+// validator must retain the safety/liveness flags that make the engine's
+// zero-copy public profile enforceable. This prevents an apparently valid fund
+// from silently disabling source liens, insurance reservations, recovery,
+// revalidation, stale penalties, favorable-action refresh, or crank-forward
+// liveness.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_public_fund_validator_requires_protection_flags_and_capacity() {
+    let max_portfolio_assets_raw: u8 = kani::any();
+    let max_market_slots_raw: u8 = kani::any();
+    let margin_mode: bool = kani::any();
+    let source_lien: bool = kani::any();
+    let insurance_reservation: bool = kani::any();
+    let permissionless_recovery: bool = kani::any();
+    let fallback_price: bool = kani::any();
+    let fallback_envelope: bool = kani::any();
+    let lien_revalidation: bool = kani::any();
+    let stale_penalty: bool = kani::any();
+    let favorable_refresh: bool = kani::any();
+    let crank_forward: bool = kani::any();
+
+    let mut cfg = V16Config::public_user_fund_with_market_slots(
+        max_portfolio_assets_raw as u16,
+        max_market_slots_raw as u32,
+        0,
+        10,
+    );
+    cfg.margin_mode_realizable_full_shared_cross_margin = margin_mode;
+    cfg.source_credit_lien_required = source_lien;
+    cfg.insurance_credit_reservation_required = insurance_reservation;
+    cfg.permissionless_recovery_enabled = permissionless_recovery;
+    cfg.recovery_fallback_price_enabled = fallback_price;
+    cfg.recovery_fallback_envelope_enabled = fallback_envelope;
+    cfg.credit_lien_revalidation_required = lien_revalidation;
+    cfg.stale_certificate_penalty_enabled = stale_penalty;
+    cfg.full_refresh_required_for_favorable_actions = favorable_refresh;
+    cfg.public_liveness_profile_crank_forward = crank_forward;
+
+    let result = cfg.validate_public_user_fund();
+    let all_flags = margin_mode
+        && source_lien
+        && insurance_reservation
+        && permissionless_recovery
+        && fallback_price
+        && fallback_envelope
+        && lien_revalidation
+        && stale_penalty
+        && favorable_refresh
+        && crank_forward;
+
+    kani::cover!(
+        result == Ok(())
+            && max_portfolio_assets_raw > 0
+            && max_market_slots_raw > max_portfolio_assets_raw,
+        "public fund validator accepts protected config with spare market capacity"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && max_portfolio_assets_raw == 0,
+        "public fund validator rejects zero portfolio capacity"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && max_portfolio_assets_raw > max_market_slots_raw,
+        "public fund validator rejects portfolio capacity above market capacity"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && !source_lien,
+        "public fund validator rejects disabled source-credit liens"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && !insurance_reservation,
+        "public fund validator rejects disabled insurance reservations"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && !crank_forward,
+        "public fund validator rejects disabled crank-forward liveness"
+    );
+
+    kani::assume(result == Ok(()));
+    assert!(cfg.max_portfolio_assets != 0);
+    assert!(cfg.max_portfolio_assets as usize <= V16_MAX_PORTFOLIO_ASSETS_N);
+    assert!(cfg.max_market_slots != 0);
+    assert!(cfg.max_portfolio_assets as u32 <= cfg.max_market_slots);
+    assert!(all_flags);
+    assert!(cfg.margin_mode_realizable_full_shared_cross_margin);
+    assert!(cfg.source_credit_lien_required);
+    assert!(cfg.insurance_credit_reservation_required);
+    assert!(cfg.permissionless_recovery_enabled);
+    assert!(cfg.recovery_fallback_price_enabled);
+    assert!(cfg.recovery_fallback_envelope_enabled);
+    assert!(cfg.credit_lien_revalidation_required);
+    assert!(cfg.stale_certificate_penalty_enabled);
+    assert!(cfg.full_refresh_required_for_favorable_actions);
+    assert!(cfg.public_liveness_profile_crank_forward);
+}
+
 // Clean-room inductive senior-solvency proof (independent of any external PR).
 //
 // validate_shape enforces the senior leg `c_tot + insurance (+ earnings) <= vault`
