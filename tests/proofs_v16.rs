@@ -26223,6 +26223,111 @@ fn proof_v16_validator_sound_close_progress_ledger_shape() {
     }
 }
 
+// Active-close ledger binding: when a persisted close ledger validates while
+// the account still has the target leg, the close must be assigned to the
+// opposite domain side and cannot already carry ADL quantity. This is the
+// account-level anti-rug invariant for forced/shutdown progress: remaining
+// traders are not silently charged to their own side, and ADL only appears
+// after the position row is gone.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_active_close_binds_opposite_domain_side() {
+    let leg_is_long: bool = kani::any();
+    let ledger_side_is_long: bool = kani::any();
+    let gross_raw: u8 = kani::any();
+    let support_raw: u8 = kani::any();
+    let quantity_adl_raw: u8 = kani::any();
+    kani::assume((1..=32).contains(&gross_raw));
+    kani::assume(support_raw <= gross_raw);
+
+    let gross = gross_raw as u128;
+    let support = support_raw as u128;
+    let leg_side = if leg_is_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let ledger_side = if ledger_side_is_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: markets[0].engine.asset.market_id.get(),
+        side: leg_side,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: support == gross,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id: markets[0].engine.asset.market_id.get(),
+            domain_side: ledger_side,
+            gross_loss_at_close_start: gross,
+            drift_reference_slot: 0,
+            max_close_slot: 10,
+            support_consumed: support,
+            junior_face_burned: support,
+            quantity_adl_applied_q: quantity_adl_raw as u128,
+            residual_remaining: gross - support,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = account.as_view().validate_with_market(&market.as_view());
+
+    kani::cover!(
+        result == Ok(()) && leg_side == SideV16::Long && ledger_side == SideV16::Short,
+        "active-close validator theorem covers long leg charged to short domain"
+    );
+    kani::cover!(
+        result == Ok(()) && leg_side == SideV16::Short && ledger_side == SideV16::Long,
+        "active-close validator theorem covers short leg charged to long domain"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidLeg) && leg_side == ledger_side,
+        "active-close validator theorem rejects same-side close ledger"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidLeg) && quantity_adl_raw > 0,
+        "active-close validator theorem rejects ADL quantity while target leg remains active"
+    );
+
+    kani::assume(result == Ok(()));
+    let accepted = account.header.close_progress.try_to_runtime().unwrap();
+    let expected_domain_side = if leg.side == SideV16::Long {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    assert_eq!(accepted.asset_index, leg.asset_index);
+    assert_eq!(accepted.market_id, leg.market_id);
+    assert_eq!(accepted.domain_side, expected_domain_side);
+    assert_eq!(accepted.quantity_adl_applied_q, 0);
+}
+
 // Active-leg lookup soundness for the account-view helper used by close-progress
 // validation and source-domain consistency checks. An Ok(Some(slot)) result
 // means exactly one active persisted leg for the requested asset exists; hidden
