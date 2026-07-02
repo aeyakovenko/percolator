@@ -22306,7 +22306,7 @@ fn proof_v16_close_cancel_shape_rejects_dropped_residual() {
 
     let result = account.validate_with_market(&market.as_view());
 
-    assert!(result.is_err());
+    assert_eq!(result, Err(V16Error::InvalidLeg));
     let ledger = account.header.close_progress.try_to_runtime().unwrap();
     assert!(ledger.canceled && !ledger.active && !ledger.finalized);
     assert_eq!(ledger.b_loss_booked, booked);
