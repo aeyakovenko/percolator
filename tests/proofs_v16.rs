@@ -23242,7 +23242,6 @@ fn proof_v16_frame_crank_touches_only_clock_and_cert_state() {
             )
             .unwrap();
     }
-    kani::cover!(true, "same-slot crank frame reached");
     let mut eh = h0;
     eh.current_slot = header.current_slot;
     eh.slot_last = header.slot_last;
@@ -23275,6 +23274,19 @@ fn proof_v16_frame_crank_touches_only_clock_and_cert_state() {
     ea.b_stale_state = account_header.b_stale_state;
     ea.last_fee_slot = account_header.last_fee_slot;
     assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
+    kani::cover!(
+        header.current_slot.get() == current
+            && header.slot_last.get() == current
+            && markets[0].engine.asset.slot_last.get() == current
+            && account_header.last_fee_slot.get() == current
+            && account_header.health_cert.valid == 1
+            && account_header.health_cert.cert_oracle_epoch.get() == header.oracle_epoch.get()
+            && account_header.health_cert.cert_funding_epoch.get() == header.funding_epoch.get()
+            && account_header.health_cert.cert_risk_epoch.get() == header.risk_epoch.get()
+            && account_header.health_cert.cert_asset_set_epoch.get()
+                == header.asset_set_epoch.get(),
+        "same-slot crank frame covers current certified refresh"
+    );
 }
 
 // Permissionless no-DoS classifier floor: a current, empty Live account with
