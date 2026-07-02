@@ -1653,10 +1653,48 @@ fn closure_ledger_inv_prepare_insurance_lien_consume_delta() {
     let insurance: u128 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(domain_spent < 1u128 << 96);
+    kani::assume(insurance < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
     if let Ok((r2, s2, _ds, _ins)) =
         V16Core::prepare_insurance_lien_consume_delta(r, s, domain_spent, insurance, amount)
     {
+        assert_eq!(
+            r.valid_liened_insurance_num
+                .checked_sub(r2.valid_liened_insurance_num),
+            Some(amount)
+        );
+        assert_eq!(
+            r.insurance_credit_reserved_num
+                .checked_sub(r2.insurance_credit_reserved_num),
+            Some(amount)
+        );
+        assert_eq!(
+            r2.consumed_insurance_num
+                .checked_sub(r.consumed_insurance_num),
+            Some(amount)
+        );
+        assert_eq!(
+            r2.impaired_liened_insurance_num,
+            r.impaired_liened_insurance_num
+        );
+        assert_eq!(
+            s.valid_liened_insurance_num
+                .checked_sub(s2.valid_liened_insurance_num),
+            Some(amount)
+        );
+        assert_eq!(
+            s.insurance_credit_reserved_num
+                .checked_sub(s2.insurance_credit_reserved_num),
+            Some(amount)
+        );
+        assert_eq!(
+            s2.impaired_liened_insurance_num,
+            s.impaired_liened_insurance_num
+        );
+        assert_eq!(s2.fresh_reserved_backing_num, s.fresh_reserved_backing_num);
+        assert_eq!(s2.spent_backing_num, s.spent_backing_num);
+        assert_eq!(s2.provider_receivable_num, s.provider_receivable_num);
+        assert_eq!(domain_spent.checked_add(insurance), _ds.checked_add(_ins));
         kani::cover!(
             amount >= 2 * BOUND_SCALE
                 && r.insurance_credit_reserved_num > amount
