@@ -26039,6 +26039,70 @@ fn proof_v16_validator_sound_account_reserves() {
     ); // U19b
 }
 
+// Account-validator soundness for resolved payout receipts: any receipt accepted
+// by validate_with_market is either exactly empty, or it is internally
+// conservation-safe for payout: the stored bound covers the terminal face, paid
+// effective cannot exceed that face, and the finalized flag is exactly the
+// all-paid predicate.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_resolved_receipt_shape() {
+    let present: bool = kani::any();
+    let finalized: bool = kani::any();
+    let bound_units_raw: u16 = kani::any();
+    let live_face_raw: u16 = kani::any();
+    let terminal_face_raw: u16 = kani::any();
+    let paid_raw: u16 = kani::any();
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present,
+            prior_bound_contribution_num: (bound_units_raw as u128) * BOUND_SCALE,
+            live_released_face_at_receipt: live_face_raw as u128,
+            terminal_positive_claim_face: terminal_face_raw as u128,
+            paid_effective: paid_raw as u128,
+            finalized,
+        });
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    kani::assume(account.as_view().validate_with_market(&market.as_view()) == Ok(()));
+    let receipt = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        receipt.present && receipt.terminal_positive_claim_face > 255 && !receipt.finalized,
+        "receipt validator theorem covers large live nonfinal receipt"
+    );
+    kani::cover!(
+        receipt.present && receipt.finalized && receipt.paid_effective > 0,
+        "receipt validator theorem covers finalized paid receipt"
+    );
+    kani::cover!(
+        !receipt.present,
+        "receipt validator theorem covers exactly empty absent receipt"
+    );
+
+    if !receipt.present {
+        assert!(receipt.is_empty());
+    } else {
+        assert!(
+            receipt.prior_bound_contribution_num
+                >= receipt.terminal_positive_claim_face * BOUND_SCALE
+        );
+        assert!(receipt.paid_effective <= receipt.terminal_positive_claim_face);
+        assert_eq!(
+            receipt.finalized,
+            receipt.paid_effective == receipt.terminal_positive_claim_face
+        );
+    }
+}
+
 // Active-leg lookup soundness for the account-view helper used by close-progress
 // validation and source-domain consistency checks. An Ok(Some(slot)) result
 // means exactly one active persisted leg for the requested asset exists; hidden
