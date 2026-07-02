@@ -1789,6 +1789,15 @@ fn closure_bucket_status_machine_prepare_counterparty_lien_impair_delta() {
     kani::assume(kani_ledger_inv(&b, &s, &r));
     kani::assume(V16Core::validate_backing_bucket_static(b) == Ok(()));
     if let Ok((b2, _s2)) = V16Core::prepare_counterparty_lien_impair_delta(b, s, amount) {
+        kani::cover!(
+            amount > 1
+                && b.status == BackingBucketStatusV16::Fresh
+                && b.fresh_unliened_backing_num == 0
+                && b.valid_liened_backing_num == amount
+                && b.impaired_liened_backing_num > 1
+                && b2.status == BackingBucketStatusV16::Impaired,
+            "bucket status covers fresh-to-impaired transition on final valid lien impairment"
+        );
         assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
     }
 }
