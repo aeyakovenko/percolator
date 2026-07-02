@@ -1148,12 +1148,40 @@ fn closure_ledger_inv_prepare_counterparty_lien_create_delta() {
 fn closure_ledger_inv_prepare_counterparty_lien_release_delta() {
     let (b, s, r) = kani_any_ledger_triple();
     let amount: u128 = kani::any();
+    let current_slot: u64 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
     if let Ok((b2, s2)) =
-        V16Core::prepare_counterparty_lien_release_delta(b, s, kani::any(), amount)
+        V16Core::prepare_counterparty_lien_release_delta(b, s, current_slot, amount)
     {
         // Reservation untouched by counterparty deltas.
+        assert_eq!(
+            b.valid_liened_backing_num
+                .checked_sub(b2.valid_liened_backing_num),
+            Some(amount)
+        );
+        assert_eq!(
+            b2.fresh_unliened_backing_num
+                .checked_sub(b.fresh_unliened_backing_num),
+            Some(amount)
+        );
+        assert_eq!(
+            s.valid_liened_backing_num
+                .checked_sub(s2.valid_liened_backing_num),
+            Some(amount)
+        );
+        assert_eq!(s2.fresh_reserved_backing_num, s.fresh_reserved_backing_num);
+        assert_eq!(s2.spent_backing_num, s.spent_backing_num);
+        assert_eq!(s2.provider_receivable_num, s.provider_receivable_num);
+        kani::cover!(
+            amount > 1
+                && b.status == BackingBucketStatusV16::Fresh
+                && b.expiry_slot > current_slot
+                && b.valid_liened_backing_num > amount
+                && b.fresh_unliened_backing_num > 1
+                && s.valid_liened_backing_num > amount,
+            "ledger closure covers partial nonzero counterparty-lien release"
+        );
         assert!(kani_ledger_inv(&b2, &s2, &r));
     }
 }
