@@ -22953,7 +22953,28 @@ fn proof_v16_frame_backing_deposit_touches_only_declared_state() {
             .deposit_fresh_counterparty_backing_not_atomic(0, amt, 10)
             .unwrap();
     }
-    kani::cover!(true, "backing deposit frame reached");
+    kani::cover!(
+        amt_raw > 2
+            && header.vault.get() == h0.vault.get() + amt
+            && header.source_fresh_backing_total_num.get()
+                == h0.source_fresh_backing_total_num.get() + amt_num
+            && header.risk_epoch.get() == h0.risk_epoch.get() + 1
+            && markets[0]
+                .engine
+                .backing_long
+                .fresh_unliened_backing_num
+                .get()
+                == amt_num
+            && markets[0]
+                .engine
+                .source_credit_long
+                .fresh_reserved_backing_num
+                .get()
+                == amt_num
+            && markets[0].engine.source_credit_long.credit_epoch.get()
+                == s0.source_credit_long.credit_epoch.get() + 1,
+        "backing deposit frame covers nontrivial vault, backing, source, and epoch movement"
+    );
     let mut eh = h0;
     eh.vault = V16PodU128::new(h0.vault.get() + amt);
     eh.source_fresh_backing_total_num =
@@ -22969,11 +22990,11 @@ fn proof_v16_frame_backing_deposit_touches_only_declared_state() {
         status: BackingBucketStatusV16::Fresh,
         ..BackingBucketV16::EMPTY
     });
-    let mut src = s0.source_credit_long.try_to_runtime().unwrap();
-    src.fresh_reserved_backing_num += amt_num;
-    src.credit_epoch += 1;
-    src.credit_rate_num = CREDIT_RATE_SCALE;
-    es.source_credit_long = SourceCreditStateV16Account::from_runtime(&src);
+    es.source_credit_long.fresh_reserved_backing_num =
+        V16PodU128::new(s0.source_credit_long.fresh_reserved_backing_num.get() + amt_num);
+    es.source_credit_long.credit_epoch =
+        V16PodU64::new(s0.source_credit_long.credit_epoch.get() + 1);
+    es.source_credit_long.credit_rate_num = V16PodU128::new(CREDIT_RATE_SCALE);
     assert!(kani_eq_engine_asset_slot_v16_account(
         &es,
         &markets[0].engine
