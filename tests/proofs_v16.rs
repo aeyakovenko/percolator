@@ -25926,6 +25926,54 @@ fn proof_v16_validator_sound_global_bound_covers_source_claim_total() {
     }
 }
 
+// Validator soundness for resolved-payout snapshot shape: before the payout
+// snapshot is captured, the resolved payout ledger must be exactly empty. Any
+// ghost ledger field would let future wind-down code observe stale rate/claim
+// state that was never tied to the current residual snapshot.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_uncaptured_snapshot_requires_empty_resolved_ledger() {
+    let dirty_kind_raw: u8 = kani::any();
+    let dirty_value_raw: u8 = kani::any();
+    kani::assume(dirty_kind_raw <= 7);
+    kani::assume(dirty_value_raw > 0);
+    let dirty_value = dirty_value_raw as u128;
+
+    let mut dirty_ledger = ResolvedPayoutLedgerV16::EMPTY;
+    match dirty_kind_raw {
+        0 => dirty_ledger.snapshot_residual = dirty_value,
+        1 => dirty_ledger.terminal_claim_exact_receipts_num = dirty_value,
+        2 => dirty_ledger.terminal_claim_bound_unreceipted_num = dirty_value,
+        3 => dirty_ledger.current_payout_rate_num = dirty_value,
+        4 => dirty_ledger.current_payout_rate_den = dirty_value,
+        5 => dirty_ledger.snapshot_slot = dirty_value_raw as u64,
+        6 => dirty_ledger.payout_halted = true,
+        _ => dirty_ledger.finalized = true,
+    }
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.payout_snapshot_captured = 0;
+    header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&dirty_ledger);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+
+    kani::cover!(
+        dirty_kind_raw == 0 && dirty_value > 1,
+        "snapshot/ledger validator rejects ghost residual"
+    );
+    kani::cover!(
+        dirty_kind_raw == 2 && dirty_value > 1,
+        "snapshot/ledger validator rejects ghost unreceipted bound"
+    );
+    kani::cover!(
+        dirty_kind_raw == 6,
+        "snapshot/ledger validator rejects ghost payout halt"
+    );
+    assert_eq!(result, Err(V16Error::InvalidConfig));
+    assert_eq!(market.header.payout_snapshot_captured, 0);
+}
+
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
