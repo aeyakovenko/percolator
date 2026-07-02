@@ -23108,7 +23108,6 @@ fn proof_v16_frame_oracle_target_update_touches_only_declared_state() {
             .set_asset_raw_oracle_target_not_atomic(0, target)
             .unwrap();
     }
-    kani::cover!(true, "oracle target frame reached");
     assert!(kani_eq_market_group_v16_header_account(&h0, &header));
     let mut es = s0;
     let mut asset = s0.asset.try_to_runtime().unwrap();
@@ -23118,6 +23117,11 @@ fn proof_v16_frame_oracle_target_update_touches_only_declared_state() {
         &es,
         &markets[0].engine
     ));
+    let post_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    kani::cover!(
+        target > 1 && post_asset.raw_oracle_target_price == target,
+        "oracle target frame covers nontrivial target update only"
+    );
 }
 
 // insurance->account credit frame: exactly {insurance, c_tot} on the header
