@@ -11071,7 +11071,7 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
         k_snap: 0,
         f_snap: 0,
         epoch_snap: 0,
-        loss_weight: POS_SCALE,
+        loss_weight: basis.unsigned_abs(),
         b_snap: 0,
         b_rem: 0,
         b_epoch_snap: 0,
@@ -11097,7 +11097,7 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
         units_raw > 4 && result.is_err(),
         "duplicate active asset legs are rejected before double-counting wide symbolic size"
     );
-    assert!(result.is_err());
+    assert_eq!(result, Err(V16Error::HiddenLeg));
 }
 
 #[kani::proof]
