@@ -7790,6 +7790,170 @@ fn proof_v16_live_market_shape_rejects_phantom_weight_and_unweighted_oi() {
     assert_eq!(result, Err(V16Error::InvalidConfig));
 }
 
+// Market-shape validation is the wrapper's production boundary for persisted
+// asset slots. This proof keeps the slot-local theorem broad but tractable:
+// accepted live slots have valid prices, non-future timestamps, balanced OI,
+// and non-degenerate loss-weight/count metadata; each symbolic violation is
+// rejected before wrapper instructions can act on the slot.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_live_asset_slot_shape() {
+    let lifecycle_raw: u8 = kani::any();
+    let effective_price_case: u8 = kani::any();
+    let raw_price_case: u8 = kani::any();
+    let fund_price_case: u8 = kani::any();
+    let oi_units_raw: u8 = kani::any();
+    let live_oi_mismatch: bool = kani::any();
+    let long_zero_weight: bool = kani::any();
+    let short_zero_weight: bool = kani::any();
+    let long_zero_count: bool = kani::any();
+    let short_zero_count: bool = kani::any();
+    let future_slot: bool = kani::any();
+    kani::assume(lifecycle_raw <= 2);
+    kani::assume(effective_price_case <= 2);
+    kani::assume(raw_price_case <= 2);
+    kani::assume(fund_price_case <= 2);
+    kani::assume(oi_units_raw <= 8);
+
+    let lifecycle = match lifecycle_raw {
+        0 => AssetLifecycleV16::Active,
+        1 => AssetLifecycleV16::DrainOnly,
+        _ => AssetLifecycleV16::Recovery,
+    };
+    let effective_price = match effective_price_case {
+        0 => 0,
+        1 => 100,
+        _ => MAX_ORACLE_PRICE + 1,
+    };
+    let raw_oracle_target_price = match raw_price_case {
+        0 => 0,
+        1 => 100,
+        _ => MAX_ORACLE_PRICE + 1,
+    };
+    let fund_px_last = match fund_price_case {
+        0 => 0,
+        1 => 100,
+        _ => MAX_ORACLE_PRICE + 1,
+    };
+    let long_oi = oi_units_raw as u128 * POS_SCALE;
+    let short_oi = if live_oi_mismatch {
+        long_oi + POS_SCALE
+    } else {
+        long_oi
+    };
+    let long_weight = if long_zero_weight || long_oi == 0 {
+        0
+    } else {
+        POS_SCALE
+    };
+    let short_weight = if short_zero_weight || short_oi == 0 {
+        0
+    } else {
+        POS_SCALE
+    };
+    let long_count = if long_zero_count || long_weight == 0 {
+        0
+    } else {
+        1
+    };
+    let short_count = if short_zero_count || short_weight == 0 {
+        0
+    } else {
+        1
+    };
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.mode = 0;
+    header.current_slot = V16PodU64::new(10);
+    header.resolved_payout_blocker_count = V16PodU64::new(long_count + short_count);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = lifecycle;
+    asset.effective_price = effective_price;
+    asset.raw_oracle_target_price = raw_oracle_target_price;
+    asset.fund_px_last = fund_px_last;
+    asset.slot_last = if future_slot { 11 } else { 10 };
+    asset.oi_eff_long_q = long_oi;
+    asset.oi_eff_short_q = short_oi;
+    asset.loss_weight_sum_long = long_weight;
+    asset.loss_weight_sum_short = short_weight;
+    asset.stored_pos_count_long = long_count;
+    asset.stored_pos_count_short = short_count;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+    let prices_ok = effective_price_case == 1 && raw_price_case == 1 && fund_price_case == 1;
+    let weights_ok = (long_oi == 0 || long_weight != 0) && (short_oi == 0 || short_weight != 0);
+    let counts_ok =
+        (long_weight == 0 || long_count != 0) && (short_weight == 0 || short_count != 0);
+    let expected_ok = prices_ok && !future_slot && !live_oi_mismatch && weights_ok && counts_ok;
+
+    kani::cover!(
+        result.is_ok()
+            && lifecycle == AssetLifecycleV16::Active
+            && oi_units_raw > 1
+            && long_count == 1
+            && short_count == 1,
+        "live asset slot validator accepts nontrivial balanced active OI"
+    );
+    kani::cover!(
+        result.is_ok()
+            && lifecycle == AssetLifecycleV16::Recovery
+            && oi_units_raw == 0
+            && long_count == 0
+            && short_count == 0,
+        "live asset slot validator accepts empty recovery slot with valid prices"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && effective_price_case == 0,
+        "live asset slot validator rejects zero effective price"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && raw_price_case == 2,
+        "live asset slot validator rejects over-max raw oracle price"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && future_slot,
+        "live asset slot validator rejects future slot timestamp"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig) && live_oi_mismatch && oi_units_raw > 1,
+        "live asset slot validator rejects balanced-market OI mismatch"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && long_zero_weight
+            && oi_units_raw > 1
+            && !live_oi_mismatch,
+        "live asset slot validator rejects unweighted long OI"
+    );
+    kani::cover!(
+        result == Err(V16Error::InvalidConfig)
+            && short_zero_count
+            && oi_units_raw > 1
+            && !live_oi_mismatch,
+        "live asset slot validator rejects phantom short loss weight without stored positions"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if result.is_ok() {
+        assert!(asset.effective_price > 0 && asset.effective_price <= MAX_ORACLE_PRICE);
+        assert!(asset.raw_oracle_target_price > 0);
+        assert!(asset.raw_oracle_target_price <= MAX_ORACLE_PRICE);
+        assert!(asset.fund_px_last > 0 && asset.fund_px_last <= MAX_ORACLE_PRICE);
+        assert!(asset.slot_last <= market.header.current_slot.get());
+        assert_eq!(asset.oi_eff_long_q, asset.oi_eff_short_q);
+        assert!(asset.oi_eff_long_q == 0 || asset.loss_weight_sum_long != 0);
+        assert!(asset.oi_eff_short_q == 0 || asset.loss_weight_sum_short != 0);
+        assert!(asset.loss_weight_sum_long == 0 || asset.stored_pos_count_long != 0);
+        assert!(asset.loss_weight_sum_short == 0 || asset.stored_pos_count_short != 0);
+        assert_eq!(
+            market.header.resolved_payout_blocker_count.get(),
+            asset.stored_pos_count_long + asset.stored_pos_count_short
+        );
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
