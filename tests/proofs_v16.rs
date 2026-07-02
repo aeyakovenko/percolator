@@ -23187,7 +23187,6 @@ fn proof_v16_frame_side_reset_touches_only_declared_state() {
             .finalize_side_reset_not_atomic(0, SideV16::Long)
             .unwrap();
     }
-    kani::cover!(true, "side reset frame reached");
     let mut eh = h0;
     eh.risk_epoch = V16PodU64::new(h0.risk_epoch.get() + 1);
     assert!(kani_eq_market_group_v16_header_account(&eh, &header));
@@ -23199,6 +23198,12 @@ fn proof_v16_frame_side_reset_touches_only_declared_state() {
         &es,
         &markets[0].engine
     ));
+    kani::cover!(
+        header.risk_epoch.get() == h0.risk_epoch.get() + 1
+            && s0.asset.mode_long != es.asset.mode_long
+            && markets[0].engine.asset.mode_long == es.asset.mode_long,
+        "side reset frame covers mode restoration and risk epoch bump"
+    );
 }
 
 // same-slot crank frame: a refresh may touch ONLY the five clock/observation
