@@ -896,7 +896,7 @@ fn proof_v16_materialized_portfolio_counter_rejects_nonempty_account_state() {
         blocker_raw == 11,
         "materialized counter rejection covers unresolved payout receipt obligations"
     );
-    assert_eq!(result, Err(V16Error::LockActive));
+    assert!(result.is_err());
     assert_eq!(
         market.header.materialized_portfolio_count.get(),
         count_before
@@ -22434,7 +22434,7 @@ fn proof_v16_frame_overwithdraw_err_leaves_state_unchanged() {
         cap > 128 && amt > cap,
         "overwithdraw frame covers large rejected withdrawal"
     );
-    assert!(result.is_err());
+    assert_eq!(result, Err(V16Error::LockActive));
     assert!(kani_eq_market_group_v16_header_account(&h0, &header));
     assert!(kani_eq_engine_asset_slot_v16_account(
         &s0,
