@@ -22703,7 +22703,6 @@ fn proof_v16_frame_resolve_market_touches_only_declared_state() {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         market.resolve_market_not_atomic(resolved_slot).unwrap();
     }
-    kani::cover!(true, "resolve frame reached");
     let mut eh = h0;
     eh.mode = 1;
     eh.resolved_slot = V16PodU64::new(resolved_slot);
@@ -22714,6 +22713,13 @@ fn proof_v16_frame_resolve_market_touches_only_declared_state() {
         &s0,
         &markets[0].engine
     ));
+    kani::cover!(
+        delta_raw > 1
+            && header.mode == 1
+            && header.current_slot.get() == resolved_slot
+            && header.resolved_slot.get() == resolved_slot,
+        "resolve frame covers nontrivial slot advance and exact freeze frame"
+    );
 }
 
 // mark_asset_drain_only frame: exactly {asset_set_epoch, risk_epoch} on the
@@ -22729,7 +22735,6 @@ fn proof_v16_frame_mark_drain_only_touches_only_declared_state() {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         market.mark_asset_drain_only_not_atomic(0).unwrap();
     }
-    kani::cover!(true, "drain-only frame reached");
     let mut eh = h0;
     eh.asset_set_epoch = V16PodU64::new(h0.asset_set_epoch.get() + 1);
     eh.risk_epoch = V16PodU64::new(h0.risk_epoch.get() + 1);
@@ -22742,6 +22747,13 @@ fn proof_v16_frame_mark_drain_only_touches_only_declared_state() {
         &es,
         &markets[0].engine
     ));
+    let post_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    kani::cover!(
+        post_asset.lifecycle == AssetLifecycleV16::DrainOnly
+            && header.asset_set_epoch.get() == h0.asset_set_epoch.get() + 1
+            && header.risk_epoch.get() == h0.risk_epoch.get() + 1,
+        "drain-only frame covers lifecycle transition and epoch bumps"
+    );
 }
 
 // retire-empty frame: exactly {current_slot, asset_set_epoch, risk_epoch} on
