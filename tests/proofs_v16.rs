@@ -26103,6 +26103,126 @@ fn proof_v16_validator_sound_resolved_receipt_shape() {
     }
 }
 
+// Account-validator soundness for close-progress persistence: any close ledger
+// accepted by validate_with_market is either empty, a safe canceled watermark,
+// or an active residual-conserving close. This turns the close validator itself
+// into a theorem over symbolic persisted fields, rather than one hand-picked
+// close scenario.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_sound_close_progress_ledger_shape() {
+    let active: bool = kani::any();
+    let finalized: bool = kani::any();
+    let canceled: bool = kani::any();
+    let side_is_long: bool = kani::any();
+    let close_id_raw: u8 = kani::any();
+    let asset_index_raw: u8 = kani::any();
+    let market_id_raw: u8 = kani::any();
+    let gross_raw: u16 = kani::any();
+    let drift_reference_slot_raw: u8 = kani::any();
+    let max_close_slot_raw: u8 = kani::any();
+    let support_raw: u16 = kani::any();
+    let junior_raw: u16 = kani::any();
+    let insurance_raw: u16 = kani::any();
+    let b_loss_raw: u16 = kani::any();
+    let explicit_raw: u16 = kani::any();
+    let quantity_adl_raw: u16 = kani::any();
+    let drift_raw: u16 = kani::any();
+    let residual_raw: u16 = kani::any();
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let ledger = CloseProgressLedgerV16 {
+        active,
+        finalized,
+        canceled,
+        close_id: close_id_raw as u64,
+        asset_index: asset_index_raw as u32,
+        market_id: market_id_raw as u64,
+        domain_side: if side_is_long {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
+        gross_loss_at_close_start: gross_raw as u128,
+        drift_reference_slot: drift_reference_slot_raw as u64,
+        max_close_slot: max_close_slot_raw as u64,
+        support_consumed: support_raw as u128,
+        junior_face_burned: junior_raw as u128,
+        insurance_spent: insurance_raw as u128,
+        b_loss_booked: b_loss_raw as u128,
+        explicit_loss_assigned: explicit_raw as u128,
+        quantity_adl_applied_q: quantity_adl_raw as u128,
+        drift_consumed: drift_raw as u128,
+        residual_remaining: residual_raw as u128,
+    };
+    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    kani::assume(account.as_view().validate_with_market(&market.as_view()) == Ok(()));
+    let accepted = account.header.close_progress.try_to_runtime().unwrap();
+
+    kani::cover!(
+        accepted.is_empty(),
+        "close-progress validator theorem covers empty inert ledger"
+    );
+    kani::cover!(
+        accepted.canceled && accepted.gross_loss_at_close_start > 0,
+        "close-progress validator theorem covers canceled loss watermark"
+    );
+    kani::cover!(
+        accepted.active && !accepted.finalized && accepted.residual_remaining > 0,
+        "close-progress validator theorem covers active pending residual"
+    );
+    kani::cover!(
+        accepted.active && accepted.finalized && accepted.quantity_adl_applied_q > 0,
+        "close-progress validator theorem covers finalized ADL progress"
+    );
+
+    if accepted.canceled {
+        let irreversible_progress = accepted.support_consumed != 0
+            || accepted.junior_face_burned != 0
+            || accepted.insurance_spent != 0
+            || accepted.b_loss_booked != 0
+            || accepted.explicit_loss_assigned != 0
+            || accepted.quantity_adl_applied_q != 0
+            || accepted.drift_consumed != 0;
+        assert!(!accepted.active);
+        assert!(!accepted.finalized);
+        assert!(accepted.close_id != 0);
+        assert!(accepted.asset_index == 0);
+        assert!(accepted.drift_reference_slot <= accepted.max_close_slot);
+        assert!(!irreversible_progress);
+        assert_eq!(
+            accepted.residual_remaining,
+            accepted.gross_loss_at_close_start
+        );
+    } else if !accepted.active {
+        assert!(accepted.is_empty());
+    } else {
+        let progress = accepted.support_consumed
+            + accepted.insurance_spent
+            + accepted.b_loss_booked
+            + accepted.explicit_loss_assigned;
+        let total_loss = accepted.gross_loss_at_close_start + accepted.drift_consumed;
+        assert!(accepted.close_id != 0);
+        assert_eq!(accepted.asset_index, 0);
+        assert_eq!(accepted.market_id, markets[0].engine.asset.market_id.get());
+        assert!(accepted.drift_reference_slot <= accepted.max_close_slot);
+        assert!(accepted.support_consumed <= accepted.junior_face_burned);
+        assert!(progress <= total_loss);
+        assert_eq!(accepted.residual_remaining, total_loss - progress);
+        if accepted.finalized {
+            assert_eq!(accepted.residual_remaining, 0);
+        }
+        if accepted.quantity_adl_applied_q != 0 {
+            assert!(accepted.finalized);
+            assert_eq!(accepted.residual_remaining, 0);
+        }
+    }
+}
+
 // Active-leg lookup soundness for the account-view helper used by close-progress
 // validation and source-domain consistency checks. An Ok(Some(slot)) result
 // means exactly one active persisted leg for the requested asset exists; hidden
