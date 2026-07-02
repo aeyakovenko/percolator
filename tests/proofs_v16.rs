@@ -22114,7 +22114,6 @@ fn proof_v16_close_begin_rejects_occupied_domain_before_mutation() {
 
     let result = market.kani_begin_close_progress_ledger(&mut account, 0, SideV16::Long, gross);
 
-    kani::cover!(true, "occupied-domain begin rejection reached");
     assert_eq!(result, Err(V16Error::LockActive));
     // No mutation: ledger still empty, barrier unchanged.
     let ledger = account.header.close_progress.try_to_runtime().unwrap();
@@ -22125,6 +22124,16 @@ fn proof_v16_close_begin_rejects_occupied_domain_before_mutation() {
             .pending_domain_loss_barrier_long
             .get(),
         1
+    );
+    kani::cover!(
+        gross > 1
+            && !ledger.active
+            && market.markets[0]
+                .engine
+                .pending_domain_loss_barrier_long
+                .get()
+                == 1,
+        "occupied-domain begin rejection covers nontrivial gross loss without mutation"
     );
 }
 
