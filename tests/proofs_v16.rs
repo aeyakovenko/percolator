@@ -15619,6 +15619,91 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
 }
 
 #[kani::proof]
+#[kani::unwind(12)]
+#[kani::solver(cadical)]
+fn proof_v16_bankruptcy_residual_leaf_is_side_local_and_conserving() {
+    let loss_side_is_long: bool = kani::any();
+    let chunk_raw: u8 = kani::any();
+    let residual_extra_raw: u8 = kani::any();
+    let b_long_raw: u8 = kani::any();
+    let b_short_raw: u8 = kani::any();
+    let rem_long_raw: u8 = kani::any();
+    let rem_short_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&chunk_raw));
+    kani::assume(residual_extra_raw <= 16);
+
+    let loss_side = if loss_side_is_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let chunk = chunk_raw as u128;
+    let residual = chunk + residual_extra_raw as u128;
+    let weight = SOCIAL_LOSS_DEN - 1;
+
+    let mut asset = AssetStateV16::default();
+    asset.loss_weight_sum_long = weight;
+    asset.loss_weight_sum_short = weight;
+    asset.b_long_num = b_long_raw as u128;
+    asset.b_short_num = b_short_raw as u128;
+    asset.social_loss_remainder_long_num = rem_long_raw as u128;
+    asset.social_loss_remainder_short_num = rem_short_raw as u128;
+
+    let before = asset;
+    let selected_remainder = if loss_side_is_long {
+        before.social_loss_remainder_long_num
+    } else {
+        before.social_loss_remainder_short_num
+    };
+    let numerator = chunk * SOCIAL_LOSS_DEN + selected_remainder;
+    let expected_delta_b = numerator / weight;
+    let expected_remainder = numerator % weight;
+
+    let outcome = MarketGroupV16ViewMut::<u64>::kani_apply_bankruptcy_residual_chunk_to_loss_side(
+        &mut asset, loss_side, chunk, residual,
+    )
+    .unwrap()
+    .unwrap();
+
+    kani::cover!(
+        loss_side_is_long && residual_extra_raw > 0,
+        "B residual leaf covers long-side partial booking"
+    );
+    kani::cover!(
+        !loss_side_is_long && residual_extra_raw == 0,
+        "B residual leaf covers short-side final booking"
+    );
+    kani::cover!(
+        expected_remainder != selected_remainder,
+        "B residual leaf covers nontrivial selected-side remainder update"
+    );
+
+    assert_eq!(outcome.booked_loss, chunk);
+    assert_eq!(outcome.explicit_loss, 0);
+    assert_eq!(outcome.delta_b, expected_delta_b);
+    assert_eq!(outcome.remaining_after, residual - chunk);
+    assert_eq!(outcome.booked_loss + outcome.remaining_after, residual);
+
+    if loss_side_is_long {
+        assert_eq!(asset.b_short_num, before.b_short_num);
+        assert_eq!(
+            asset.social_loss_remainder_short_num,
+            before.social_loss_remainder_short_num
+        );
+        assert_eq!(asset.b_long_num, before.b_long_num + expected_delta_b);
+        assert_eq!(asset.social_loss_remainder_long_num, expected_remainder);
+    } else {
+        assert_eq!(asset.b_long_num, before.b_long_num);
+        assert_eq!(
+            asset.social_loss_remainder_long_num,
+            before.social_loss_remainder_long_num
+        );
+        assert_eq!(asset.b_short_num, before.b_short_num + expected_delta_b);
+        assert_eq!(asset.social_loss_remainder_short_num, expected_remainder);
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_social_loss_book_split_exact_for_bounded_symbolic_weights() {
