@@ -22212,11 +22212,20 @@ fn proof_v16_close_begin_rejects_account_with_active_close() {
 
     let result = market.kani_begin_close_progress_ledger(&mut account, 0, SideV16::Long, 5);
 
-    kani::cover!(true, "active-close begin rejection reached");
     assert_eq!(result, Err(V16Error::LockActive));
     let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    assert!(ledger.active && !ledger.finalized && !ledger.canceled);
     assert_eq!(ledger.close_id, 1);
     assert_eq!(ledger.gross_loss_at_close_start, 3);
+    assert_eq!(ledger.residual_remaining, 3);
+    assert_eq!(ledger.max_close_slot, 100);
+    kani::cover!(
+        ledger.active
+            && ledger.close_id == 1
+            && ledger.gross_loss_at_close_start == 3
+            && ledger.residual_remaining == 3,
+        "active-close begin rejection preserves existing nonzero ledger"
+    );
 }
 
 // ============ SPEC #19/#24: CLOSE-LIFECYCLE EXIT REJECTIONS ============
@@ -22297,8 +22306,15 @@ fn proof_v16_close_cancel_shape_rejects_dropped_residual() {
 
     let result = account.validate_with_market(&market.as_view());
 
-    kani::cover!(true, "dropped-residual cancel shape reached");
     assert!(result.is_err());
+    let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    assert!(ledger.canceled && !ledger.active && !ledger.finalized);
+    assert_eq!(ledger.b_loss_booked, booked);
+    assert_eq!(ledger.residual_remaining, 4 - booked);
+    kani::cover!(
+        booked > 1 && ledger.b_loss_booked > 1 && ledger.residual_remaining > 0,
+        "dropped-residual cancel shape covers partial booked residual"
+    );
     let _ = &mut market;
 }
 
