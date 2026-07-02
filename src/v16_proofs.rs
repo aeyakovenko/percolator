@@ -1439,6 +1439,44 @@ fn closure_ledger_inv_prepare_insurance_lien_create_delta() {
     kani::assume(kani_ledger_inv(&b, &s, &r));
     if let Ok((r2, s2)) = V16Core::prepare_insurance_lien_create_delta(r, s, amount) {
         // Bucket untouched by insurance deltas.
+        assert_eq!(
+            r2.valid_liened_insurance_num
+                .checked_sub(r.valid_liened_insurance_num),
+            Some(amount)
+        );
+        assert_eq!(
+            r2.insurance_credit_reserved_num,
+            r.insurance_credit_reserved_num
+        );
+        assert_eq!(
+            r2.impaired_liened_insurance_num,
+            r.impaired_liened_insurance_num
+        );
+        assert_eq!(r2.consumed_insurance_num, r.consumed_insurance_num);
+        assert_eq!(
+            s2.valid_liened_insurance_num
+                .checked_sub(s.valid_liened_insurance_num),
+            Some(amount)
+        );
+        assert_eq!(
+            s2.insurance_credit_reserved_num,
+            s.insurance_credit_reserved_num
+        );
+        assert_eq!(
+            s2.impaired_liened_insurance_num,
+            s.impaired_liened_insurance_num
+        );
+        assert_eq!(s2.fresh_reserved_backing_num, s.fresh_reserved_backing_num);
+        assert_eq!(s2.spent_backing_num, s.spent_backing_num);
+        assert_eq!(s2.provider_receivable_num, s.provider_receivable_num);
+        kani::cover!(
+            amount >= 2 * BOUND_SCALE
+                && r.valid_liened_insurance_num > 1
+                && r.impaired_liened_insurance_num > 1
+                && r.insurance_credit_reserved_num
+                    > r2.valid_liened_insurance_num + r2.impaired_liened_insurance_num,
+            "ledger closure covers partial nonzero insurance-lien creation"
+        );
         assert!(kani_ledger_inv(&b, &s2, &r2));
     }
 }
