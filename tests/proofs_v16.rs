@@ -22443,6 +22443,72 @@ fn proof_v16_frame_overwithdraw_err_leaves_state_unchanged() {
     assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
 }
 
+// full refresh: an empty account has zero risk requirements. Refresh may clear
+// stale certificate accounting and replace the health cert, but it must not move
+// any value stock or market-slot state.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_full_refresh_empty_account_clears_stale_and_certifies_without_value_move() {
+    let cap_raw: u8 = kani::any();
+    let stale: bool = kani::any();
+    let cap = cap_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(cap);
+    header.c_tot = V16PodU128::new(cap);
+    header.stale_certificate_count = V16PodU64::new(if stale { 1 } else { 0 });
+    account_header.capital = V16PodU128::new(cap);
+    account_header.stale_state = if stale { 1 } else { 0 };
+    account_header.health_cert.valid = 0;
+
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    let cert = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market
+            .full_account_refresh_not_atomic(&mut account)
+            .unwrap()
+    };
+
+    kani::cover!(
+        stale && cap > 128,
+        "full refresh frame covers stale nonzero-capital empty account"
+    );
+    kani::cover!(
+        !stale && cap > 128,
+        "full refresh frame covers current nonzero-capital empty account"
+    );
+
+    let mut eh = h0;
+    eh.stale_certificate_count = V16PodU64::new(0);
+    assert!(kani_eq_market_group_v16_header_account(&eh, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+
+    let expected_cert = HealthCertV16 {
+        certified_equity: cap as i128,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: h0.oracle_epoch.get(),
+        cert_funding_epoch: h0.funding_epoch.get(),
+        cert_risk_epoch: h0.risk_epoch.get(),
+        cert_asset_set_epoch: h0.asset_set_epoch.get(),
+        active_bitmap_at_cert: a0.active_bitmap.map(V16PodU64::get),
+        valid: true,
+    };
+    assert_eq!(cert, expected_cert);
+    let mut ea = a0;
+    ea.stale_state = 0;
+    ea.health_cert = HealthCertV16Account::from_runtime(&expected_cert);
+    assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
+}
+
 // domain-insurance deposit frame: exactly {vault, insurance,
 // insurance_domain_budget_remaining_total} on the header and
 // {insurance_domain_budget_long} on the slot.
