@@ -22253,12 +22253,18 @@ fn proof_v16_withdraw_rejects_while_close_active() {
 
     let result = market.withdraw_not_atomic(&mut account, amount);
 
-    kani::cover!(true, "active-close withdraw rejection reached");
-    assert!(result.is_err());
+    assert_eq!(result, Err(V16Error::LockActive));
     // No value moved.
     assert_eq!(market.header.vault.get(), 5);
     assert_eq!(market.header.c_tot.get(), 5);
     assert_eq!(account.header.capital.get(), 5);
+    kani::cover!(
+        amount > 1
+            && market.header.vault.get() == 5
+            && market.header.c_tot.get() == 5
+            && account.header.capital.get() == 5,
+        "active-close withdraw rejection covers nonzero exit without value mutation"
+    );
 }
 
 // #24 (residual durability before clear): a close ledger with residual still
