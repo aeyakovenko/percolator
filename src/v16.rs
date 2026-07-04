@@ -13234,9 +13234,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             close_q,
             self.asset_state(request.asset_index)?.effective_price,
         )?;
-        let fee = checked_fee_bps(fee_notional, request.fee_bps)?
-            .max(config.min_liquidation_abs)
-            .min(config.liquidation_fee_cap);
+        let fee = liquidation_fee_for_close(
+            fee_notional,
+            request.fee_bps,
+            config.min_liquidation_abs,
+            config.liquidation_fee_cap,
+            close_q == leg.basis_pos_q.unsigned_abs(),
+        )?;
         let charged_fee = self.charge_account_fee_not_atomic(account, fee)?;
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let gross_bankruptcy_residual = if account.header.pnl.get() < 0 {
@@ -15986,6 +15990,34 @@ fn checked_fee_bps(notional: u128, fee_bps: u64) -> V16Result<u128> {
     )
     .and_then(|v| v.try_into_u128())
     .ok_or(V16Error::ArithmeticOverflow)
+}
+
+fn liquidation_fee_for_close(
+    fee_notional: u128,
+    fee_bps: u64,
+    min_liquidation_abs: u128,
+    liquidation_fee_cap: u128,
+    closes_full_position: bool,
+) -> V16Result<u128> {
+    let raw_fee = checked_fee_bps(fee_notional, fee_bps)?;
+    liquidation_fee_from_raw_fee(
+        raw_fee,
+        min_liquidation_abs,
+        liquidation_fee_cap,
+        closes_full_position,
+    )
+}
+
+fn liquidation_fee_from_raw_fee(
+    raw_fee: u128,
+    min_liquidation_abs: u128,
+    liquidation_fee_cap: u128,
+    closes_full_position: bool,
+) -> V16Result<u128> {
+    if !closes_full_position && min_liquidation_abs != 0 && raw_fee < min_liquidation_abs {
+        return Err(V16Error::NonProgress);
+    }
+    Ok(raw_fee.max(min_liquidation_abs).min(liquidation_fee_cap))
 }
 
 /// Per-side trade fee atoms, mirroring the production derivation in

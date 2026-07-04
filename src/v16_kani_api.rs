@@ -215,6 +215,36 @@ pub fn kani_checked_fee_bps(notional: u128, fee_bps: u64) -> V16Result<u128> {
     checked_fee_bps(notional, fee_bps)
 }
 
+pub fn kani_liquidation_fee_for_close(
+    fee_notional: u128,
+    fee_bps: u64,
+    min_liquidation_abs: u128,
+    liquidation_fee_cap: u128,
+    closes_full_position: bool,
+) -> V16Result<u128> {
+    liquidation_fee_for_close(
+        fee_notional,
+        fee_bps,
+        min_liquidation_abs,
+        liquidation_fee_cap,
+        closes_full_position,
+    )
+}
+
+pub fn kani_liquidation_fee_from_raw_fee(
+    raw_fee: u128,
+    min_liquidation_abs: u128,
+    liquidation_fee_cap: u128,
+    closes_full_position: bool,
+) -> V16Result<u128> {
+    liquidation_fee_from_raw_fee(
+        raw_fee,
+        min_liquidation_abs,
+        liquidation_fee_cap,
+        closes_full_position,
+    )
+}
+
 pub fn kani_adjust_u128(current: u128, old: u128, new: u128) -> V16Result<u128> {
     adjust_u128(current, old, new)
 }
