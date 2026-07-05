@@ -317,13 +317,168 @@ fn liquidation_close_would_leave_uncovered_loss_with_open_risk(
     Ok(uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap))
 }
 
-#[inline]
-fn liquidation_engine_close_request_q(leg_basis_pos_q: i128) -> V16Result<u128> {
-    let close_q = leg_basis_pos_q.unsigned_abs();
-    if close_q == 0 {
+fn liquidation_leg_maintenance_requirement(
+    config: V16Config,
+    abs_q: u128,
+    side: SideV16,
+    effective_price: u64,
+    raw_target_price: u64,
+) -> V16Result<u128> {
+    if abs_q == 0 {
+        return Ok(0);
+    }
+    let risk_notional = risk_notional_ceil(abs_q, effective_price)?;
+    let target_lag_penalty =
+        V16Core::target_effective_lag_loss_penalty(abs_q, side, effective_price, raw_target_price)?;
+    let (_, maintenance, _) = V16Core::health_requirements_from_notional_and_target_lag(
+        config,
+        risk_notional,
+        target_lag_penalty,
+    )?;
+    Ok(maintenance)
+}
+
+fn liquidation_projected_healthy_after_close(
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
+    close_q: u128,
+) -> V16Result<bool> {
+    let old_abs_q = leg.basis_pos_q.unsigned_abs();
+    if close_q == 0 || close_q > old_abs_q {
+        return Ok(false);
+    }
+    let old_maintenance = liquidation_leg_maintenance_requirement(
+        config,
+        old_abs_q,
+        leg.side,
+        effective_price,
+        raw_target_price,
+    )?;
+    let new_abs_q = old_abs_q - close_q;
+    let new_maintenance = liquidation_leg_maintenance_requirement(
+        config,
+        new_abs_q,
+        leg.side,
+        effective_price,
+        raw_target_price,
+    )?;
+    let fee_notional = risk_notional_ceil(close_q, effective_price)?;
+    let fee = liquidation_fee_for_close(
+        fee_notional,
+        fee_bps,
+        config.min_liquidation_abs,
+        config.liquidation_fee_cap,
+        close_q == old_abs_q,
+    )?;
+    let charged_fee = if pnl >= 0 { fee.min(capital) } else { 0 };
+    Ok(liquidation_projected_health_deficit_from_parts(
+        cert.certified_equity,
+        cert.certified_maintenance_req,
+        old_maintenance,
+        new_maintenance,
+        charged_fee,
+    )? == 0)
+}
+
+fn liquidation_projected_health_deficit_from_parts(
+    certified_equity: i128,
+    certified_maintenance_req: u128,
+    old_leg_maintenance: u128,
+    new_leg_maintenance: u128,
+    charged_fee: u128,
+) -> V16Result<u128> {
+    let post_maintenance = certified_maintenance_req
+        .checked_sub(old_leg_maintenance)
+        .and_then(|v| v.checked_add(new_leg_maintenance))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    let charged_fee_i128 = i128::try_from(charged_fee).map_err(|_| V16Error::ArithmeticOverflow)?;
+    let post_equity = certified_equity
+        .checked_sub(charged_fee_i128)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if post_equity < 0 {
+        return post_maintenance
+            .checked_add(post_equity.unsigned_abs())
+            .ok_or(V16Error::ArithmeticOverflow);
+    }
+    Ok(post_maintenance.saturating_sub(post_equity as u128))
+}
+
+fn liquidation_engine_close_request_q(
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
+) -> V16Result<u128> {
+    let old_abs_q = leg.basis_pos_q.unsigned_abs();
+    if old_abs_q == 0 {
         return Err(V16Error::InvalidLeg);
     }
-    Ok(close_q)
+    if cert.certified_equity < 0 || pnl < 0 {
+        return Ok(old_abs_q);
+    }
+    if !liquidation_projected_healthy_after_close(
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
+        old_abs_q,
+    )? {
+        return Ok(old_abs_q);
+    }
+
+    let mut lo = 1u128;
+    let mut hi = old_abs_q;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let healthy = liquidation_projected_healthy_after_close(
+            config,
+            cert,
+            capital,
+            pnl,
+            leg,
+            effective_price,
+            raw_target_price,
+            fee_bps,
+            mid,
+        )
+        .unwrap_or(false);
+        if healthy {
+            hi = mid;
+        } else {
+            lo = mid.checked_add(1).ok_or(V16Error::ArithmeticOverflow)?;
+        }
+    }
+    if liquidation_projected_healthy_after_close(
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
+        lo,
+    )
+    .unwrap_or(false)
+    {
+        Ok(lo)
+    } else {
+        Ok(old_abs_q)
+    }
 }
 
 fn add_open_interest_for_new_position(
@@ -13205,11 +13360,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
-        let close_request_q = liquidation_engine_close_request_q(leg.basis_pos_q)?;
+        let asset = self.asset_state(request.asset_index)?;
+        let close_request_q = liquidation_engine_close_request_q(
+            config,
+            cert,
+            account.header.capital.get(),
+            account.header.pnl.get(),
+            leg,
+            asset.effective_price,
+            asset.raw_oracle_target_price,
+            request.fee_bps,
+        )?;
         // PRODUCTION KERNEL: clamp + toward-zero reduction delta — the SAME
         // risk-reduction kernel rebalance uses, so A5.dec's strict-progress
         // contract now governs the real liquidation route (3C). Liquidation size
-        // is engine-selected: close the selected leg fully, never a keeper chunk.
+        // is engine-selected: close just enough to restore maintenance health
+        // when possible, otherwise close the selected leg fully.
         let (close_q, close_delta) =
             V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, close_request_q)?;
         if self.position_delta_touches_pending_domain_loss_barrier(
@@ -13237,10 +13403,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             leg.side,
             &account.as_view(),
         )?;
-        let fee_notional = risk_notional_ceil(
-            close_q,
-            self.asset_state(request.asset_index)?.effective_price,
-        )?;
+        let fee_notional = risk_notional_ceil(close_q, asset.effective_price)?;
         let fee = liquidation_fee_for_close(
             fee_notional,
             request.fee_bps,

@@ -65,16 +65,20 @@ pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
     )
 }
 
-pub fn kani_liquidation_engine_close_request_q(leg_basis_pos_q: i128) -> V16Result<u128> {
-    liquidation_engine_close_request_q(leg_basis_pos_q)
-}
-
-pub fn kani_kernel_reduce_position_delta(
-    pre_basis_signed: i128,
-    side: SideV16,
-    requested: u128,
-) -> V16Result<(u128, i128)> {
-    V16Core::kernel_reduce_position_delta(pre_basis_signed, side, requested)
+pub fn kani_liquidation_projected_health_deficit_from_parts(
+    certified_equity: i128,
+    certified_maintenance_req: u128,
+    old_leg_maintenance: u128,
+    new_leg_maintenance: u128,
+    charged_fee: u128,
+) -> V16Result<u128> {
+    liquidation_projected_health_deficit_from_parts(
+        certified_equity,
+        certified_maintenance_req,
+        old_leg_maintenance,
+        new_leg_maintenance,
+        charged_fee,
+    )
 }
 
 pub fn kani_add_open_interest_for_new_position(
