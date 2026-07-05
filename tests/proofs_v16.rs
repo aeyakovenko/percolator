@@ -9,18 +9,18 @@ use percolator::v16::{
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
+    kani_health_requirements_from_base_and_target_lag, kani_kernel_reduce_position_delta,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
-    kani_liquidation_fee_from_raw_fee, kani_loss_stale_trade_scope_allowed,
-    kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preflight_risk_gate,
-    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
-    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
-    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
-    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
-    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
+    kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
+    kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
+    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
     PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -3844,6 +3844,61 @@ fn proof_v16_pending_domain_loss_barrier_allows_only_same_side_reductions() {
     }
     if touches_barrier && current != 0 && next != 0 && current.signum() != next.signum() {
         assert!(blocked);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_engine_selected_size_closes_full_leg() {
+    let basis_raw: i64 = kani::any();
+    let raw_fee_raw: u16 = kani::any();
+    let min_liquidation_abs_raw: u16 = kani::any();
+    let cap_extra: u16 = kani::any();
+
+    kani::assume(basis_raw != 0);
+    let basis = basis_raw as i128;
+    let side = if basis > 0 {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let leg_abs_q = basis.unsigned_abs();
+    let close_request_q = kani_liquidation_engine_close_request_q(basis).unwrap();
+    let (closed_q, delta_q) =
+        kani_kernel_reduce_position_delta(basis, side, close_request_q).unwrap();
+
+    kani::cover!(
+        basis > 0 && leg_abs_q > 1024,
+        "engine-selected liquidation proof covers nontrivial long position"
+    );
+    kani::cover!(
+        basis < 0 && leg_abs_q > 1024,
+        "engine-selected liquidation proof covers nontrivial short position"
+    );
+    assert_eq!(close_request_q, leg_abs_q);
+    assert_eq!(closed_q, leg_abs_q);
+    assert_eq!(basis.checked_add(delta_q).unwrap(), 0);
+
+    let raw_fee = raw_fee_raw as u128;
+    let min_liquidation_abs = min_liquidation_abs_raw as u128;
+    let liquidation_fee_cap = min_liquidation_abs + cap_extra as u128;
+    let closes_full_position = closed_q == leg_abs_q;
+    let fee = kani_liquidation_fee_from_raw_fee(
+        raw_fee,
+        min_liquidation_abs,
+        liquidation_fee_cap,
+        closes_full_position,
+    )
+    .unwrap();
+
+    kani::cover!(
+        min_liquidation_abs > 0 && raw_fee < min_liquidation_abs && cap_extra > 0,
+        "engine-selected liquidation proof covers dust full close with absolute min fee"
+    );
+    assert!(closes_full_position);
+    if min_liquidation_abs > 0 && raw_fee < min_liquidation_abs {
+        assert_eq!(fee, min_liquidation_abs);
     }
 }
 

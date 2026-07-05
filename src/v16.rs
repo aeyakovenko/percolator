@@ -317,6 +317,15 @@ fn liquidation_close_would_leave_uncovered_loss_with_open_risk(
     Ok(uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap))
 }
 
+#[inline]
+fn liquidation_engine_close_request_q(leg_basis_pos_q: i128) -> V16Result<u128> {
+    let close_q = leg_basis_pos_q.unsigned_abs();
+    if close_q == 0 {
+        return Err(V16Error::InvalidLeg);
+    }
+    Ok(close_q)
+}
+
 fn add_open_interest_for_new_position(
     asset: &mut AssetStateV16,
     side: SideV16,
@@ -4508,15 +4517,15 @@ pub struct AutoCrankObservationV16 {
     pub funding_rate_e9: i128,
 }
 
-/// Bounded work a keeper submits to the order-insensitive auto-crank (engine.md):
-/// observations that may land in any order, a liquidation work budget, and the
-/// resolved-close fee rate. NO caller-chosen action, asset, or liquidation fee —
-/// the engine selects the step and the asset and derives the fee from config.
+/// Work a keeper submits to the order-insensitive auto-crank (engine.md):
+/// observations that may land in any order and the resolved-close fee rate. NO
+/// caller-chosen action, asset, liquidation size, or liquidation fee — the engine
+/// selects the step/asset, closes the selected leg, and derives the fee from
+/// config.
 #[derive(Clone, Copy, Debug)]
 pub struct AutoCrankWorkV16<'a> {
     pub now_slot: u64,
     pub observations: &'a [AutoCrankObservationV16],
-    pub liquidation_max_close_q: u128,
     pub resolved_close_fee_rate_per_slot: u128,
 }
 
@@ -5096,7 +5105,6 @@ impl SourceCreditLienAggregateProofV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiquidationRequestV16 {
     pub asset_index: usize,
-    pub close_q: u128,
     pub fee_bps: u64,
 }
 
@@ -11380,12 +11388,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// Calling convention (wrapper side):
     /// 1. Decode a public auto-crank instruction carrying a bounded set of oracle
     ///    OBSERVATIONS (asset, authenticated price, funding) — one per asset the
-    ///    keeper has fresh data for — plus a `liquidation_max_close_q` work budget
-    ///    and the `resolved_close_fee_rate_per_slot`.
+    ///    keeper has fresh data for — plus the `resolved_close_fee_rate_per_slot`.
     /// 2. Authenticate clock/slot + each observation against the oracle.
-    /// 3. Build `AutoCrankWorkV16 { now_slot, observations, liquidation_max_close_q,
-    ///    resolved_close_fee_rate_per_slot }` and call this ONCE (one ix = one step;
-    ///    never loop to a fixed point — CU).
+    /// 3. Build `AutoCrankWorkV16 { now_slot, observations,
+    ///    resolved_close_fee_rate_per_slot }` and call this ONCE (one ix = one
+    ///    step; never loop to a fixed point — CU).
     /// 4. The engine classifies the account, selects the highest-priority step AND
     ///    its asset (self-selected — the caller never chooses action or asset),
     ///    matches the observation that step needs, derives the liquidation fee from
@@ -11505,7 +11512,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     obs,
                     PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 {
                         asset_index,
-                        close_q: work.liquidation_max_close_q,
                         fee_bps,
                     }),
                 )?)
@@ -13172,7 +13178,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let config = self.header.config.try_to_runtime_shape()?;
         if request.asset_index >= config.max_market_slots as usize
-            || request.close_q == 0
             || request.fee_bps > config.liquidation_fee_bps.max(config.max_trading_fee_bps)
         {
             return Err(V16Error::InvalidConfig);
@@ -13200,11 +13205,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
+        let close_request_q = liquidation_engine_close_request_q(leg.basis_pos_q)?;
         // PRODUCTION KERNEL: clamp + toward-zero reduction delta — the SAME
         // risk-reduction kernel rebalance uses, so A5.dec's strict-progress
-        // contract now governs the real liquidation route (3C).
+        // contract now governs the real liquidation route (3C). Liquidation size
+        // is engine-selected: close the selected leg fully, never a keeper chunk.
         let (close_q, close_delta) =
-            V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, request.close_q)?;
+            V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, close_request_q)?;
         if self.position_delta_touches_pending_domain_loss_barrier(
             &account.as_view(),
             request.asset_index,

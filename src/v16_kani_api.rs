@@ -65,6 +65,18 @@ pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
     )
 }
 
+pub fn kani_liquidation_engine_close_request_q(leg_basis_pos_q: i128) -> V16Result<u128> {
+    liquidation_engine_close_request_q(leg_basis_pos_q)
+}
+
+pub fn kani_kernel_reduce_position_delta(
+    pre_basis_signed: i128,
+    side: SideV16,
+    requested: u128,
+) -> V16Result<(u128, i128)> {
+    V16Core::kernel_reduce_position_delta(pre_basis_signed, side, requested)
+}
+
 pub fn kani_add_open_interest_for_new_position(
     asset: &mut AssetStateV16,
     side: SideV16,
