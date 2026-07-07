@@ -538,6 +538,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_clear_terminal_spent_domain_budget_pair(
+        budget: u128,
+        spent: u128,
+    ) -> V16Result<(u128, u128)> {
+        let (budget, spent) = Self::clear_terminal_spent_domain_budget_pair(
+            V16PodU128::new(budget),
+            V16PodU128::new(spent),
+        )?;
+        Ok((budget.get(), spent.get()))
+    }
+
     pub fn kani_credit_account_from_insurance_delta(
         insurance: u128,
         budget_remaining: u128,

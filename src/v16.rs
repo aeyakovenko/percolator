@@ -8888,6 +8888,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    fn clear_terminal_spent_domain_budget_pair(
+        budget: V16PodU128,
+        spent: V16PodU128,
+    ) -> V16Result<(V16PodU128, V16PodU128)> {
+        let budget = budget.get();
+        let spent = spent.get();
+        if spent == 0 {
+            return Ok((V16PodU128::new(budget), V16PodU128::default()));
+        }
+        if budget != spent {
+            return Err(V16Error::LockActive);
+        }
+        Ok((V16PodU128::default(), V16PodU128::default()))
+    }
+
     fn set_domain_insurance_budget_core(
         &mut self,
         domain: usize,
@@ -12018,6 +12033,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn require_empty_asset_lifecycle_state(&self, asset_index: usize) -> V16Result<()> {
+        self.require_empty_asset_lifecycle_state_with_spent_policy(asset_index, false)
+    }
+
+    fn require_empty_asset_lifecycle_state_with_spent_policy(
+        &self,
+        asset_index: usize,
+        allow_terminal_spent_budget: bool,
+    ) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
         let asset = self.asset_state(asset_index)?;
         let long_domain = self.insurance_domain_index(asset_index, SideV16::Long)?;
@@ -12029,6 +12052,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let long_reservation = self.insurance_reservation_for_domain(long_domain)?;
         let short_reservation = self.insurance_reservation_for_domain(short_domain)?;
         let slot = self.markets[asset_index].engine_slot();
+        let long_budget = slot.insurance_domain_budget_long.get();
+        let long_spent = slot.insurance_domain_spent_long.get();
+        let short_budget = slot.insurance_domain_budget_short.get();
+        let short_spent = slot.insurance_domain_spent_short.get();
+        let spent_blocks_empty = if allow_terminal_spent_budget {
+            (long_spent != 0 && long_budget != long_spent)
+                || (short_spent != 0 && short_budget != short_spent)
+        } else {
+            long_spent != 0 || short_spent != 0
+        };
 
         if slot.pending_domain_loss_barrier_long.get() != 0
             || slot.pending_domain_loss_barrier_short.get() != 0
@@ -12064,8 +12097,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.social_loss_dust_short_num != 0
             || asset.explicit_unallocated_loss_long != 0
             || asset.explicit_unallocated_loss_short != 0
-            || slot.insurance_domain_spent_long.get() != 0
-            || slot.insurance_domain_spent_short.get() != 0
+            || spent_blocks_empty
             || !long_source.is_empty_amount_shape()
             || !short_source.is_empty_amount_shape()
             || !long_bucket.is_empty_amount_shape()
@@ -15389,6 +15421,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.last_asset_activation_slot = V16PodU64::new(now_slot);
         self.header.asset_set_epoch = V16PodU64::new(next_asset_set_epoch);
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
+    /// Clears spent-only insurance-domain ledgers on an otherwise empty terminal asset.
+    ///
+    /// This is value-neutral: it may only erase a domain whose remaining budget
+    /// is already zero (`budget == spent`). If `budget > spent`, callers must
+    /// withdraw the remaining domain budget before terminal cleanup.
+    pub fn clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        let asset = self.asset_state(asset_index)?;
+        if !matches!(
+            asset.lifecycle,
+            AssetLifecycleV16::Recovery | AssetLifecycleV16::Retired
+        ) {
+            return Err(V16Error::LockActive);
+        }
+        self.require_empty_asset_lifecycle_state_with_spent_policy(asset_index, true)?;
+        let slot = self.markets[asset_index].engine_slot_mut();
+        let (budget_long, spent_long) = Self::clear_terminal_spent_domain_budget_pair(
+            slot.insurance_domain_budget_long,
+            slot.insurance_domain_spent_long,
+        )?;
+        let (budget_short, spent_short) = Self::clear_terminal_spent_domain_budget_pair(
+            slot.insurance_domain_budget_short,
+            slot.insurance_domain_spent_short,
+        )?;
+        slot.insurance_domain_budget_long = budget_long;
+        slot.insurance_domain_spent_long = spent_long;
+        slot.insurance_domain_budget_short = budget_short;
+        slot.insurance_domain_spent_short = spent_short;
         self.validate_shape()
     }
 
