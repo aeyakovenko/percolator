@@ -13447,8 +13447,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidConfig);
         }
-        let asset = self.asset_state(asset_index)?;
-        if asset.raw_oracle_target_price != asset.effective_price {
+        if self.account_has_target_effective_lag(&account.as_view())? {
             let cert = self.compute_account_health_cert_with_price_override(
                 &account.as_view(),
                 false,

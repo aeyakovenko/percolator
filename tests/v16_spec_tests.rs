@@ -916,6 +916,56 @@ fn v16_batch_trade_checks_initial_margin_on_final_portfolio() {
 }
 
 #[test]
+fn v16_single_trade_recert_applies_unrelated_asset_target_lag_penalty() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut taker_header = account_fixture(2, 213);
+    let mut lp_header = account_fixture(2, 214);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+        let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+        market.deposit_not_atomic(&mut taker, 200).unwrap();
+        market.deposit_not_atomic(&mut lp, 10_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut taker,
+                &mut lp,
+                TradeRequestV16 {
+                    asset_index: 1,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .set_asset_raw_oracle_target_not_atomic(1, 50)
+            .unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+    let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+    let res = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut taker,
+        &mut lp,
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+    );
+    assert_eq!(res, Err(V16Error::InvalidConfig));
+
+    let full_cert = taker.header.health_cert.try_to_runtime().unwrap();
+    assert_eq!(
+        full_cert.certified_initial_req, 250,
+        "post-trade full cert must include asset-1 lag penalty"
+    );
+}
+
+#[test]
 fn v16_batch_trade_self_settles_stale_certificates_once_before_fills() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut long_header = account_fixture(1, 203);

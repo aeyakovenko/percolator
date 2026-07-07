@@ -3588,6 +3588,62 @@ fn proof_v16_final_batch_margin_gate_accepts_only_final_certified_im() {
 }
 
 #[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_single_trade_recert_lag_gate_sees_nontraded_active_asset() {
+    let raw_target_1: u8 = kani::any();
+    kani::assume((1..=99).contains(&raw_target_1));
+    let (mut header, mut markets, mut account_header) = two_market_view_fixture();
+    markets[1].engine.asset.raw_oracle_target_price = V16PodU64::new(raw_target_1 as u64);
+
+    let leg0 = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: markets[0].engine.asset.market_id.get(),
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        loss_weight: POS_SCALE,
+        ..PortfolioLegV16::EMPTY
+    };
+    let leg1 = PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: markets[1].engine.asset.market_id.get(),
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        loss_weight: POS_SCALE,
+        ..PortfolioLegV16::EMPTY
+    };
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg0);
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&leg1);
+    let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    active_bitmap_set(&mut bitmap, 1).unwrap();
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+
+    assert_eq!(markets[0].engine.asset.raw_oracle_target_price.get(), 100);
+    assert_eq!(markets[0].engine.asset.effective_price.get(), 100);
+    assert_ne!(
+        markets[1].engine.asset.raw_oracle_target_price.get(),
+        markets[1].engine.asset.effective_price.get()
+    );
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let expected_nontraded_lag = 100u128 - raw_target_1 as u128;
+    kani::cover!(
+        expected_nontraded_lag > 40,
+        "single-trade recert lag gate covers material lag on a non-traded held asset"
+    );
+    assert_eq!(
+        market.kani_account_has_target_effective_lag(&account.as_view()),
+        Ok(true)
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_locked_trade_margin_gate_cannot_use_positive_pnl_credit() {

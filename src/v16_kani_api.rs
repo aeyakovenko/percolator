@@ -783,6 +783,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::ensure_no_positive_credit_initial_margin(account)
     }
 
+    pub fn kani_account_has_target_effective_lag(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        self.account_has_target_effective_lag(account)
+    }
+
     pub fn kani_apply_trade_after_refresh_not_atomic(
         &mut self,
         long_account: &mut PortfolioV16ViewMut<'_>,
