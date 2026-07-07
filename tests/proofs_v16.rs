@@ -2032,6 +2032,50 @@ fn proof_v16_public_restart_rejects_spent_domain_before_mutation() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_spent_domain_cleanup_is_value_neutral_and_remaining_budget_gated() {
+    let budget_raw: u8 = kani::any();
+    let spent_raw: u8 = kani::any();
+    kani::assume(budget_raw > 0);
+    kani::assume(spent_raw <= budget_raw);
+    let budget = budget_raw as u128;
+    let spent = spent_raw as u128;
+    let remaining_before = budget - spent;
+    let result =
+        MarketGroupV16ViewMut::<u64>::kani_clear_terminal_spent_domain_budget_pair(budget, spent);
+    let expected_ok = spent == 0 || budget == spent;
+
+    kani::cover!(
+        spent != 0 && budget == spent,
+        "terminal cleanup covers nonzero spent-only domain"
+    );
+    kani::cover!(
+        spent != 0 && budget > spent,
+        "terminal cleanup rejects domain with remaining budget"
+    );
+    kani::cover!(
+        spent == 0 && budget > 1,
+        "terminal cleanup covers no-op domain with remaining budget"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok((next_budget, next_spent)) = result {
+        assert_eq!(next_spent, 0);
+        assert_eq!(next_budget - next_spent, remaining_before);
+        if spent == 0 {
+            assert_eq!(next_budget, budget);
+        } else {
+            assert_eq!(next_budget, 0);
+            assert_eq!(remaining_before, 0);
+        }
+    } else {
+        assert!(spent != 0 && budget > spent);
+        assert!(remaining_before > 0);
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_canonical_retired_asset_slot_preserves_identity_and_clears_local_ledgers() {
