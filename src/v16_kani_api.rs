@@ -449,6 +449,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok((budget.get(), spent.get()))
     }
 
+    pub fn kani_clear_terminal_source_backing_pair(
+        market_id: u64,
+        source: SourceCreditStateV16,
+        bucket: BackingBucketV16,
+    ) -> V16Result<(SourceCreditStateV16, BackingBucketV16)> {
+        Self::clear_terminal_source_backing_pair(market_id, source, bucket)
+    }
+
     pub fn kani_credit_account_from_insurance_delta(
         insurance: u128,
         budget_remaining: u128,

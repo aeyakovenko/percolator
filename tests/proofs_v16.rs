@@ -2034,6 +2034,132 @@ fn proof_v16_public_restart_rejects_spent_domain_before_mutation() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_terminal_source_backing_cleanup_only_erases_matched_inert_residue() {
+    let market_id_raw: u8 = kani::any();
+    kani::assume(market_id_raw > 0);
+    let market_id = u64::from(market_id_raw);
+
+    let positive_claim_raw: u8 = kani::any();
+    let exact_claim_raw: u8 = kani::any();
+    let fresh_reserved_raw: u8 = kani::any();
+    let spent_raw: u8 = kani::any();
+    let provider_raw: u8 = kani::any();
+    let valid_liened_raw: u8 = kani::any();
+    let impaired_liened_raw: u8 = kani::any();
+    let insurance_reserved_raw: u8 = kani::any();
+    let valid_insurance_raw: u8 = kani::any();
+    let impaired_insurance_raw: u8 = kani::any();
+    let bucket_fresh_raw: u8 = kani::any();
+    let bucket_valid_raw: u8 = kani::any();
+    let bucket_consumed_raw: u8 = kani::any();
+    let bucket_impaired_raw: u8 = kani::any();
+    let bucket_earnings_raw: u8 = kani::any();
+    let credit_rate_raw: u8 = kani::any();
+    let credit_epoch_raw: u8 = kani::any();
+    let bucket_expiry_raw: u8 = kani::any();
+    let bucket_status_raw: u8 = kani::any();
+
+    let scale = |v: u8| u128::from(v) * BOUND_SCALE;
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: scale(positive_claim_raw),
+        exact_positive_claim_num: scale(exact_claim_raw),
+        fresh_reserved_backing_num: scale(fresh_reserved_raw),
+        spent_backing_num: scale(spent_raw),
+        provider_receivable_num: scale(provider_raw),
+        valid_liened_backing_num: scale(valid_liened_raw),
+        impaired_liened_backing_num: scale(impaired_liened_raw),
+        insurance_credit_reserved_num: scale(insurance_reserved_raw),
+        valid_liened_insurance_num: scale(valid_insurance_raw),
+        impaired_liened_insurance_num: scale(impaired_insurance_raw),
+        credit_rate_num: scale(credit_rate_raw),
+        credit_epoch: u64::from(credit_epoch_raw),
+    };
+    let bucket = BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: scale(bucket_fresh_raw),
+        valid_liened_backing_num: scale(bucket_valid_raw),
+        consumed_liened_backing_num: scale(bucket_consumed_raw),
+        impaired_liened_backing_num: scale(bucket_impaired_raw),
+        utilization_fee_earnings: scale(bucket_earnings_raw),
+        expiry_slot: u64::from(bucket_expiry_raw),
+        status: match bucket_status_raw & 3 {
+            0 => BackingBucketStatusV16::Empty,
+            1 => BackingBucketStatusV16::Fresh,
+            2 => BackingBucketStatusV16::Expired,
+            _ => BackingBucketStatusV16::Impaired,
+        },
+    };
+
+    let source_has_live_value = source.positive_claim_bound_num != 0
+        || source.exact_positive_claim_num != 0
+        || source.fresh_reserved_backing_num != 0
+        || source.valid_liened_backing_num != 0
+        || source.impaired_liened_backing_num != 0
+        || source.insurance_credit_reserved_num != 0
+        || source.valid_liened_insurance_num != 0
+        || source.impaired_liened_insurance_num != 0;
+    let bucket_has_live_value = bucket.fresh_unliened_backing_num != 0
+        || bucket.valid_liened_backing_num != 0
+        || bucket.impaired_liened_backing_num != 0
+        || bucket.utilization_fee_earnings != 0;
+    let residue_is_matched = source.spent_backing_num == source.provider_receivable_num
+        && source.spent_backing_num == bucket.consumed_liened_backing_num;
+    let expected_ok = !source_has_live_value && !bucket_has_live_value && residue_is_matched;
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_clear_terminal_source_backing_pair(
+        market_id, source, bucket,
+    );
+
+    kani::cover!(
+        result.is_ok() && source.spent_backing_num != 0,
+        "terminal source/backing cleanup clears matched consumed-only residue"
+    );
+    kani::cover!(
+        result.is_err() && source.positive_claim_bound_num != 0,
+        "terminal source/backing cleanup rejects live source claims"
+    );
+    kani::cover!(
+        result.is_err() && bucket.fresh_unliened_backing_num != 0,
+        "terminal source/backing cleanup rejects fresh backing value"
+    );
+    kani::cover!(
+        result.is_err() && !source_has_live_value && !bucket_has_live_value && !residue_is_matched,
+        "terminal source/backing cleanup rejects mismatched consumed/provider residue"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    match result {
+        Ok((next_source, next_bucket)) => {
+            assert!(!source_has_live_value);
+            assert!(!bucket_has_live_value);
+            assert!(residue_is_matched);
+            assert_eq!(next_source.positive_claim_bound_num, 0);
+            assert_eq!(next_source.exact_positive_claim_num, 0);
+            assert_eq!(next_source.fresh_reserved_backing_num, 0);
+            assert_eq!(next_source.spent_backing_num, 0);
+            assert_eq!(next_source.provider_receivable_num, 0);
+            assert_eq!(next_source.valid_liened_backing_num, 0);
+            assert_eq!(next_source.impaired_liened_backing_num, 0);
+            assert_eq!(next_source.insurance_credit_reserved_num, 0);
+            assert_eq!(next_source.valid_liened_insurance_num, 0);
+            assert_eq!(next_source.impaired_liened_insurance_num, 0);
+            assert_eq!(next_bucket.market_id, market_id);
+            assert_eq!(next_bucket.fresh_unliened_backing_num, 0);
+            assert_eq!(next_bucket.valid_liened_backing_num, 0);
+            assert_eq!(next_bucket.consumed_liened_backing_num, 0);
+            assert_eq!(next_bucket.impaired_liened_backing_num, 0);
+            assert_eq!(next_bucket.utilization_fee_earnings, 0);
+        }
+        Err(err) => {
+            assert_eq!(err, V16Error::LockActive);
+            assert!(source_has_live_value || bucket_has_live_value || !residue_is_matched);
+        }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_terminal_spent_domain_cleanup_is_value_neutral_and_remaining_budget_gated() {
     let budget_raw: u8 = kani::any();
     let spent_raw: u8 = kani::any();
