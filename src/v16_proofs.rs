@@ -3023,15 +3023,26 @@ fn kani_public_force_asset_recovery_isolation_case<const SELECTED: usize>() {
     let mut expected_header = header_before;
     expected_header.asset_set_epoch = V16PodU64::new(header_before.asset_set_epoch.get() + 1);
     expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
-    assert_eq!(header, expected_header);
+    assert!(kani_eq_market_group_v16_header_account(
+        &header,
+        &expected_header
+    ));
 
     let mut expected_selected = selected_before;
     let mut expected_selected_asset = selected_before.engine.asset.try_to_runtime().unwrap();
     expected_selected_asset.lifecycle = AssetLifecycleV16::Recovery;
     expected_selected_asset.raw_oracle_target_price = expected_selected_asset.effective_price;
     expected_selected.engine.asset = AssetStateV16Account::from_runtime(&expected_selected_asset);
-    assert_eq!(markets[SELECTED], expected_selected);
-    assert_eq!(markets[unrelated], unrelated_before);
+    assert_eq!(markets[SELECTED].wrapper, expected_selected.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets[SELECTED].engine,
+        &expected_selected.engine
+    ));
+    assert_eq!(markets[unrelated].wrapper, unrelated_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets[unrelated].engine,
+        &unrelated_before.engine
+    ));
 }
 
 #[cfg(all(kani, feature = "contracts"))]
@@ -3056,4 +3067,322 @@ fn contract_public_force_asset_zero_recovery_preserves_asset_one_whole_slot() {
 )]
 fn contract_public_force_asset_one_recovery_preserves_asset_zero_whole_slot() {
     kani_public_force_asset_recovery_isolation_case::<1>();
+}
+
+// The public cure route obtains `cert` from full_account_refresh and then calls
+// this production body. Prove the value-moving body as one whole-state step:
+// external deposit raises V once, prior escrow is reclassified once, and the
+// close identity and account frame are exact.
+#[cfg(all(kani, feature = "contracts"))]
+fn kani_cure_close_body_case<const FUNDING_MODE: u8>() {
+    let capital_raw: u8 = kani::any();
+    let loss_raw: u8 = kani::any();
+    let initial_req_raw: u8 = kani::any();
+    let slack_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 4);
+    kani::assume((1..=6).contains(&loss_raw));
+    kani::assume(initial_req_raw <= 2);
+    kani::assume(slack_raw <= 2);
+
+    let capital = capital_raw as u128;
+    let loss = loss_raw as u128;
+    let initial_req = initial_req_raw as u128;
+    let slack = slack_raw as u128;
+    kani::assume(loss > capital);
+    let cure_credit = loss + initial_req + slack - capital;
+    let (deposit, escrow) = match FUNDING_MODE {
+        0 => (cure_credit, 0),
+        1 => (0, cure_credit),
+        2 => {
+            kani::assume(cure_credit >= 2);
+            (cure_credit - 1, 1)
+        }
+        _ => unreachable!(),
+    };
+
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = [1; 32];
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(1);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.last_asset_activation_slot = V16PodU64::new(1);
+    header.next_market_id = V16PodU64::new(2);
+    header.slot_last = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(1);
+    header.vault = V16PodU128::new(capital + escrow);
+    header.c_tot = V16PodU128::new(capital);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut markets = [Market::new(
+        77u64,
+        EngineAssetSlotV16Account::empty_for_market(1),
+    )];
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        [1; 32], [2; 32], [3; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(provenance).unwrap();
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    account_header.cancel_deposit_escrow = V16PodU128::new(escrow);
+    account_header.last_fee_slot = V16PodU64::new(1);
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            close_id: 1,
+            asset_index: 0,
+            market_id: 1,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: loss,
+            drift_reference_slot: 1,
+            max_close_slot: 11,
+            residual_remaining: loss,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    let cert = HealthCertV16 {
+        certified_equity: capital as i128 - loss as i128,
+        certified_initial_req: initial_req,
+        certified_maintenance_req: initial_req,
+        certified_liq_deficit: loss.saturating_sub(capital),
+        certified_worst_case_loss: loss,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+    };
+    account_header.health_cert = HealthCertV16Account::from_runtime(&cert);
+
+    let header_before = header;
+    let market_before = markets[0];
+    let account_before = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market
+            .cure_and_cancel_close_with_cert_not_atomic(&mut account, deposit, cert)
+            .unwrap();
+    }
+
+    kani::cover!(
+        initial_req > 0 && slack > 0,
+        "nontrivial deficit cure covers margin and over-cure slack"
+    );
+
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(header_before.vault.get() + deposit);
+    expected_header.c_tot = V16PodU128::new(header_before.c_tot.get() + cure_credit);
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(0);
+    assert!(kani_eq_market_group_v16_header_account(
+        &header,
+        &expected_header
+    ));
+
+    let mut expected_market = market_before;
+    expected_market.engine.pending_domain_loss_barrier_long = V16PodU64::new(0);
+    assert_eq!(markets[0].wrapper, expected_market.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets[0].engine,
+        &expected_market.engine
+    ));
+
+    let mut expected_account = account_before;
+    expected_account.capital = V16PodU128::new(capital + cure_credit);
+    expected_account.cancel_deposit_escrow = V16PodU128::new(0);
+    expected_account.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: false,
+            canceled: true,
+            ..account_before.close_progress.try_to_runtime().unwrap()
+        });
+    expected_account.health_cert.valid = 0;
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_header,
+        &expected_account
+    ));
+
+    assert_eq!(header.vault.get(), header_before.vault.get() + deposit);
+    assert_eq!(header.vault.get(), header.c_tot.get());
+    assert_eq!(
+        header_before.vault.get(),
+        header_before.c_tot.get() + escrow
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    kani_zero_claim_expected_source_credit_rate_num
+)]
+fn contract_external_deposit_cure_conserves_value_and_releases_only_its_domain() {
+    kani_cure_close_body_case::<0>();
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    kani_zero_claim_expected_source_credit_rate_num
+)]
+fn contract_escrow_cure_conserves_value_and_releases_only_its_domain() {
+    kani_cure_close_body_case::<1>();
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    kani_zero_claim_expected_source_credit_rate_num
+)]
+fn contract_mixed_cure_conserves_value_and_releases_only_its_domain() {
+    kani_cure_close_body_case::<2>();
+}
+
+// The cure body delegates barrier release to this O(1) production helper.
+// Prove its exact frame separately over a rich opposite domain so the costly
+// account validator need not be duplicated in the cure value theorem.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn contract_barrier_release_preserves_opposite_domain_whole_slot() {
+    let position_raw: u8 = kani::any();
+    let stale_raw: u8 = kani::any();
+    let pending_short: bool = kani::any();
+    let backing_raw: u8 = kani::any();
+    let earnings_raw: u8 = kani::any();
+    let insurance_free_raw: u8 = kani::any();
+    let insurance_reserved_raw: u8 = kani::any();
+    kani::assume(position_raw <= 4);
+    kani::assume(stale_raw <= 4);
+    kani::assume((1..=4).contains(&backing_raw));
+    kani::assume(earnings_raw <= 4);
+    kani::assume((1..=4).contains(&insurance_free_raw));
+    kani::assume(insurance_reserved_raw <= 4);
+
+    let position_q = position_raw as u128;
+    let position_count = u64::from(position_raw != 0);
+    let stale_count = stale_raw as u64;
+    let backing_atoms = backing_raw as u128;
+    let backing_num = backing_atoms * BOUND_SCALE;
+    let earnings = earnings_raw as u128;
+    let insurance_reserved = insurance_reserved_raw as u128;
+    let insurance_reserved_num = insurance_reserved * BOUND_SCALE;
+    let insurance = insurance_free_raw as u128 + insurance_reserved;
+    let blockers_before = 1 + u64::from(pending_short) + 2 * position_count + 2 * stale_count;
+
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = [1; 32];
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(1);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.last_asset_activation_slot = V16PodU64::new(1);
+    header.next_market_id = V16PodU64::new(2);
+    header.slot_last = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(1);
+    header.vault = V16PodU128::new(insurance + backing_atoms + earnings);
+    header.insurance = V16PodU128::new(insurance);
+    header.backing_provider_earnings_total = V16PodU128::new(earnings);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(insurance_reserved);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(insurance);
+    header.resolved_payout_blocker_count = V16PodU64::new(blockers_before);
+
+    let mut markets = [Market::new(
+        kani::any::<u64>(),
+        EngineAssetSlotV16Account::empty_for_market(1),
+    )];
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 1;
+    asset.oi_eff_long_q = position_q;
+    asset.oi_eff_short_q = position_q;
+    asset.stored_pos_count_long = position_count;
+    asset.stored_pos_count_short = position_count;
+    asset.stale_account_count_long = stale_count;
+    asset.stale_account_count_short = stale_count;
+    asset.loss_weight_sum_long = u128::from(position_raw != 0);
+    asset.loss_weight_sum_short = u128::from(position_raw != 0);
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(u64::from(pending_short));
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(insurance);
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        utilization_fee_earnings: earnings,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: backing_num,
+            insurance_credit_reserved_num: insurance_reserved_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.insurance_reservation_short =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: insurance_reserved_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+
+    let header_before = header;
+    let market_before = markets[0];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .set_pending_domain_loss_barrier_count(0, SideV16::Long, 0)
+            .unwrap();
+    }
+
+    kani::cover!(
+        pending_short
+            && position_raw > 0
+            && stale_raw > 0
+            && earnings_raw > 0
+            && insurance_reserved_raw > 0,
+        "selected barrier release preserves a busy funded opposite domain"
+    );
+
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(blockers_before - 1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &header,
+        &expected_header
+    ));
+
+    let mut expected_market = market_before;
+    expected_market.engine.pending_domain_loss_barrier_long = V16PodU64::new(0);
+    assert_eq!(markets[0].wrapper, expected_market.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets[0].engine,
+        &expected_market.engine
+    ));
 }
