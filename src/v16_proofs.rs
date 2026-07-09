@@ -2770,3 +2770,290 @@ fn contract_check_select_auto_crank_plan() {
         recovery_reason,
     );
 }
+
+// Modular rate model for whole-market frame proofs. A zero-face source has
+// full credit after the real shape checks; keeping that shape validation in
+// the stub makes its success and error behavior identical to production.
+#[cfg(all(kani, feature = "contracts"))]
+fn kani_zero_claim_expected_source_credit_rate_num(state: SourceCreditStateV16) -> V16Result<u128> {
+    assert_eq!(state.positive_claim_bound_num, 0);
+    V16Core::validate_source_credit_state_shape_static(state)?;
+    Ok(CREDIT_RATE_SCALE)
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn contract_zero_claim_rate_model_matches_production_across_shape_classes() {
+    let fresh_free_raw: u8 = kani::any();
+    let valid_backing_raw: u8 = kani::any();
+    let spent_free_raw: u8 = kani::any();
+    let receivable_raw: u8 = kani::any();
+    let valid_insurance_raw: u8 = kani::any();
+    let impaired_insurance_raw: u8 = kani::any();
+    let free_insurance_raw: u8 = kani::any();
+    let fault: u8 = kani::any();
+    kani::assume(fresh_free_raw <= 4);
+    kani::assume(valid_backing_raw <= 4);
+    kani::assume(spent_free_raw <= 4);
+    kani::assume(receivable_raw <= 4);
+    kani::assume(valid_insurance_raw <= 4);
+    kani::assume(impaired_insurance_raw <= 4);
+    kani::assume(free_insurance_raw <= 4);
+    kani::assume(fault <= 10);
+
+    let valid_backing = valid_backing_raw as u128 * BOUND_SCALE;
+    let receivable = receivable_raw as u128 * BOUND_SCALE;
+    let valid_insurance = valid_insurance_raw as u128 * BOUND_SCALE;
+    let impaired_insurance = impaired_insurance_raw as u128 * BOUND_SCALE;
+    let mut state = SourceCreditStateV16 {
+        positive_claim_bound_num: 0,
+        exact_positive_claim_num: 0,
+        fresh_reserved_backing_num: valid_backing + fresh_free_raw as u128 * BOUND_SCALE,
+        spent_backing_num: receivable + spent_free_raw as u128 * BOUND_SCALE,
+        provider_receivable_num: receivable,
+        valid_liened_backing_num: valid_backing,
+        impaired_liened_backing_num: kani::any::<u8>() as u128 * BOUND_SCALE,
+        insurance_credit_reserved_num: valid_insurance
+            + impaired_insurance
+            + free_insurance_raw as u128 * BOUND_SCALE,
+        valid_liened_insurance_num: valid_insurance,
+        impaired_liened_insurance_num: impaired_insurance,
+        credit_rate_num: if kani::any() { 0 } else { CREDIT_RATE_SCALE },
+        credit_epoch: kani::any(),
+    };
+    match fault {
+        1 => state.exact_positive_claim_num = BOUND_SCALE,
+        2 => state.credit_rate_num = CREDIT_RATE_SCALE + 1,
+        3 => {
+            state.spent_backing_num = 0;
+            state.provider_receivable_num = BOUND_SCALE;
+        }
+        4 => {
+            state.fresh_reserved_backing_num = 0;
+            state.valid_liened_backing_num = BOUND_SCALE;
+        }
+        5 => {
+            state.insurance_credit_reserved_num = 0;
+            state.valid_liened_insurance_num = BOUND_SCALE;
+        }
+        6 => state.insurance_credit_reserved_num += 1,
+        7 => state.valid_liened_insurance_num += 1,
+        8 => state.impaired_liened_insurance_num += 1,
+        9 => {
+            let max_aligned = (u128::MAX / BOUND_SCALE) * BOUND_SCALE;
+            state.insurance_credit_reserved_num = max_aligned;
+            state.valid_liened_insurance_num = max_aligned;
+            state.impaired_liened_insurance_num = BOUND_SCALE;
+        }
+        10 => state = SourceCreditStateV16::EMPTY,
+        _ => {}
+    }
+
+    let modeled = kani_zero_claim_expected_source_credit_rate_num(state);
+    let actual = V16Core::expected_source_credit_rate_num_for_state(state);
+
+    kani::cover!(
+        fault == 0 && actual.is_ok() && state.fresh_reserved_backing_num > 0,
+        "valid zero-claim source with nonzero backing has full credit"
+    );
+    kani::cover!(
+        fault == 10 && actual.is_ok(),
+        "canonical empty source has full credit"
+    );
+    kani::cover!(
+        (1..=5).contains(&fault) && actual.is_err(),
+        "malformed zero-claim scalar ordering fails identically"
+    );
+    kani::cover!(
+        (6..=8).contains(&fault) && actual.is_err(),
+        "misaligned zero-claim insurance ledger fails identically"
+    );
+    kani::cover!(
+        fault == 9 && actual == Err(V16Error::ArithmeticOverflow),
+        "zero-claim insurance encumbrance overflow fails identically"
+    );
+    assert_eq!(actual, modeled);
+}
+
+// Cross-asset shutdown isolation over the real public route. The non-selected
+// asset carries balanced OI, a pending-loss barrier, fresh backing, provider
+// earnings, and reserved insurance. The rate stub removes only four eager
+// expansions of the U256-capable helper after its zero-claim behavior is
+// independently proven above.
+#[cfg(all(kani, feature = "contracts"))]
+fn kani_public_force_asset_recovery_isolation_case<const SELECTED: usize>() {
+    let selected_drain_only: bool = kani::any();
+    let backing_raw: u8 = kani::any();
+    let earnings_raw: u8 = kani::any();
+    let insurance_free_raw: u8 = kani::any();
+    let insurance_reserved_raw: u8 = kani::any();
+    let position_raw: u8 = kani::any();
+    let pending_barrier: bool = kani::any();
+    kani::assume((1..=4).contains(&backing_raw));
+    kani::assume(earnings_raw <= 4);
+    kani::assume((1..=4).contains(&insurance_free_raw));
+    kani::assume(insurance_reserved_raw <= 4);
+    kani::assume(position_raw <= 4);
+
+    let unrelated = 1 - SELECTED;
+    let backing_atoms = backing_raw as u128;
+    let backing_num = backing_atoms * BOUND_SCALE;
+    let earnings = earnings_raw as u128;
+    let insurance_reserved = insurance_reserved_raw as u128;
+    let insurance_reserved_num = insurance_reserved * BOUND_SCALE;
+    let insurance = insurance_free_raw as u128 + insurance_reserved;
+    let position_q = position_raw as u128;
+
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = [1; 32];
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.last_asset_activation_slot = V16PodU64::new(1);
+    header.next_market_id = V16PodU64::new(3);
+    header.slot_last = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(1);
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    for (index, market) in markets.iter_mut().enumerate() {
+        let mut asset = AssetStateV16::default();
+        asset.market_id = index as u64 + 1;
+        asset.lifecycle = AssetLifecycleV16::Active;
+        asset.raw_oracle_target_price = 100;
+        asset.effective_price = 100;
+        asset.fund_px_last = 100;
+        asset.slot_last = 1;
+        market.engine.asset = AssetStateV16Account::from_runtime(&asset);
+    }
+    header.insurance = V16PodU128::new(insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(insurance);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(insurance_reserved);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.backing_provider_earnings_total = V16PodU128::new(earnings);
+    header.vault = V16PodU128::new(insurance + backing_atoms + earnings);
+    header.resolved_payout_blocker_count =
+        V16PodU64::new(2 * u64::from(position_raw != 0) + u64::from(pending_barrier));
+
+    let mut selected_asset = markets[SELECTED].engine.asset.try_to_runtime().unwrap();
+    selected_asset.lifecycle = if selected_drain_only {
+        AssetLifecycleV16::DrainOnly
+    } else {
+        AssetLifecycleV16::Active
+    };
+    selected_asset.raw_oracle_target_price = 151;
+    selected_asset.effective_price = 101;
+    selected_asset.fund_px_last = 101;
+    markets[SELECTED].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+    markets[SELECTED].wrapper = 11;
+
+    let unrelated_market_id = markets[unrelated].engine.asset.market_id.get();
+    let mut unrelated_asset = markets[unrelated].engine.asset.try_to_runtime().unwrap();
+    unrelated_asset.raw_oracle_target_price = 211;
+    unrelated_asset.effective_price = 212;
+    unrelated_asset.fund_px_last = 213;
+    unrelated_asset.k_long = 7;
+    unrelated_asset.k_short = -9;
+    unrelated_asset.f_long_num = 11;
+    unrelated_asset.f_short_num = -13;
+    unrelated_asset.oi_eff_long_q = position_q;
+    unrelated_asset.oi_eff_short_q = position_q;
+    unrelated_asset.loss_weight_sum_long = u128::from(position_raw != 0);
+    unrelated_asset.loss_weight_sum_short = u128::from(position_raw != 0);
+    unrelated_asset.stored_pos_count_long = u64::from(position_raw != 0);
+    unrelated_asset.stored_pos_count_short = u64::from(position_raw != 0);
+    markets[unrelated].engine.asset = AssetStateV16Account::from_runtime(&unrelated_asset);
+    markets[unrelated].engine.insurance_domain_budget_long = V16PodU128::new(insurance);
+    markets[unrelated].engine.pending_domain_loss_barrier_short =
+        V16PodU64::new(u64::from(pending_barrier));
+    markets[unrelated].engine.backing_long =
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: unrelated_market_id,
+            fresh_unliened_backing_num: backing_num,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            utilization_fee_earnings: earnings,
+            ..BackingBucketV16::EMPTY
+        });
+    markets[unrelated].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: backing_num,
+            insurance_credit_reserved_num: insurance_reserved_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[unrelated].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: insurance_reserved_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    markets[unrelated].wrapper = 22;
+
+    let header_before = header;
+    let selected_before = markets[SELECTED];
+    let unrelated_before = markets[unrelated];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .force_asset_recovery_not_atomic(SELECTED, header_before.current_slot.get())
+            .unwrap();
+    }
+
+    kani::cover!(
+        selected_drain_only
+            && position_raw > 0
+            && pending_barrier
+            && earnings_raw > 0
+            && insurance_reserved_raw > 0,
+        "DrainOnly shutdown preserves a risk-bearing funded sibling"
+    );
+    kani::cover!(
+        !selected_drain_only
+            && position_raw > 0
+            && pending_barrier
+            && earnings_raw > 0
+            && insurance_reserved_raw > 0,
+        "Active shutdown preserves a risk-bearing funded sibling"
+    );
+
+    let mut expected_header = header_before;
+    expected_header.asset_set_epoch = V16PodU64::new(header_before.asset_set_epoch.get() + 1);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
+    assert_eq!(header, expected_header);
+
+    let mut expected_selected = selected_before;
+    let mut expected_selected_asset = selected_before.engine.asset.try_to_runtime().unwrap();
+    expected_selected_asset.lifecycle = AssetLifecycleV16::Recovery;
+    expected_selected_asset.raw_oracle_target_price = expected_selected_asset.effective_price;
+    expected_selected.engine.asset = AssetStateV16Account::from_runtime(&expected_selected_asset);
+    assert_eq!(markets[SELECTED], expected_selected);
+    assert_eq!(markets[unrelated], unrelated_before);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    kani_zero_claim_expected_source_credit_rate_num
+)]
+fn contract_public_force_asset_zero_recovery_preserves_asset_one_whole_slot() {
+    kani_public_force_asset_recovery_isolation_case::<0>();
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    kani_zero_claim_expected_source_credit_rate_num
+)]
+fn contract_public_force_asset_one_recovery_preserves_asset_zero_whole_slot() {
+    kani_public_force_asset_recovery_isolation_case::<1>();
+}
