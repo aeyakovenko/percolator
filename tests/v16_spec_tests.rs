@@ -1298,6 +1298,70 @@ fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
 }
 
 #[test]
+fn v16_terminal_spent_domain_cleanup_canonicalizes_empty_price_state() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.deposit_domain_insurance_not_atomic(2, 10).unwrap();
+        market.force_asset_recovery_not_atomic(1, 2).unwrap();
+    }
+    header.insurance = V16PodU128::new(0);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(0);
+    markets[1].engine.insurance_domain_spent_long = V16PodU128::new(10);
+    let mut asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset.k_short = -700;
+    asset.k_epoch_start_long = 700;
+    asset.mode_long = SideModeV16::ResetPending;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let old_market_id = markets[1].engine.asset.market_id.get();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let remaining_before = header.insurance_domain_budget_remaining_total.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(
+        market.restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3),
+        Err(V16Error::LockActive)
+    );
+
+    market
+        .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(1)
+        .unwrap();
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        remaining_before
+    );
+    let cleaned = market.markets[1].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(cleaned.mode_long, SideModeV16::Normal);
+    assert_eq!(cleaned.mode_short, SideModeV16::Normal);
+    assert_eq!(cleaned.k_short, 0);
+    assert_eq!(cleaned.k_epoch_start_long, 0);
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_spent_long.get(),
+        0
+    );
+
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3)
+        .unwrap();
+    let restarted = market.markets[1].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(restarted.lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(restarted.market_id, old_market_id);
+    assert_eq!(restarted.effective_price, 222);
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_terminal_spent_domain_budget_cleanup_rejects_remaining_budget() {
     let (mut header, mut markets) = market_fixture(2, 100);
     {

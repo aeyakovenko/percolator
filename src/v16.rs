@@ -11778,13 +11778,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn require_empty_asset_lifecycle_state(&self, asset_index: usize) -> V16Result<()> {
-        self.require_empty_asset_lifecycle_state_with_spent_policy(asset_index, false)
+        self.require_empty_asset_lifecycle_state_with_terminal_policy(asset_index, false, false)
     }
 
-    fn require_empty_asset_lifecycle_state_with_spent_policy(
+    fn require_empty_asset_lifecycle_state_with_terminal_policy(
         &self,
         asset_index: usize,
         allow_terminal_spent_budget: bool,
+        allow_terminal_inert_price_state: bool,
     ) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
         let asset = self.asset_state(asset_index)?;
@@ -11807,25 +11808,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             long_spent != 0 || short_spent != 0
         };
+        let price_state_blocks_empty = if allow_terminal_inert_price_state {
+            false
+        } else {
+            asset.mode_long != SideModeV16::Normal
+                || asset.mode_short != SideModeV16::Normal
+                || asset.k_long != 0
+                || asset.k_short != 0
+                || asset.f_long_num != 0
+                || asset.f_short_num != 0
+                || asset.k_epoch_start_long != 0
+                || asset.k_epoch_start_short != 0
+                || asset.f_epoch_start_long_num != 0
+                || asset.f_epoch_start_short_num != 0
+                || asset.b_long_num != 0
+                || asset.b_short_num != 0
+                || asset.b_epoch_start_long_num != 0
+                || asset.b_epoch_start_short_num != 0
+        };
 
         if slot.pending_domain_loss_barrier_long.get() != 0
             || slot.pending_domain_loss_barrier_short.get() != 0
-            || asset.mode_long != SideModeV16::Normal
-            || asset.mode_short != SideModeV16::Normal
             || !((asset.a_long == ADL_ONE && asset.a_short == ADL_ONE)
                 || (asset.a_long == 0 && asset.a_short == 0))
-            || asset.k_long != 0
-            || asset.k_short != 0
-            || asset.f_long_num != 0
-            || asset.f_short_num != 0
-            || asset.k_epoch_start_long != 0
-            || asset.k_epoch_start_short != 0
-            || asset.f_epoch_start_long_num != 0
-            || asset.f_epoch_start_short_num != 0
-            || asset.b_long_num != 0
-            || asset.b_short_num != 0
-            || asset.b_epoch_start_long_num != 0
-            || asset.b_epoch_start_short_num != 0
+            || price_state_blocks_empty
             || asset.oi_eff_long_q != 0
             || asset.oi_eff_short_q != 0
             || asset.stored_pos_count_long != 0
@@ -15157,11 +15163,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    /// Clears spent-only insurance-domain ledgers on an otherwise empty terminal asset.
+    /// Clears inert terminal ledgers on an otherwise empty terminal asset.
     ///
     /// This is value-neutral: it may only erase a domain whose remaining budget
-    /// is already zero (`budget == spent`). If `budget > spent`, callers must
-    /// withdraw the remaining domain budget before terminal cleanup.
+    /// is already zero (`budget == spent`) and side-reset price indexes after no
+    /// position, stale-account, pending-obligation, loss, barrier, source,
+    /// backing, or reservation state can still reference them. If `budget >
+    /// spent`, callers must withdraw the remaining domain budget before terminal
+    /// cleanup.
     pub fn clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(
         &mut self,
         asset_index: usize,
@@ -15174,7 +15183,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ) {
             return Err(V16Error::LockActive);
         }
-        self.require_empty_asset_lifecycle_state_with_spent_policy(asset_index, true)?;
+        self.require_empty_asset_lifecycle_state_with_terminal_policy(asset_index, true, true)?;
+        let mut asset = self.asset_state(asset_index)?;
+        asset.a_long = ADL_ONE;
+        asset.a_short = ADL_ONE;
+        asset.k_long = 0;
+        asset.k_short = 0;
+        asset.f_long_num = 0;
+        asset.f_short_num = 0;
+        asset.k_epoch_start_long = 0;
+        asset.k_epoch_start_short = 0;
+        asset.f_epoch_start_long_num = 0;
+        asset.f_epoch_start_short_num = 0;
+        asset.b_long_num = 0;
+        asset.b_short_num = 0;
+        asset.b_epoch_start_long_num = 0;
+        asset.b_epoch_start_short_num = 0;
+        asset.mode_long = SideModeV16::Normal;
+        asset.mode_short = SideModeV16::Normal;
+        self.set_asset_state(asset_index, asset)?;
         let slot = self.markets[asset_index].engine_slot_mut();
         let (budget_long, spent_long) = Self::clear_terminal_spent_domain_budget_pair(
             slot.insurance_domain_budget_long,
