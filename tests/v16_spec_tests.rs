@@ -2695,6 +2695,51 @@ fn v16_grant_source_positive_pnl_attributes_claims_and_aggregates_in_lockstep() 
     assert_eq!(account.header.pnl.get(), 25);
 }
 
+#[test]
+fn v16_flat_source_claim_conversion_does_not_require_live_risk_cert() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 44);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(0, 25, 10)
+        .unwrap();
+    market
+        .add_account_source_positive_pnl_not_atomic(&mut account, 0, 25)
+        .unwrap();
+    assert_eq!(account.header.pnl.get(), 25);
+    assert!(!account.header.health_cert.try_to_runtime().unwrap().valid);
+
+    market.force_asset_recovery_not_atomic(0, 2).unwrap();
+    let converted = market
+        .convert_released_pnl_to_capital_not_atomic(&mut account)
+        .expect("flat source-backed PnL must remain convertible after asset recovery");
+
+    assert_eq!(converted, 25);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.capital.get(), 25);
+    assert_eq!(market.header.c_tot.get(), 25);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .positive_claim_bound_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .consumed_liened_backing_num
+            .get(),
+        25 * BOUND_SCALE
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
 // ROADMAP 3C step 4 — self-classifying crank. The keeper no longer chooses the
 // action: build_actionable_summary classifies the account and
 // select_progress_witness picks the continuation the auto-crank dispatches.

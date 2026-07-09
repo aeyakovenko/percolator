@@ -14192,6 +14192,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::LockActive);
         }
+        if Self::account_has_source_claims(account)?
+            && !self.account_has_active_source_claim_exposure(account)?
+        {
+            return Ok(());
+        }
         self.ensure_favorable_action_allowed(account)
     }
 
