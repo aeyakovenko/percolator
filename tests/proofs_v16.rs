@@ -15362,27 +15362,36 @@ fn proof_v16_validator_sound_senior_stack_includes_fresh_backing() {
     assert!(senior_with_backing <= market.header.vault.get());
 }
 
-// Insurance-capacity floor: a committable market shape cannot carry domain
-// insurance budget or live insurance-credit reservations exceeding global
-// insurance, and live reservations must fit inside the domain budget they spend.
-// The proof uses a real slot reservation ledger plus independently symbolic
-// budget/reservation atoms so the implication comes from validate_shape.
+// Insurance-capacity commit boundary: a domain may spend and reserve from the
+// same funded budget, but their sum cannot exceed it, and the remaining domain
+// budget cannot exceed pooled insurance. This is an exact accept/reject theorem
+// over the production validator, not an implication behind assume(validate).
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_validator_sound_insurance_capacity_covers_budget_and_reservations() {
-    let insurance: u128 = kani::any();
+    let insurance_raw: u8 = kani::any();
     let budget_raw: u8 = kani::any();
+    let spent_raw: u8 = kani::any();
     let reserved_raw: u8 = kani::any();
+    kani::assume(insurance_raw <= 16);
     kani::assume(budget_raw <= 16);
+    kani::assume(spent_raw <= 16);
     kani::assume(reserved_raw <= 16);
+    let insurance = insurance_raw as u128;
     let budget_atoms = budget_raw as u128;
+    let spent_atoms = spent_raw as u128;
     let reserved_atoms = reserved_raw as u128;
+    let remaining_atoms = if spent_atoms <= budget_atoms {
+        budget_atoms - spent_atoms
+    } else {
+        0
+    };
     let reserved_num = reserved_atoms * BOUND_SCALE;
     let (mut header, mut markets) = one_market_only_fixture();
     header.vault = V16PodU128::new(insurance);
     header.insurance = V16PodU128::new(insurance);
-    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget_atoms);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(remaining_atoms);
     header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(reserved_atoms);
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         status: BackingBucketStatusV16::Expired,
@@ -15390,6 +15399,7 @@ fn proof_v16_validator_sound_insurance_capacity_covers_budget_and_reservations()
         ..BackingBucketV16::EMPTY
     });
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budget_atoms);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(spent_atoms);
     markets[0].engine.insurance_reservation_long =
         InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
             insurance_credit_reserved_num: reserved_num,
@@ -15402,31 +15412,50 @@ fn proof_v16_validator_sound_insurance_capacity_covers_budget_and_reservations()
             ..SourceCreditStateV16::EMPTY
         });
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.validate_shape();
+    let expected_ok = spent_atoms <= budget_atoms
+        && reserved_atoms <= remaining_atoms
+        && remaining_atoms <= insurance;
 
-    kani::assume(market.validate_shape() == Ok(()));
     kani::cover!(
-        reserved_atoms > 0 && budget_atoms > reserved_atoms && insurance > budget_atoms,
-        "insurance-capacity lemma reaches nontrivial reservation within funded budget"
+        expected_ok
+            && spent_atoms > 0
+            && reserved_atoms > 0
+            && spent_atoms + reserved_atoms < budget_atoms,
+        "validator accepts nontrivial spent, reserved, and free domain capacity"
+    );
+    kani::cover!(
+        expected_ok
+            && spent_atoms > 0
+            && reserved_atoms > 0
+            && spent_atoms + reserved_atoms == budget_atoms,
+        "validator accepts exactly exhausted domain capacity"
+    );
+    kani::cover!(
+        spent_atoms > budget_atoms,
+        "validator rejects domain spend above its funded budget"
+    );
+    kani::cover!(
+        spent_atoms <= budget_atoms && reserved_atoms > remaining_atoms,
+        "validator rejects double allocation of spent capacity as a live reservation"
+    );
+    kani::cover!(
+        spent_atoms <= budget_atoms
+            && reserved_atoms <= remaining_atoms
+            && remaining_atoms > insurance,
+        "validator rejects aggregate domain capacity above pooled insurance"
     );
 
-    assert!(
-        market
-            .header
-            .source_insurance_credit_reserved_total_atoms
-            .get()
-            <= market.header.insurance_domain_budget_remaining_total.get()
-    );
-    assert!(
-        market
-            .header
-            .source_insurance_credit_reserved_total_atoms
-            .get()
-            <= market.header.insurance.get()
-    );
-    assert!(
-        market.header.insurance_domain_budget_remaining_total.get()
-            <= market.header.insurance.get()
-    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if result == Ok(()) {
+        assert!(spent_atoms + reserved_atoms <= budget_atoms);
+        assert_eq!(remaining_atoms, budget_atoms - spent_atoms);
+        assert!(reserved_atoms <= remaining_atoms);
+        assert!(remaining_atoms <= insurance);
+        assert!(reserved_atoms <= insurance);
+    } else {
+        assert!(!expected_ok);
+    }
 }
 
 #[kani::proof]
