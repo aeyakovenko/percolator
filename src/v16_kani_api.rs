@@ -33,6 +33,15 @@ pub fn kani_apply_backing_provider_earnings_withdraw(
     apply_backing_provider_earnings_withdraw(vault, bucket_earnings, amount)
 }
 
+pub fn kani_validate_source_domain_ledger_parts(
+    expected_market_id: u64,
+    source: SourceCreditStateV16,
+    bucket: BackingBucketV16,
+    reservation: InsuranceCreditReservationV16,
+) -> V16Result<()> {
+    V16Core::validate_source_domain_ledger_parts(expected_market_id, source, bucket, reservation)
+}
+
 pub fn kani_health_cert_after_capital_debit(
     cert: HealthCertV16,
     amount: u128,

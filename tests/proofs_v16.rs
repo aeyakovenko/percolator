@@ -15,16 +15,16 @@ use percolator::v16::{
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
     kani_select_auto_crank_plan, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preflight_risk_gate,
-    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
-    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
-    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    kani_validate_positive_pnl_source_attribution, kani_validate_source_domain_ledger_parts,
+    ActionableSummaryV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
@@ -15482,6 +15482,129 @@ fn proof_v16_validator_sound_global_bound_covers_source_claims() {
                 >= market.header.source_claim_bound_total_num.get()
         );
     } else if pnl_bound_raw < claim_raw {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    }
+}
+
+// Domain-ledger commit-gate completeness for an active source. The closure
+// proofs establish that each production delta preserves these equalities; this
+// theorem establishes the other half of the induction boundary: the production
+// validator accepts a nontrivial balanced ledger and rejects every single-field
+// corruption of the source/bucket/reservation bindings. The source has zero
+// claim face, whose canonical rate is always full regardless of backing, so
+// faults 1..=7 cannot be rejected merely by a stale credit rate; they must hit
+// the cross-ledger binding itself. Positive-face rate arithmetic is proved
+// separately by proof_v16_source_credit_rate_never_exceeds_available_backing_ratio.
+#[kani::proof]
+#[kani::unwind(12)]
+#[kani::solver(cadical)]
+fn proof_v16_source_domain_ledger_validator_binds_all_encumbrance_aggregates() {
+    let fresh_raw: u8 = kani::any();
+    let liened_raw: u8 = kani::any();
+    let consumed_raw: u8 = kani::any();
+    let spent_history_raw: u8 = kani::any();
+    let insurance_free_raw: u8 = kani::any();
+    let insurance_valid_raw: u8 = kani::any();
+    let insurance_impaired_raw: u8 = kani::any();
+    let fault: u8 = kani::any();
+
+    kani::assume((1..=4).contains(&fresh_raw));
+    kani::assume(liened_raw <= 4);
+    kani::assume(consumed_raw <= 4);
+    kani::assume((1..=4).contains(&spent_history_raw));
+    kani::assume((1..=4).contains(&insurance_free_raw));
+    kani::assume(insurance_valid_raw <= 4);
+    kani::assume(insurance_impaired_raw <= 4);
+    kani::assume(fault <= 9);
+
+    let fresh = fresh_raw as u128 * BOUND_SCALE;
+    let liened = liened_raw as u128 * BOUND_SCALE;
+    let consumed = consumed_raw as u128 * BOUND_SCALE;
+    let spent = (consumed_raw as u128 + spent_history_raw as u128) * BOUND_SCALE;
+    let insurance_free = insurance_free_raw as u128 * BOUND_SCALE;
+    let insurance_valid = insurance_valid_raw as u128 * BOUND_SCALE;
+    let insurance_impaired = insurance_impaired_raw as u128 * BOUND_SCALE;
+    let insurance_reserved = insurance_free + insurance_valid + insurance_impaired;
+
+    let bucket = BackingBucketV16 {
+        market_id: 7,
+        fresh_unliened_backing_num: fresh,
+        valid_liened_backing_num: liened,
+        consumed_liened_backing_num: consumed,
+        impaired_liened_backing_num: 0,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        utilization_fee_earnings: 0,
+    };
+    let reservation = InsuranceCreditReservationV16 {
+        insurance_credit_reserved_num: insurance_reserved,
+        valid_liened_insurance_num: insurance_valid,
+        impaired_liened_insurance_num: insurance_impaired,
+        consumed_insurance_num: 0,
+        source_credit_epoch: 3,
+    };
+    let mut source = SourceCreditStateV16 {
+        positive_claim_bound_num: 0,
+        exact_positive_claim_num: 0,
+        fresh_reserved_backing_num: fresh + liened,
+        valid_liened_backing_num: liened,
+        impaired_liened_backing_num: 0,
+        spent_backing_num: spent,
+        provider_receivable_num: consumed,
+        insurance_credit_reserved_num: insurance_reserved,
+        valid_liened_insurance_num: insurance_valid,
+        impaired_liened_insurance_num: insurance_impaired,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 3,
+    };
+
+    match fault {
+        0 => {}
+        1 => source.fresh_reserved_backing_num += BOUND_SCALE,
+        2 => source.provider_receivable_num += BOUND_SCALE,
+        3 => source.valid_liened_backing_num += BOUND_SCALE,
+        4 => source.impaired_liened_backing_num += BOUND_SCALE,
+        5 => source.insurance_credit_reserved_num += BOUND_SCALE,
+        6 => source.valid_liened_insurance_num += BOUND_SCALE,
+        7 => source.impaired_liened_insurance_num += BOUND_SCALE,
+        8 => {}
+        _ => {
+            source.credit_rate_num = if source.credit_rate_num == CREDIT_RATE_SCALE {
+                CREDIT_RATE_SCALE - 1
+            } else {
+                source.credit_rate_num + 1
+            };
+        }
+    }
+    let expected_market_id = if fault == 8 { 8 } else { 7 };
+    let result =
+        kani_validate_source_domain_ledger_parts(expected_market_id, source, bucket, reservation);
+
+    kani::cover!(
+        fault == 0
+            && liened_raw > 0
+            && consumed_raw > 0
+            && insurance_valid_raw > 0
+            && insurance_impaired_raw > 0,
+        "validator accepts a mixed valid counterparty and insurance ledger"
+    );
+    kani::cover!(
+        (1..=4).contains(&fault),
+        "validator rejects every counterparty/source aggregate mismatch"
+    );
+    kani::cover!(
+        (5..=7).contains(&fault),
+        "validator rejects every insurance source/reservation mismatch"
+    );
+    kani::cover!(fault == 8, "validator rejects mismatched market identity");
+    kani::cover!(
+        fault == 9,
+        "validator rejects a stale or forged credit rate"
+    );
+
+    if fault == 0 {
+        assert_eq!(result, Ok(()));
+    } else {
         assert_eq!(result, Err(V16Error::InvalidConfig));
     }
 }
