@@ -8637,6 +8637,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok((V16PodU128::default(), V16PodU128::default()))
     }
 
+    fn clear_terminal_source_backing_pair(
+        market_id: u64,
+        source: SourceCreditStateV16,
+        bucket: BackingBucketV16,
+    ) -> V16Result<(SourceCreditStateV16, BackingBucketV16)> {
+        if source.is_empty_amount_shape() && bucket.is_empty_amount_shape() {
+            return Ok((source, bucket));
+        }
+        if source.positive_claim_bound_num != 0
+            || source.exact_positive_claim_num != 0
+            || source.fresh_reserved_backing_num != 0
+            || source.valid_liened_backing_num != 0
+            || source.impaired_liened_backing_num != 0
+            || source.insurance_credit_reserved_num != 0
+            || source.valid_liened_insurance_num != 0
+            || source.impaired_liened_insurance_num != 0
+            || bucket.fresh_unliened_backing_num != 0
+            || bucket.valid_liened_backing_num != 0
+            || bucket.impaired_liened_backing_num != 0
+            || bucket.utilization_fee_earnings != 0
+            || source.spent_backing_num != source.provider_receivable_num
+            || source.spent_backing_num != bucket.consumed_liened_backing_num
+        {
+            return Err(V16Error::LockActive);
+        }
+        Ok((
+            SourceCreditStateV16::EMPTY,
+            BackingBucketV16::empty_for_market(market_id),
+        ))
+    }
+
     fn set_domain_insurance_budget_core(
         &mut self,
         domain: usize,
@@ -11826,6 +11857,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 || asset.b_epoch_start_long_num != 0
                 || asset.b_epoch_start_short_num != 0
         };
+        let source_backing_blocks_empty = if allow_terminal_inert_price_state {
+            Self::clear_terminal_source_backing_pair(asset.market_id, long_source, long_bucket)
+                .is_err()
+                || Self::clear_terminal_source_backing_pair(
+                    asset.market_id,
+                    short_source,
+                    short_bucket,
+                )
+                .is_err()
+        } else {
+            !long_source.is_empty_amount_shape()
+                || !short_source.is_empty_amount_shape()
+                || !long_bucket.is_empty_amount_shape()
+                || !short_bucket.is_empty_amount_shape()
+        };
 
         if slot.pending_domain_loss_barrier_long.get() != 0
             || slot.pending_domain_loss_barrier_short.get() != 0
@@ -11849,10 +11895,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.explicit_unallocated_loss_long != 0
             || asset.explicit_unallocated_loss_short != 0
             || spent_blocks_empty
-            || !long_source.is_empty_amount_shape()
-            || !short_source.is_empty_amount_shape()
-            || !long_bucket.is_empty_amount_shape()
-            || !short_bucket.is_empty_amount_shape()
+            || source_backing_blocks_empty
             || long_bucket.market_id != asset.market_id
             || short_bucket.market_id != asset.market_id
             || long_reservation != InsuranceCreditReservationV16::EMPTY
@@ -15171,11 +15214,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// Clears inert terminal ledgers on an otherwise empty terminal asset.
     ///
     /// This is value-neutral: it may only erase a domain whose remaining budget
-    /// is already zero (`budget == spent`) and side-reset price indexes after no
-    /// position, stale-account, pending-obligation, loss, barrier, source,
-    /// backing, or reservation state can still reference them. If `budget >
-    /// spent`, callers must withdraw the remaining domain budget before terminal
-    /// cleanup.
+    /// is already zero (`budget == spent`), side-reset price indexes, and
+    /// matched consumed-only source/backing audit counters after no position,
+    /// stale-account, pending-obligation, loss, barrier, live source claim,
+    /// fresh backing, backing fee, or reservation state can still reference
+    /// them. If `budget > spent`, callers must withdraw the remaining domain
+    /// budget before terminal cleanup.
     pub fn clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(
         &mut self,
         asset_index: usize,
@@ -15189,7 +15233,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         self.require_empty_asset_lifecycle_state_with_terminal_policy(asset_index, true, true)?;
+        let long_domain = self.insurance_domain_index(asset_index, SideV16::Long)?;
+        let short_domain = self.insurance_domain_index(asset_index, SideV16::Short)?;
         let mut asset = self.asset_state(asset_index)?;
+        let (long_source, long_bucket) = Self::clear_terminal_source_backing_pair(
+            asset.market_id,
+            self.source_credit_for_domain_shape(long_domain)?,
+            self.backing_bucket_for_domain(long_domain)?,
+        )?;
+        let (short_source, short_bucket) = Self::clear_terminal_source_backing_pair(
+            asset.market_id,
+            self.source_credit_for_domain_shape(short_domain)?,
+            self.backing_bucket_for_domain(short_domain)?,
+        )?;
         asset.a_long = ADL_ONE;
         asset.a_short = ADL_ONE;
         asset.k_long = 0;
@@ -15207,6 +15263,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset.mode_long = SideModeV16::Normal;
         asset.mode_short = SideModeV16::Normal;
         self.set_asset_state(asset_index, asset)?;
+        self.set_source_credit_for_domain(long_domain, long_source)?;
+        self.set_backing_bucket_for_domain(long_domain, long_bucket)?;
+        self.set_source_credit_for_domain(short_domain, short_source)?;
+        self.set_backing_bucket_for_domain(short_domain, short_bucket)?;
         let slot = self.markets[asset_index].engine_slot_mut();
         let (budget_long, spent_long) = Self::clear_terminal_spent_domain_budget_pair(
             slot.insurance_domain_budget_long,

@@ -1313,6 +1313,21 @@ fn v16_terminal_spent_domain_cleanup_canonicalizes_empty_price_state() {
     asset.k_epoch_start_long = 700;
     asset.mode_long = SideModeV16::ResetPending;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[1].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: 4 * BOUND_SCALE,
+            provider_receivable_num: 4 * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: 7,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: asset.market_id,
+        consumed_liened_backing_num: 4 * BOUND_SCALE,
+        expiry_slot: 99,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::empty_for_market(asset.market_id)
+    });
 
     let old_market_id = markets[1].engine.asset.market_id.get();
     let vault_before = header.vault.get();
@@ -1342,6 +1357,17 @@ fn v16_terminal_spent_domain_cleanup_canonicalizes_empty_price_state() {
     assert_eq!(cleaned.mode_short, SideModeV16::Normal);
     assert_eq!(cleaned.k_short, 0);
     assert_eq!(cleaned.k_epoch_start_long, 0);
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .source_credit_short
+            .try_to_runtime(),
+        Ok(SourceCreditStateV16::EMPTY)
+    );
+    assert_eq!(
+        market.markets[1].engine.backing_short.try_to_runtime(),
+        Ok(BackingBucketV16::empty_for_market(old_market_id))
+    );
     assert_eq!(
         market.markets[1].engine.insurance_domain_budget_long.get(),
         0
