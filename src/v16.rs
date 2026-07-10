@@ -15552,6 +15552,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
                     return Ok(());
                 }
+                let asset = self.asset_state(asset_index)?;
+                if Self::leg_has_exhausted_effective_oi(asset, leg) {
+                    // A legacy Live state may resolve before its next auto-crank.
+                    // Establish the same terminal reset epoch here so resolved
+                    // teardown does not subtract stored basis from zero OI.
+                    self.begin_full_drain_reset_inner(asset_index, leg.side)?;
+                }
                 let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
                 if k_target != leg.k_snap || f_target != leg.f_snap {
                     return Ok(());
