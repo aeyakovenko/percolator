@@ -2647,6 +2647,86 @@ fn proof_v16_view_withdraw_reduces_vault_ctot_and_capital_equally() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_public_withdraw_cannot_evade_fee_debt() {
+    let capital_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let fee_debt_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 64);
+    kani::assume(other_capital_raw <= 64);
+    kani::assume(insurance_raw <= 64);
+    kani::assume(surplus_raw <= 64);
+    kani::assume(fee_debt_raw <= 64);
+    kani::assume((1..=96).contains(&amount_raw));
+
+    let capital = capital_raw as u128;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let fee_debt = fee_debt_raw as u128;
+    let amount = amount_raw as u128;
+    let c_tot_before = capital + other_capital;
+    let vault_before = c_tot_before + insurance + surplus;
+    let expected_success = amount <= capital && amount + fee_debt <= capital;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.c_tot = V16PodU128::new(c_tot_before);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(vault_before);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.fee_credits = V16PodI128::new(-(fee_debt as i128));
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.withdraw_not_atomic(&mut account, amount);
+
+    kani::cover!(
+        expected_success && fee_debt > 0 && amount + fee_debt == capital,
+        "withdraw succeeds at the exact zero-equity fee-debt boundary"
+    );
+    kani::cover!(
+        !expected_success && amount <= capital && fee_debt > 0,
+        "withdraw rejects capital that remains encumbered by fee debt"
+    );
+    kani::cover!(
+        !expected_success && amount > capital,
+        "withdraw rejects a direct overdraw before value exit"
+    );
+    kani::cover!(
+        expected_success && capital > 32 && other_capital > 32 && surplus > 32,
+        "withdraw preserves unrelated funded market layers"
+    );
+
+    if expected_success {
+        assert_eq!(result, Ok(()));
+        assert_eq!(account.header.capital.get(), capital - amount);
+        assert_eq!(account.header.fee_credits.get(), -(fee_debt as i128));
+        assert_eq!(market.header.c_tot.get(), c_tot_before - amount);
+        assert_eq!(market.header.vault.get(), vault_before - amount);
+        assert_eq!(market.header.insurance.get(), insurance);
+        assert_eq!(
+            market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get(),
+            surplus
+        );
+        assert_eq!(account.header.health_cert.valid, 0);
+    } else {
+        assert!(matches!(
+            result,
+            Err(V16Error::InvalidConfig) | Err(V16Error::LockActive)
+        ));
+        assert_eq!(account.header.capital.get(), capital);
+        assert_eq!(account.header.fee_credits.get(), -(fee_debt as i128));
+        assert_eq!(market.header.c_tot.get(), c_tot_before);
+        assert_eq!(market.header.vault.get(), vault_before);
+        assert_eq!(market.header.insurance.get(), insurance);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
     let start_capital_raw: u8 = kani::any();
     let other_capital_raw: u8 = kani::any();
