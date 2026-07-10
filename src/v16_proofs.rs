@@ -4023,3 +4023,162 @@ fn closure_rebalance_partial_resize_then_matching_adl_preserves_oi_and_asset_fra
     assert_eq!(after.oi_eff_long_q, remaining_market_oi);
     assert!(!opposite_drained);
 }
+
+// The arithmetic Kani harness `proof_v16_one_slot_funding_floor_matches_closure_axiom`
+// discharges these exact inputs against the real signed-floor helper. Keeping
+// that leaf separate makes the public state-transition proof division-free.
+#[cfg(all(kani, feature = "closure"))]
+fn axiom_exact_one_slot_funding_floor(n: i128, d: u128) -> i128 {
+    const NUMERATOR: i128 = 10_000 * 1_000_000;
+    assert_eq!(d, FUNDING_DEN);
+    assert!(n == NUMERATOR || n == -NUMERATOR);
+    if n > 0 {
+        10
+    } else {
+        -10
+    }
+}
+
+// Spec proof 77, funding half: a pending domain-loss barrier cannot let one
+// close freeze asset-wide F accrual. Execute the public accrual route for both
+// funding signs and every nonempty long/short barrier combination; prove exact
+// opposing F deltas and frame source-domain barriers/budgets plus senior value
+// state. General signed funding arithmetic is discharged by differential
+// proofs; this theorem composes that arithmetic through the production route.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_pending_domain_loss_barrier_does_not_block_funding_accrual<const POSITIVE: bool>() {
+    let long_barrier: bool = kani::any();
+    let short_barrier: bool = kani::any();
+    kani::assume(long_barrier || short_barrier);
+    let funding_rate_e9 = if POSITIVE { 10_000 } else { -10_000 };
+    let price = 1_000_000u64;
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.max_abs_funding_e9_per_slot = 10_000;
+    cfg.max_price_move_bps_per_slot = 9_000;
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = [1u8; 32];
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(1);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.next_market_id = V16PodU64::new(2);
+    header.current_slot = V16PodU64::new(1);
+    header.slot_last = V16PodU64::new(1);
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    asset.raw_oracle_target_price = price;
+    asset.effective_price = price;
+    asset.fund_px_last = price;
+    asset.slot_last = 1;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    let mut markets = [Market::new(
+        0u64,
+        EngineAssetSlotV16Account::empty_for_market(1),
+    )];
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(u64::from(long_barrier));
+    markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(u64::from(short_barrier));
+    header.resolved_payout_blocker_count =
+        V16PodU64::new(u64::from(long_barrier) + u64::from(short_barrier));
+    header.vault = V16PodU128::new(13);
+    header.c_tot = V16PodU128::new(5);
+    header.insurance = V16PodU128::new(7);
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let outcome = market
+        .accrue_asset_to_not_atomic(0, 2, price, funding_rate_e9, true)
+        .unwrap();
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    let funding_atoms = if POSITIVE { 10i128 } else { -10i128 };
+    let funding_delta = funding_atoms * ADL_ONE as i128;
+
+    kani::cover!(
+        long_barrier && !short_barrier,
+        "F accrual proceeds through a long-domain barrier"
+    );
+    kani::cover!(
+        !long_barrier && short_barrier,
+        "F accrual proceeds through a short-domain barrier"
+    );
+    kani::cover!(
+        long_barrier && short_barrier,
+        "F accrual proceeds through simultaneous domain barriers"
+    );
+    assert_eq!(outcome.dt, 1);
+    assert!(!outcome.price_move_active);
+    assert!(outcome.funding_active);
+    assert!(outcome.equity_active);
+    assert!(!outcome.loss_stale_after);
+    assert_eq!(asset_after.k_long, asset.k_long);
+    assert_eq!(asset_after.k_short, asset.k_short);
+    assert_eq!(asset_after.f_long_num, asset.f_long_num - funding_delta);
+    assert_eq!(asset_after.f_short_num, asset.f_short_num + funding_delta);
+    assert_eq!(asset_after.slot_last, 2);
+    assert_eq!(
+        market.header.funding_epoch.get(),
+        header_before.funding_epoch.get() + 1
+    );
+    assert_eq!(market.header.oracle_epoch, header_before.oracle_epoch);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(
+        market.header.resolved_payout_blocker_count,
+        header_before.resolved_payout_blocker_count
+    );
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_long,
+        slot_before.pending_domain_loss_barrier_long
+    );
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_short,
+        slot_before.pending_domain_loss_barrier_short
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long,
+        slot_before.insurance_domain_budget_long
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short,
+        slot_before.insurance_domain_budget_short
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long,
+        slot_before.insurance_domain_spent_long
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short,
+        slot_before.insurance_domain_spent_short
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::wide_math::floor_div_signed_conservative_i128,
+    axiom_exact_one_slot_funding_floor
+)]
+fn closure_pending_domain_loss_barrier_does_not_block_positive_funding_accrual() {
+    prove_pending_domain_loss_barrier_does_not_block_funding_accrual::<true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::wide_math::floor_div_signed_conservative_i128,
+    axiom_exact_one_slot_funding_floor
+)]
+fn closure_pending_domain_loss_barrier_does_not_block_negative_funding_accrual() {
+    prove_pending_domain_loss_barrier_does_not_block_funding_accrual::<false>();
+}

@@ -9192,8 +9192,11 @@ fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation(
 fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     let now_slot_raw: u8 = kani::any();
     let price_delta_raw: u8 = kani::any();
+    let long_barrier: bool = kani::any();
+    let short_barrier: bool = kani::any();
     kani::assume((2..=4).contains(&now_slot_raw));
     kani::assume((1..=5).contains(&price_delta_raw));
+    kani::assume(long_barrier || short_barrier);
     let now_slot = now_slot_raw as u64;
     let price = 100 + price_delta_raw as u64;
     let (mut header, mut markets, _) = one_market_view_fixture();
@@ -9206,6 +9209,13 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     asset.loss_weight_sum_long = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(u64::from(long_barrier));
+    markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(u64::from(short_barrier));
+    header.resolved_payout_blocker_count =
+        V16PodU64::new(u64::from(long_barrier) + u64::from(short_barrier));
+    let blockers_before = header.resolved_payout_blocker_count;
+    let long_barrier_before = markets[0].engine.pending_domain_loss_barrier_long;
+    let short_barrier_before = markets[0].engine.pending_domain_loss_barrier_short;
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -9226,6 +9236,18 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
         price_delta_raw > 1,
         "equity-active accrual proof covers nontrivial price movement"
     );
+    kani::cover!(
+        long_barrier && !short_barrier,
+        "equity-active accrual proceeds through a long-domain barrier"
+    );
+    kani::cover!(
+        !long_barrier && short_barrier,
+        "equity-active accrual proceeds through a short-domain barrier"
+    );
+    kani::cover!(
+        long_barrier && short_barrier,
+        "equity-active accrual proceeds through simultaneous domain barriers"
+    );
     assert_eq!(outcome.dt, 1);
     assert!(outcome.price_move_active);
     assert!(!outcome.funding_active);
@@ -9240,6 +9262,15 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
         if expected_asset_slot < now_slot { 1 } else { 0 }
     );
     assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
+    assert_eq!(market.header.resolved_payout_blocker_count, blockers_before);
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_long,
+        long_barrier_before
+    );
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_short,
+        short_barrier_before
+    );
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);

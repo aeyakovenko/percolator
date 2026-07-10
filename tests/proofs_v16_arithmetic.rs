@@ -43,6 +43,27 @@ fn proof_v16_floor_div_signed_conservative_matches_small_reference() {
     assert_eq!(got, expected);
 }
 
+// Discharges the exact division axiom used by the production funding-accrual
+// closure proofs. Keeping this arithmetic leaf separate prevents 128-bit
+// division from dominating the much larger state-transition formula.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_one_slot_funding_floor_matches_closure_axiom() {
+    const FUNDING_DEN: u128 = 1_000_000_000;
+    const NUMERATOR: i128 = 10_000 * 1_000_000;
+    let positive: bool = kani::any();
+    let numerator = if positive { NUMERATOR } else { -NUMERATOR };
+    let expected = if positive { 10 } else { -10 };
+
+    kani::cover!(positive, "positive one-slot funding numerator");
+    kani::cover!(!positive, "negative one-slot funding numerator");
+    assert_eq!(
+        floor_div_signed_conservative_i128(numerator, FUNDING_DEN),
+        expected
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(20)]
 #[kani::solver(cadical)]
