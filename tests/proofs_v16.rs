@@ -7637,6 +7637,196 @@ fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
     assert!(support_b <= b);
 }
 
+// Two same-domain claimants must remain solvent through the complete value
+// skeleton, not merely at the support-quote boundary. Each claimant consumes
+// the shared production backing deltas independently, converts that backing to
+// capital, and exits; order cannot make the pair overdraw backing or move an
+// unrelated stock class.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_two_source_claimants_exit_once_against_shared_backing() {
+    let support_a_raw: u8 = kani::any();
+    let support_b_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let senior_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let a_first: bool = kani::any();
+    kani::assume((1..=31).contains(&support_a_raw));
+    kani::assume((1..=31).contains(&support_b_raw));
+    kani::assume(backing_raw <= 63);
+    kani::assume(senior_raw <= 31);
+    kani::assume(insurance_raw <= 31);
+    kani::assume(surplus_raw <= 31);
+    kani::assume((support_a_raw as u16) + (support_b_raw as u16) <= backing_raw as u16);
+
+    // The preceding theorem proves this cap for production support quotes.
+    // This composition quantifies every partition admitted by that boundary.
+    let support_a = support_a_raw as u128;
+    let support_b = support_b_raw as u128;
+    let support_total = support_a + support_b;
+    let backing = backing_raw as u128;
+    let backing_num = backing * BOUND_SCALE;
+    let initial_source = SourceCreditStateV16 {
+        positive_claim_bound_num: backing_num,
+        exact_positive_claim_num: backing_num,
+        fresh_reserved_backing_num: backing_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    // Atom-to-backing scaling is proven independently by the lien-sizing and
+    // scaled-cure proofs. Keeping that inverse division out of this composition
+    // leaves the shared-stock theorem tractable without weakening its boundary.
+    let backing_a_num = support_a * BOUND_SCALE;
+    let backing_b_num = support_b * BOUND_SCALE;
+    let (first_backing_num, second_backing_num, first_support, second_support) = if a_first {
+        (backing_a_num, backing_b_num, support_a, support_b)
+    } else {
+        (backing_b_num, backing_a_num, support_b, support_a)
+    };
+
+    let initial_bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let (bucket, source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            initial_bucket,
+            initial_source,
+            1,
+            first_backing_num,
+        )
+        .unwrap();
+    let (bucket, source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
+            bucket,
+            source,
+            first_backing_num,
+        )
+        .unwrap();
+    let (bucket, source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            bucket,
+            source,
+            1,
+            second_backing_num,
+        )
+        .unwrap();
+    let (final_bucket, final_source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
+            bucket,
+            source,
+            second_backing_num,
+        )
+        .unwrap();
+    let first_converted =
+        MarketGroupV16ViewMut::<u64>::kani_counterparty_cure_atoms_from_scaled_backing(
+            first_backing_num,
+        )
+        .unwrap();
+    let second_converted =
+        MarketGroupV16ViewMut::<u64>::kani_counterparty_cure_atoms_from_scaled_backing(
+            second_backing_num,
+        )
+        .unwrap();
+
+    let senior = senior_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let initial_vault = senior + backing + insurance + surplus;
+    let initial_stock = StockReconciliationProofV16 {
+        token_vault: initial_vault,
+        senior_capital_total: senior,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: backing,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: surplus,
+    };
+    let support_flow = TokenValueFlowProofV16::support_to_account_capital(
+        support_total,
+        support_total,
+        0,
+        0,
+        initial_vault,
+        initial_vault,
+    )
+    .unwrap();
+    let supported_stock = StockReconciliationProofV16 {
+        senior_capital_total: senior + support_total,
+        counterparty_backing_principal: backing - support_total,
+        ..initial_stock
+    };
+    let final_vault = initial_vault - support_total;
+    let exit_flow = TokenValueFlowProofV16::account_capital_to_external_out(
+        support_total,
+        initial_vault,
+        final_vault,
+    )
+    .unwrap();
+    let final_stock = StockReconciliationProofV16 {
+        token_vault: final_vault,
+        senior_capital_total: senior,
+        ..supported_stock
+    };
+
+    kani::cover!(
+        support_total < backing && insurance > 0 && surplus > 0,
+        "both claimants exit while unrelated backing and junior stock remain"
+    );
+    kani::cover!(
+        support_total == backing,
+        "both claimants may exactly consume the shared backing stock"
+    );
+    kani::cover!(
+        !a_first && support_a != support_b,
+        "the second claimant may consume shared backing first"
+    );
+    kani::cover!(
+        a_first && support_a != support_b && senior > 0,
+        "either asymmetric claimant ordering preserves existing senior capital"
+    );
+    assert!(support_total <= backing);
+    assert_eq!(first_converted, first_support);
+    assert_eq!(second_converted, second_support);
+    assert_eq!(final_bucket.valid_liened_backing_num, 0);
+    assert_eq!(
+        final_bucket.fresh_unliened_backing_num,
+        (backing - support_total) * BOUND_SCALE
+    );
+    assert_eq!(
+        final_bucket.consumed_liened_backing_num,
+        support_total * BOUND_SCALE
+    );
+    assert_eq!(final_source.valid_liened_backing_num, 0);
+    assert_eq!(
+        final_source.fresh_reserved_backing_num,
+        (backing - support_total) * BOUND_SCALE
+    );
+    assert_eq!(final_source.spent_backing_num, support_total * BOUND_SCALE);
+    assert_eq!(
+        final_source.provider_receivable_num,
+        support_total * BOUND_SCALE
+    );
+    assert_eq!(initial_stock.validate(), Ok(()));
+    assert_eq!(support_flow.validate(), Ok(()));
+    assert_eq!(supported_stock.validate(), Ok(()));
+    assert_eq!(exit_flow.validate(), Ok(()));
+    assert_eq!(final_stock.validate(), Ok(()));
+    assert_eq!(final_stock.token_vault, initial_vault - support_total);
+    assert_eq!(final_stock.senior_capital_total, senior);
+    assert_eq!(
+        final_stock.counterparty_backing_principal,
+        backing - support_total
+    );
+    assert_eq!(final_stock.insurance_capital, insurance);
+    assert_eq!(final_stock.unallocated_protocol_surplus, surplus);
+}
+
 // Global junior-bound aggregation invariant: the group-level junior claim bound
 // (`pnl_pos_bound_tot_num`) is the denominator for the non-source haircut
 // (`haircut_effective_support`) and the resolved-payout snapshot, so it must
