@@ -810,6 +810,93 @@ fn proof_v16_public_materialized_portfolio_deregister_rejects_value_state_before
     assert_eq!(market.header.insurance.get(), insurance_before);
 }
 
+// Public dematerialization is the last line of defense against deleting an
+// account that still owes or owns protocol state. Exercise every scalar/lock
+// blocker through the production validator and deregistration route, then pin
+// the complete market frame on rejection.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_deregister_cannot_erase_scalar_debt_escrow_or_locks() {
+    let blocker: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume(blocker <= 6);
+    kani::assume((1..=31).contains(&amount_raw));
+    let amount = amount_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.materialized_portfolio_count = V16PodU64::new(1);
+    match blocker {
+        0 => {
+            account_header.pnl = V16PodI128::new(-(amount as i128));
+            header.negative_pnl_account_count = V16PodU64::new(1);
+        }
+        1 => account_header.fee_credits = V16PodI128::new(-(amount as i128)),
+        2 => {
+            account_header.cancel_deposit_escrow = V16PodU128::new(amount);
+            header.vault = V16PodU128::new(amount);
+        }
+        3 => {
+            account_header.stale_state = 1;
+            header.stale_certificate_count = V16PodU64::new(1);
+        }
+        4 => {
+            account_header.b_stale_state = 1;
+            header.b_stale_account_count = V16PodU64::new(1);
+        }
+        5 => account_header.rebalance_lock = 1,
+        _ => account_header.liquidation_lock = 1,
+    }
+
+    let preflight = PortfolioV16View::new(&account_header)
+        .validate_with_market(&MarketGroupV16ViewMut::new(&mut header, &mut markets).as_view());
+    assert_eq!(preflight, Ok(()));
+    let header_before = header;
+    let market_before = markets[0];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = market.deregister_empty_materialized_portfolio_not_atomic(&account);
+
+    kani::cover!(
+        blocker == 0 && amount > 1 && preflight == Ok(()),
+        "validated negative PnL blocks dematerialization"
+    );
+    kani::cover!(
+        blocker == 1 && amount > 1 && preflight == Ok(()),
+        "validated fee debt blocks dematerialization"
+    );
+    kani::cover!(
+        blocker == 2 && amount > 1 && preflight == Ok(()),
+        "validated cancel escrow blocks dematerialization"
+    );
+    kani::cover!(
+        blocker == 3 && preflight == Ok(()),
+        "validated stale settlement state blocks dematerialization"
+    );
+    kani::cover!(
+        blocker == 4 && preflight == Ok(()),
+        "validated B-stale state blocks dematerialization"
+    );
+    kani::cover!(
+        blocker == 5 && preflight == Ok(()),
+        "validated rebalance lock blocks dematerialization"
+    );
+    kani::cover!(
+        blocker == 6 && preflight == Ok(()),
+        "validated liquidation lock blocks dematerialization"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert!(kani_eq_market_group_v16_header_account(
+        market.header,
+        &header_before
+    ));
+    assert_eq!(market.markets[0].wrapper, market_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &market_before.engine
+    ));
+}
+
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
