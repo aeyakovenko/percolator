@@ -2626,6 +2626,120 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
 }
 
 #[test]
+fn v16_live_mark_reversal_unwinds_source_lien_before_claim_burn() {
+    const OPEN_Q: u128 = 1_000 * POS_SCALE;
+    const INCREASE_Q: u128 = 50 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(1, 10);
+    let mut short_header = account_fixture(1, 11);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 100)
+        .unwrap();
+    market.deposit_not_atomic(&mut long, 52_501).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(OPEN_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    assert_eq!(long.header.pnl.get(), 5_000);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(INCREASE_Q),
+                exec_price: 105,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    let lien_before = long.header.source_domains[0];
+    assert_eq!(long.header.pnl.get(), 5_000);
+    assert!(lien_before.source_claim_liened_num.get() > 0);
+    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+    let capital_before_reversal = long.header.capital.get();
+    let lien_effective = lien_before.source_lien_effective_reserved.get();
+    let backing_before_reversal = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 100)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 3, 100, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    let cert = market
+        .full_account_refresh_not_atomic(&mut long)
+        .expect("a mark reversal must settle even when the prior positive claim backed IM");
+
+    let backing_after_reversal = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    let unliened_support_consumed = 5_000 - lien_effective;
+    let principal_loss = 5_250 - unliened_support_consumed;
+    assert_eq!(long.header.pnl.get(), 0);
+    assert_eq!(
+        long.header.capital.get(),
+        capital_before_reversal - principal_loss
+    );
+    assert_eq!(long.header.source_domains[0], Default::default());
+    assert_eq!(
+        backing_after_reversal.fresh_unliened_backing_num,
+        backing_before_reversal
+            .fresh_unliened_backing_num
+            .checked_sub(unliened_support_consumed * BOUND_SCALE)
+            .unwrap()
+            .checked_add(lien_before.source_lien_counterparty_backing_num.get())
+            .unwrap(),
+        "the still-liened backing is unpledged rather than consumed"
+    );
+    assert_eq!(backing_after_reversal.valid_liened_backing_num, 0);
+    assert_eq!(
+        backing_after_reversal.consumed_liened_backing_num,
+        backing_before_reversal.consumed_liened_backing_num
+            + unliened_support_consumed * BOUND_SCALE,
+        "only realizable unliened support offsets the reversal loss"
+    );
+    assert!(cert.valid);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_residual_reward_credit_uses_real_principal_not_notional() {
     let (mut header, mut markets) = market_fixture(1, 1_000);
     header.config.initial_margin_bps = V16PodU64::new(500);
