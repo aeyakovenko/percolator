@@ -15545,6 +15545,157 @@ fn proof_v16_frame_crank_touches_only_clock_and_cert_state() {
 // routed into a mutating crank branch, while any real work class cannot be hidden
 // behind NoAction.
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_state_classifier_composes_to_exact_plan() {
+    let mode_raw: u8 = kani::any();
+    let cert_current: bool = kani::any();
+    let active_leg: bool = kani::any();
+    let b_stale_leg: bool = kani::any();
+    let close_outstanding: bool = kani::any();
+    let close_expired: bool = kani::any();
+    let liquidatable_cert: bool = kani::any();
+    let resolved_positive_pnl: bool = kani::any();
+    let resolved_blocked: bool = kani::any();
+    kani::assume(mode_raw <= 2);
+
+    let current_slot = 10u64;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.mode = mode_raw;
+    header.current_slot = V16PodU64::new(current_slot);
+    header.slot_last = V16PodU64::new(current_slot);
+    header.b_stale_account_count = V16PodU64::new(0);
+    header.stale_certificate_count = V16PodU64::new(0);
+    header.negative_pnl_account_count = V16PodU64::new(0);
+    header.resolved_payout_blocker_count = V16PodU64::new(u64::from(resolved_blocked));
+
+    let mut active_bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    if active_leg {
+        active_bitmap_set(&mut active_bitmap, 0).unwrap();
+        account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index: 0,
+            market_id,
+            side: SideV16::Long,
+            basis_pos_q: POS_SCALE as i128,
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: POS_SCALE,
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: b_stale_leg,
+            stale: false,
+        });
+    }
+    account_header.active_bitmap = active_bitmap.map(V16PodU64::new);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: if liquidatable_cert { -1 } else { 1 },
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: u128::from(liquidatable_cert),
+        certified_worst_case_loss: u128::from(liquidatable_cert),
+        cert_oracle_epoch: header.oracle_epoch.get() + u64::from(!cert_current),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: active_bitmap,
+        valid: true,
+    });
+    account_header.pnl = V16PodI128::new(i128::from(resolved_positive_pnl));
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: close_outstanding,
+            finalized: false,
+            canceled: false,
+            close_id: u64::from(close_outstanding),
+            asset_index: 0,
+            market_id,
+            domain_side: SideV16::Long,
+            gross_loss_at_close_start: u128::from(close_outstanding),
+            drift_reference_slot: 1,
+            max_close_slot: if close_expired {
+                current_slot - 1
+            } else {
+                current_slot
+            },
+            support_consumed: 0,
+            junior_face_burned: 0,
+            insurance_spent: 0,
+            b_loss_booked: 0,
+            explicit_loss_assigned: 0,
+            quantity_adl_applied_q: 0,
+            drift_consumed: 0,
+            residual_remaining: u128::from(close_outstanding),
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let summary = market.build_actionable_summary(&account).unwrap();
+    let live = mode_raw == 0;
+    let resolved = mode_raw == 1;
+    let expected_summary = ActionableSummaryV16 {
+        stale: live && !cert_current,
+        b_stale: live && active_leg && b_stale_leg,
+        pending_close: false,
+        expired_close: live && close_outstanding && close_expired,
+        liquidatable: live && cert_current && liquidatable_cert && active_leg,
+        recovery_eligible: false,
+        resolved_winner: resolved && resolved_positive_pnl && !resolved_blocked,
+    };
+    let active_asset = active_leg.then_some(0);
+    let recovery_reason = PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress;
+    let plan = kani_select_auto_crank_plan(summary, 0, 0, active_asset, recovery_reason);
+    let expected_plan = if expected_summary.expired_close {
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: recovery_reason,
+        }
+    } else if expected_summary.resolved_winner {
+        AutoCrankPlanV16::CloseResolved
+    } else if expected_summary.b_stale {
+        AutoCrankPlanV16::SettleBChunk { asset_index: 0 }
+    } else if expected_summary.liquidatable {
+        AutoCrankPlanV16::Liquidate { asset_index: 0 }
+    } else if expected_summary.stale {
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: active_asset,
+        }
+    } else {
+        AutoCrankPlanV16::NoAction
+    };
+
+    kani::cover!(
+        expected_summary.expired_close && expected_summary.b_stale,
+        "expired close preempts lower-priority B settlement"
+    );
+    kani::cover!(
+        expected_summary.b_stale && expected_summary.liquidatable,
+        "B settlement preempts a simultaneous current liquidation deficit"
+    );
+    kani::cover!(
+        expected_summary.stale && active_asset.is_none(),
+        "stale empty account selects observation-backed refresh"
+    );
+    kani::cover!(
+        expected_summary.resolved_winner,
+        "resolved payout-ready winner selects terminal close"
+    );
+    kani::cover!(
+        mode_raw == 2 && !expected_summary.is_actionable(),
+        "recovery mode exposes no invalid live or resolved action"
+    );
+    assert_eq!(summary, expected_summary);
+    assert_eq!(plan, expected_plan);
+    assert_eq!(
+        plan == AutoCrankPlanV16::NoAction,
+        !expected_summary.is_actionable()
+    );
+}
+
+#[kani::proof]
 #[kani::solver(cadical)]
 fn proof_v16_auto_crank_selector_noaction_iff_no_actionable_work() {
     use percolator::v16::auto_crank_plan_requires_caller_observation;
