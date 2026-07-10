@@ -4029,13 +4029,14 @@ fn closure_rebalance_partial_resize_then_matching_adl_preserves_oi_and_asset_fra
 // that leaf separate makes the public state-transition proof division-free.
 #[cfg(all(kani, feature = "closure"))]
 fn axiom_exact_one_slot_funding_floor(n: i128, d: u128) -> i128 {
-    const NUMERATOR: i128 = 10_000 * 1_000_000;
+    const BASE_NUMERATOR: i128 = 10_000 * 1_000_000;
+    const MOVED_NUMERATOR: i128 = 10_000 * 1_000_001;
     assert_eq!(d, FUNDING_DEN);
-    assert!(n == NUMERATOR || n == -NUMERATOR);
-    if n > 0 {
-        10
-    } else {
-        -10
+    match n {
+        BASE_NUMERATOR | MOVED_NUMERATOR => 10,
+        n if n == -BASE_NUMERATOR => -10,
+        n if n == -MOVED_NUMERATOR => -11,
+        _ => panic!("unexpected funding numerator"),
     }
 }
 
@@ -4181,4 +4182,159 @@ fn closure_pending_domain_loss_barrier_does_not_block_positive_funding_accrual()
 )]
 fn closure_pending_domain_loss_barrier_does_not_block_negative_funding_accrual() {
     prove_pending_domain_loss_barrier_does_not_block_funding_accrual::<false>();
+}
+
+// A permissionless crank on one asset must be a strict slab-local write: even
+// simultaneous K/F accrual cannot alter a sibling asset's engine or wrapper
+// bytes. The sibling is fully symbolic, so this proves write noninterference
+// independently of its economic contents; the target is a valid active asset.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_price_funding_accrual_is_sibling_slab_isolated<const SELECTED: usize>() {
+    assert!(SELECTED < 2);
+    let sibling = 1 - SELECTED;
+    let positive_funding: bool = kani::any();
+    let funding_rate_e9 = if positive_funding { 10_000 } else { -10_000 };
+    let old_price = 1_000_000u64;
+    let new_price = old_price + 1;
+
+    let mut cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    cfg.max_abs_funding_e9_per_slot = 10_000;
+    cfg.max_price_move_bps_per_slot = 9_000;
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = [1u8; 32];
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.current_slot = V16PodU64::new(1);
+    header.slot_last = V16PodU64::new(1);
+    header.vault = V16PodU128::new(13);
+    header.c_tot = V16PodU128::new(5);
+    header.insurance = V16PodU128::new(7);
+
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let sibling_asset: AssetStateV16 = kani::any();
+    let sibling_source_long: SourceCreditStateV16 = kani::any();
+    let sibling_source_short: SourceCreditStateV16 = kani::any();
+    let sibling_backing_long: BackingBucketV16 = kani::any();
+    let sibling_backing_short: BackingBucketV16 = kani::any();
+    let sibling_reservation_long: InsuranceCreditReservationV16 = kani::any();
+    let sibling_reservation_short: InsuranceCreditReservationV16 = kani::any();
+    let sibling_engine = EngineAssetSlotV16Account {
+        asset: AssetStateV16Account::from_runtime(&sibling_asset),
+        insurance_domain_budget_long: V16PodU128::new(kani::any()),
+        insurance_domain_budget_short: V16PodU128::new(kani::any()),
+        insurance_domain_spent_long: V16PodU128::new(kani::any()),
+        insurance_domain_spent_short: V16PodU128::new(kani::any()),
+        pending_domain_loss_barrier_long: V16PodU64::new(kani::any()),
+        pending_domain_loss_barrier_short: V16PodU64::new(kani::any()),
+        source_credit_long: SourceCreditStateV16Account::from_runtime(&sibling_source_long),
+        source_credit_short: SourceCreditStateV16Account::from_runtime(&sibling_source_short),
+        backing_long: BackingBucketV16Account::from_runtime(&sibling_backing_long),
+        backing_short: BackingBucketV16Account::from_runtime(&sibling_backing_short),
+        insurance_reservation_long: InsuranceCreditReservationV16Account::from_runtime(
+            &sibling_reservation_long,
+        ),
+        insurance_reservation_short: InsuranceCreditReservationV16Account::from_runtime(
+            &sibling_reservation_short,
+        ),
+    };
+    markets[sibling] = Market::new(kani::any(), sibling_engine);
+    let mut target = AssetStateV16::default();
+    target.market_id = SELECTED as u64 + 1;
+    target.lifecycle = AssetLifecycleV16::Active;
+    target.raw_oracle_target_price = old_price;
+    target.effective_price = old_price;
+    target.fund_px_last = old_price;
+    target.slot_last = 1;
+    target.oi_eff_long_q = POS_SCALE;
+    target.oi_eff_short_q = POS_SCALE;
+    target.stored_pos_count_long = 1;
+    target.stored_pos_count_short = 1;
+    target.loss_weight_sum_long = POS_SCALE;
+    target.loss_weight_sum_short = POS_SCALE;
+    markets[SELECTED].engine = EngineAssetSlotV16Account::empty_for_market(target.market_id);
+    markets[SELECTED].engine.asset = AssetStateV16Account::from_runtime(&target);
+    markets[SELECTED].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+
+    let header_before = header;
+    let target_before = markets[SELECTED].engine;
+    let sibling_before = markets[sibling];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let outcome = market
+        .accrue_asset_to_not_atomic(SELECTED, 2, new_price, funding_rate_e9, true)
+        .unwrap();
+    let after = market.markets[SELECTED]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap();
+    let funding_atoms = if positive_funding { 10i128 } else { -11i128 };
+    let funding_delta = funding_atoms * ADL_ONE as i128;
+
+    kani::cover!(
+        positive_funding && sibling_before.wrapper > 0,
+        "positive funding accrues beside a nontrivial sibling wrapper"
+    );
+    kani::cover!(
+        !positive_funding && sibling_before.engine.insurance_domain_budget_long.get() > 0,
+        "negative funding accrues beside nontrivial sibling engine state"
+    );
+    assert_eq!(outcome.dt, 1);
+    assert!(outcome.price_move_active);
+    assert!(outcome.funding_active);
+    assert!(outcome.equity_active);
+    assert_eq!(after.k_long, target.k_long + ADL_ONE as i128);
+    assert_eq!(after.k_short, target.k_short - ADL_ONE as i128);
+    assert_eq!(after.f_long_num, target.f_long_num - funding_delta);
+    assert_eq!(after.f_short_num, target.f_short_num + funding_delta);
+    assert_eq!(after.slot_last, 2);
+    assert_eq!(market.header.oracle_epoch.get(), 1);
+    assert_eq!(market.header.funding_epoch.get(), 1);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(
+        market.header.resolved_payout_blocker_count,
+        header_before.resolved_payout_blocker_count
+    );
+    assert_eq!(
+        market.markets[SELECTED]
+            .engine
+            .pending_domain_loss_barrier_long,
+        target_before.pending_domain_loss_barrier_long
+    );
+    assert_eq!(market.markets[sibling].wrapper, sibling_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[sibling].engine,
+        &sibling_before.engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::wide_math::floor_div_signed_conservative_i128,
+    axiom_exact_one_slot_funding_floor
+)]
+fn closure_asset_zero_price_funding_accrual_is_sibling_slab_isolated() {
+    prove_price_funding_accrual_is_sibling_slab_isolated::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::wide_math::floor_div_signed_conservative_i128,
+    axiom_exact_one_slot_funding_floor
+)]
+fn closure_asset_one_price_funding_accrual_is_sibling_slab_isolated() {
+    prove_price_funding_accrual_is_sibling_slab_isolated::<1>();
 }

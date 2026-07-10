@@ -51,13 +51,28 @@ fn proof_v16_floor_div_signed_conservative_matches_small_reference() {
 #[kani::solver(cadical)]
 fn proof_v16_one_slot_funding_floor_matches_closure_axiom() {
     const FUNDING_DEN: u128 = 1_000_000_000;
-    const NUMERATOR: i128 = 10_000 * 1_000_000;
+    const BASE_NUMERATOR: i128 = 10_000 * 1_000_000;
+    const MOVED_NUMERATOR: i128 = 10_000 * 1_000_001;
     let positive: bool = kani::any();
-    let numerator = if positive { NUMERATOR } else { -NUMERATOR };
-    let expected = if positive { 10 } else { -10 };
+    let price_moved: bool = kani::any();
+    let magnitude = if price_moved {
+        MOVED_NUMERATOR
+    } else {
+        BASE_NUMERATOR
+    };
+    let numerator = if positive { magnitude } else { -magnitude };
+    let expected = if positive {
+        10
+    } else if price_moved {
+        -11
+    } else {
+        -10
+    };
 
-    kani::cover!(positive, "positive one-slot funding numerator");
-    kani::cover!(!positive, "negative one-slot funding numerator");
+    kani::cover!(positive && !price_moved, "positive flat-price numerator");
+    kani::cover!(!positive && !price_moved, "negative flat-price numerator");
+    kani::cover!(positive && price_moved, "positive moved-price numerator");
+    kani::cover!(!positive && price_moved, "negative moved-price numerator");
     assert_eq!(
         floor_div_signed_conservative_i128(numerator, FUNDING_DEN),
         expected
