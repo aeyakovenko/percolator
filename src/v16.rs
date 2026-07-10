@@ -1621,6 +1621,155 @@ impl V16Core {
         Ok(leg)
     }
 
+    #[inline]
+    fn leg_predates_side_reset(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
+        match leg.side {
+            SideV16::Long => {
+                asset.mode_long == SideModeV16::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_long)
+            }
+            SideV16::Short => {
+                asset.mode_short == SideModeV16::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
+            }
+        }
+    }
+
+    fn kernel_reduce_matching_open_interest_for_unilateral_close(
+        mut asset: AssetStateV16,
+        closed_side: SideV16,
+        close_q: u128,
+    ) -> V16Result<(AssetStateV16, bool)> {
+        if close_q == 0 {
+            return Ok((asset, false));
+        }
+        let opposite = opposite_side(closed_side);
+        let (oi_before, a_before) = match opposite {
+            SideV16::Long => (asset.oi_eff_long_q, asset.a_long),
+            SideV16::Short => (asset.oi_eff_short_q, asset.a_short),
+        };
+        if close_q > oi_before {
+            return Err(V16Error::InvalidLeg);
+        }
+        let oi_after = oi_before - close_q;
+        let a_after = if oi_after == 0 {
+            ADL_ONE
+        } else {
+            let candidate = wide_mul_div_floor_u128(a_before, oi_after, oi_before);
+            if candidate == 0 {
+                return Err(V16Error::RecoveryRequired);
+            }
+            candidate
+        };
+        match opposite {
+            SideV16::Long => {
+                asset.oi_eff_long_q = oi_after;
+                asset.a_long = a_after;
+                if oi_after != 0 && a_after < MIN_A_SIDE {
+                    asset.mode_long = SideModeV16::DrainOnly;
+                }
+            }
+            SideV16::Short => {
+                asset.oi_eff_short_q = oi_after;
+                asset.a_short = a_after;
+                if oi_after != 0 && a_after < MIN_A_SIDE {
+                    asset.mode_short = SideModeV16::DrainOnly;
+                }
+            }
+        }
+        Ok((asset, oi_after == 0))
+    }
+
+    fn kernel_begin_full_drain_reset(
+        mut asset: AssetStateV16,
+        side: SideV16,
+        pending_domain_loss_barrier: bool,
+    ) -> V16Result<AssetStateV16> {
+        if pending_domain_loss_barrier {
+            return Err(V16Error::LockActive);
+        }
+        match side {
+            SideV16::Long => {
+                if asset.mode_long == SideModeV16::ResetPending {
+                    return Err(V16Error::LockActive);
+                }
+                if asset.oi_eff_long_q != 0 || asset.pending_obligation_count_long != 0 {
+                    return Err(V16Error::LockActive);
+                }
+                quarantine_remainder(
+                    &mut asset.social_loss_remainder_long_num,
+                    &mut asset.social_loss_dust_long_num,
+                )?;
+                asset.k_epoch_start_long = asset.k_long;
+                asset.f_epoch_start_long_num = asset.f_long_num;
+                asset.b_epoch_start_long_num = asset.b_long_num;
+                asset.k_long = 0;
+                asset.f_long_num = 0;
+                asset.b_long_num = 0;
+                asset.loss_weight_sum_long = 0;
+                asset.a_long = ADL_ONE;
+                asset.epoch_long = asset
+                    .epoch_long
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+                asset.mode_long = SideModeV16::ResetPending;
+            }
+            SideV16::Short => {
+                if asset.mode_short == SideModeV16::ResetPending {
+                    return Err(V16Error::LockActive);
+                }
+                if asset.oi_eff_short_q != 0 || asset.pending_obligation_count_short != 0 {
+                    return Err(V16Error::LockActive);
+                }
+                quarantine_remainder(
+                    &mut asset.social_loss_remainder_short_num,
+                    &mut asset.social_loss_dust_short_num,
+                )?;
+                asset.k_epoch_start_short = asset.k_short;
+                asset.f_epoch_start_short_num = asset.f_short_num;
+                asset.b_epoch_start_short_num = asset.b_short_num;
+                asset.k_short = 0;
+                asset.f_short_num = 0;
+                asset.b_short_num = 0;
+                asset.loss_weight_sum_short = 0;
+                asset.a_short = ADL_ONE;
+                asset.epoch_short = asset
+                    .epoch_short
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+                asset.mode_short = SideModeV16::ResetPending;
+            }
+        }
+        Ok(asset)
+    }
+
+    fn kernel_clear_forfeited_leg(
+        leg: PortfolioLegV16,
+        asset: AssetStateV16,
+        opposite_pending_domain_loss_barrier: bool,
+    ) -> V16Result<(AssetStateV16, bool)> {
+        let predates_side_reset = Self::leg_predates_side_reset(asset, leg);
+        let asset = Self::kernel_clear_leg(leg, asset)?;
+        if predates_side_reset {
+            return Ok((asset, false));
+        }
+        let (asset, opposite_drained) =
+            Self::kernel_reduce_matching_open_interest_for_unilateral_close(
+                asset,
+                leg.side,
+                leg.basis_pos_q.unsigned_abs(),
+            )?;
+        if !opposite_drained {
+            return Ok((asset, false));
+        }
+        let asset = Self::kernel_begin_full_drain_reset(
+            asset,
+            opposite_side(leg.side),
+            opposite_pending_domain_loss_barrier,
+        )?;
+        Ok((asset, true))
+    }
+
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
@@ -1711,16 +1860,7 @@ impl V16Core {
         leg: PortfolioLegV16,
         mut asset: AssetStateV16,
     ) -> V16Result<AssetStateV16> {
-        let prior_reset_epoch = match leg.side {
-            SideV16::Long => {
-                asset.mode_long == SideModeV16::ResetPending
-                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_long)
-            }
-            SideV16::Short => {
-                asset.mode_short == SideModeV16::ResetPending
-                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
-            }
-        };
+        let prior_reset_epoch = Self::leg_predates_side_reset(asset, leg);
         let dust_after_clear = if !prior_reset_epoch && leg.b_rem != 0 {
             let current_dust = match leg.side {
                 SideV16::Long => asset.social_loss_dust_long_num,
@@ -12401,11 +12541,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn clear_leg(
-        &mut self,
+    fn prepare_leg_clear(
+        &self,
         account: &mut PortfolioV16ViewMut<'_>,
         asset_index: usize,
-    ) -> V16Result<()> {
+    ) -> V16Result<(usize, PortfolioLegV16, AssetStateV16)> {
         let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
         let leg = account.header.legs[leg_slot].try_to_runtime()?;
         if !leg.active || leg.b_stale || leg.stale {
@@ -12430,7 +12570,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let asset = self.asset_state(asset_index)?;
-        let asset = V16Core::kernel_clear_leg(leg, asset)?;
+        Ok((leg_slot, leg, asset))
+    }
+
+    fn commit_cleared_leg(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        leg_slot: usize,
+        asset: AssetStateV16,
+    ) -> V16Result<()> {
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
@@ -12438,6 +12587,49 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.header.active_bitmap = bitmap.map(V16PodU64::new);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
+        Ok(())
+    }
+
+    fn clear_leg(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        let (leg_slot, leg, asset) = self.prepare_leg_clear(account, asset_index)?;
+        let asset = V16Core::kernel_clear_leg(leg, asset)?;
+        self.commit_cleared_leg(account, asset_index, leg_slot, asset)
+    }
+
+    fn clear_forfeited_leg(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        let (leg_slot, leg, asset) = self.prepare_leg_clear(account, asset_index)?;
+        let opposite_barrier =
+            self.has_pending_domain_loss_barrier(asset_index, opposite_side(leg.side))?;
+        let (asset, bump_risk_epoch) =
+            match V16Core::kernel_clear_forfeited_leg(leg, asset, opposite_barrier) {
+                Ok(result) => result,
+                Err(V16Error::RecoveryRequired) => {
+                    self.declare_permissionless_recovery(
+                        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+                    )?;
+                    return Err(V16Error::RecoveryRequired);
+                }
+                Err(error) => return Err(error),
+            };
+        let next_risk_epoch = if bump_risk_epoch {
+            self.header
+                .risk_epoch
+                .get()
+                .checked_add(1)
+                .ok_or(V16Error::CounterOverflow)?
+        } else {
+            self.header.risk_epoch.get()
+        };
+        self.commit_cleared_leg(account, asset_index, leg_slot, asset)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         Ok(())
     }
 
@@ -13017,62 +13209,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn begin_full_drain_reset_inner(&mut self, asset_index: usize, side: SideV16) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
-        if self.has_pending_domain_loss_barrier(asset_index, side)? {
-            return Err(V16Error::LockActive);
-        }
-        let mut asset = self.asset_state(asset_index)?;
-        match side {
-            SideV16::Long => {
-                if asset.mode_long == SideModeV16::ResetPending {
-                    return Err(V16Error::LockActive);
-                }
-                if asset.oi_eff_long_q != 0 || asset.pending_obligation_count_long != 0 {
-                    return Err(V16Error::LockActive);
-                }
-                quarantine_remainder(
-                    &mut asset.social_loss_remainder_long_num,
-                    &mut asset.social_loss_dust_long_num,
-                )?;
-                asset.k_epoch_start_long = asset.k_long;
-                asset.f_epoch_start_long_num = asset.f_long_num;
-                asset.b_epoch_start_long_num = asset.b_long_num;
-                asset.k_long = 0;
-                asset.f_long_num = 0;
-                asset.b_long_num = 0;
-                asset.loss_weight_sum_long = 0;
-                asset.a_long = ADL_ONE;
-                asset.epoch_long = asset
-                    .epoch_long
-                    .checked_add(1)
-                    .ok_or(V16Error::CounterOverflow)?;
-                asset.mode_long = SideModeV16::ResetPending;
-            }
-            SideV16::Short => {
-                if asset.mode_short == SideModeV16::ResetPending {
-                    return Err(V16Error::LockActive);
-                }
-                if asset.oi_eff_short_q != 0 || asset.pending_obligation_count_short != 0 {
-                    return Err(V16Error::LockActive);
-                }
-                quarantine_remainder(
-                    &mut asset.social_loss_remainder_short_num,
-                    &mut asset.social_loss_dust_short_num,
-                )?;
-                asset.k_epoch_start_short = asset.k_short;
-                asset.f_epoch_start_short_num = asset.f_short_num;
-                asset.b_epoch_start_short_num = asset.b_short_num;
-                asset.k_short = 0;
-                asset.f_short_num = 0;
-                asset.b_short_num = 0;
-                asset.loss_weight_sum_short = 0;
-                asset.a_short = ADL_ONE;
-                asset.epoch_short = asset
-                    .epoch_short
-                    .checked_add(1)
-                    .ok_or(V16Error::CounterOverflow)?;
-                asset.mode_short = SideModeV16::ResetPending;
-            }
-        }
+        let pending_barrier = self.has_pending_domain_loss_barrier(asset_index, side)?;
+        let asset = V16Core::kernel_begin_full_drain_reset(
+            self.asset_state(asset_index)?,
+            side,
+            pending_barrier,
+        )?;
         self.set_asset_state(asset_index, asset)?;
         self.header.risk_epoch = V16PodU64::new(
             self.header
@@ -13093,47 +13235,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if close_q == 0 {
             return Ok(());
         }
-        let opp = opposite_side(closed_side);
-        let mut asset = self.asset_state(asset_index)?;
-        let (opp_oi_before, opp_a_before) = match opp {
-            SideV16::Long => (asset.oi_eff_long_q, asset.a_long),
-            SideV16::Short => (asset.oi_eff_short_q, asset.a_short),
-        };
-        if close_q > opp_oi_before {
-            return Err(V16Error::InvalidLeg);
-        }
-        let opp_oi_after = opp_oi_before - close_q;
-        let opp_a_after = if opp_oi_after == 0 {
-            ADL_ONE
-        } else {
-            let candidate = wide_mul_div_floor_u128(opp_a_before, opp_oi_after, opp_oi_before);
-            if candidate == 0 {
-                self.declare_permissionless_recovery(
-                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-                )?;
-                return Err(V16Error::RecoveryRequired);
-            }
-            candidate
-        };
-        match opp {
-            SideV16::Long => {
-                asset.oi_eff_long_q = opp_oi_after;
-                asset.a_long = opp_a_after;
-                if opp_oi_after != 0 && asset.a_long < MIN_A_SIDE {
-                    asset.mode_long = SideModeV16::DrainOnly;
+        let opposite = opposite_side(closed_side);
+        let (asset, opposite_drained) =
+            match V16Core::kernel_reduce_matching_open_interest_for_unilateral_close(
+                self.asset_state(asset_index)?,
+                closed_side,
+                close_q,
+            ) {
+                Ok(result) => result,
+                Err(V16Error::RecoveryRequired) => {
+                    self.declare_permissionless_recovery(
+                        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+                    )?;
+                    return Err(V16Error::RecoveryRequired);
                 }
-            }
-            SideV16::Short => {
-                asset.oi_eff_short_q = opp_oi_after;
-                asset.a_short = opp_a_after;
-                if opp_oi_after != 0 && asset.a_short < MIN_A_SIDE {
-                    asset.mode_short = SideModeV16::DrainOnly;
-                }
-            }
-        }
+                Err(error) => return Err(error),
+            };
         self.set_asset_state(asset_index, asset)?;
-        if opp_oi_after == 0 {
-            self.begin_full_drain_reset_inner(asset_index, opp)?;
+        if opposite_drained {
+            self.begin_full_drain_reset_inner(asset_index, opposite)?;
         }
         Ok(())
     }
@@ -15295,7 +15415,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .try_to_runtime()?
                 .has_pending_residual()
         {
-            self.clear_leg(account, asset_index)?;
+            self.clear_forfeited_leg(account, asset_index)?;
             return Ok(DeadLegForfeitOutcomeV16 {
                 detached: true,
                 positive_pnl_forfeited: 0,
@@ -15408,7 +15528,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .try_to_runtime()?
                 .has_pending_residual();
         if detached {
-            self.clear_leg(account, asset_index)?;
+            self.clear_forfeited_leg(account, asset_index)?;
         }
         self.validate_shape()?;
         account.validate_with_market(&self.as_view())?;

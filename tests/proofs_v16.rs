@@ -9,22 +9,23 @@ use percolator::v16::{
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
+    kani_health_requirements_from_base_and_target_lag, kani_kernel_clear_forfeited_leg,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_loss_stale_trade_scope_allowed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
     kani_select_auto_crank_plan, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preflight_risk_gate,
-    kani_validate_positive_pnl_source_attribution, kani_validate_source_domain_ledger_parts,
-    ActionableSummaryV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
-    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
-    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
-    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
-    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    kani_validate_asset_shape_for_view, kani_validate_positive_pnl_source_attribution,
+    kani_validate_source_domain_ledger_parts, ActionableSummaryV16, AssetLifecycleV16,
+    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, MarketModeV16,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
@@ -15972,4 +15973,207 @@ fn proof_v16_backing_utilization_zero_fee_carries_accrual_forward() {
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+}
+
+// Per-asset Recovery unwinds one owner account per transaction. Prove the exact
+// production forfeit-clear helper preserves strict Live OI equality by reducing
+// matching effective OI. The symbolic branches cover both sides and partial/full
+// first exits.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_forfeit_first_clear_preserves_live_oi_balance() {
+    let close_units: u8 = kani::any();
+    let remaining_units: u8 = kani::any();
+    let long_side: bool = kani::any();
+    kani::assume((1..=2).contains(&close_units));
+    kani::assume(remaining_units <= 2);
+
+    let close_q = u128::from(close_units) * POS_SCALE;
+    let remaining_q = u128::from(remaining_units) * POS_SCALE;
+    let total_q = close_q + remaining_q;
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 1;
+    asset.a_long = ADL_ONE;
+    asset.a_short = ADL_ONE;
+
+    asset.oi_eff_long_q = total_q;
+    asset.oi_eff_short_q = total_q;
+    asset.loss_weight_sum_long = if long_side && remaining_q != 0 { 2 } else { 1 };
+    asset.loss_weight_sum_short = if !long_side && remaining_q != 0 { 2 } else { 1 };
+    asset.stored_pos_count_long = if long_side && remaining_q != 0 { 2 } else { 1 };
+    asset.stored_pos_count_short = if !long_side && remaining_q != 0 { 2 } else { 1 };
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: 1,
+        side,
+        basis_pos_q: if long_side {
+            close_q as i128
+        } else {
+            -(close_q as i128)
+        },
+        a_basis: ADL_ONE,
+        loss_weight: 1,
+        ..PortfolioLegV16::EMPTY
+    };
+    let (after, bump_risk_epoch) = kani_kernel_clear_forfeited_leg(leg, asset, false).unwrap();
+    kani::cover!(
+        long_side && remaining_q != 0,
+        "long partial unilateral Recovery exit"
+    );
+    kani::cover!(
+        !long_side && remaining_q != 0,
+        "short partial unilateral Recovery exit"
+    );
+    kani::cover!(
+        long_side && remaining_q == 0,
+        "long full unilateral Recovery exit resets short"
+    );
+    kani::cover!(
+        !long_side && remaining_q == 0,
+        "short full unilateral Recovery exit resets long"
+    );
+    assert_eq!(after.oi_eff_long_q, remaining_q);
+    assert_eq!(after.oi_eff_short_q, remaining_q);
+    assert_eq!(after.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(after.market_id, asset.market_id);
+    assert_eq!(after.raw_oracle_target_price, asset.raw_oracle_target_price);
+    assert_eq!(after.effective_price, asset.effective_price);
+    assert_eq!(after.fund_px_last, asset.fund_px_last);
+    assert_eq!(after.slot_last, asset.slot_last);
+
+    if remaining_q == 0 {
+        let reset_side = if long_side {
+            after.mode_short
+        } else {
+            after.mode_long
+        };
+        assert_eq!(reset_side, SideModeV16::ResetPending);
+        assert!(bump_risk_epoch);
+    } else {
+        let expected_opposite_a = ADL_ONE * remaining_q / total_q;
+        if long_side {
+            assert_eq!(after.a_long, ADL_ONE);
+            assert_eq!(after.a_short, expected_opposite_a);
+        } else {
+            assert_eq!(after.a_short, ADL_ONE);
+            assert_eq!(after.a_long, expected_opposite_a);
+        }
+        assert!(!bump_risk_epoch);
+    }
+    let expected_selected_count = u64::from(remaining_q != 0);
+    let expected_selected_weight = u128::from(remaining_q != 0);
+    if long_side {
+        assert_eq!(after.stored_pos_count_long, expected_selected_count);
+        assert_eq!(after.loss_weight_sum_long, expected_selected_weight);
+        assert_eq!(after.stored_pos_count_short, 1);
+    } else {
+        assert_eq!(after.stored_pos_count_short, expected_selected_count);
+        assert_eq!(after.loss_weight_sum_short, expected_selected_weight);
+        assert_eq!(after.stored_pos_count_long, 1);
+    }
+
+    assert_eq!(
+        kani_validate_asset_shape_for_view(after, MarketModeV16::Live, 1, 2),
+        Ok(())
+    );
+}
+
+// The first unilateral exit resets a fully drained opposite side. Prove a
+// delayed leg from the prior epoch clears through the exact production helper
+// without subtracting its already-zero OI or advancing the reset epoch again.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_forfeit_reset_predecessor_clear_does_not_double_subtract() {
+    let close_units: u8 = kani::any();
+    let long_side: bool = kani::any();
+    kani::assume((1..=2).contains(&close_units));
+    let close_q = u128::from(close_units) * POS_SCALE;
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 1;
+    asset.oi_eff_long_q = 0;
+    asset.oi_eff_short_q = 0;
+    asset.a_long = ADL_ONE;
+    asset.a_short = ADL_ONE;
+    match side {
+        SideV16::Long => {
+            asset.mode_long = SideModeV16::ResetPending;
+            asset.epoch_long = 1;
+            asset.stored_pos_count_long = 1;
+        }
+        SideV16::Short => {
+            asset.mode_short = SideModeV16::ResetPending;
+            asset.epoch_short = 1;
+            asset.stored_pos_count_short = 1;
+        }
+    }
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: 1,
+        side,
+        basis_pos_q: if long_side {
+            close_q as i128
+        } else {
+            -(close_q as i128)
+        },
+        a_basis: ADL_ONE,
+        loss_weight: 1,
+        ..PortfolioLegV16::EMPTY
+    };
+    let (after, bump_risk_epoch) = kani_kernel_clear_forfeited_leg(leg, asset, false).unwrap();
+    kani::cover!(
+        long_side,
+        "delayed long reset predecessor exits without double subtraction"
+    );
+    kani::cover!(
+        !long_side,
+        "delayed short reset predecessor exits without double subtraction"
+    );
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    assert_eq!(after.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(after.market_id, asset.market_id);
+    assert_eq!(after.raw_oracle_target_price, asset.raw_oracle_target_price);
+    assert_eq!(after.effective_price, asset.effective_price);
+    assert_eq!(after.fund_px_last, asset.fund_px_last);
+    assert_eq!(after.slot_last, asset.slot_last);
+    assert!(!bump_risk_epoch);
+    if long_side {
+        assert_eq!(after.mode_long, SideModeV16::ResetPending);
+        assert_eq!(after.epoch_long, 1);
+        assert_eq!(after.stored_pos_count_long, 0);
+    } else {
+        assert_eq!(after.mode_short, SideModeV16::ResetPending);
+        assert_eq!(after.epoch_short, 1);
+        assert_eq!(after.stored_pos_count_short, 0);
+    }
+    assert_eq!(
+        kani_validate_asset_shape_for_view(after, MarketModeV16::Live, 1, 2),
+        Ok(())
+    );
 }

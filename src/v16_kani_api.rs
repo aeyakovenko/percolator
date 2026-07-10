@@ -42,6 +42,29 @@ pub fn kani_validate_source_domain_ledger_parts(
     V16Core::validate_source_domain_ledger_parts(expected_market_id, source, bucket, reservation)
 }
 
+#[cfg(kani)]
+pub fn kani_validate_asset_shape_for_view(
+    asset: AssetStateV16,
+    mode: MarketModeV16,
+    current_slot: u64,
+    next_market_id: u64,
+) -> V16Result<()> {
+    MarketGroupV16View::<u8>::validate_asset_shape_for_view(
+        asset,
+        mode,
+        current_slot,
+        next_market_id,
+    )
+}
+
+pub fn kani_kernel_clear_forfeited_leg(
+    leg: PortfolioLegV16,
+    asset: AssetStateV16,
+    opposite_pending_domain_loss_barrier: bool,
+) -> V16Result<(AssetStateV16, bool)> {
+    V16Core::kernel_clear_forfeited_leg(leg, asset, opposite_pending_domain_loss_barrier)
+}
+
 pub fn kani_health_cert_after_capital_debit(
     cert: HealthCertV16,
     amount: u128,

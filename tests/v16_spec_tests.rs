@@ -407,9 +407,22 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
         market
             .forfeit_recovery_leg_not_atomic(&mut long, 0, 1)
             .unwrap();
+        let after_long = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(after_long.oi_eff_long_q, 0);
+        assert_eq!(after_long.oi_eff_short_q, 0);
+        assert_eq!(after_long.stored_pos_count_long, 0);
+        assert_eq!(after_long.stored_pos_count_short, 1);
+        assert_eq!(after_long.mode_short, SideModeV16::ResetPending);
+        assert_eq!(market.validate_shape(), Ok(()));
         market
             .forfeit_recovery_leg_not_atomic(&mut short, 0, 1)
             .unwrap();
+        let after_short = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(after_short.oi_eff_long_q, 0);
+        assert_eq!(after_short.oi_eff_short_q, 0);
+        assert_eq!(after_short.stored_pos_count_long, 0);
+        assert_eq!(after_short.stored_pos_count_short, 0);
+        assert_eq!(market.validate_shape(), Ok(()));
     }
 
     assert_eq!(
