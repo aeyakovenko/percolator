@@ -859,6 +859,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::trade_signed_size_deltas(size_q)
     }
 
+    pub fn kani_require_asset_risk_change_allowed(
+        &self,
+        asset_index: usize,
+        risk_increasing: bool,
+    ) -> V16Result<()> {
+        self.require_asset_risk_change_allowed(asset_index, risk_increasing)
+    }
+
     pub fn kani_ensure_close_progress_not_expired(
         &mut self,
         ledger: CloseProgressLedgerV16,

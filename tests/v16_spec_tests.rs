@@ -570,6 +570,136 @@ fn v16_finalize_side_reset_rejects_blocked_pending_side() {
 }
 
 #[test]
+fn v16_trade_rejects_fresh_risk_when_either_side_is_recovering() {
+    let cases = [
+        (SideModeV16::ResetPending, SideModeV16::Normal),
+        (SideModeV16::Normal, SideModeV16::ResetPending),
+        (SideModeV16::DrainOnly, SideModeV16::Normal),
+        (SideModeV16::Normal, SideModeV16::DrainOnly),
+    ];
+    for (mode_long, mode_short) in cases {
+        let (mut header, mut markets) = market_fixture(1, 100);
+        let mut long_header = account_fixture(1, 16);
+        let mut short_header = account_fixture(1, 17);
+        {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let mut long = PortfolioV16ViewMut::new(&mut long_header);
+            let mut short = PortfolioV16ViewMut::new(&mut short_header);
+            market.deposit_not_atomic(&mut long, 1_000).unwrap();
+            market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        }
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.mode_long = mode_long;
+        asset.mode_short = mode_short;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        let value_before = (header.vault, header.c_tot, header.insurance);
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        assert_eq!(
+            market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            ),
+            Err(V16Error::LockActive),
+            "fresh risk admitted with {mode_long:?}/{mode_short:?}"
+        );
+
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(asset.oi_eff_long_q, 0);
+        assert_eq!(asset.oi_eff_short_q, 0);
+        assert_eq!(asset.stored_pos_count_long, 0);
+        assert_eq!(asset.stored_pos_count_short, 0);
+        assert_eq!(
+            long.header.active_bitmap,
+            V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new)
+        );
+        assert_eq!(
+            short.header.active_bitmap,
+            V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new)
+        );
+        assert_eq!(
+            (
+                market.header.vault,
+                market.header.c_tot,
+                market.header.insurance
+            ),
+            value_before
+        );
+    }
+}
+
+#[test]
+fn v16_trade_keeps_two_sided_risk_reduction_open_during_side_recovery() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 18);
+    let mut short_header = account_fixture(1, 19);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(2 * POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.mode_long = SideModeV16::ResetPending;
+    asset.mode_short = SideModeV16::DrainOnly;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .expect("recovery must not block a matched reduction of both open sides");
+
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+    assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+    assert_eq!(asset.stored_pos_count_long, 1);
+    assert_eq!(asset.stored_pos_count_short, 1);
+    assert_eq!(
+        long.header.legs[0].try_to_runtime().unwrap().basis_pos_q,
+        signed_q(POS_SCALE)
+    );
+    assert_eq!(
+        short.header.legs[0].try_to_runtime().unwrap().basis_pos_q,
+        -signed_q(POS_SCALE)
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut long_header = account_fixture(2, 201);

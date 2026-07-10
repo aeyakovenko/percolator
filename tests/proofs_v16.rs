@@ -22,15 +22,15 @@ use percolator::v16::{
     BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
     EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
     InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
-    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
-    TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
+    TokenValueFlowProofV16, V16Config, V16ConfigAccount, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
@@ -872,6 +872,88 @@ fn proof_v16_raw_oracle_target_change_invalidates_all_prior_certificates() {
         &expected_slot,
         &market.markets[0].engine
     ));
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes() {
+    let lifecycle_raw: u8 = kani::any();
+    let long_mode_raw: u8 = kani::any();
+    let short_mode_raw: u8 = kani::any();
+    let risk_increasing: bool = kani::any();
+    kani::assume(lifecycle_raw <= 5 && long_mode_raw <= 2 && short_mode_raw <= 2);
+
+    let decode_mode = |raw| match raw {
+        0 => SideModeV16::Normal,
+        1 => SideModeV16::DrainOnly,
+        _ => SideModeV16::ResetPending,
+    };
+    let lifecycle = match lifecycle_raw {
+        0 => AssetLifecycleV16::Disabled,
+        1 => AssetLifecycleV16::PendingActivation,
+        2 => AssetLifecycleV16::Active,
+        3 => AssetLifecycleV16::DrainOnly,
+        4 => AssetLifecycleV16::Retired,
+        _ => AssetLifecycleV16::Recovery,
+    };
+    let long_mode = decode_mode(long_mode_raw);
+    let short_mode = decode_mode(short_mode_raw);
+    let expected_ok = !risk_increasing
+        || (lifecycle == AssetLifecycleV16::Active
+            && long_mode == SideModeV16::Normal
+            && short_mode == SideModeV16::Normal);
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = lifecycle;
+    asset.mode_long = long_mode;
+    asset.mode_short = short_mode;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.kani_require_asset_risk_change_allowed(0, risk_increasing);
+
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && long_mode == SideModeV16::Normal
+            && short_mode == SideModeV16::Normal,
+        "active Normal/Normal admits risk increase"
+    );
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && long_mode == SideModeV16::ResetPending,
+        "long ResetPending blocks fresh matched risk"
+    );
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && short_mode == SideModeV16::ResetPending,
+        "short ResetPending blocks fresh matched risk"
+    );
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && (long_mode == SideModeV16::DrainOnly || short_mode == SideModeV16::DrainOnly),
+        "either DrainOnly side blocks fresh matched risk"
+    );
+    kani::cover!(
+        risk_increasing && lifecycle != AssetLifecycleV16::Active,
+        "non-active lifecycle blocks fresh matched risk"
+    );
+    kani::cover!(
+        !risk_increasing
+            && lifecycle == AssetLifecycleV16::Recovery
+            && long_mode == SideModeV16::ResetPending
+            && short_mode == SideModeV16::DrainOnly,
+        "risk reduction remains admitted during recovery"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if expected_ok {
+        assert_eq!(result, Ok(()));
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
 }
 
 #[kani::proof]
