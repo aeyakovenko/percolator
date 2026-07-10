@@ -3880,3 +3880,146 @@ fn closure_liquidation_clear_then_matching_adl_preserves_oi_and_counter_frame() 
         }
     );
 }
+
+// Permissionless rebalance uses three production kernels in sequence: clamp a
+// requested close toward zero, resize the surviving same-side leg, then reduce
+// matching opposite OI through ADL. Prove that every bounded partial reduction
+// strictly shrinks the selected account exposure, restores exact market OI
+// balance, updates only the selected loss-weight aggregate, and otherwise has
+// an exact whole-asset frame. Full closes are covered by the clear composition
+// above, so this theorem isolates the nonzero Resize branch.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn closure_rebalance_partial_resize_then_matching_adl_preserves_oi_and_asset_frame() {
+    let market_oi_raw: u8 = kani::any();
+    let leg_abs_raw: u8 = kani::any();
+    let close_raw: u8 = kani::any();
+    let old_weight_raw: u8 = kani::any();
+    let new_weight_raw: u8 = kani::any();
+    let other_weight_raw: u8 = kani::any();
+    let reducing_long: bool = kani::any();
+    let preserve_pending_weight: bool = kani::any();
+    kani::assume((2..=16).contains(&market_oi_raw));
+    kani::assume((2..=market_oi_raw).contains(&leg_abs_raw));
+    kani::assume((1..leg_abs_raw).contains(&close_raw));
+    kani::assume(old_weight_raw <= 16);
+    kani::assume(new_weight_raw <= 16);
+    kani::assume(other_weight_raw <= 16);
+
+    let market_oi = market_oi_raw as u128;
+    let leg_abs = leg_abs_raw as u128;
+    let close_q = close_raw as u128;
+    let remaining_market_oi = market_oi - close_q;
+    let remaining_leg_abs = leg_abs - close_q;
+    let old_weight = old_weight_raw as u128;
+    let new_weight = new_weight_raw as u128;
+    let other_weight = other_weight_raw as u128;
+    let side = if reducing_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let pre_signed = if reducing_long {
+        leg_abs as i128
+    } else {
+        -(leg_abs as i128)
+    };
+
+    let mut asset: AssetStateV16 = kani::any();
+    asset.oi_eff_long_q = market_oi;
+    asset.oi_eff_short_q = market_oi;
+    asset.a_long = ADL_ONE;
+    asset.a_short = ADL_ONE;
+    asset.mode_long = SideModeV16::Normal;
+    asset.mode_short = SideModeV16::Normal;
+    if reducing_long {
+        asset.loss_weight_sum_long = old_weight + other_weight;
+    } else {
+        asset.loss_weight_sum_short = old_weight + other_weight;
+    }
+    let before = asset;
+    let mut leg: PortfolioLegV16 = kani::any();
+    leg.active = true;
+    leg.side = side;
+    leg.basis_pos_q = pre_signed;
+    leg.loss_weight = old_weight;
+    let leg_before = leg;
+
+    let (reduced_q, delta) =
+        V16Core::kernel_reduce_position_delta(pre_signed, side, close_q).unwrap();
+    let next_signed = pre_signed.checked_add(delta).unwrap();
+    assert_eq!(
+        V16Core::kernel_classify_position_delta(pre_signed, next_signed),
+        PositionRouteV16::Resize
+    );
+    let (resized_leg, resized_asset) = V16Core::kernel_resize_leg_same_side(
+        leg,
+        asset,
+        next_signed,
+        new_weight,
+        preserve_pending_weight,
+    )
+    .unwrap();
+    let (after, opposite_drained) =
+        V16Core::kernel_reduce_matching_open_interest_for_unilateral_close(
+            resized_asset,
+            side,
+            reduced_q,
+        )
+        .unwrap();
+
+    let expected_opposite_a = ADL_ONE * remaining_market_oi / market_oi;
+    let expected_opposite_mode = if expected_opposite_a < MIN_A_SIDE {
+        SideModeV16::DrainOnly
+    } else {
+        SideModeV16::Normal
+    };
+    let mut expected_asset = before;
+    expected_asset.oi_eff_long_q = remaining_market_oi;
+    expected_asset.oi_eff_short_q = remaining_market_oi;
+    if reducing_long {
+        expected_asset.loss_weight_sum_long = if preserve_pending_weight {
+            old_weight + other_weight
+        } else {
+            new_weight + other_weight
+        };
+        expected_asset.a_short = expected_opposite_a;
+        expected_asset.mode_short = expected_opposite_mode;
+    } else {
+        expected_asset.loss_weight_sum_short = if preserve_pending_weight {
+            old_weight + other_weight
+        } else {
+            new_weight + other_weight
+        };
+        expected_asset.a_long = expected_opposite_a;
+        expected_asset.mode_long = expected_opposite_mode;
+    }
+    let mut expected_leg = leg_before;
+    expected_leg.basis_pos_q = next_signed;
+    if !preserve_pending_weight {
+        expected_leg.loss_weight = new_weight;
+    }
+
+    kani::cover!(
+        reducing_long && !preserve_pending_weight && old_weight != new_weight && other_weight > 0,
+        "long rebalance replaces only its selected loss weight"
+    );
+    kani::cover!(
+        !reducing_long && preserve_pending_weight && close_q > 1,
+        "short rebalance under a pending obligation preserves booked loss weight"
+    );
+    kani::cover!(
+        expected_opposite_mode == SideModeV16::DrainOnly,
+        "deep partial rebalance quarantines a thin matching side"
+    );
+    assert_eq!(reduced_q, close_q);
+    assert_eq!(next_signed.unsigned_abs(), remaining_leg_abs);
+    assert!(next_signed.unsigned_abs() < pre_signed.unsigned_abs());
+    assert_eq!(resized_leg, expected_leg);
+    assert_eq!(after, expected_asset);
+    assert_eq!(after.oi_eff_long_q, after.oi_eff_short_q);
+    assert_eq!(after.oi_eff_long_q, remaining_market_oi);
+    assert!(!opposite_drained);
+}
