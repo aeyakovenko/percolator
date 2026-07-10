@@ -404,6 +404,7 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
             .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
             .unwrap();
         market.force_asset_recovery_not_atomic(0, 2).unwrap();
+        let short_capital_before = short.header.capital.get();
         market
             .forfeit_recovery_leg_not_atomic(&mut long, 0, 1)
             .unwrap();
@@ -414,9 +415,15 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
         assert_eq!(after_long.stored_pos_count_short, 1);
         assert_eq!(after_long.mode_short, SideModeV16::ResetPending);
         assert_eq!(market.validate_shape(), Ok(()));
-        market
+        let short_outcome = market
             .forfeit_recovery_leg_not_atomic(&mut short, 0, 1)
             .unwrap();
+        assert_eq!(
+            short_outcome.positive_pnl_forfeited,
+            FUNDING_COUNTER_ATOMS_PER_SLOT
+        );
+        assert_eq!(short.header.pnl.get(), 0);
+        assert_eq!(short.header.capital.get(), short_capital_before);
         let after_short = market.markets[0].engine.asset.try_to_runtime().unwrap();
         assert_eq!(after_short.oi_eff_long_q, 0);
         assert_eq!(after_short.oi_eff_short_q, 0);

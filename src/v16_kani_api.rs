@@ -664,6 +664,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok((out.support_consumed, out.junior_face_burned))
     }
 
+    pub fn kani_settle_forfeited_leg_kf_effects(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<(u128, u128, u128, u128)> {
+        self.settle_forfeited_leg_kf_effects(account, asset_index)
+    }
+
     pub fn kani_account_unliened_source_realizable_support(
         &self,
         account: &PortfolioV16View<'_>,

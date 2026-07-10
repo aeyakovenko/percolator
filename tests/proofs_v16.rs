@@ -16177,3 +16177,113 @@ fn proof_v16_forfeit_reset_predecessor_clear_does_not_double_subtract() {
         Ok(())
     );
 }
+
+// A profitable dead leg is an exit-only liability release, not a source-backed
+// claim. Prove the exact production settlement helper reports the gain as
+// forfeited while creating no account PnL, capital, source claim, or group value.
+fn kani_dead_leg_positive_kf_is_forfeited_without_value_credit<const LONG_SIDE: bool>() {
+    let units_raw: u16 = kani::any();
+    let capital_raw: u8 = kani::any();
+    kani::assume((1..=511).contains(&units_raw));
+    kani::assume(capital_raw <= 4);
+    let units = i128::from(units_raw);
+    let capital = u128::from(capital_raw);
+    let side = if LONG_SIDE {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+
+    let (mut header, mut markets, mut account_header) = one_market_direct_view_fixture();
+    header.vault = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(capital);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: 1,
+        side,
+        basis_pos_q: if LONG_SIDE {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        },
+        a_basis: ADL_ONE,
+        loss_weight: POS_SCALE,
+        ..PortfolioLegV16::EMPTY
+    });
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    if LONG_SIDE {
+        asset.k_long = (ADL_ONE as i128) * units;
+    } else {
+        asset.k_short = (ADL_ONE as i128) * units;
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let header_before = header;
+    let market_before = markets[0];
+    let source_domains_before = account_header.source_domains;
+    let close_before = account_header.close_progress;
+    let funding_before = (
+        account_header.funding_long_paid_atoms_total,
+        account_header.funding_long_received_atoms_total,
+        account_header.funding_short_paid_atoms_total,
+        account_header.funding_short_received_atoms_total,
+    );
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market
+        .kani_settle_forfeited_leg_kf_effects(&mut account, 0)
+        .unwrap();
+
+    kani::cover!(
+        units > 1 && capital > 0,
+        "profitable dead leg forfeits a nontrivial gain"
+    );
+    assert_eq!(outcome, (0, units as u128, 0, 0));
+    assert_eq!(account.header.capital.get(), capital);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(account.header.source_domains, source_domains_before);
+    assert_eq!(account.header.close_progress, close_before);
+    assert_eq!(
+        (
+            account.header.funding_long_paid_atoms_total,
+            account.header.funding_long_received_atoms_total,
+            account.header.funding_short_paid_atoms_total,
+            account.header.funding_short_received_atoms_total,
+        ),
+        funding_before
+    );
+    let settled_leg = account.header.legs[0].try_to_runtime().unwrap();
+    assert!(settled_leg.active);
+    assert_eq!(settled_leg.side, side);
+    assert_eq!(settled_leg.k_snap, (ADL_ONE as i128) * units);
+    assert_eq!(settled_leg.f_snap, 0);
+    assert_eq!(account.header.health_cert.valid, 0);
+    assert_eq!(*market.header, header_before);
+    assert_eq!(market.markets[0], market_before);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_dead_long_positive_kf_is_forfeited_without_value_credit() {
+    kani_dead_leg_positive_kf_is_forfeited_without_value_credit::<true>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_dead_short_positive_kf_is_forfeited_without_value_credit() {
+    kani_dead_leg_positive_kf_is_forfeited_without_value_credit::<false>();
+}
