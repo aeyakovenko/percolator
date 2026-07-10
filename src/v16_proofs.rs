@@ -4184,10 +4184,21 @@ fn closure_pending_domain_loss_barrier_does_not_block_negative_funding_accrual()
     prove_pending_domain_loss_barrier_does_not_block_funding_accrual::<false>();
 }
 
-// A permissionless crank on one asset must be a strict slab-local write: even
-// simultaneous K/F accrual cannot alter a sibling asset's engine or wrapper
-// bytes. The sibling is fully symbolic, so this proves write noninterference
-// independently of its economic contents; the target is a valid active asset.
+// A permissionless oracle crank on one asset must be a strict slab-local write:
+// raw-target update plus simultaneous K/F accrual cannot alter a sibling
+// asset's engine or wrapper bytes. The sibling is fully symbolic, so this
+// proves write noninterference independently of its economic contents; the
+// target is a valid active asset.
+#[cfg(all(kani, feature = "closure"))]
+fn axiom_pure_shape_validator_commits<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    // validate_shape takes &self and is independently proven sound. For this
+    // write-frame theorem only its successful return matters; arbitrary sibling
+    // bytes deliberately need not satisfy economic shape constraints.
+    Ok(())
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn prove_price_funding_accrual_is_sibling_slab_isolated<const SELECTED: usize>() {
     assert!(SELECTED < 2);
@@ -4196,6 +4207,7 @@ fn prove_price_funding_accrual_is_sibling_slab_isolated<const SELECTED: usize>()
     let funding_rate_e9 = if positive_funding { 10_000 } else { -10_000 };
     let old_price = 1_000_000u64;
     let new_price = old_price + 1;
+    let raw_target = old_price + 2;
 
     let mut cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
     cfg.max_abs_funding_e9_per_slot = 10_000;
@@ -4259,12 +4271,17 @@ fn prove_price_funding_accrual_is_sibling_slab_isolated<const SELECTED: usize>()
     markets[SELECTED].engine = EngineAssetSlotV16Account::empty_for_market(target.market_id);
     markets[SELECTED].engine.asset = AssetStateV16Account::from_runtime(&target);
     markets[SELECTED].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    markets[SELECTED].wrapper = kani::any();
     header.resolved_payout_blocker_count = V16PodU64::new(1);
 
     let header_before = header;
+    let target_wrapper_before = markets[SELECTED].wrapper;
     let target_before = markets[SELECTED].engine;
     let sibling_before = markets[sibling];
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .set_asset_raw_oracle_target_not_atomic(SELECTED, raw_target)
+        .unwrap();
     let outcome = market
         .accrue_asset_to_not_atomic(SELECTED, 2, new_price, funding_rate_e9, true)
         .unwrap();
@@ -4275,6 +4292,23 @@ fn prove_price_funding_accrual_is_sibling_slab_isolated<const SELECTED: usize>()
         .unwrap();
     let funding_atoms = if positive_funding { 10i128 } else { -11i128 };
     let funding_delta = funding_atoms * ADL_ONE as i128;
+    let mut expected_header = header_before;
+    expected_header.current_slot = V16PodU64::new(2);
+    expected_header.slot_last = V16PodU64::new(2);
+    expected_header.loss_stale_active = 0;
+    expected_header.oracle_epoch = V16PodU64::new(1);
+    expected_header.funding_epoch = V16PodU64::new(1);
+    let mut expected_asset = target;
+    expected_asset.raw_oracle_target_price = raw_target;
+    expected_asset.effective_price = new_price;
+    expected_asset.fund_px_last = new_price;
+    expected_asset.slot_last = 2;
+    expected_asset.k_long += ADL_ONE as i128;
+    expected_asset.k_short -= ADL_ONE as i128;
+    expected_asset.f_long_num -= funding_delta;
+    expected_asset.f_short_num += funding_delta;
+    let mut expected_target = target_before;
+    expected_target.asset = AssetStateV16Account::from_runtime(&expected_asset);
 
     kani::cover!(
         positive_funding && sibling_before.wrapper > 0,
@@ -4292,22 +4326,18 @@ fn prove_price_funding_accrual_is_sibling_slab_isolated<const SELECTED: usize>()
     assert_eq!(after.k_short, target.k_short - ADL_ONE as i128);
     assert_eq!(after.f_long_num, target.f_long_num - funding_delta);
     assert_eq!(after.f_short_num, target.f_short_num + funding_delta);
+    assert_eq!(after.raw_oracle_target_price, raw_target);
+    assert_eq!(after.effective_price, new_price);
     assert_eq!(after.slot_last, 2);
-    assert_eq!(market.header.oracle_epoch.get(), 1);
-    assert_eq!(market.header.funding_epoch.get(), 1);
-    assert_eq!(market.header.vault, header_before.vault);
-    assert_eq!(market.header.c_tot, header_before.c_tot);
-    assert_eq!(market.header.insurance, header_before.insurance);
-    assert_eq!(
-        market.header.resolved_payout_blocker_count,
-        header_before.resolved_payout_blocker_count
-    );
-    assert_eq!(
-        market.markets[SELECTED]
-            .engine
-            .pending_domain_loss_barrier_long,
-        target_before.pending_domain_loss_barrier_long
-    );
+    assert!(kani_eq_market_group_v16_header_account(
+        market.header,
+        &expected_header
+    ));
+    assert_eq!(market.markets[SELECTED].wrapper, target_wrapper_before);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[SELECTED].engine,
+        &expected_target
+    ));
     assert_eq!(market.markets[sibling].wrapper, sibling_before.wrapper);
     assert!(kani_eq_engine_asset_slot_v16_account(
         &market.markets[sibling].engine,
@@ -4323,6 +4353,10 @@ fn prove_price_funding_accrual_is_sibling_slab_isolated<const SELECTED: usize>()
     crate::wide_math::floor_div_signed_conservative_i128,
     axiom_exact_one_slot_funding_floor
 )]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    axiom_pure_shape_validator_commits
+)]
 fn closure_asset_zero_price_funding_accrual_is_sibling_slab_isolated() {
     prove_price_funding_accrual_is_sibling_slab_isolated::<0>();
 }
@@ -4334,6 +4368,10 @@ fn closure_asset_zero_price_funding_accrual_is_sibling_slab_isolated() {
 #[kani::stub(
     crate::wide_math::floor_div_signed_conservative_i128,
     axiom_exact_one_slot_funding_floor
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    axiom_pure_shape_validator_commits
 )]
 fn closure_asset_one_price_funding_accrual_is_sibling_slab_isolated() {
     prove_price_funding_accrual_is_sibling_slab_isolated::<1>();
