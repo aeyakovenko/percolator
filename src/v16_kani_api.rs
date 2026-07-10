@@ -81,6 +81,60 @@ pub fn kani_liquidation_projected_health_deficit_from_parts(
     )
 }
 
+pub fn kani_liquidation_projected_healthy_after_close(
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
+    close_q: u128,
+) -> V16Result<bool> {
+    liquidation_projected_healthy_after_close(
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
+        close_q,
+    )
+}
+
+pub fn kani_liquidation_engine_close_request_q(
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
+) -> V16Result<u128> {
+    liquidation_engine_close_request_q(
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
+    )
+}
+
+pub fn kani_liquidation_partial_search_hi(
+    config: V16Config,
+    old_abs_q: u128,
+    effective_price: u64,
+) -> V16Result<u128> {
+    liquidation_partial_search_hi(config, old_abs_q, effective_price)
+}
+
 pub fn kani_add_open_interest_for_new_position(
     asset: &mut AssetStateV16,
     side: SideV16,

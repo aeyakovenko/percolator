@@ -239,10 +239,7 @@ fn apply_fuzz_action(
                 market
                     .liquidate_account_not_atomic(
                         &mut account,
-                        LiquidationRequestV16 {
-                            asset_index: 0,
-                            fee_bps: 0,
-                        },
+                        LiquidationRequestV16 { asset_index: 0 },
                     )
                     .map(|_| ())
             } else {
@@ -250,10 +247,7 @@ fn apply_fuzz_action(
                 market
                     .liquidate_account_not_atomic(
                         &mut account,
-                        LiquidationRequestV16 {
-                            asset_index: 0,
-                            fee_bps: 0,
-                        },
+                        LiquidationRequestV16 { asset_index: 0 },
                     )
                     .map(|_| ())
             }

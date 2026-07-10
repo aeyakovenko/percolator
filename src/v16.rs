@@ -317,6 +317,19 @@ fn liquidation_close_would_leave_uncovered_loss_with_open_risk(
     Ok(uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap))
 }
 
+fn liquidation_risk_notional_ceil(abs_pos_q: u128, price: u64) -> V16Result<u128> {
+    if abs_pos_q == 0 {
+        return Ok(0);
+    }
+    if abs_pos_q > MAX_POSITION_ABS_Q || price > MAX_ORACLE_PRICE {
+        return Err(V16Error::InvalidConfig);
+    }
+    let product = abs_pos_q * price as u128;
+    (product / POS_SCALE)
+        .checked_add(u128::from(product % POS_SCALE != 0))
+        .ok_or(V16Error::ArithmeticOverflow)
+}
+
 fn liquidation_leg_maintenance_requirement(
     config: V16Config,
     abs_q: u128,
@@ -327,15 +340,17 @@ fn liquidation_leg_maintenance_requirement(
     if abs_q == 0 {
         return Ok(0);
     }
-    let risk_notional = risk_notional_ceil(abs_q, effective_price)?;
-    let target_lag_penalty =
-        V16Core::target_effective_lag_loss_penalty(abs_q, side, effective_price, raw_target_price)?;
-    let (_, maintenance, _) = V16Core::health_requirements_from_notional_and_target_lag(
-        config,
-        risk_notional,
-        target_lag_penalty,
-    )?;
-    Ok(maintenance)
+    if config.maintenance_margin_bps > MAX_MARGIN_BPS {
+        return Err(V16Error::InvalidConfig);
+    }
+    let risk_notional = liquidation_risk_notional_ceil(abs_q, effective_price)?;
+    let adverse_delta =
+        V16Core::target_effective_lag_adverse_delta(side, effective_price, raw_target_price);
+    let target_lag_penalty = liquidation_risk_notional_ceil(abs_q, adverse_delta)?;
+    let base = ((risk_notional * config.maintenance_margin_bps as u128) / MAX_MARGIN_BPS as u128)
+        .max(config.min_nonzero_mm_req);
+    base.checked_add(target_lag_penalty)
+        .ok_or(V16Error::ArithmeticOverflow)
 }
 
 fn liquidation_projected_healthy_after_close(
@@ -368,7 +383,7 @@ fn liquidation_projected_healthy_after_close(
         effective_price,
         raw_target_price,
     )?;
-    let fee_notional = risk_notional_ceil(close_q, effective_price)?;
+    let fee_notional = liquidation_risk_notional_ceil(close_q, effective_price)?;
     let fee = liquidation_fee_for_close(
         fee_notional,
         fee_bps,
@@ -384,6 +399,76 @@ fn liquidation_projected_healthy_after_close(
         new_maintenance,
         charged_fee,
     )? == 0)
+}
+
+fn liquidation_partial_close_is_healthy(
+    config: V16Config,
+    cert: HealthCertV16,
+    capital: u128,
+    pnl: i128,
+    leg: PortfolioLegV16,
+    effective_price: u64,
+    raw_target_price: u64,
+    fee_bps: u64,
+    close_q: u128,
+) -> V16Result<bool> {
+    match liquidation_projected_healthy_after_close(
+        config,
+        cert,
+        capital,
+        pnl,
+        leg,
+        effective_price,
+        raw_target_price,
+        fee_bps,
+        close_q,
+    ) {
+        // A partial close below the configured absolute fee floor is not an
+        // admissible liquidation chunk. Every other error remains fail-closed.
+        Err(V16Error::NonProgress) => Ok(false),
+        result => result,
+    }
+}
+
+fn min_abs_q_for_risk_notional_at_least(
+    risk_notional: u128,
+    effective_price: u64,
+) -> V16Result<u128> {
+    if risk_notional == 0 {
+        return Ok(0);
+    }
+    if effective_price == 0 {
+        return Err(V16Error::InvalidConfig);
+    }
+    let numerator = risk_notional - 1;
+    if let Some(product) = numerator.checked_mul(POS_SCALE) {
+        return (product / effective_price as u128)
+            .checked_add(1)
+            .ok_or(V16Error::ArithmeticOverflow);
+    }
+    U256::from_u128(numerator)
+        .checked_mul(U256::from_u128(POS_SCALE))
+        .and_then(|v| v.checked_div(U256::from_u128(effective_price as u128)))
+        .and_then(|v| v.try_into_u128())
+        .and_then(|v| v.checked_add(1))
+        .ok_or(V16Error::ArithmeticOverflow)
+}
+
+fn liquidation_partial_search_hi(
+    config: V16Config,
+    old_abs_q: u128,
+    effective_price: u64,
+) -> V16Result<u128> {
+    if config.maintenance_margin_bps == 0 {
+        return Ok(0);
+    }
+    let floor_exit_notional = V16Config::checked_mul_div_ceil_to_u128(
+        config.min_nonzero_mm_req,
+        MAX_MARGIN_BPS as u128,
+        config.maintenance_margin_bps as u128,
+    )?;
+    let floor_exit_q = min_abs_q_for_risk_notional_at_least(floor_exit_notional, effective_price)?;
+    Ok(old_abs_q.saturating_sub(floor_exit_q))
 }
 
 fn liquidation_projected_health_deficit_from_parts(
@@ -440,11 +525,33 @@ fn liquidation_engine_close_request_q(
         return Ok(old_abs_q);
     }
 
+    // The absolute maintenance floor makes projected health non-monotone: a
+    // partial close can become healthy, unhealthy again as its fee grows while
+    // maintenance is flat, then healthy on the full-close discontinuity. Search
+    // only the proportional-margin prefix. Crossing into the floor region is a
+    // deterministic dust/full-close policy.
+    let partial_hi = liquidation_partial_search_hi(config, old_abs_q, effective_price)?;
+    if partial_hi == 0
+        || !liquidation_partial_close_is_healthy(
+            config,
+            cert,
+            capital,
+            pnl,
+            leg,
+            effective_price,
+            raw_target_price,
+            fee_bps,
+            partial_hi,
+        )?
+    {
+        return Ok(old_abs_q);
+    }
+
     let mut lo = 1u128;
-    let mut hi = old_abs_q;
+    let mut hi = partial_hi;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let healthy = liquidation_projected_healthy_after_close(
+        let healthy = liquidation_partial_close_is_healthy(
             config,
             cert,
             capital,
@@ -454,15 +561,14 @@ fn liquidation_engine_close_request_q(
             raw_target_price,
             fee_bps,
             mid,
-        )
-        .unwrap_or(false);
+        )?;
         if healthy {
             hi = mid;
         } else {
             lo = mid.checked_add(1).ok_or(V16Error::ArithmeticOverflow)?;
         }
     }
-    if liquidation_projected_healthy_after_close(
+    if liquidation_partial_close_is_healthy(
         config,
         cert,
         capital,
@@ -472,9 +578,7 @@ fn liquidation_engine_close_request_q(
         raw_target_price,
         fee_bps,
         lo,
-    )
-    .unwrap_or(false)
-    {
+    )? {
         Ok(lo)
     } else {
         Ok(old_abs_q)
@@ -5260,7 +5364,6 @@ impl SourceCreditLienAggregateProofV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiquidationRequestV16 {
     pub asset_index: usize,
-    pub fee_bps: u64,
 }
 
 #[repr(C)]
@@ -11654,21 +11757,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             AutoCrankPlanV16::Liquidate { asset_index } => {
                 let obs = obs_or_current_asset(self, asset_index)?;
-                // CONFIG fee policy — never a caller hint (engine.md).
-                let fee_bps = self
-                    .header
-                    .config
-                    .try_to_runtime_shape()?
-                    .liquidation_fee_bps;
                 AutoCrankOutcomeV16::Progressed(crank_with(
                     self,
                     account,
                     asset_index,
                     obs,
-                    PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 {
-                        asset_index,
-                        fee_bps,
-                    }),
+                    PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 { asset_index }),
                 )?)
             }
             AutoCrankPlanV16::DeclareRecovery { reason } => {
@@ -13332,11 +13426,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         let config = self.header.config.try_to_runtime_shape()?;
-        if request.asset_index >= config.max_market_slots as usize
-            || request.fee_bps > config.liquidation_fee_bps.max(config.max_trading_fee_bps)
-        {
+        if request.asset_index >= config.max_market_slots as usize {
             return Err(V16Error::InvalidConfig);
         }
+        let fee_bps = config.liquidation_fee_bps;
         self.require_asset_live_reducible(request.asset_index)?;
         self.validate_account_scalar_preflight(&account.as_view())?;
         Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
@@ -13369,7 +13462,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             leg,
             asset.effective_price,
             asset.raw_oracle_target_price,
-            request.fee_bps,
+            fee_bps,
         )?;
         // PRODUCTION KERNEL: clamp + toward-zero reduction delta — the SAME
         // risk-reduction kernel rebalance uses, so A5.dec's strict-progress
@@ -13403,10 +13496,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             leg.side,
             &account.as_view(),
         )?;
-        let fee_notional = risk_notional_ceil(close_q, asset.effective_price)?;
+        let fee_notional = liquidation_risk_notional_ceil(close_q, asset.effective_price)?;
         let fee = liquidation_fee_for_close(
             fee_notional,
-            request.fee_bps,
+            fee_bps,
             config.min_liquidation_abs,
             config.liquidation_fee_cap,
             close_q == leg.basis_pos_q.unsigned_abs(),
@@ -16169,7 +16262,13 @@ fn liquidation_fee_for_close(
     liquidation_fee_cap: u128,
     closes_full_position: bool,
 ) -> V16Result<u128> {
-    let raw_fee = checked_fee_bps(fee_notional, fee_bps)?;
+    if fee_notional > MAX_ACCOUNT_NOTIONAL || fee_bps > MAX_MARGIN_BPS {
+        return Err(V16Error::InvalidConfig);
+    }
+    let product = fee_notional * fee_bps as u128;
+    let raw_fee = (product / MAX_MARGIN_BPS as u128)
+        .checked_add(u128::from(product % MAX_MARGIN_BPS as u128 != 0))
+        .ok_or(V16Error::ArithmeticOverflow)?;
     liquidation_fee_from_raw_fee(
         raw_fee,
         min_liquidation_abs,
