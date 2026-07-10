@@ -5036,6 +5036,7 @@ struct PositionDeltaLookupV16 {
 enum AccountRefreshCertOutcomeV16 {
     Certified(HealthCertV16),
     BChunk(AccountBSettlementChunkV16),
+    SourceBackingExpired(usize),
 }
 
 #[cfg(kani)]
@@ -7858,10 +7859,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.refresh_source_credit_domain_after_mutation(domain)
     }
 
-    fn expire_lapsed_source_backing_for_account_not_atomic(
+    fn expire_first_lapsed_source_backing_for_account_not_atomic(
         &mut self,
         account: &PortfolioV16View<'_>,
-    ) -> V16Result<()> {
+    ) -> V16Result<Option<usize>> {
         let current_slot = self.header.current_slot.get();
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -7876,11 +7877,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     && bucket.expiry_slot <= current_slot
                 {
                     self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
+                    return Ok(Some(domain));
                 }
             }
             slot += 1;
         }
-        Ok(())
+        Ok(None)
     }
 
     #[cfg(any(kani, feature = "fuzz"))]
@@ -10859,6 +10861,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
             AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
             AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
+            AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => Err(V16Error::Stale),
         }
     }
 
@@ -10885,11 +10888,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             )?;
         }
         // A source-backed winner can remain Live past the backing bucket's expiry.
-        // Refresh is the permissionless continuation for that account, so apply the
-        // canonical expiry transition here before any support calculation consults
-        // the now-lapsed domain. Otherwise refresh returns Stale, SVM rollback
-        // restores the Fresh bucket, and every subsequent auto-crank repeats forever.
-        self.expire_lapsed_source_backing_for_account_not_atomic(&account.as_view())?;
+        // The permissionless path commits exactly one canonical expiry transition
+        // per call, then returns before valuation. Repeated auto-cranks drain the
+        // bounded domain set without an O(source-domains) CU cliff.
+        if allow_b_chunk {
+            if let Some(domain) =
+                self.expire_first_lapsed_source_backing_for_account_not_atomic(&account.as_view())?
+            {
+                return Ok(AccountRefreshCertOutcomeV16::SourceBackingExpired(domain));
+            }
+        }
         if decode_bool(account.header.b_stale_state)? && !allow_b_chunk {
             return Err(V16Error::BStale);
         }
@@ -11740,6 +11748,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     AccountRefreshCertOutcomeV16::BChunk(out) => {
                         self.validate_shape_audit_scan()?;
                         return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
+                    }
+                    AccountRefreshCertOutcomeV16::SourceBackingExpired(domain) => {
+                        self.validate_shape_audit_scan()?;
+                        return Ok(PermissionlessProgressOutcomeV16::SourceBackingExpired {
+                            domain,
+                        });
                     }
                 }
                 touches_accrued_asset
@@ -13816,6 +13830,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )? {
             AccountRefreshCertOutcomeV16::Certified(_) => {}
             AccountRefreshCertOutcomeV16::BChunk(_) => return Err(V16Error::BStale),
+            AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => return Err(V16Error::Stale),
         }
         let cert = account.header.health_cert.try_to_runtime()?;
         if cert.certified_liq_deficit == 0 {
@@ -14020,6 +14035,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
             AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
             AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
+            AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => Err(V16Error::Stale),
         }
     }
 
@@ -16582,6 +16598,7 @@ impl RiskScoreV16 {
 pub enum PermissionlessProgressOutcomeV16 {
     AccountCurrent,
     AccountBChunk(AccountBSettlementChunkV16),
+    SourceBackingExpired { domain: usize },
     ResidualBooked(BResidualBookingOutcomeV16),
     RecoveryDeclared(PermissionlessRecoveryReasonV16),
 }

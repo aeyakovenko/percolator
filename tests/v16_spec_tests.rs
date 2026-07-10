@@ -3031,9 +3031,9 @@ fn v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean() {
 }
 
 #[test]
-fn v16_auto_crank_expires_lapsed_live_source_backing_before_refresh() {
-    let (mut header, mut markets) = market_fixture(1, 100);
-    let mut account_header = account_fixture(1, 22);
+fn v16_auto_crank_expires_one_lapsed_live_source_domain_per_step() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 22);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -3042,16 +3042,34 @@ fn v16_auto_crank_expires_lapsed_live_source_backing_before_refresh() {
             .deposit_fresh_counterparty_backing_not_atomic(1, 40, 5)
             .unwrap();
         market
+            .deposit_fresh_counterparty_backing_not_atomic(3, 40, 5)
+            .unwrap();
+        market
             .add_account_source_positive_pnl_not_atomic(&mut account, 1, 40)
             .unwrap();
         market
+            .add_account_source_positive_pnl_not_atomic(&mut account, 3, 40)
+            .unwrap();
+        market
             .accrue_asset_to_not_atomic(0, 10, 100, 0, true)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(1, 10, 100, 0, true)
             .unwrap();
     }
 
     let before = markets[0].engine.backing_short.try_to_runtime().unwrap();
     assert_eq!(before.status, BackingBucketStatusV16::Fresh);
     assert_eq!(before.expiry_slot, 5);
+    assert_eq!(
+        markets[1]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Fresh
+    );
     assert!(header.current_slot.get() > before.expiry_slot);
     let vault_before = header.vault.get();
 
@@ -3062,7 +3080,7 @@ fn v16_auto_crank_expires_lapsed_live_source_backing_before_refresh() {
         effective_price: 100,
         funding_rate_e9: 0,
     }];
-    let result = market
+    let expiry = market
         .permissionless_auto_crank_not_atomic(
             &mut account,
             AutoCrankWorkV16 {
@@ -3075,12 +3093,14 @@ fn v16_auto_crank_expires_lapsed_live_source_backing_before_refresh() {
         .expect("Live auto-crank must expire lapsed backing instead of returning Stale");
 
     assert!(matches!(
-        result.selected,
+        expiry.selected,
         AutoCrankPlanV16::RefreshAccount { .. }
     ));
     assert_eq!(
-        result.outcome,
-        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+        expiry.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::SourceBackingExpired {
+            domain: 1
+        })
     );
     let after = market.markets[0]
         .engine
@@ -3089,9 +3109,63 @@ fn v16_auto_crank_expires_lapsed_live_source_backing_before_refresh() {
         .unwrap();
     assert_eq!(after.status, BackingBucketStatusV16::Expired);
     assert_eq!(after.fresh_unliened_backing_num, 0);
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Fresh,
+        "one auto-crank expires exactly one source domain"
+    );
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(account.header.capital.get(), 100);
-    assert_eq!(account.header.pnl.get(), 40);
+    assert_eq!(account.header.pnl.get(), 80);
+    assert!(!account.header.health_cert.try_to_runtime().unwrap().valid);
+
+    let second_expiry = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &observations,
+                liquidation_max_close_q: 0,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the next bounded auto-crank must expire the next domain");
+    assert_eq!(
+        second_expiry.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::SourceBackingExpired {
+            domain: 3
+        })
+    );
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired
+    );
+
+    let refresh = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &observations,
+                liquidation_max_close_q: 0,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the final bounded auto-crank must finish account refresh");
+    assert_eq!(
+        refresh.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+    );
     assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
