@@ -9845,6 +9845,108 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
     }
 }
 
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_principal_then_domain_insurance_waterfall_is_loss_and_domain_capped() {
+    let capital_raw: u8 = kani::any();
+    let budget_raw: u8 = kani::any();
+    let peer_budget_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let loss_raw: u8 = kani::any();
+    kani::assume(loss_raw > 0);
+    kani::assume((budget_raw as u16) + (peer_budget_raw as u16) <= insurance_raw as u16);
+
+    let capital = capital_raw as u128;
+    let budget = budget_raw as u128;
+    let peer_budget = peer_budget_raw as u128;
+    let insurance = insurance_raw as u128;
+    let loss = loss_raw as u128;
+    let expected_principal = capital.min(loss);
+    let residual_after_principal = loss - expected_principal;
+    let expected_insurance = budget.min(residual_after_principal);
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(capital + insurance);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budget);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(peer_budget);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.refresh_header_aggregate_totals_for_test().unwrap();
+    let remaining_before = market.header.insurance_domain_budget_remaining_total.get();
+    let peer_budget_before = market.markets[0].engine.insurance_domain_budget_long;
+    let peer_spent_before = market.markets[0].engine.insurance_domain_spent_long;
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let principal_paid = market
+        .kani_settle_negative_pnl_from_principal_core_not_atomic(&mut account)
+        .unwrap();
+    let insurance_used = market
+        .kani_consume_domain_insurance_for_negative_pnl(0, SideV16::Long, &mut account)
+        .unwrap();
+
+    kani::cover!(
+        capital > 0 && capital < loss && budget > 0 && budget < residual_after_principal,
+        "principal-first waterfall leaves a domain-budget-capped residual"
+    );
+    kani::cover!(
+        capital < loss && budget >= residual_after_principal && residual_after_principal > 0,
+        "domain insurance fully cures only the post-principal residual"
+    );
+    kani::cover!(
+        capital >= loss && insurance_used == 0,
+        "principal fully absorbs the loss before insurance is considered"
+    );
+    kani::cover!(
+        peer_budget > 0 && insurance_used > 0,
+        "selected insurance spend preserves a funded peer domain"
+    );
+    assert_eq!(principal_paid, expected_principal);
+    assert_eq!(insurance_used, expected_insurance);
+    assert!(insurance_used <= budget);
+    assert!(insurance_used <= residual_after_principal);
+    assert_eq!(
+        account.header.pnl.get(),
+        -(loss as i128) + (expected_principal + expected_insurance) as i128
+    );
+    assert_eq!(account.header.capital.get(), capital - expected_principal);
+    assert_eq!(market.header.c_tot.get(), capital - expected_principal);
+    assert_eq!(
+        market.header.insurance.get(),
+        insurance - expected_insurance
+    );
+    assert_eq!(market.header.vault.get(), capital + insurance);
+    assert_eq!(remaining_before, budget + peer_budget);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        budget - expected_insurance + peer_budget
+    );
+    assert!(
+        market.header.insurance.get()
+            >= market.header.insurance_domain_budget_remaining_total.get()
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        expected_insurance
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long,
+        peer_budget_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long,
+        peer_spent_before
+    );
+    assert_eq!(
+        market.header.negative_pnl_account_count.get(),
+        u64::from(expected_principal + expected_insurance != loss)
+    );
+}
+
 fn kani_bankruptcy_insurance_spend_is_domain_and_asset_isolated<
     const SELECTED: usize,
     const BANKRUPT_LONG: bool,
