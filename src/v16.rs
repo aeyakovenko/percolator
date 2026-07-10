@@ -7858,6 +7858,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.refresh_source_credit_domain_after_mutation(domain)
     }
 
+    fn expire_lapsed_source_backing_for_account_not_atomic(
+        &mut self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        let current_slot = self.header.current_slot.get();
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let domain = source.domain.get() as usize;
+                let bucket = self.backing_bucket_for_domain(domain)?;
+                if bucket.status == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= current_slot
+                {
+                    self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
+                }
+            }
+            slot += 1;
+        }
+        Ok(())
+    }
+
     #[cfg(any(kani, feature = "fuzz"))]
     pub fn create_source_credit_lien_from_counterparty_not_atomic(
         &mut self,
@@ -10859,6 +10884,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 source_claim_sum_num,
             )?;
         }
+        // A source-backed winner can remain Live past the backing bucket's expiry.
+        // Refresh is the permissionless continuation for that account, so apply the
+        // canonical expiry transition here before any support calculation consults
+        // the now-lapsed domain. Otherwise refresh returns Stale, SVM rollback
+        // restores the Fresh bucket, and every subsequent auto-crank repeats forever.
+        self.expire_lapsed_source_backing_for_account_not_atomic(&account.as_view())?;
         if decode_bool(account.header.b_stale_state)? && !allow_b_chunk {
             return Err(V16Error::BStale);
         }
