@@ -2142,6 +2142,203 @@ fn proof_v16_terminal_spent_domain_cleanup_is_value_neutral_and_remaining_budget
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_terminal_spent_cleanup_then_restart_preserves_value() {
+    let restart_retired: bool = kani::any();
+    let long_spent_raw: u8 = kani::any();
+    let short_spent_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let price_raw: u16 = kani::any();
+    kani::assume(long_spent_raw != 0 || short_spent_raw != 0);
+    kani::assume((1..=10_000).contains(&price_raw));
+
+    let old_market_id = 1u64;
+    let next_market_id = 2u64;
+    let current_slot = 5u64;
+    let now_slot = 6u64;
+    let capital = u128::from(capital_raw);
+    let insurance = u128::from(insurance_raw);
+    let vault = capital + insurance + u128::from(surplus_raw);
+    let long_spent = u128::from(long_spent_raw);
+    let short_spent = u128::from(short_spent_raw);
+
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 1, 0).unwrap();
+    header.current_slot = V16PodU64::new(current_slot);
+    header.slot_last = V16PodU64::new(current_slot);
+    header.next_market_id = V16PodU64::new(next_market_id);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.last_asset_activation_slot = V16PodU64::new(current_slot);
+    header.asset_set_epoch = V16PodU64::new(3);
+    header.risk_epoch = V16PodU64::new(4);
+    header.vault = V16PodU128::new(vault);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+
+    let mut markets = [Market::new(
+        7u64,
+        EngineAssetSlotV16Account::empty_for_market(old_market_id),
+    )];
+    let mut asset = AssetStateV16::default();
+    asset.market_id = old_market_id;
+    asset.lifecycle = if restart_retired {
+        AssetLifecycleV16::Retired
+    } else {
+        AssetLifecycleV16::Recovery
+    };
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = current_slot;
+    asset.retired_slot = if restart_retired { current_slot } else { 0 };
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_spent);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(long_spent);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_spent);
+    markets[0].engine.insurance_domain_spent_short = V16PodU128::new(short_spent);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    let residual_before = market.kani_residual();
+
+    market
+        .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(0)
+        .unwrap();
+    assert_eq!(market.header.vault.get(), vault);
+    assert_eq!(market.header.c_tot.get(), capital);
+    assert_eq!(market.header.insurance.get(), insurance);
+    assert_eq!(market.kani_residual(), residual_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        0
+    );
+
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(
+            0,
+            u64::from(price_raw),
+            now_slot,
+        )
+        .unwrap();
+
+    kani::cover!(
+        long_spent != 0 && short_spent != 0 && capital != 0 && insurance != 0,
+        "cleanup and restart cover both spent domains with unrelated senior value"
+    );
+    kani::cover!(restart_retired, "cleanup and restart cover Retired assets");
+    kani::cover!(
+        !restart_retired,
+        "cleanup and restart cover Recovery assets"
+    );
+
+    let restarted = market.markets[0].engine;
+    let restarted_asset = restarted.asset.try_to_runtime().unwrap();
+    assert_eq!(market.markets[0].wrapper, 7);
+    assert_eq!(restarted_asset.lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(restarted_asset.market_id, next_market_id);
+    assert_eq!(restarted_asset.effective_price, u64::from(price_raw));
+    assert_eq!(restarted.insurance_domain_budget_long.get(), 0);
+    assert_eq!(restarted.insurance_domain_budget_short.get(), 0);
+    assert_eq!(restarted.insurance_domain_spent_long.get(), 0);
+    assert_eq!(restarted.insurance_domain_spent_short.get(), 0);
+    assert_eq!(market.header.vault.get(), vault);
+    assert_eq!(market.header.c_tot.get(), capital);
+    assert_eq!(market.header.insurance.get(), insurance);
+    assert_eq!(market.kani_residual(), residual_before);
+    assert_eq!(market.header.next_market_id.get(), next_market_id + 1);
+    assert_eq!(market.header.asset_activation_count.get(), 2);
+    assert_eq!(market.header.asset_set_epoch.get(), 4);
+    assert_eq!(market.header.risk_epoch.get(), 5);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_spent_cleanup_cannot_erase_provider_receivable() {
+    let receivable_raw: u8 = kani::any();
+    kani::assume(receivable_raw != 0);
+    let receivable = u128::from(receivable_raw) * BOUND_SCALE;
+    let old_market_id = 1u64;
+
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 1, 0).unwrap();
+    header.current_slot = V16PodU64::new(5);
+    header.slot_last = V16PodU64::new(5);
+    header.next_market_id = V16PodU64::new(2);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.last_asset_activation_slot = V16PodU64::new(5);
+
+    let mut markets = [Market::new(
+        9u64,
+        EngineAssetSlotV16Account::empty_for_market(old_market_id),
+    )];
+    let mut asset = AssetStateV16::default();
+    asset.market_id = old_market_id;
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 5;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(1);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(1);
+
+    let source = SourceCreditStateV16 {
+        spent_backing_num: receivable,
+        provider_receivable_num: receivable,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let bucket = BackingBucketV16 {
+        market_id: old_market_id,
+        consumed_liened_backing_num: receivable,
+        expiry_slot: 1,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    };
+    markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(&source);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&bucket);
+
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let wrapper_before = markets[0].wrapper;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(0);
+
+    kani::cover!(
+        receivable > BOUND_SCALE,
+        "terminal cleanup rejection covers a nontrivial provider receivable"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert!(kani_eq_market_group_v16_header_account(
+        market.header,
+        &header_before
+    ));
+    assert_eq!(market.markets[0].wrapper, wrapper_before);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &slot_before
+    ));
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_canonical_retired_asset_slot_preserves_identity_and_clears_local_ledgers() {
