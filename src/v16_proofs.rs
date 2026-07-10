@@ -3726,3 +3726,157 @@ fn closure_liquidation_matching_adl_restores_balanced_oi_with_exact_frame() {
     assert!(remaining == 0 || expected_a > 0);
     assert!(expected_a <= ADL_ONE);
 }
+
+// Compose the two mutation kernels used by reduce_position: clear the
+// liquidated leg from its side, then ADL-reduce matching opposite OI. This
+// proves the caller-side premise of the theorem above and pins stored-position
+// and loss-weight deltas to the cleared side only.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn closure_liquidation_clear_then_matching_adl_preserves_oi_and_counter_frame() {
+    let pre_oi_raw: u8 = kani::any();
+    let close_raw: u8 = kani::any();
+    let closed_long: bool = kani::any();
+    kani::assume((1..=16).contains(&pre_oi_raw));
+    kani::assume((1..=pre_oi_raw).contains(&close_raw));
+    let pre_oi = pre_oi_raw as u128;
+    let close_q = close_raw as u128;
+    let remaining = pre_oi - close_q;
+    let closed_side = if closed_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let closed_count = if remaining == 0 { 1 } else { 2 };
+    let closed_weight = close_q + u128::from(remaining != 0);
+
+    let mut asset: AssetStateV16 = kani::any();
+    asset.oi_eff_long_q = pre_oi;
+    asset.oi_eff_short_q = pre_oi;
+    asset.a_long = ADL_ONE;
+    asset.a_short = ADL_ONE;
+    asset.mode_long = SideModeV16::Normal;
+    asset.mode_short = SideModeV16::Normal;
+    asset.epoch_long = 1;
+    asset.epoch_short = 1;
+    if closed_long {
+        asset.stored_pos_count_long = closed_count;
+        asset.loss_weight_sum_long = closed_weight;
+    } else {
+        asset.stored_pos_count_short = closed_count;
+        asset.loss_weight_sum_short = closed_weight;
+    }
+    let before = asset;
+    let signed_basis = if closed_long {
+        close_q as i128
+    } else {
+        -(close_q as i128)
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: closed_side,
+        basis_pos_q: signed_basis,
+        a_basis: ADL_ONE,
+        k_snap: if closed_long {
+            asset.k_long
+        } else {
+            asset.k_short
+        },
+        f_snap: if closed_long {
+            asset.f_long_num
+        } else {
+            asset.f_short_num
+        },
+        epoch_snap: 1,
+        loss_weight: close_q,
+        b_snap: if closed_long {
+            asset.b_long_num
+        } else {
+            asset.b_short_num
+        },
+        b_rem: 0,
+        b_epoch_snap: 1,
+        b_stale: false,
+        stale: false,
+    };
+
+    let after_clear = V16Core::kernel_clear_leg(leg, asset).unwrap();
+    let (after, opposite_drained) =
+        V16Core::kernel_reduce_matching_open_interest_for_unilateral_close(
+            after_clear,
+            closed_side,
+            close_q,
+        )
+        .unwrap();
+    let expected_a = if remaining == 0 {
+        ADL_ONE
+    } else {
+        ADL_ONE * remaining / pre_oi
+    };
+    let expected_mode = if remaining != 0 && expected_a < MIN_A_SIDE {
+        SideModeV16::DrainOnly
+    } else {
+        SideModeV16::Normal
+    };
+    let mut expected = before;
+    if closed_long {
+        expected.oi_eff_long_q = remaining;
+        expected.oi_eff_short_q = remaining;
+        expected.stored_pos_count_long = closed_count - 1;
+        expected.loss_weight_sum_long = closed_weight - close_q;
+        expected.a_short = expected_a;
+        expected.mode_short = expected_mode;
+    } else {
+        expected.oi_eff_short_q = remaining;
+        expected.oi_eff_long_q = remaining;
+        expected.stored_pos_count_short = closed_count - 1;
+        expected.loss_weight_sum_short = closed_weight - close_q;
+        expected.a_long = expected_a;
+        expected.mode_long = expected_mode;
+    }
+
+    kani::cover!(
+        closed_long && remaining > 0 && expected_mode == SideModeV16::Normal,
+        "partial long liquidation composes clear and normal matching ADL"
+    );
+    kani::cover!(
+        !closed_long && remaining > 0 && expected_mode == SideModeV16::DrainOnly,
+        "partial short liquidation composes clear and matching drain-only ADL"
+    );
+    kani::cover!(
+        remaining == 0 && pre_oi > 1,
+        "full liquidation clears its final count and drains matching OI"
+    );
+    assert_eq!(after, expected);
+    assert_eq!(after.oi_eff_long_q, after.oi_eff_short_q);
+    assert_eq!(after.oi_eff_long_q, remaining);
+    assert_eq!(opposite_drained, remaining == 0);
+    assert_eq!(
+        if closed_long {
+            after.stored_pos_count_short
+        } else {
+            after.stored_pos_count_long
+        },
+        if closed_long {
+            before.stored_pos_count_short
+        } else {
+            before.stored_pos_count_long
+        }
+    );
+    assert_eq!(
+        if closed_long {
+            after.loss_weight_sum_short
+        } else {
+            after.loss_weight_sum_long
+        },
+        if closed_long {
+            before.loss_weight_sum_short
+        } else {
+            before.loss_weight_sum_long
+        }
+    );
+}
