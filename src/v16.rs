@@ -14793,7 +14793,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(payout)
     }
 
-    pub fn refine_resolved_unreceipted_bound_not_atomic(
+    fn refine_resolved_unreceipted_bound_not_atomic(
         &mut self,
         decrease_num: u128,
     ) -> V16Result<()> {

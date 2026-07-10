@@ -570,57 +570,6 @@ fn v16_finalize_side_reset_rejects_blocked_pending_side() {
 }
 
 #[test]
-fn v16_resolved_bound_refinement_uses_public_monotone_api() {
-    let (mut header, mut markets) = market_fixture(1, 100);
-    {
-        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-        market.resolve_market_not_atomic(1).unwrap();
-    }
-    header.vault = V16PodU128::new(50);
-    let exact_num = 2 * BOUND_SCALE;
-    let bound_num = 4 * BOUND_SCALE;
-    header.payout_snapshot_captured = 1;
-    header.resolved_payout_ledger =
-        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
-            snapshot_residual: 3,
-            terminal_claim_exact_receipts_num: exact_num,
-            terminal_claim_bound_unreceipted_num: bound_num,
-            current_payout_rate_num: 3 * BOUND_SCALE,
-            current_payout_rate_den: exact_num + bound_num,
-            snapshot_slot: 1,
-            payout_halted: false,
-            finalized: false,
-        });
-    let vault_before = header.vault.get();
-    let c_tot_before = header.c_tot.get();
-    let insurance_before = header.insurance.get();
-
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    market
-        .refine_resolved_unreceipted_bound_not_atomic(2 * BOUND_SCALE)
-        .unwrap();
-
-    let refined = market
-        .header
-        .resolved_payout_ledger
-        .try_to_runtime()
-        .unwrap();
-    assert_eq!(
-        refined.terminal_claim_bound_unreceipted_num,
-        2 * BOUND_SCALE
-    );
-    assert!(
-        refined.current_payout_rate_num * (exact_num + bound_num)
-            >= (3 * BOUND_SCALE) * refined.current_payout_rate_den,
-        "bound refinement must not reduce already-quoted payout rate"
-    );
-    assert_eq!(market.header.vault.get(), vault_before);
-    assert_eq!(market.header.c_tot.get(), c_tot_before);
-    assert_eq!(market.header.insurance.get(), insurance_before);
-    market.validate_shape().unwrap();
-}
-
-#[test]
 fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut long_header = account_fixture(2, 201);

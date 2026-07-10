@@ -870,6 +870,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.realize_source_backed_claims_for_resolved_close_not_atomic(account)
     }
 
+    pub fn kani_create_resolved_payout_receipt_if_needed(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        self.create_resolved_payout_receipt_if_needed(account)
+    }
+
     pub fn kani_claim_resolved_payout_topup_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
