@@ -3030,6 +3030,113 @@ fn v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean() {
     account.validate_with_market(&market.as_view()).unwrap();
 }
 
+#[test]
+fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 22);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    }
+
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset0.lifecycle = AssetLifecycleV16::Recovery;
+    asset0.slot_last = 10;
+    asset0.oi_eff_long_q = POS_SCALE;
+    asset0.oi_eff_short_q = POS_SCALE;
+    asset0.loss_weight_sum_long = POS_SCALE;
+    asset0.loss_weight_sum_short = POS_SCALE;
+    asset0.stored_pos_count_long = 1;
+    asset0.stored_pos_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+
+    let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset1.slot_last = 10;
+    asset1.oi_eff_long_q = POS_SCALE;
+    asset1.oi_eff_short_q = POS_SCALE;
+    asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.stored_pos_count_long = 1;
+    asset1.stored_pos_count_short = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset0.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset0.k_long,
+        f_snap: asset0.f_long_num,
+        epoch_snap: asset0.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset0.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset0.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: asset1.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -(POS_SCALE as i128),
+        a_basis: ADL_ONE,
+        k_snap: asset1.k_short,
+        f_snap: asset1.f_short_num,
+        epoch_snap: asset1.epoch_short,
+        loss_weight: POS_SCALE,
+        b_snap: asset1.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset1.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+
+    let obs = [AutoCrankObservationV16 {
+        asset_index: 1,
+        effective_price: 100,
+        funding_rate_e9: 0,
+    }];
+    let work = AutoCrankWorkV16 {
+        now_slot: 10,
+        observations: &obs,
+        liquidation_max_close_q: POS_SCALE,
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert!(
+        market
+            .build_actionable_summary(&account.as_view())
+            .unwrap()
+            .stale
+    );
+
+    let result = market
+        .permissionless_auto_crank_not_atomic(&mut account, work)
+        .expect("a Recovery first leg must not block the live asset refresh");
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(1),
+        },
+    );
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent),
+    );
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
 // ROADMAP 3C step 4 / NB2 finite-multi-step liveness via the self-classifying
 // crank: an uncertified, underwater account must be driven to a de-risked fixed
 // point by repeated auto-cranks — the classifier ESCALATES (stale -> refresh,
