@@ -5100,6 +5100,7 @@ struct PositionDeltaLookupV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AccountRefreshCertOutcomeV16 {
     Certified(HealthCertV16),
+    LegSettled { asset_index: usize },
     BChunk(AccountBSettlementChunkV16),
     SourceBackingExpired(usize),
 }
@@ -8571,6 +8572,41 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(sum)
     }
 
+    fn account_source_domain_count(account: &PortfolioV16View<'_>) -> usize {
+        let mut count = 0usize;
+        while count < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[count];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            count += 1;
+        }
+        count
+    }
+
+    fn account_pending_kf_settlement_count(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<usize> {
+        let mut count = 0usize;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                let asset = self.asset_state(leg.asset_index as usize)?;
+                let (target_k, target_f) = Self::kf_target_for_leg_from_asset(asset, leg)?;
+                if Self::leg_has_exhausted_effective_oi(asset, leg)
+                    || leg.k_snap != target_k
+                    || leg.f_snap != target_f
+                {
+                    count += 1;
+                }
+            }
+            slot += 1;
+        }
+        Ok(count)
+    }
+
     fn account_has_source_claims(account: &PortfolioV16View<'_>) -> V16Result<bool> {
         Ok(Self::account_source_claim_bound_sum_num(account)? != 0)
     }
@@ -10898,6 +10934,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<HealthCertV16> {
         match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
             AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
+            AccountRefreshCertOutcomeV16::LegSettled { .. } => Err(V16Error::Stale),
             AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
             AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => Err(V16Error::Stale),
         }
@@ -10919,6 +10956,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .validate_source_credit_shape_with_market(&self.as_view())?;
             Self::account_source_claim_bound_sum_num(&account.as_view())?
         };
+        let source_domain_count = if allow_b_chunk {
+            Self::account_source_domain_count(&account.as_view())
+        } else {
+            0
+        };
+        let pending_kf_count = if allow_b_chunk {
+            self.account_pending_kf_settlement_count(&account.as_view())?
+        } else {
+            0
+        };
+        // Existing source attribution adds another bounded scan to every K/F
+        // settlement. In that state permissionless refresh commits at most one
+        // stale leg, keeping the last few legs from being folded into an
+        // unbounded certification tail as earlier chunks remove domains. The
+        // source-free max-leg path remains monolithic and has its own SBF bound.
+        let chunk_kf_settlement =
+            allow_b_chunk && source_domain_count != 0 && pending_kf_count != 0;
         if source_claim_sum_num != 0 {
             V16Core::validate_positive_pnl_source_attribution(
                 account.header.pnl.get(),
@@ -11011,7 +11065,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.begin_full_drain_reset_inner(asset_index, leg.side)?;
                 asset = self.asset_state(asset_index)?;
             }
+            let (target_k, target_f) = Self::kf_target_for_leg_from_asset(asset, leg)?;
+            let kf_settlement_pending = leg.k_snap != target_k || leg.f_snap != target_f;
             self.settle_leg_kf_effects_at_slot_with_asset(account, slot, asset)?;
+            if chunk_kf_settlement && kf_settlement_pending {
+                self.validate_account_audit_scan(&account.as_view())?;
+                self.validate_shape_audit_scan()?;
+                return Ok(AccountRefreshCertOutcomeV16::LegSettled { asset_index });
+            }
             let mut refreshed = account.header.legs[slot].try_to_runtime()?;
             let target = Self::b_target_for_leg_from_asset(asset, refreshed)?;
             if target > refreshed.b_snap {
@@ -11783,6 +11844,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     true,
                 )? {
                     AccountRefreshCertOutcomeV16::Certified(_) => {}
+                    AccountRefreshCertOutcomeV16::LegSettled { asset_index } => {
+                        self.validate_shape_audit_scan()?;
+                        return Ok(PermissionlessProgressOutcomeV16::AccountLegSettled {
+                            asset_index,
+                        });
+                    }
                     AccountRefreshCertOutcomeV16::BChunk(out) => {
                         self.validate_shape_audit_scan()?;
                         return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
@@ -13858,19 +13925,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let fee_bps = config.liquidation_fee_bps;
         self.require_asset_live_reducible(request.asset_index)?;
-        self.validate_account_scalar_preflight(&account.as_view())?;
+        let cert = self.settle_account_for_position_action_and_refresh_not_atomic(account)?;
         Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
-        match self.refresh_account_and_certify_not_atomic(
-            account,
-            None,
-            self.header.config.public_b_chunk_atoms.get(),
-            false,
-        )? {
-            AccountRefreshCertOutcomeV16::Certified(_) => {}
-            AccountRefreshCertOutcomeV16::BChunk(_) => return Err(V16Error::BStale),
-            AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => return Err(V16Error::Stale),
-        }
-        let cert = account.header.health_cert.try_to_runtime()?;
         if cert.certified_liq_deficit == 0 {
             return Err(V16Error::NonProgress);
         }
@@ -14072,6 +14128,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
             AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
+            AccountRefreshCertOutcomeV16::LegSettled { .. } => Err(V16Error::Stale),
             AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
             AccountRefreshCertOutcomeV16::SourceBackingExpired(_) => Err(V16Error::Stale),
         }
@@ -16757,6 +16814,7 @@ impl RiskScoreV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionlessProgressOutcomeV16 {
     AccountCurrent,
+    AccountLegSettled { asset_index: usize },
     AccountBChunk(AccountBSettlementChunkV16),
     SourceBackingExpired { domain: usize },
     ResidualBooked(BResidualBookingOutcomeV16),

@@ -3100,6 +3100,144 @@ fn v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean() {
 }
 
 #[test]
+fn v16_auto_crank_settles_each_stale_kf_tail_leg_before_certifying() {
+    const PRICE: u64 = 1_000_000;
+    let (mut header, mut markets) = market_fixture(14, PRICE);
+    let mut long_header = account_fixture(14, 211);
+    let mut short_header = account_fixture(14, 212);
+    let requests = [
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(POS_SCALE),
+            exec_price: PRICE,
+            fee_bps: 0,
+        },
+        TradeRequestV16 {
+            asset_index: 1,
+            size_q: signed_q(POS_SCALE),
+            exec_price: PRICE,
+            fee_bps: 0,
+        },
+        TradeRequestV16 {
+            asset_index: 2,
+            size_q: signed_q(POS_SCALE),
+            exec_price: PRICE,
+            fee_bps: 0,
+        },
+    ];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 10_000_000).unwrap();
+    market.deposit_not_atomic(&mut short, 10_000_000).unwrap();
+    market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, &requests)
+        .unwrap();
+    // The old aggregate threshold treated 11 source domains + 3 pending
+    // legs as a safe 14-item tail and folded all three settlements into the
+    // certification call. The public SBF route exhausted its CU meter.
+    for domain in 0..11 {
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut long, domain, 1)
+            .unwrap();
+    }
+    market
+        .accrue_asset_to_not_atomic(0, 20, 1_001_000, 0, true)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(1, 20, 1_001_000, 0, true)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(2, 20, 1_001_000, 0, true)
+        .unwrap();
+    assert_eq!(
+        long.header
+            .source_domains
+            .iter()
+            .filter(|source| source.is_occupied())
+            .count(),
+        11
+    );
+    assert_ne!(
+        long.header.legs[0].try_to_runtime().unwrap().k_snap,
+        market.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .k_long,
+    );
+
+    let work = AutoCrankWorkV16 {
+        now_slot: 20,
+        observations: &[],
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let first = market
+        .permissionless_auto_crank_not_atomic(&mut long, work)
+        .unwrap();
+    assert_eq!(
+        first.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountLegSettled {
+            asset_index: 0
+        })
+    );
+    assert!(!long.header.health_cert.try_to_runtime().unwrap().valid);
+    assert_eq!(
+        long.header.legs[0].try_to_runtime().unwrap().k_snap,
+        market.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .k_long,
+    );
+    assert_ne!(
+        long.header.legs[1].try_to_runtime().unwrap().k_snap,
+        market.markets[1]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .k_long,
+    );
+
+    let second = market
+        .permissionless_auto_crank_not_atomic(&mut long, work)
+        .unwrap();
+    assert_eq!(
+        second.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountLegSettled {
+            asset_index: 1
+        })
+    );
+    assert!(!long.header.health_cert.try_to_runtime().unwrap().valid);
+
+    let third = market
+        .permissionless_auto_crank_not_atomic(&mut long, work)
+        .unwrap();
+    assert_eq!(
+        third.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountLegSettled {
+            asset_index: 2
+        })
+    );
+    assert!(!long.header.health_cert.try_to_runtime().unwrap().valid);
+
+    let certified = market
+        .permissionless_auto_crank_not_atomic(&mut long, work)
+        .unwrap();
+    assert_eq!(
+        certified.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+    );
+    assert!(long.header.health_cert.try_to_runtime().unwrap().valid);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_auto_crank_expires_one_lapsed_live_source_domain_per_step() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut account_header = account_fixture(2, 22);
