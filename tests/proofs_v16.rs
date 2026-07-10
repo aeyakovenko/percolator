@@ -12517,6 +12517,65 @@ fn proof_v16_source_credit_lien_face_and_backing_use_scaled_units() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_source_lien_face_burn_releases_only_required_backing() {
+    let face_whole_raw: u8 = kani::any();
+    let effective_raw: u8 = kani::any();
+    let burn_whole_raw: u8 = kani::any();
+    let has_fractional_face: bool = kani::any();
+    let burn_full_face: bool = kani::any();
+    kani::assume(face_whole_raw <= 32);
+    kani::assume(burn_whole_raw <= face_whole_raw);
+    let face_whole = face_whole_raw as u128;
+    let fractional_face = if has_fractional_face {
+        BOUND_SCALE / 2
+    } else {
+        0
+    };
+    let face_num = face_whole * BOUND_SCALE + fractional_face;
+    let max_effective = face_whole + u128::from(has_fractional_face);
+    kani::assume((effective_raw as u128) <= max_effective);
+    let backing_num = (effective_raw as u128) * BOUND_SCALE;
+    let face_burn_num = if burn_full_face {
+        face_num
+    } else {
+        (burn_whole_raw as u128) * BOUND_SCALE
+    };
+
+    let release_num = MarketGroupV16ViewMut::<u64>::kani_source_lien_backing_release_for_face_burn(
+        face_num,
+        backing_num,
+        face_burn_num,
+    )
+    .unwrap();
+    let remaining_face = face_num - face_burn_num;
+    let remaining_face_ceiling =
+        remaining_face / BOUND_SCALE + u128::from(remaining_face % BOUND_SCALE != 0);
+    let remaining_effective = (backing_num - release_num) / BOUND_SCALE;
+    let expected_release_effective = (effective_raw as u128).saturating_sub(remaining_face_ceiling);
+
+    kani::cover!(
+        release_num == 0,
+        "remaining face can preserve the full lien"
+    );
+    kani::cover!(release_num != 0, "face burn can require backing release");
+    kani::cover!(
+        has_fractional_face && face_burn_num != face_num,
+        "fractional scaled face is covered"
+    );
+    assert_eq!(release_num % BOUND_SCALE, 0);
+    assert_eq!(release_num, expected_release_effective * BOUND_SCALE);
+    assert!(remaining_effective <= remaining_face_ceiling);
+    if release_num != 0 {
+        assert!(remaining_effective + 1 > remaining_face_ceiling);
+    }
+    if face_burn_num == face_num {
+        assert_eq!(release_num, backing_num);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_residual_reward_credit_is_capped_by_principal_and_crystallized_loss() {
     let crystallized_raw: u8 = kani::any();
     let spent_raw: u8 = kani::any();
