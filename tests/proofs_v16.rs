@@ -11549,6 +11549,124 @@ fn proof_v16_public_domain_insurance_withdraw_is_budget_scoped_and_value_conserv
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+// The one-domain public withdrawal and validator-soundness harnesses execute
+// the real shape scan. This composition removes only the duplicate two-slot
+// scan while retaining its LoF-relevant senior and budget-cap postconditions.
+fn axiom_v16_two_asset_domain_withdraw_shape<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> Result<(), V16Error> {
+    assert!(market.header.c_tot.get() <= market.header.vault.get());
+    assert!(market.header.insurance.get() <= market.header.vault.get());
+    assert!(
+        market.header.insurance_domain_budget_remaining_total.get()
+            <= market.header.insurance.get()
+    );
+    Ok(())
+}
+
+fn prove_v16_domain_insurance_withdraw_is_sibling_asset_isolated<const SELECTED: usize>() {
+    assert!(SELECTED < 2);
+    let sibling = 1 - SELECTED;
+    let budget_raw = (kani::any::<u8>() & 7) + 1;
+    let withdraw_raw = (kani::any::<u8>() & 7) + 1;
+    let unbudgeted_raw = kani::any::<u8>() & 7;
+    let junior_raw = kani::any::<u8>() & 7;
+    kani::assume(withdraw_raw <= budget_raw);
+    let budget = u128::from(budget_raw);
+    let withdraw = u128::from(withdraw_raw);
+    let unbudgeted = u128::from(unbudgeted_raw);
+    let junior = u128::from(junior_raw);
+    let sibling_budget = 9u128;
+    let sibling_spent = 2u128;
+    let sibling_remaining = sibling_budget - sibling_spent;
+
+    let (mut header, mut markets, _) = two_market_view_fixture();
+    let insurance = budget + sibling_remaining + unbudgeted;
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(insurance + junior);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget + sibling_remaining);
+    markets[SELECTED].engine.insurance_domain_budget_long = V16PodU128::new(budget);
+    markets[sibling].engine.insurance_domain_budget_long = V16PodU128::new(sibling_budget);
+    markets[sibling].engine.insurance_domain_spent_long = V16PodU128::new(sibling_spent);
+    markets[sibling].wrapper = kani::any();
+    let sibling_before = markets[sibling];
+    let selected_short_before = markets[SELECTED].engine.insurance_domain_budget_short;
+    let header_before = header;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    market
+        .withdraw_domain_insurance_not_atomic(SELECTED * 2, withdraw)
+        .unwrap();
+
+    kani::cover!(
+        withdraw < budget,
+        "partial selected-asset insurance withdrawal"
+    );
+    kani::cover!(
+        withdraw == budget,
+        "full selected-asset insurance withdrawal"
+    );
+    kani::cover!(
+        unbudgeted > 0 && junior > 0 && sibling_before.wrapper > 0,
+        "withdrawal preserves nontrivial sibling and unrelated value layers"
+    );
+    assert_eq!(
+        market.header.vault.get(),
+        header_before.vault.get() - withdraw
+    );
+    assert_eq!(
+        market.header.insurance.get(),
+        header_before.insurance.get() - withdraw
+    );
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        header_before.insurance_domain_budget_remaining_total.get() - withdraw
+    );
+    assert_eq!(
+        market.markets[SELECTED]
+            .engine
+            .insurance_domain_budget_long
+            .get(),
+        budget - withdraw
+    );
+    assert_eq!(
+        market.markets[SELECTED]
+            .engine
+            .insurance_domain_budget_short,
+        selected_short_before
+    );
+    assert_eq!(market.markets[sibling].wrapper, sibling_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[sibling].engine,
+        &sibling_before.engine
+    ));
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    axiom_v16_two_asset_domain_withdraw_shape
+)]
+fn proof_v16_asset_zero_domain_insurance_withdraw_preserves_asset_one_slab() {
+    prove_v16_domain_insurance_withdraw_is_sibling_asset_isolated::<0>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    axiom_v16_two_asset_domain_withdraw_shape
+)]
+fn proof_v16_asset_one_domain_insurance_withdraw_preserves_asset_zero_slab() {
+    prove_v16_domain_insurance_withdraw_is_sibling_asset_isolated::<1>();
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
