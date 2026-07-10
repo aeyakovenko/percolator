@@ -4338,3 +4338,209 @@ fn closure_asset_zero_price_funding_accrual_is_sibling_slab_isolated() {
 fn closure_asset_one_price_funding_accrual_is_sibling_slab_isolated() {
     prove_price_funding_accrual_is_sibling_slab_isolated::<1>();
 }
+
+// The real-helper theorem `proof_v16_source_credit_rate_never_exceeds_available_backing_ratio`
+// proves this exact zero-backing branch over symbolic claim sizes. Retain the
+// production shape checks here and remove only its U256 division expansion
+// from the aggregate transition below.
+#[cfg(all(kani, feature = "closure"))]
+fn axiom_unfunded_source_credit_rate(state: SourceCreditStateV16) -> V16Result<u128> {
+    V16Core::validate_source_credit_state_shape_static(state)?;
+    if state.positive_claim_bound_num == 0 {
+        return Ok(CREDIT_RATE_SCALE);
+    }
+    assert_eq!(state.fresh_reserved_backing_num, 0);
+    assert_eq!(state.valid_liened_backing_num, 0);
+    assert_eq!(state.insurance_credit_reserved_num, 0);
+    assert_eq!(state.valid_liened_insurance_num, 0);
+    assert_eq!(state.impaired_liened_insurance_num, 0);
+    Ok(0)
+}
+
+// Canonical success body behind add_account_source_positive_pnl_not_atomic:
+// source-attributed PnL is not quote value. For either domain side, prove that
+// a fresh insert or an incremented claim moves account/domain/group claim
+// aggregates in exact lockstep, lowers an unfunded source rate to zero, and
+// leaves every senior stock plus the opposite source domain unchanged.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_source_positive_pnl_grant_is_attributed_aggregate_exact_and_value_neutral<
+    const EXISTING: bool,
+    const DOMAIN_CASE: u8,
+>() -> (bool, u8, u8, u8, u8) {
+    assert!(DOMAIN_CASE <= 2);
+    let prior_raw: u8 = if EXISTING {
+        (kani::any::<u8>() & 7) + 1
+    } else {
+        0
+    };
+    let grant_raw: u8 = (kani::any::<u8>() & 7) + 1;
+    let long_domain: bool = match DOMAIN_CASE {
+        0 => true,
+        1 => false,
+        _ => kani::any(),
+    };
+    let c_tot_raw: u8 = kani::any::<u8>() & 7;
+    let insurance_raw: u8 = kani::any::<u8>() & 7;
+    let surplus_raw: u8 = kani::any::<u8>() & 7;
+    let prior = prior_raw as u128;
+    let grant = grant_raw as u128;
+    let total = prior + grant;
+    let prior_num = prior * BOUND_SCALE;
+    let grant_num = grant * BOUND_SCALE;
+    let total_num = total * BOUND_SCALE;
+    let domain = if long_domain { 0 } else { 1 };
+
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = [1u8; 32];
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(1);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.next_market_id = V16PodU64::new(2);
+    header.vault = V16PodU128::new(c_tot_raw as u128 + insurance_raw as u128 + surplus_raw as u128);
+    header.c_tot = V16PodU128::new(c_tot_raw as u128);
+    header.insurance = V16PodU128::new(insurance_raw as u128);
+    header.pnl_pos_tot = V16PodU128::new(prior);
+    header.pnl_pos_bound_tot = V16PodU128::new(prior);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(prior_num);
+    header.source_claim_bound_total_num = V16PodU128::new(prior_num);
+
+    let mut slot = EngineAssetSlotV16Account::empty_for_market(1);
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    slot.asset = AssetStateV16Account::from_runtime(&asset);
+    if prior != 0 {
+        let prior_source = SourceCreditStateV16 {
+            positive_claim_bound_num: prior_num,
+            exact_positive_claim_num: prior_num,
+            credit_rate_num: 0,
+            ..SourceCreditStateV16::EMPTY
+        };
+        if long_domain {
+            slot.source_credit_long = SourceCreditStateV16Account::from_runtime(&prior_source);
+        } else {
+            slot.source_credit_short = SourceCreditStateV16Account::from_runtime(&prior_source);
+        }
+    }
+    let mut markets = [Market::new(0u64, slot)];
+    let opposite_before = if long_domain {
+        markets[0].engine.source_credit_short
+    } else {
+        markets[0].engine.source_credit_long
+    };
+
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.pnl = V16PodI128::new(prior as i128);
+    account_header.capital = V16PodU128::new(c_tot_raw as u128);
+    account_header.health_cert.valid = 1;
+    if prior != 0 {
+        account_header.source_domains[0].domain = V16PodU32::new(domain as u32);
+        account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+        account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(prior_num);
+    }
+
+    let header_before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .set_account_pnl_with_source(&mut account, total as i128, domain)
+        .unwrap();
+    let source = market.source_credit_for_domain_shape(domain).unwrap();
+    let account_source = account.header.source_domains[0];
+
+    assert_eq!(account.header.pnl.get(), total as i128);
+    assert_eq!(account.header.health_cert.valid, 0);
+    assert_eq!(account_source.domain.get(), domain as u32);
+    assert_eq!(account_source.source_claim_market_id.get(), 1);
+    assert_eq!(account_source.source_claim_bound_num.get(), total_num);
+    assert_eq!(source.positive_claim_bound_num, total_num);
+    assert_eq!(source.exact_positive_claim_num, total_num);
+    assert_eq!(source.credit_rate_num, 0);
+    assert_eq!(source.credit_epoch, 1);
+    assert_eq!(market.header.pnl_pos_tot.get(), total);
+    assert_eq!(market.header.pnl_pos_bound_tot.get(), total);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), total_num);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), total_num);
+    assert_eq!(
+        market.header.risk_epoch.get(),
+        header_before.risk_epoch.get() + 1
+    );
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(account.header.capital.get(), c_tot_raw as u128);
+    assert_eq!(
+        if long_domain {
+            market.markets[0].engine.source_credit_short
+        } else {
+            market.markets[0].engine.source_credit_long
+        },
+        opposite_before
+    );
+    assert_eq!(source.positive_claim_bound_num - prior_num, grant_num);
+    (
+        long_domain,
+        grant_raw,
+        c_tot_raw,
+        insurance_raw,
+        surplus_raw,
+    )
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    axiom_unfunded_source_credit_rate
+)]
+fn closure_fresh_source_positive_pnl_grant_is_attributed_aggregate_exact_and_value_neutral() {
+    let (long_domain, grant, c_tot, insurance, surplus) =
+        prove_source_positive_pnl_grant_is_attributed_aggregate_exact_and_value_neutral::<false, 2>(
+        );
+    kani::cover!(long_domain && grant > 1, "nontrivial fresh long claim");
+    kani::cover!(!long_domain && grant > 1, "nontrivial fresh short claim");
+    kani::cover!(
+        c_tot > 0 && insurance > 0 && surplus > 0,
+        "fresh grant preserves every vault layer"
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    axiom_unfunded_source_credit_rate
+)]
+fn closure_existing_long_source_positive_pnl_grant_is_aggregate_exact_and_value_neutral() {
+    let (_, grant, c_tot, insurance, surplus) =
+        prove_source_positive_pnl_grant_is_attributed_aggregate_exact_and_value_neutral::<true, 0>(
+        );
+    kani::cover!(grant > 1, "nontrivial existing long claim increment");
+    kani::cover!(
+        c_tot > 0 && insurance > 0 && surplus > 0,
+        "existing long grant preserves every vault layer"
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    axiom_unfunded_source_credit_rate
+)]
+fn closure_existing_short_source_positive_pnl_grant_is_aggregate_exact_and_value_neutral() {
+    let (_, grant, c_tot, insurance, surplus) =
+        prove_source_positive_pnl_grant_is_attributed_aggregate_exact_and_value_neutral::<true, 1>(
+        );
+    kani::cover!(grant > 1, "nontrivial existing short claim increment");
+    kani::cover!(
+        c_tot > 0 && insurance > 0 && surplus > 0,
+        "existing short grant preserves every vault layer"
+    );
+}

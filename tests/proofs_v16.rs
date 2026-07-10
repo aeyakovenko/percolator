@@ -7267,9 +7267,16 @@ fn proof_v16_source_credit_rate_never_exceeds_available_backing_ratio() {
         backing_num >= claim_num,
         "source credit rate proof covers full-credit branch"
     );
+    kani::cover!(
+        backing_num == 0 && claim_atoms > 1,
+        "source credit rate proof covers an unfunded nontrivial claim"
+    );
     assert!(rate <= CREDIT_RATE_SCALE);
     assert!(support <= backing_atoms);
     assert!(support <= claim_atoms);
+    if backing_num == 0 {
+        assert_eq!(rate, 0);
+    }
     if backing_num >= claim_num {
         assert_eq!(rate, CREDIT_RATE_SCALE);
         assert_eq!(support, claim_atoms);
@@ -13818,13 +13825,13 @@ fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
 }
 
 // First-class engine API for granting source-attributed positive PnL (the
-// wrapper previously shadow-implemented this op host-side). The value-neutral
-// + aggregate-lockstep property is covered concretely by the unit test
-// v16_grant_source_positive_pnl_attributes_claims_and_aggregates_in_lockstep:
-// the symbolic Kani witness exceeds the 900s budget even fully concrete (the
-// grant runs validate_with_market + a claim-bound-denominated rate recompute +
-// validate_shape + validate_with_market — three heavy sweeps). The mode gate
-// IS proven below (it errors before the heavy path).
+// wrapper previously shadow-implemented this op host-side). The canonical
+// setter's symbolic value-neutrality, attribution, aggregate lockstep, and
+// opposite-domain frame are proven by the three source-positive-PnL closure
+// harnesses in src/v16_proofs.rs. The full public validation envelope remains
+// intractable because it adds three heavy account/market sweeps; the runtime
+// test covers that composition. The mode gate is proven below before the heavy
+// path.
 // Mode gate: granting source PnL outside Live is rejected before mutation.
 #[kani::proof]
 #[kani::unwind(40)]
