@@ -900,6 +900,63 @@ fn proof_v16_public_deregister_cannot_erase_scalar_debt_escrow_or_locks() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
+fn proof_v16_public_deregister_cannot_erase_active_close_or_domain_barrier() {
+    let gross_raw: u8 = kani::any();
+    let short_domain: bool = kani::any();
+    kani::assume((1..=31).contains(&gross_raw));
+    let gross = gross_raw as u128;
+    let domain_side = if short_domain {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.materialized_portfolio_count = V16PodU64::new(1);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market
+            .kani_begin_close_progress_ledger(&mut account, 0, domain_side, gross)
+            .unwrap();
+        assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    }
+
+    let header_before = header;
+    let market_before = markets[0];
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = market.deregister_empty_materialized_portfolio_not_atomic(&account);
+
+    kani::cover!(
+        !short_domain && gross > 1,
+        "active long-domain close blocks account dematerialization"
+    );
+    kani::cover!(
+        short_domain && gross > 1,
+        "active short-domain close blocks account dematerialization"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(
+        account.header.close_progress.residual_remaining.get(),
+        gross
+    );
+    assert_eq!(account.header.close_progress, account_before.close_progress);
+    assert!(kani_eq_market_group_v16_header_account(
+        market.header,
+        &header_before
+    ));
+    assert_eq!(market.markets[0].wrapper, market_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &market_before.engine
+    ));
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
 fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     let target: u16 = kani::any();
     let c_tot: u128 = kani::any();

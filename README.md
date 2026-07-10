@@ -59,7 +59,7 @@ Source-checkable counts in this checkout:
 
 | Class | Count |
 | --- | ---: |
-| Plain Kani proofs in `tests/proofs_v16.rs` | 267 |
+| Plain Kani proofs in `tests/proofs_v16.rs` | 268 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
 | Plain Kani proofs in `src/v16_proofs.rs` | 57 |
 | Function-contract proofs in `src/v16_proofs.rs` | 51 |
