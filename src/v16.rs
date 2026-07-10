@@ -16520,12 +16520,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidLeg);
         }
-        let leg = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
+        let mut leg = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
         if !self.leg_is_dead_for_forfeit(asset_index, leg.side)? {
             return Err(V16Error::LockActive);
+        }
+        if Self::leg_has_exhausted_effective_oi(self.asset_state(asset_index)?, leg)
+            && !account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+            && !self.has_pending_domain_loss_barrier(asset_index, leg.side)?
+        {
+            // A matched Recovery close can consume the final effective OI while
+            // leaving an ADL-reduced account's larger stored basis behind. Move
+            // that terminal residue into the reset epoch before forfeit clears it.
+            self.begin_full_drain_reset_inner(asset_index, leg.side)?;
+            leg = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
         }
 
         let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
