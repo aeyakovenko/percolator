@@ -3386,3 +3386,259 @@ fn contract_barrier_release_preserves_opposite_domain_whole_slot() {
         &expected_market.engine
     ));
 }
+
+#[cfg(all(kani, feature = "closure"))]
+fn axiom_bankruptcy_residual_single_step_capacity<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    bankrupt_side: SideV16,
+    residual_remaining: u128,
+) -> V16Result<u128> {
+    if residual_remaining == 0 {
+        return Ok(0);
+    }
+    let asset = market.asset_state(asset_index)?;
+    let (b_now, weight_sum, remainder) = match opposite_side(bankrupt_side) {
+        SideV16::Long => (
+            asset.b_long_num,
+            asset.loss_weight_sum_long,
+            asset.social_loss_remainder_long_num,
+        ),
+        SideV16::Short => (
+            asset.b_short_num,
+            asset.loss_weight_sum_short,
+            asset.social_loss_remainder_short_num,
+        ),
+    };
+    let public_cap = market.header.config.public_b_chunk_atoms.get();
+    let capacity = residual_remaining.min(public_cap);
+
+    // This is the exact fast branch of the production capacity helper. Its
+    // general arithmetic is independently proven by the plain capacity proof;
+    // these assertions prevent this specialized composition axiom being used
+    // outside the unit-weight/headroom state constructed below.
+    assert!(public_cap > 0);
+    assert_eq!(weight_sum, SOCIAL_LOSS_DEN);
+    assert!(remainder < SOCIAL_LOSS_DEN);
+    assert!(capacity > 0);
+    assert!(b_now.checked_add(capacity).is_some());
+    Ok(capacity)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn axiom_social_loss_book_split_unit_weight(
+    engine_chunk: u128,
+    carried_rem: u128,
+    weight_sum: u128,
+) -> V16Result<(u128, u128)> {
+    // Exact specialization of (chunk * DEN + rem) / DEN when rem < DEN.
+    assert_eq!(weight_sum, SOCIAL_LOSS_DEN);
+    assert!(carried_rem < SOCIAL_LOSS_DEN);
+    assert!(engine_chunk <= u8::MAX as u128);
+    Ok((engine_chunk, carried_rem))
+}
+
+// Compose the exact capacity/split leaves through the real residual-booking
+// route. The selected index is const-specialized so each proof has one storage
+// write path; the bankrupt side, partial/full booking, and carried remainder
+// remain symbolic. A rich sibling slot and every non-B field of the selected
+// slot are compared wholesale, proving a corrupt market cannot route this loss
+// into another asset or the bankrupt side's domain.
+#[cfg(all(kani, feature = "closure"))]
+fn kani_bankruptcy_residual_opposing_domain_and_asset_isolation<const SELECTED: usize>() {
+    let residual_raw: u8 = kani::any();
+    let chunk_raw: u8 = kani::any();
+    let remainder_raw: u8 = kani::any();
+    let sibling_tag: u8 = kani::any();
+    let bankrupt_long: bool = kani::any();
+    kani::assume((1..=8).contains(&residual_raw));
+    kani::assume((1..=8).contains(&chunk_raw));
+    kani::assume(remainder_raw <= 8);
+    kani::assume((1..=8).contains(&sibling_tag));
+    let residual = residual_raw as u128;
+    let chunk = chunk_raw as u128;
+    let expected_booked = residual.min(chunk);
+    let bankrupt_side = if bankrupt_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let sibling = 1 - SELECTED;
+
+    let mut cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    cfg.public_b_chunk_atoms = chunk;
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.last_asset_activation_slot = V16PodU64::new(1);
+    header.next_market_id = V16PodU64::new(3);
+    header.current_slot = V16PodU64::new(1);
+    header.slot_last = V16PodU64::new(1);
+    header.vault = V16PodU128::new(101 + sibling_tag as u128);
+    header.c_tot = V16PodU128::new(17);
+    header.insurance = V16PodU128::new(19);
+    header.pnl_pos_tot = V16PodU128::new(23);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(29);
+    header.source_claim_bound_total_num = V16PodU128::new(31);
+    header.resolved_payout_blocker_count = V16PodU64::new(7);
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    for (index, market) in markets.iter_mut().enumerate() {
+        let mut asset = AssetStateV16::default();
+        asset.market_id = index as u64 + 1;
+        asset.lifecycle = AssetLifecycleV16::Active;
+        asset.raw_oracle_target_price = 100 + index as u64;
+        asset.effective_price = 100 + index as u64;
+        asset.fund_px_last = 100 + index as u64;
+        asset.slot_last = 1;
+        market.engine.asset = AssetStateV16Account::from_runtime(&asset);
+    }
+
+    let mut selected_asset = markets[SELECTED].engine.asset.try_to_runtime().unwrap();
+    selected_asset.oi_eff_long_q = POS_SCALE;
+    selected_asset.oi_eff_short_q = POS_SCALE;
+    selected_asset.stored_pos_count_long = 1;
+    selected_asset.stored_pos_count_short = 1;
+    selected_asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    selected_asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    selected_asset.b_long_num = 11;
+    selected_asset.b_short_num = 13;
+    selected_asset.social_loss_remainder_long_num = remainder_raw as u128;
+    selected_asset.social_loss_remainder_short_num = remainder_raw as u128 + 1;
+    markets[SELECTED].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+    markets[SELECTED].engine.insurance_domain_budget_long = V16PodU128::new(37);
+    markets[SELECTED].engine.insurance_domain_budget_short = V16PodU128::new(41);
+    markets[SELECTED].engine.insurance_domain_spent_long = V16PodU128::new(3);
+    markets[SELECTED].engine.insurance_domain_spent_short = V16PodU128::new(5);
+    markets[SELECTED]
+        .engine
+        .source_credit_long
+        .positive_claim_bound_num = V16PodU128::new(43);
+    markets[SELECTED]
+        .engine
+        .backing_short
+        .fresh_unliened_backing_num = V16PodU128::new(47);
+    markets[SELECTED].wrapper = 53;
+
+    let tag = sibling_tag as u128;
+    let mut sibling_asset = markets[sibling].engine.asset.try_to_runtime().unwrap();
+    sibling_asset.k_long = sibling_tag as i128;
+    sibling_asset.k_short = -(sibling_tag as i128);
+    sibling_asset.f_long_num = sibling_tag as i128 + 1;
+    sibling_asset.f_short_num = -(sibling_tag as i128) - 1;
+    sibling_asset.b_long_num = tag + 2;
+    sibling_asset.b_short_num = tag + 3;
+    sibling_asset.oi_eff_long_q = POS_SCALE;
+    sibling_asset.oi_eff_short_q = POS_SCALE;
+    sibling_asset.stored_pos_count_long = 1;
+    sibling_asset.stored_pos_count_short = 1;
+    sibling_asset.loss_weight_sum_long = tag + 4;
+    sibling_asset.loss_weight_sum_short = tag + 5;
+    sibling_asset.social_loss_remainder_long_num = tag + 6;
+    sibling_asset.social_loss_remainder_short_num = tag + 7;
+    markets[sibling].engine.asset = AssetStateV16Account::from_runtime(&sibling_asset);
+    markets[sibling].engine.insurance_domain_budget_long = V16PodU128::new(tag + 59);
+    markets[sibling].engine.insurance_domain_budget_short = V16PodU128::new(tag + 61);
+    markets[sibling].engine.insurance_domain_spent_long = V16PodU128::new(tag);
+    markets[sibling].engine.insurance_domain_spent_short = V16PodU128::new(tag + 1);
+    markets[sibling].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+    markets[sibling]
+        .engine
+        .source_credit_long
+        .positive_claim_bound_num = V16PodU128::new(tag + 67);
+    markets[sibling]
+        .engine
+        .source_credit_short
+        .fresh_reserved_backing_num = V16PodU128::new(tag + 71);
+    markets[sibling]
+        .engine
+        .backing_long
+        .fresh_unliened_backing_num = V16PodU128::new(tag + 73);
+    markets[sibling]
+        .engine
+        .insurance_reservation_short
+        .insurance_credit_reserved_num = V16PodU128::new(tag + 79);
+    markets[sibling].wrapper = 83;
+
+    let header_before = header;
+    let selected_before = markets[SELECTED];
+    let sibling_before = markets[sibling];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let outcome = market
+        .book_bankruptcy_residual_chunk_internal(SELECTED, bankrupt_side, residual)
+        .unwrap();
+
+    kani::cover!(
+        bankrupt_long && residual > chunk && remainder_raw > 0,
+        "long bankruptcy partially books to the short domain"
+    );
+    kani::cover!(
+        !bankrupt_long && residual <= chunk && remainder_raw > 0,
+        "short bankruptcy fully books to the long domain"
+    );
+    assert_eq!(outcome.booked_loss, expected_booked);
+    assert_eq!(outcome.explicit_loss, 0);
+    assert_eq!(outcome.delta_b, expected_booked);
+    assert_eq!(outcome.remaining_after, residual - expected_booked);
+
+    let mut expected_header = header_before;
+    expected_header.bankruptcy_hlock_active = 1;
+    assert!(kani_eq_market_group_v16_header_account(
+        market.header,
+        &expected_header
+    ));
+
+    let mut expected_selected = selected_before;
+    let mut expected_asset = selected_asset;
+    if bankrupt_long {
+        expected_asset.b_short_num += expected_booked;
+    } else {
+        expected_asset.b_long_num += expected_booked;
+    }
+    expected_selected.engine.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert_eq!(market.markets[SELECTED].wrapper, expected_selected.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[SELECTED].engine,
+        &expected_selected.engine
+    ));
+    assert_eq!(market.markets[sibling].wrapper, sibling_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[sibling].engine,
+        &sibling_before.engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::bankruptcy_residual_single_step_capacity,
+    axiom_bankruptcy_residual_single_step_capacity
+)]
+#[kani::stub(
+    crate::v16::social_loss_book_split,
+    axiom_social_loss_book_split_unit_weight
+)]
+fn closure_asset_zero_bankruptcy_residual_is_opposing_domain_and_asset_isolated() {
+    kani_bankruptcy_residual_opposing_domain_and_asset_isolation::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::bankruptcy_residual_single_step_capacity,
+    axiom_bankruptcy_residual_single_step_capacity
+)]
+#[kani::stub(
+    crate::v16::social_loss_book_split,
+    axiom_social_loss_book_split_unit_weight
+)]
+fn closure_asset_one_bankruptcy_residual_is_opposing_domain_and_asset_isolated() {
+    kani_bankruptcy_residual_opposing_domain_and_asset_isolation::<1>();
+}

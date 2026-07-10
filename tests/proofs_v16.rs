@@ -9409,6 +9409,7 @@ fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom()
     let residual_raw: u8 = kani::any();
     let chunk_raw: u8 = kani::any();
     let rem_raw: u8 = kani::any();
+    let bankrupt_long: bool = kani::any();
     kani::assume(residual_raw > 0);
     kani::assume(chunk_raw > 0);
     let residual = residual_raw as u128;
@@ -9424,21 +9425,35 @@ fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom()
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
-    asset.social_loss_remainder_short_num = rem_raw as u128;
+    asset.social_loss_remainder_long_num = rem_raw as u128;
+    asset.social_loss_remainder_short_num = rem_raw as u128 + 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let bankrupt_side = if bankrupt_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
     let capacity = market
-        .kani_bankruptcy_residual_single_step_capacity(0, SideV16::Long, residual)
+        .kani_bankruptcy_residual_single_step_capacity(0, bankrupt_side, residual)
         .unwrap();
 
     kani::cover!(
-        residual > chunk,
-        "bankruptcy residual capacity proof covers public chunk cap"
+        bankrupt_long && residual > chunk,
+        "long bankruptcy capacity covers the public chunk cap"
     );
     kani::cover!(
-        residual <= chunk,
-        "bankruptcy residual capacity proof covers full residual fit"
+        bankrupt_long && residual <= chunk,
+        "long bankruptcy capacity covers full residual fit"
+    );
+    kani::cover!(
+        !bankrupt_long && residual > chunk,
+        "short bankruptcy capacity covers the public chunk cap"
+    );
+    kani::cover!(
+        !bankrupt_long && residual <= chunk,
+        "short bankruptcy capacity covers full residual fit"
     );
     assert_eq!(capacity, expected);
     assert!(capacity > 0);
