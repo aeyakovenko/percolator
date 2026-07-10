@@ -3642,3 +3642,87 @@ fn closure_asset_zero_bankruptcy_residual_is_opposing_domain_and_asset_isolated(
 fn closure_asset_one_bankruptcy_residual_is_opposing_domain_and_asset_isolated() {
     kani_bankruptcy_residual_opposing_domain_and_asset_isolation::<1>();
 }
+
+// Liquidation first clears the account's side, then this kernel removes the
+// same effective OI from the opposite side by reducing its ADL multiplier. For
+// either side and every bounded partial/full close, prove that the kernel
+// restores exact long/short OI balance and changes no unrelated asset field.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn closure_liquidation_matching_adl_restores_balanced_oi_with_exact_frame() {
+    let pre_oi_raw: u8 = kani::any();
+    let close_raw: u8 = kani::any();
+    let closed_long: bool = kani::any();
+    kani::assume((1..=16).contains(&pre_oi_raw));
+    kani::assume((1..=pre_oi_raw).contains(&close_raw));
+    let pre_oi = pre_oi_raw as u128;
+    let close_q = close_raw as u128;
+    let remaining = pre_oi - close_q;
+    let closed_side = if closed_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+
+    let mut asset: AssetStateV16 = kani::any();
+    asset.oi_eff_long_q = if closed_long { remaining } else { pre_oi };
+    asset.oi_eff_short_q = if closed_long { pre_oi } else { remaining };
+    asset.a_long = ADL_ONE;
+    asset.a_short = ADL_ONE;
+    asset.mode_long = SideModeV16::Normal;
+    asset.mode_short = SideModeV16::Normal;
+    let before = asset;
+
+    let (after, opposite_drained) =
+        V16Core::kernel_reduce_matching_open_interest_for_unilateral_close(
+            asset,
+            closed_side,
+            close_q,
+        )
+        .unwrap();
+    let expected_a = if remaining == 0 {
+        ADL_ONE
+    } else {
+        ADL_ONE * remaining / pre_oi
+    };
+    let expected_mode = if remaining != 0 && expected_a < MIN_A_SIDE {
+        SideModeV16::DrainOnly
+    } else {
+        SideModeV16::Normal
+    };
+    let mut expected = before;
+    if closed_long {
+        expected.oi_eff_short_q = remaining;
+        expected.a_short = expected_a;
+        expected.mode_short = expected_mode;
+    } else {
+        expected.oi_eff_long_q = remaining;
+        expected.a_long = expected_a;
+        expected.mode_long = expected_mode;
+    }
+
+    kani::cover!(
+        closed_long && close_q < pre_oi && close_q > 1,
+        "long liquidation partially ADL-reduces matching short OI"
+    );
+    kani::cover!(
+        !closed_long && close_q < pre_oi && close_q > 1,
+        "short liquidation partially ADL-reduces matching long OI"
+    );
+    kani::cover!(
+        close_q == pre_oi && pre_oi > 1,
+        "full liquidation drains and resets the matching side"
+    );
+    kani::cover!(
+        remaining > 0 && expected_a < MIN_A_SIDE,
+        "thin matching OI enters DrainOnly after ADL reduction"
+    );
+    assert_eq!(after, expected);
+    assert_eq!(after.oi_eff_long_q, remaining);
+    assert_eq!(after.oi_eff_short_q, remaining);
+    assert_eq!(opposite_drained, remaining == 0);
+    assert!(remaining == 0 || expected_a > 0);
+    assert!(expected_a <= ADL_ONE);
+}
