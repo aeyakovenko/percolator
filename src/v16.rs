@@ -14759,8 +14759,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_bool(account.header.resolved_payout_receipt.present)? {
             return Ok(());
         }
-        self.initialize_resolved_payout_ledger_if_needed()?;
         let terminal_positive_claim_face = account.header.pnl.get().max(0) as u128;
+        self.append_resolved_payout_receipt_face_not_atomic(account, terminal_positive_claim_face)
+    }
+
+    fn append_resolved_payout_receipt_face_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        terminal_positive_claim_face: u128,
+    ) -> V16Result<()> {
+        if terminal_positive_claim_face == 0 {
+            return Ok(());
+        }
+        self.initialize_resolved_payout_ledger_if_needed()?;
         let prior_bound_contribution_num =
             V16Core::bound_num_from_amount(terminal_positive_claim_face)?;
         let mut ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
@@ -14784,15 +14795,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             )?)
             .ok_or(V16Error::ArithmeticOverflow)?;
         self.header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
+        let mut receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
+        if !receipt.present {
+            if !receipt.is_empty() {
+                return Err(V16Error::InvalidLeg);
+            }
+            receipt.present = true;
+        }
+        receipt.prior_bound_contribution_num = receipt
+            .prior_bound_contribution_num
+            .checked_add(prior_bound_contribution_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        receipt.terminal_positive_claim_face = receipt
+            .terminal_positive_claim_face
+            .checked_add(terminal_positive_claim_face)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        receipt.finalized = receipt.paid_effective == receipt.terminal_positive_claim_face;
+        validate_resolved_payout_receipt_value(receipt)?;
         account.header.resolved_payout_receipt =
-            ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
-                present: true,
-                prior_bound_contribution_num,
-                live_released_face_at_receipt: 0,
-                terminal_positive_claim_face,
-                paid_effective: 0,
-                finalized: false,
-            });
+            ResolvedPayoutReceiptV16Account::from_runtime(&receipt);
         self.recompute_resolved_payout_rate()
     }
 
@@ -15345,43 +15366,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    /// Terminal realization for a source-backed winner: realize the account's
-    /// outstanding source-credit claims against their domain backing at the
-    /// current credit rate (lien consumption -> capital credit) BEFORE the claim
-    /// face enters the junior receipt pool. A settlement-quality claim is
-    /// realizable at rate in Live (convert_released_pnl_to_capital); resolution
-    /// must not strip that entitlement -- without this step the wind-down
-    /// RELEASES the backing to the provider while the winner is haircut from a
-    /// residual pool that (correctly) excludes the very backing underwriting the
-    /// claim. Residual-neutral: capital/c_tot grow by exactly the consumed
-    /// backing atoms, so the payout snapshot does not depend on realization
-    /// order.
-    fn realize_source_backed_claims_for_resolved_close_not_atomic(
+    /// Perform at most one preparatory source-domain mutation before terminal
+    /// realization. Source claims cannot be removed piecemeal while their face
+    /// remains positive PnL: the persisted representation requires any nonempty
+    /// source roster to cover the account's full positive PnL. Lien release and
+    /// backing expiry preserve that invariant, so expose those as bounded
+    /// `ProgressOnly` steps and leave the existing aggregate realization intact.
+    fn prepare_one_source_domain_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<u128> {
-        if decode_bool(account.header.resolved_payout_receipt.present)? {
-            // The face is already frozen into the receipt pool.
-            return Ok(0);
-        }
+    ) -> V16Result<Option<usize>> {
         if !Self::account_has_source_claims(&account.as_view())? {
-            return Ok(0);
+            return Ok(None);
         }
-        let pos = account.header.pnl.get().max(0) as u128;
-        if pos == 0 {
-            return Ok(0);
-        }
-        // Release the account's persisted liens first (the terminal burn would do
-        // this anyway): the conversion consumes only UNLIENED claims, so a still-
-        // liened claim would make the realizable estimate exceed what consumption
-        // can deliver and dead-lock the close with LockActive. In the same sweep,
-        // expire any domain whose backing bucket has lapsed (status Fresh but
-        // expiry_slot <= current_slot): realization is best-effort, and querying
-        // realizable support against a past-expiry bucket would otherwise return
-        // Stale and strand the winner's close. Expiry forfeits the lapsed
-        // principal to the junior pool (the documented expiry semantics), drops
-        // the domain's credit rate to zero, and lets this step fall through to
-        // the junior receipt path instead of reverting.
+        account.compact_source_domains();
         let current_slot = self.header.current_slot.get();
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -15389,44 +15387,170 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if source.has_default_sparse_tag() && !source.is_occupied() {
                 break;
             }
-            if source.is_occupied() {
-                let d = source.domain.get() as usize;
-                if source.source_claim_liened_num.get() != 0 {
-                    self.release_account_source_credit_lien_for_domain_not_atomic(account, d)?;
-                }
-                let bucket = self.backing_bucket_for_domain(d)?;
-                if bucket.status == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot <= current_slot
-                {
-                    self.expire_source_backing_bucket_not_atomic(d, current_slot)?;
-                }
+            if !source.is_occupied() {
+                slot += 1;
+                continue;
+            }
+
+            let domain = source.domain.get() as usize;
+            self.domain_asset_side(domain)?;
+            if source.source_claim_liened_num.get() != 0 {
+                self.release_account_source_credit_lien_for_domain_not_atomic(account, domain)?;
+                account.header.health_cert.valid = 0;
+                self.validate_shape()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(Some(domain));
+            }
+
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= current_slot
+            {
+                self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
+                account.header.health_cert.valid = 0;
+                self.validate_shape()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(Some(domain));
             }
             slot += 1;
         }
-        if self.account_source_realizable_support(&account.as_view(), pos)? == 0 {
-            return Ok(0);
+        Ok(None)
+    }
+
+    /// Settle exactly one prepared source domain. Realizable source support
+    /// becomes capital; any remaining face moves into the exact resolved payout
+    /// receipt. PnL falls by the full processed face, so the remaining source
+    /// roster still covers all remaining positive PnL at every committed step.
+    fn process_one_source_claim_for_resolved_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<Option<usize>> {
+        if !Self::account_has_source_claims(&account.as_view())? {
+            return Ok(None);
         }
-        // Terminal: PnL reservations no longer gate realization.
-        account.header.reserved_pnl = V16PodU128::new(0);
-        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
-        // If the payout snapshot was captured before this account realized (another
-        // winner closed first), the realized face is still counted in the ledger's
-        // unreceipted bound. Refine it out, or the stale bound dilutes the payout
-        // rate forever and blocks every remaining receipt from reaching the
-        // terminal rate (never finalized, never clearable).
-        if decode_bool(self.header.payout_snapshot_captured)? {
-            let pos_after = account.header.pnl.get().max(0) as u128;
-            let face_burned = pos
-                .checked_sub(pos_after)
+
+        account.compact_source_domains();
+        let source = account.header.source_domains[0];
+        if !source.is_occupied() || source.source_claim_bound_num.get() == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        let domain = source.domain.get() as usize;
+        self.domain_asset_side(domain)?;
+        if source.source_claim_liened_num.get() != 0 {
+            return Err(V16Error::LockActive);
+        }
+
+        let pos_before = account.header.pnl.get().max(0) as u128;
+        let pos_bound_num = V16Core::bound_num_from_amount(pos_before)?;
+        let realizable_claim_num =
+            Self::source_claim_unliened_num(&account.as_view(), domain)?.min(pos_bound_num);
+        let source_credit = self.source_credit_for_domain(domain)?;
+        self.validate_source_domain_ledger_current(domain)?;
+        let credited_num = U256::from_u128(realizable_claim_num)
+            .checked_mul(U256::from_u128(source_credit.credit_rate_num))
+            .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let effective = (credited_num / BOUND_SCALE)
+            .min(self.source_credit_available_backing_num(domain)? / BOUND_SCALE)
+            .min(pos_before);
+
+        if effective != 0 {
+            account.header.reserved_pnl = V16PodU128::new(0);
+            let vault_before = self.header.vault.get();
+            let consumption =
+                self.consume_source_domain_credit_for_effective_not_atomic(domain, effective)?;
+            let face_burn = consumption.face_burn.min(pos_before);
+            let face_i128 = i128::try_from(face_burn).map_err(|_| V16Error::ArithmeticOverflow)?;
+            let new_pnl = account
+                .header
+                .pnl
+                .get()
+                .checked_sub(face_i128)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.set_account_pnl(account, new_pnl)?;
+            account.header.capital = V16PodU128::new(
+                account
+                    .header
+                    .capital
+                    .get()
+                    .checked_add(effective)
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            );
+            self.header.c_tot = V16PodU128::new(
+                self.header
+                    .c_tot
+                    .get()
+                    .checked_add(effective)
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            );
+            self.header.pnl_matured_pos_tot = V16PodU128::new(
+                self.header
+                    .pnl_matured_pos_tot
+                    .get()
+                    .saturating_sub(face_burn),
+            );
+            let protocol_surplus_consumed = effective
+                .checked_sub(consumption.counterparty_credit_consumed)
+                .and_then(|v| v.checked_sub(consumption.insurance_credit_consumed))
                 .ok_or(V16Error::CounterUnderflow)?;
-            let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-            let decrease_num = V16Core::bound_num_from_amount(face_burned)?
-                .min(ledger.terminal_claim_bound_unreceipted_num);
-            if decrease_num != 0 {
-                self.refine_resolved_unreceipted_bound_not_atomic(decrease_num)?;
+            TokenValueFlowProofV16::support_to_account_capital(
+                effective,
+                consumption.counterparty_credit_consumed,
+                consumption.insurance_credit_consumed,
+                protocol_surplus_consumed,
+                vault_before,
+                self.header.vault.get(),
+            )?
+            .validate()?;
+
+            if decode_bool(self.header.payout_snapshot_captured)? {
+                let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
+                let decrease_num = V16Core::bound_num_from_amount(face_burn)?
+                    .min(ledger.terminal_claim_bound_unreceipted_num);
+                if decrease_num != 0 {
+                    self.refine_resolved_unreceipted_bound_not_atomic(decrease_num)?;
+                }
             }
         }
-        Ok(converted)
+
+        let pnl_after_source = account.header.pnl.get().max(0) as u128;
+        let remaining_domain_claim_num = account
+            .as_view()
+            .source_domain(domain)?
+            .source_claim_bound_num
+            .get();
+        let total_claim_num = Self::account_source_claim_bound_sum_num(&account.as_view())?;
+        let claims_after_domain_num = total_claim_num
+            .checked_sub(remaining_domain_claim_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let target_pnl = if claims_after_domain_num == 0 {
+            0
+        } else {
+            pnl_after_source.min(claims_after_domain_num / BOUND_SCALE)
+        };
+        let junior_face = pnl_after_source
+            .checked_sub(target_pnl)
+            .ok_or(V16Error::CounterUnderflow)?;
+        if junior_face != 0 {
+            self.initialize_resolved_payout_ledger_if_needed()?;
+            let target_i128 =
+                i128::try_from(target_pnl).map_err(|_| V16Error::ArithmeticOverflow)?;
+            self.set_account_pnl(account, target_i128)?;
+        }
+        if let Some(slot) = account.source_domain_slot(domain)? {
+            let remainder_num = account.header.source_domains[slot]
+                .source_claim_bound_num
+                .get();
+            self.burn_account_source_claim_bound_num(account, remainder_num)?;
+        }
+        if junior_face != 0 {
+            self.append_resolved_payout_receipt_face_not_atomic(account, junior_face)?;
+        }
+
+        account.header.health_cert.valid = 0;
+        self.validate_shape()?;
+        account.validate_with_market(&self.as_view())?;
+        Ok(Some(domain))
     }
 
     fn claim_resolved_payout_topup_core_not_atomic(
@@ -15539,7 +15663,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)?;
+        if self
+            .prepare_one_source_domain_for_resolved_close_not_atomic(account)?
+            .is_some()
+        {
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
+        if self
+            .process_one_source_claim_for_resolved_close_not_atomic(account)?
+            .is_some()
+        {
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
         let mut payout_receipt = None;
         let pnl_payout = if account.header.pnl.get() > 0
             || decode_bool(account.header.resolved_payout_receipt.present)?

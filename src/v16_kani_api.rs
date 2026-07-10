@@ -1118,11 +1118,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::resolved_receipt_claimable_against_ledger(receipt, ledger)
     }
 
-    pub fn kani_realize_source_backed_claims_for_resolved_close_not_atomic(
+    pub fn kani_prepare_one_source_domain_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<u128> {
-        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)
+    ) -> V16Result<Option<usize>> {
+        self.prepare_one_source_domain_for_resolved_close_not_atomic(account)
+    }
+
+    pub fn kani_process_one_source_claim_for_resolved_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<Option<usize>> {
+        self.process_one_source_claim_for_resolved_close_not_atomic(account)
     }
 
     pub fn kani_create_resolved_payout_receipt_if_needed(
