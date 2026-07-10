@@ -9727,89 +9727,174 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
     }
 }
 
-#[kani::proof]
-#[kani::unwind(48)]
-#[kani::solver(cadical)]
-fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
-    let budget_raw: u8 = kani::any();
-    let other_budget_raw: u8 = kani::any();
-    let insurance_raw: u8 = kani::any();
+fn kani_bankruptcy_insurance_spend_is_domain_and_asset_isolated<
+    const SELECTED: usize,
+    const BANKRUPT_LONG: bool,
+>() {
+    let target_remaining_raw: u8 = kani::any();
+    let target_spent_raw: u8 = kani::any();
+    let same_side_remaining_raw: u8 = kani::any();
+    let sibling_long_raw: u8 = kani::any();
+    let sibling_short_raw: u8 = kani::any();
+    let slack_raw: u8 = kani::any();
     let loss_raw: u8 = kani::any();
-    kani::assume(budget_raw <= 32);
-    kani::assume(other_budget_raw <= 32);
-    kani::assume(insurance_raw <= 32);
-    kani::assume((1..=32).contains(&loss_raw));
-    kani::assume((budget_raw as u16) + (other_budget_raw as u16) <= insurance_raw as u16);
-    let budget = budget_raw as u128;
-    let other_budget = other_budget_raw as u128;
-    let insurance = insurance_raw as u128;
+    kani::assume(target_remaining_raw <= 16);
+    kani::assume(target_spent_raw <= 8);
+    kani::assume(same_side_remaining_raw <= 8);
+    kani::assume(sibling_long_raw <= 8);
+    kani::assume(sibling_short_raw <= 8);
+    kani::assume(slack_raw <= 8);
+    kani::assume((1..=16).contains(&loss_raw));
+
+    let target_remaining = target_remaining_raw as u128;
+    let target_spent = target_spent_raw as u128;
+    let same_side_remaining = same_side_remaining_raw as u128;
+    let sibling_long = sibling_long_raw as u128;
+    let sibling_short = sibling_short_raw as u128;
     let loss = loss_raw as u128;
-    let expected_used = budget.min(loss);
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let budget_remaining_total =
+        target_remaining + same_side_remaining + sibling_long + sibling_short;
+    let insurance = budget_remaining_total + slack_raw as u128;
+    let expected_used = target_remaining.min(loss);
+    let sibling = 1 - SELECTED;
+    let bankrupt_side = if BANKRUPT_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let target_side = if BANKRUPT_LONG {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let (mut header, mut markets, mut account_header) = two_market_view_fixture();
     header.vault = V16PodU128::new(insurance);
     header.insurance = V16PodU128::new(insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget_remaining_total);
     header.negative_pnl_account_count = V16PodU64::new(1);
-    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budget);
-    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(other_budget);
     account_header.pnl = V16PodI128::new(-(loss as i128));
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    market.refresh_header_aggregate_totals_for_test().unwrap();
-    let remaining_before = market.header.insurance_domain_budget_remaining_total.get();
-    let short_budget_before = market.markets[0].engine.insurance_domain_budget_short.get();
-    let long_budget_before = market.markets[0].engine.insurance_domain_budget_long.get();
-    let long_spent_before = market.markets[0].engine.insurance_domain_spent_long.get();
-    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    account_header.health_cert.valid = 1;
+    match target_side {
+        SideV16::Long => {
+            markets[SELECTED].engine.insurance_domain_budget_long =
+                V16PodU128::new(target_remaining + target_spent);
+            markets[SELECTED].engine.insurance_domain_spent_long = V16PodU128::new(target_spent);
+            markets[SELECTED].engine.insurance_domain_budget_short =
+                V16PodU128::new(same_side_remaining);
+        }
+        SideV16::Short => {
+            markets[SELECTED].engine.insurance_domain_budget_short =
+                V16PodU128::new(target_remaining + target_spent);
+            markets[SELECTED].engine.insurance_domain_spent_short = V16PodU128::new(target_spent);
+            markets[SELECTED].engine.insurance_domain_budget_long =
+                V16PodU128::new(same_side_remaining);
+        }
+    }
+    markets[SELECTED].wrapper = 43;
+    markets[sibling].engine.insurance_domain_budget_long = V16PodU128::new(sibling_long);
+    markets[sibling].engine.insurance_domain_budget_short = V16PodU128::new(sibling_short);
+    markets[sibling]
+        .engine
+        .backing_long
+        .fresh_unliened_backing_num = V16PodU128::new(47);
+    markets[sibling].wrapper = 53;
 
+    let header_before = header;
+    let selected_before = markets[SELECTED];
+    let sibling_before = markets[sibling];
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let used = market
-        .kani_consume_domain_insurance_for_negative_pnl(0, SideV16::Long, &mut account)
+        .kani_consume_domain_insurance_for_negative_pnl(SELECTED, bankrupt_side, &mut account)
         .unwrap();
 
-    kani::cover!(budget == 0 && used == 0, "zero domain budget spend branch");
     kani::cover!(
-        budget > 0 && budget < loss && used == budget,
-        "domain budget spend proof covers budget-capped branch"
+        expected_used > 0 && sibling_long > 0 && sibling_short > 0,
+        "bankruptcy spends only selected opposing-domain insurance"
     );
     kani::cover!(
-        loss < budget && used == loss,
-        "domain budget spend proof covers loss-capped branch"
+        target_remaining < loss && expected_used == target_remaining,
+        "insurance spend is capped by selected domain remaining budget"
     );
     kani::cover!(
-        other_budget > 0 && expected_used > 0,
-        "domain budget spend proof covers unrelated funded domain isolation"
+        loss < target_remaining && expected_used == loss,
+        "insurance spend is capped by account loss"
     );
     assert_eq!(used, expected_used);
-    assert_eq!(market.header.insurance.get(), insurance - expected_used);
-    assert_eq!(market.header.vault.get(), insurance);
-    assert_eq!(market.header.c_tot.get(), 0);
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_spent_short.get(),
-        expected_used
-    );
-    assert_eq!(
-        market.header.insurance_domain_budget_remaining_total.get(),
-        remaining_before - expected_used
-    );
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_budget_short.get(),
-        short_budget_before
-    );
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_budget_long.get(),
-        long_budget_before
-    );
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_spent_long.get(),
-        long_spent_before
-    );
+
+    let mut expected_header = header_before;
+    expected_header.bankruptcy_hlock_active = 1;
+    expected_header.insurance = V16PodU128::new(insurance - expected_used);
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(budget_remaining_total - expected_used);
+    expected_header.negative_pnl_account_count = V16PodU64::new(u64::from(expected_used != loss));
+    assert!(kani_eq_market_group_v16_header_account(
+        market.header,
+        &expected_header
+    ));
+
+    let mut expected_selected = selected_before;
+    match target_side {
+        SideV16::Long => {
+            expected_selected.engine.insurance_domain_spent_long =
+                V16PodU128::new(target_spent + expected_used)
+        }
+        SideV16::Short => {
+            expected_selected.engine.insurance_domain_spent_short =
+                V16PodU128::new(target_spent + expected_used)
+        }
+    }
+    assert_eq!(market.markets[SELECTED].wrapper, expected_selected.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[SELECTED].engine,
+        &expected_selected.engine
+    ));
+    assert_eq!(market.markets[sibling].wrapper, sibling_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[sibling].engine,
+        &sibling_before.engine
+    ));
     assert_eq!(
         account.header.pnl.get(),
         -(loss as i128) + expected_used as i128
     );
-    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert_eq!(account.header.capital, account_before.capital);
+    assert_eq!(account.header.reserved_pnl, account_before.reserved_pnl);
+    assert_eq!(account.header.close_progress, account_before.close_progress);
     assert_eq!(
-        market.header.negative_pnl_account_count.get(),
-        if expected_used == loss { 0 } else { 1 }
+        account.header.health_cert.valid,
+        u8::from(expected_used == 0)
     );
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_long_bankruptcy_insurance_spend_is_domain_and_asset_isolated() {
+    kani_bankruptcy_insurance_spend_is_domain_and_asset_isolated::<0, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_short_bankruptcy_insurance_spend_is_domain_and_asset_isolated() {
+    kani_bankruptcy_insurance_spend_is_domain_and_asset_isolated::<0, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_long_bankruptcy_insurance_spend_is_domain_and_asset_isolated() {
+    kani_bankruptcy_insurance_spend_is_domain_and_asset_isolated::<1, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_short_bankruptcy_insurance_spend_is_domain_and_asset_isolated() {
+    kani_bankruptcy_insurance_spend_is_domain_and_asset_isolated::<1, false>();
 }
 
 #[kani::proof]
