@@ -12911,6 +12911,159 @@ fn proof_v16_counterparty_source_credit_support_is_prebacked_by_realized_capital
     assert_eq!(support_proof.vault_after, vault);
 }
 
+// Source-backed conversion is too large to enter through the public route in
+// one Kani query. Compose its production accounting leaves instead: a real
+// counterparty lien create+consume moves scaled backing into spent/receivable,
+// the value-flow proof admits exactly the atom conversion, and stock
+// reconciliation moves those atoms once from backing principal to C_tot.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_source_backed_conversion_moves_backing_to_capital_once() {
+    let effective_raw: u8 = kani::any();
+    let rate_shift_raw: u8 = kani::any();
+    let backing_slack_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let junior_raw: u8 = kani::any();
+    kani::assume((1..=12).contains(&effective_raw));
+    kani::assume(rate_shift_raw <= 3);
+    kani::assume(backing_slack_raw <= 8);
+    kani::assume(other_capital_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume(junior_raw <= 8);
+
+    let effective = effective_raw as u128;
+    let divisor = 1u128 << rate_shift_raw;
+    let backing_slack = backing_slack_raw as u128;
+    let backing_principal = effective + backing_slack;
+    let backing_num = backing_principal * BOUND_SCALE;
+    let claim_num = backing_principal * divisor * BOUND_SCALE;
+    let rate = CREDIT_RATE_SCALE / divisor;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let junior = junior_raw as u128;
+    let vault = other_capital + backing_principal + insurance + junior;
+
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: backing_num,
+        credit_rate_num: rate,
+        ..SourceCreditStateV16::EMPTY
+    };
+    assert_eq!(
+        kani_expected_source_credit_rate_num_for_state(source),
+        Ok(rate)
+    );
+    let (required_face_num, required_backing_num) =
+        MarketGroupV16ViewMut::<u64>::kani_source_credit_lien_amounts_for_effective(
+            effective, rate,
+        )
+        .unwrap();
+    assert_eq!(required_face_num, effective * divisor * BOUND_SCALE);
+    assert_eq!(required_backing_num, effective * BOUND_SCALE);
+
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let (bucket_liened, source_liened) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            bucket,
+            source,
+            1,
+            required_backing_num,
+        )
+        .unwrap();
+    let (bucket_consumed, source_consumed) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
+            bucket_liened,
+            source_liened,
+            required_backing_num,
+        )
+        .unwrap();
+    let converted = MarketGroupV16ViewMut::<u64>::kani_counterparty_cure_atoms_from_scaled_backing(
+        required_backing_num,
+    )
+    .unwrap();
+
+    let initial_stock = StockReconciliationProofV16 {
+        token_vault: vault,
+        senior_capital_total: other_capital,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: backing_principal,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    let final_stock = StockReconciliationProofV16 {
+        token_vault: vault,
+        senior_capital_total: other_capital + converted,
+        insurance_capital: insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: backing_slack,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    let flow = TokenValueFlowProofV16::support_to_account_capital(
+        converted, converted, 0, 0, vault, vault,
+    )
+    .unwrap();
+
+    kani::cover!(
+        divisor == 1 && backing_slack == 0 && other_capital > 0 && insurance > 0,
+        "full-rate conversion covers exact backing beside other senior stock"
+    );
+    kani::cover!(
+        divisor > 1 && backing_slack > 0 && junior > 0,
+        "reduced-rate conversion covers excess backing and junior surplus"
+    );
+    assert_eq!(converted, effective);
+    assert_eq!(bucket_consumed.valid_liened_backing_num, 0);
+    assert_eq!(
+        bucket_consumed.consumed_liened_backing_num,
+        required_backing_num
+    );
+    assert_eq!(
+        bucket_consumed.fresh_unliened_backing_num,
+        backing_slack * BOUND_SCALE
+    );
+    assert_eq!(source_consumed.valid_liened_backing_num, 0);
+    assert_eq!(
+        source_consumed.fresh_reserved_backing_num,
+        backing_slack * BOUND_SCALE
+    );
+    assert_eq!(source_consumed.spent_backing_num, required_backing_num);
+    assert_eq!(
+        source_consumed.provider_receivable_num,
+        required_backing_num
+    );
+    assert_eq!(flow.validate(), Ok(()));
+    assert_eq!(initial_stock.validate(), Ok(()));
+    assert_eq!(final_stock.validate(), Ok(()));
+    assert_eq!(final_stock.token_vault, initial_stock.token_vault);
+    assert_eq!(
+        final_stock.senior_capital_total,
+        initial_stock.senior_capital_total + effective
+    );
+    assert_eq!(
+        final_stock.counterparty_backing_principal + effective,
+        initial_stock.counterparty_backing_principal
+    );
+    assert_eq!(
+        final_stock.insurance_capital,
+        initial_stock.insurance_capital
+    );
+    assert_eq!(
+        final_stock.unallocated_protocol_surplus,
+        initial_stock.unallocated_protocol_surplus
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
