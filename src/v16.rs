@@ -1397,6 +1397,45 @@ impl V16Core {
         }
     }
 
+    /// A trade may reduce only OI that existed before that trade. This makes
+    /// aggregate accounting independent of which counterparty mutates first.
+    pub(crate) fn kernel_trade_preexisting_oi_reduction_gate(
+        oi_long_q: u128,
+        oi_short_q: u128,
+        account_a_current_q: i128,
+        account_a_next_q: i128,
+        account_b_current_q: i128,
+        account_b_next_q: i128,
+    ) -> V16Result<(u128, u128)> {
+        let side_reduction = |current_q: i128, next_q: i128, side: SideV16| {
+            let on_side = |position_q: i128| match side {
+                SideV16::Long if position_q > 0 => position_q as u128,
+                SideV16::Short if position_q < 0 => position_q.unsigned_abs(),
+                _ => 0,
+            };
+            on_side(current_q).saturating_sub(on_side(next_q))
+        };
+        let long_reduction_q = side_reduction(account_a_current_q, account_a_next_q, SideV16::Long)
+            .checked_add(side_reduction(
+                account_b_current_q,
+                account_b_next_q,
+                SideV16::Long,
+            ))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let short_reduction_q =
+            side_reduction(account_a_current_q, account_a_next_q, SideV16::Short)
+                .checked_add(side_reduction(
+                    account_b_current_q,
+                    account_b_next_q,
+                    SideV16::Short,
+                ))
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        if long_reduction_q > oi_long_q || short_reduction_q > oi_short_q {
+            return Err(V16Error::LockActive);
+        }
+        Ok((long_reduction_q, short_reduction_q))
+    }
+
     /// PRODUCTION KERNEL (roadmap 3A.2 risk-reduction / S-L3, A5.dec rank): the
     /// position-reduction core of liquidation/rebalance. Clamps the requested
     /// close to the leg and produces the toward-zero signed delta:
@@ -12574,6 +12613,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Self::position_delta_lookup_for_asset(short_account, request.asset_index, short_delta)?;
         let risk_increasing = position_delta_increases_risk(long_lookup.current_q, long_delta)?
             || position_delta_increases_risk(short_lookup.current_q, short_delta)?;
+        let asset = self
+            .markets
+            .get(request.asset_index)
+            .ok_or(V16Error::InvalidLeg)?
+            .engine_slot()
+            .asset;
+        V16Core::kernel_trade_preexisting_oi_reduction_gate(
+            asset.oi_eff_long_q.get(),
+            asset.oi_eff_short_q.get(),
+            long_lookup.current_q,
+            long_lookup.next_q,
+            short_lookup.current_q,
+            short_lookup.next_q,
+        )?;
         let target_effective_lag = self.asset_has_target_effective_lag(request.asset_index)?;
         let blocked_by_pending_domain_barrier = pending_domain_loss_barrier_blocks_position_change(
             self.position_change_touches_pending_domain_loss_barrier(

@@ -700,6 +700,109 @@ fn v16_trade_keeps_two_sided_risk_reduction_open_during_side_recovery() {
 }
 
 #[test]
+fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
+    const SURVIVOR_Q: u128 = 13 * POS_SCALE;
+    const MATCHED_Q: u128 = 10 * POS_SCALE;
+    const CROSS_Q: u128 = 11 * POS_SCALE;
+
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut survivor_header = account_fixture(1, 20);
+    let mut liquidated_header = account_fixture(1, 21);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+        let mut liquidated = PortfolioV16ViewMut::new(&mut liquidated_header);
+        market.deposit_not_atomic(&mut survivor, 100).unwrap();
+        market.deposit_not_atomic(&mut liquidated, 100).unwrap();
+    }
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.a_long = ADL_ONE * MATCHED_Q / SURVIVOR_Q;
+    asset.oi_eff_long_q = MATCHED_Q;
+    asset.oi_eff_short_q = MATCHED_Q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = SURVIVOR_Q;
+    asset.loss_weight_sum_short = MATCHED_Q;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    survivor_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: signed_q(SURVIVOR_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: SURVIVOR_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    survivor_header.active_bitmap[0] = V16PodU64::new(1);
+    survivor_header.health_cert.valid = 0;
+    liquidated_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -signed_q(MATCHED_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_short,
+        f_snap: asset.f_short_num,
+        epoch_snap: asset.epoch_short,
+        loss_weight: MATCHED_Q,
+        b_snap: asset.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    liquidated_header.active_bitmap[0] = V16PodU64::new(1);
+    liquidated_header.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+    let mut liquidated = PortfolioV16ViewMut::new(&mut liquidated_header);
+    market.validate_shape().unwrap();
+    survivor.validate_with_market(&market.as_view()).unwrap();
+    liquidated.validate_with_market(&market.as_view()).unwrap();
+    let value_before = (
+        market.header.vault,
+        market.header.c_tot,
+        market.header.insurance,
+    );
+    let asset_before = market.markets[0].engine.asset;
+
+    let result = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut liquidated,
+        &mut survivor,
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(CROSS_Q),
+            exec_price: 1,
+            fee_bps: 0,
+        },
+    );
+
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(market.markets[0].engine.asset, asset_before);
+    assert_eq!(
+        (
+            market.header.vault,
+            market.header.c_tot,
+            market.header.insurance
+        ),
+        value_before
+    );
+}
+
+#[test]
 fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut long_header = account_fixture(2, 201);

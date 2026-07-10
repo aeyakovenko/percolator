@@ -281,6 +281,24 @@ pub fn kani_position_delta_increases_risk(current: i128, delta_q: i128) -> V16Re
     position_delta_increases_risk(current, delta_q)
 }
 
+pub fn kani_trade_preexisting_oi_reduction_gate(
+    oi_long_q: u128,
+    oi_short_q: u128,
+    account_a_current_q: i128,
+    account_a_next_q: i128,
+    account_b_current_q: i128,
+    account_b_next_q: i128,
+) -> V16Result<(u128, u128)> {
+    V16Core::kernel_trade_preexisting_oi_reduction_gate(
+        oi_long_q,
+        oi_short_q,
+        account_a_current_q,
+        account_a_next_q,
+        account_b_current_q,
+        account_b_next_q,
+    )
+}
+
 pub fn kani_trade_preflight_risk_gate(
     risk_increasing: bool,
     asset_loss_stale: bool,

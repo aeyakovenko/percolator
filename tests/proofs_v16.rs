@@ -16,13 +16,13 @@ use percolator::v16::{
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preflight_risk_gate,
-    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
-    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
-    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
-    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
-    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
+    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -3720,6 +3720,102 @@ fn proof_v16_position_delta_risk_classifier_matches_abs_exposure_change() {
         if increases {
             assert!(next != 0);
         }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(5)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_reductions_are_funded_only_by_preexisting_side_oi() {
+    let account_a_current_q: i128 = kani::any();
+    let account_a_next_q: i128 = kani::any();
+    let account_b_current_q: i128 = kani::any();
+    let account_b_next_q: i128 = kani::any();
+    let oi_long_q: u128 = kani::any();
+    let oi_short_q: u128 = kani::any();
+    for position_q in [
+        account_a_current_q,
+        account_a_next_q,
+        account_b_current_q,
+        account_b_next_q,
+    ] {
+        kani::assume(position_q != i128::MIN);
+        kani::assume(position_q.unsigned_abs() <= MAX_POSITION_ABS_Q);
+    }
+    kani::assume(oi_long_q <= 2 * MAX_POSITION_ABS_Q);
+    kani::assume(oi_short_q <= 2 * MAX_POSITION_ABS_Q);
+
+    let side_reduction = |current_q: i128, next_q: i128, long_side: bool| {
+        let on_side = |position_q: i128| {
+            if (long_side && position_q > 0) || (!long_side && position_q < 0) {
+                position_q.unsigned_abs()
+            } else {
+                0
+            }
+        };
+        on_side(current_q).saturating_sub(on_side(next_q))
+    };
+    let required_long_q = side_reduction(account_a_current_q, account_a_next_q, true)
+        + side_reduction(account_b_current_q, account_b_next_q, true);
+    let required_short_q = side_reduction(account_a_current_q, account_a_next_q, false)
+        + side_reduction(account_b_current_q, account_b_next_q, false);
+    let expected_ok = required_long_q <= oi_long_q && required_short_q <= oi_short_q;
+    let result = kani_trade_preexisting_oi_reduction_gate(
+        oi_long_q,
+        oi_short_q,
+        account_a_current_q,
+        account_a_next_q,
+        account_b_current_q,
+        account_b_next_q,
+    );
+
+    let a_adds_long_q = if account_a_next_q > 0 {
+        (account_a_next_q as u128).saturating_sub(if account_a_current_q > 0 {
+            account_a_current_q as u128
+        } else {
+            0
+        })
+    } else {
+        0
+    };
+    kani::cover!(
+        !expected_ok
+            && account_a_current_q < 0
+            && account_a_next_q > 0
+            && account_b_current_q > account_b_next_q
+            && account_b_next_q > 0
+            && required_long_q > oi_long_q
+            && required_long_q <= oi_long_q.saturating_add(a_adds_long_q),
+        "same-call long addition cannot fund an oversized preexisting long reduction"
+    );
+    kani::cover!(
+        expected_ok
+            && account_a_current_q < 0
+            && account_a_next_q > 0
+            && account_b_current_q > 0
+            && account_b_next_q < 0,
+        "balanced two-sided flip remains admitted"
+    );
+    kani::cover!(
+        expected_ok
+            && account_a_current_q > account_a_next_q
+            && account_a_next_q > 0
+            && account_b_current_q < account_b_next_q
+            && account_b_next_q < 0,
+        "matched same-side reductions remain admitted"
+    );
+    kani::cover!(
+        !expected_ok && required_short_q > oi_short_q,
+        "preexisting short OI underfunding is rejected"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if expected_ok {
+        assert_eq!(result, Ok((required_long_q, required_short_q)));
+        assert!(required_long_q <= oi_long_q);
+        assert!(required_short_q <= oi_short_q);
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
     }
 }
 
