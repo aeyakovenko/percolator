@@ -1,6 +1,6 @@
 use percolator::{
-    auto_crank_plan_requires_caller_observation, AutoCrankObservationV16, AutoCrankOutcomeV16,
-    AutoCrankPlanV16, AutoCrankWorkV16,
+    active_bitmap_is_empty, auto_crank_plan_requires_caller_observation, AutoCrankObservationV16,
+    AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankWorkV16,
 };
 use percolator::{
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
@@ -856,6 +856,75 @@ fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
     );
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_close_detaches_one_active_leg_per_progress_step() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut long_header = account_fixture(2, 203);
+    let mut short_header = account_fixture(2, 204);
+    let requests = [
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        TradeRequestV16 {
+            asset_index: 1,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+    ];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, &requests)
+        .unwrap();
+    market.resolve_market_not_atomic(2).unwrap();
+
+    assert_eq!(
+        market
+            .close_resolved_account_not_atomic(&mut short, 0)
+            .unwrap(),
+        percolator::ResolvedCloseOutcomeV16::ProgressOnly,
+    );
+    assert_eq!(
+        short
+            .header
+            .active_bitmap
+            .iter()
+            .map(|word| word.get().count_ones())
+            .sum::<u32>(),
+        1,
+        "one successful close continuation must detach exactly one active leg",
+    );
+    assert_eq!(short.header.capital.get(), 1_000);
+
+    assert_eq!(
+        market
+            .close_resolved_account_not_atomic(&mut short, 0)
+            .unwrap(),
+        percolator::ResolvedCloseOutcomeV16::ProgressOnly,
+    );
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(short.header.capital.get(), 1_000);
+
+    assert_eq!(
+        market
+            .close_resolved_account_not_atomic(&mut short, 0)
+            .unwrap(),
+        percolator::ResolvedCloseOutcomeV16::Closed { payout: 1_000 },
+    );
+    market.validate_shape().unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
 }
 
@@ -3594,9 +3663,13 @@ fn v16_resolved_close_migrates_legacy_normal_adl_residue_before_detach() {
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     market.deposit_not_atomic(&mut account, 1_000).unwrap();
     market.resolve_market_not_atomic(1).unwrap();
-    let outcome = market
+    let progress = market
         .close_resolved_account_not_atomic(&mut account, 0)
         .expect("resolution must not strand an upgraded zero-effective-OI residue");
+    assert_eq!(progress, percolator::ResolvedCloseOutcomeV16::ProgressOnly);
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("the next bounded continuation must pay the detached account");
     assert_eq!(
         outcome,
         percolator::ResolvedCloseOutcomeV16::Closed { payout: 1_000 }

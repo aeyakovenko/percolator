@@ -1770,7 +1770,7 @@ pub enum TradeRejectReasonV16 {
 pub struct ResolvedCloseRankV16 {
     pub b_stale: bool,           // outstanding B settlement
     pub negative_pnl: bool,      // unsettled negative PnL
-    pub active_leg: bool,        // an open leg remains
+    pub active_leg_count: u32,   // exact number of open legs remaining
     pub receipt_claim: bool,     // an unpaid resolved receipt claim
     pub capital: bool,           // residual capital to disburse
     pub recovery_required: bool, // the explicit recovery predicate holds
@@ -1779,7 +1779,11 @@ pub struct ResolvedCloseRankV16 {
 impl ResolvedCloseRankV16 {
     #[cfg_attr(not(kani), allow(dead_code))] // PROOF-ONLY: used by kernel_resolved_close_progress (fidelity model)
     pub fn has_pending(self) -> bool {
-        self.b_stale || self.negative_pnl || self.active_leg || self.receipt_claim || self.capital
+        self.b_stale
+            || self.negative_pnl
+            || self.active_leg_count != 0
+            || self.receipt_claim
+            || self.capital
     }
 }
 
@@ -2022,14 +2026,14 @@ impl V16Core {
     /// PRODUCTION FIDELITY BUILDER (roadmap 3C step 3, A7 close-rank): map the
     /// real resolved-close per-component signals to the compact rank summary that
     /// kernel_resolved_close_progress classifies. Each rank flag is EXACTLY its
-    /// production predicate — b-stale bit, negative PnL, a live leg (non-empty
-    /// active bitmap), residual capital, an open receipt, and the explicit
+    /// production predicate — b-stale bit, negative PnL, the exact active-bitmap
+    /// population count, residual capital, an open receipt, and the explicit
     /// recovery predicate — so the close-rank summary faithfully represents the
     /// real account/market state (no hidden pending component outside it). Pure.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|r: &ResolvedCloseRankV16| {
         r.b_stale == b_stale
             && r.negative_pnl == (pnl < 0)
-            && r.active_leg == !active_bitmap_is_empty(active_bitmap)
+            && r.active_leg_count == active_bitmap_count_ones(active_bitmap)
             && r.capital == (capital > 0)
             && r.receipt_claim == receipt_present
             && r.recovery_required == recovery_required
@@ -2046,7 +2050,7 @@ impl V16Core {
         ResolvedCloseRankV16 {
             b_stale,
             negative_pnl: pnl < 0,
-            active_leg: !active_bitmap_is_empty(active_bitmap),
+            active_leg_count: active_bitmap_count_ones(active_bitmap),
             capital: capital > 0,
             receipt_claim: receipt_present,
             recovery_required,
