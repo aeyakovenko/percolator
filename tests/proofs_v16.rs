@@ -13064,6 +13064,199 @@ fn proof_v16_source_backed_conversion_moves_backing_to_capital_once() {
     );
 }
 
+// End-to-end value skeleton for a mixed-source favorable exit. The conversion
+// consumes real counterparty and insurance lien state before crediting capital;
+// the subsequent withdrawal may then reduce vault/C_tot by that credit. Each
+// persistent source stock must be debited exactly once and no unrelated slack
+// may move.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_mixed_source_conversion_then_exit_debits_each_stock_once() {
+    let counterparty_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let extra_capital_raw: u8 = kani::any();
+    let extra_backing_raw: u8 = kani::any();
+    let extra_insurance_raw: u8 = kani::any();
+    let extra_surplus_raw: u8 = kani::any();
+    kani::assume((1..=6).contains(&counterparty_raw));
+    kani::assume((1..=6).contains(&insurance_raw));
+    kani::assume(surplus_raw <= 6);
+    kani::assume(extra_capital_raw <= 6);
+    kani::assume(extra_backing_raw <= 6);
+    kani::assume(extra_insurance_raw <= 6);
+    kani::assume(extra_surplus_raw <= 6);
+
+    let counterparty = counterparty_raw as u128;
+    let insurance_support = insurance_raw as u128;
+    let surplus_support = surplus_raw as u128;
+    let support_total = counterparty + insurance_support + surplus_support;
+    let initial_capital = extra_capital_raw as u128;
+    let initial_backing = counterparty + extra_backing_raw as u128;
+    let initial_insurance = insurance_support + extra_insurance_raw as u128;
+    let initial_surplus = surplus_support + extra_surplus_raw as u128;
+    let initial_vault = initial_capital + initial_backing + initial_insurance + initial_surplus;
+    let counterparty_num = counterparty * BOUND_SCALE;
+    let initial_backing_num = initial_backing * BOUND_SCALE;
+    let insurance_num = insurance_support * BOUND_SCALE;
+
+    let counterparty_bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: initial_backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let counterparty_source = SourceCreditStateV16 {
+        positive_claim_bound_num: initial_backing_num,
+        exact_positive_claim_num: initial_backing_num,
+        fresh_reserved_backing_num: initial_backing_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let (counterparty_bucket, counterparty_source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            counterparty_bucket,
+            counterparty_source,
+            1,
+            counterparty_num,
+        )
+        .unwrap();
+    let (counterparty_bucket, counterparty_source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
+            counterparty_bucket,
+            counterparty_source,
+            counterparty_num,
+        )
+        .unwrap();
+    let counterparty_atoms =
+        MarketGroupV16ViewMut::<u64>::kani_counterparty_cure_atoms_from_scaled_backing(
+            counterparty_num,
+        )
+        .unwrap();
+
+    let insurance_reservation = InsuranceCreditReservationV16 {
+        insurance_credit_reserved_num: insurance_num,
+        valid_liened_insurance_num: insurance_num,
+        ..InsuranceCreditReservationV16::EMPTY
+    };
+    let insurance_source = SourceCreditStateV16 {
+        insurance_credit_reserved_num: insurance_num,
+        valid_liened_insurance_num: insurance_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let (insurance_reservation, insurance_source, domain_spent, insurance_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_insurance_lien_consume_delta(
+            insurance_reservation,
+            insurance_source,
+            0,
+            initial_insurance,
+            insurance_num,
+        )
+        .unwrap();
+
+    let initial_stock = StockReconciliationProofV16 {
+        token_vault: initial_vault,
+        senior_capital_total: initial_capital,
+        insurance_capital: initial_insurance,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: initial_backing,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: initial_surplus,
+    };
+    let support_flow = TokenValueFlowProofV16::support_to_account_capital(
+        support_total,
+        counterparty_atoms,
+        insurance_support,
+        surplus_support,
+        initial_vault,
+        initial_vault,
+    )
+    .unwrap();
+    let supported_stock = StockReconciliationProofV16 {
+        token_vault: initial_vault,
+        senior_capital_total: initial_capital + support_total,
+        insurance_capital: insurance_after,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: initial_backing - counterparty_atoms,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: initial_surplus - surplus_support,
+    };
+    let final_vault = initial_vault - support_total;
+    let exit_flow = TokenValueFlowProofV16::account_capital_to_external_out(
+        support_total,
+        initial_vault,
+        final_vault,
+    )
+    .unwrap();
+    let final_stock = StockReconciliationProofV16 {
+        token_vault: final_vault,
+        senior_capital_total: initial_capital,
+        ..supported_stock
+    };
+
+    kani::cover!(
+        surplus_support > 0
+            && extra_capital_raw > 0
+            && extra_backing_raw > 0
+            && extra_insurance_raw > 0
+            && extra_surplus_raw > 0,
+        "mixed exit consumes all support classes while preserving unrelated stock"
+    );
+    kani::cover!(
+        surplus_support == 0 && extra_backing_raw == 0 && extra_insurance_raw == 0,
+        "senior-only mixed exit covers exact counterparty and insurance funding"
+    );
+    assert_eq!(counterparty_atoms, counterparty);
+    assert_eq!(counterparty_bucket.valid_liened_backing_num, 0);
+    assert_eq!(
+        counterparty_bucket.consumed_liened_backing_num,
+        counterparty_num
+    );
+    assert_eq!(
+        counterparty_source.fresh_reserved_backing_num,
+        extra_backing_raw as u128 * BOUND_SCALE
+    );
+    assert_eq!(counterparty_source.spent_backing_num, counterparty_num);
+    assert_eq!(
+        counterparty_source.provider_receivable_num,
+        counterparty_num
+    );
+    assert_eq!(insurance_reservation.valid_liened_insurance_num, 0);
+    assert_eq!(insurance_reservation.consumed_insurance_num, insurance_num);
+    assert_eq!(insurance_source.valid_liened_insurance_num, 0);
+    assert_eq!(insurance_source.insurance_credit_reserved_num, 0);
+    assert_eq!(domain_spent, insurance_support);
+    assert_eq!(insurance_after, extra_insurance_raw as u128);
+    assert_eq!(support_flow.validate(), Ok(()));
+    assert_eq!(exit_flow.validate(), Ok(()));
+    assert_eq!(initial_stock.validate(), Ok(()));
+    assert_eq!(supported_stock.validate(), Ok(()));
+    assert_eq!(final_stock.validate(), Ok(()));
+    assert_eq!(
+        final_stock.token_vault,
+        initial_stock.token_vault - support_total
+    );
+    assert_eq!(
+        final_stock.counterparty_backing_principal,
+        initial_stock.counterparty_backing_principal - counterparty
+    );
+    assert_eq!(
+        final_stock.insurance_capital,
+        initial_stock.insurance_capital - insurance_support
+    );
+    assert_eq!(
+        final_stock.unallocated_protocol_surplus,
+        initial_stock.unallocated_protocol_surplus - surplus_support
+    );
+    assert_eq!(
+        final_stock.senior_capital_total,
+        initial_stock.senior_capital_total
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
