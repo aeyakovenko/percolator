@@ -11245,8 +11245,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         self.require_asset_mark_pushable(asset_index)?;
         let mut asset = self.asset_state(asset_index)?;
+        let target_changed = asset.raw_oracle_target_price != raw_oracle_target_price;
+        let next_oracle_epoch = if target_changed {
+            Some(
+                self.header
+                    .oracle_epoch
+                    .get()
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?,
+            )
+        } else {
+            None
+        };
         asset.raw_oracle_target_price = raw_oracle_target_price;
         self.set_asset_state(asset_index, asset)?;
+        if let Some(next) = next_oracle_epoch {
+            self.header.oracle_epoch = V16PodU64::new(next);
+        }
         self.validate_shape()
     }
 

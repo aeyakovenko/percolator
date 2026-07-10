@@ -1063,6 +1063,7 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
+    let oracle_epoch_before = header.oracle_epoch.get();
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market
@@ -1072,9 +1073,14 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
 
     assert_eq!(asset.raw_oracle_target_price, 111);
     assert_eq!(asset.effective_price, 100);
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 111)
+        .unwrap();
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
     market.validate_shape().unwrap();
 }
 

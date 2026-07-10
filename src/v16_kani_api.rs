@@ -40,6 +40,24 @@ pub fn kani_health_cert_after_capital_debit(
     health_cert_after_capital_debit(cert, amount)
 }
 
+pub fn kani_cert_is_current(
+    cert: HealthCertV16,
+    oracle_epoch: u64,
+    funding_epoch: u64,
+    risk_epoch: u64,
+    asset_set_epoch: u64,
+    account_bitmap: V16ActiveBitmap,
+) -> bool {
+    V16Core::kernel_cert_is_current(
+        cert,
+        oracle_epoch,
+        funding_epoch,
+        risk_epoch,
+        asset_set_epoch,
+        account_bitmap,
+    )
+}
+
 pub fn kani_active_bitmap_set(
     bitmap: &mut V16ActiveBitmap,
     leg_slot_index: usize,
