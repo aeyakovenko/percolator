@@ -777,6 +777,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::prepare_counterparty_backing_withdraw_delta(bucket, source, amount)
     }
 
+    pub fn kani_prepare_counterparty_backing_expiry_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        now_slot: u64,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        V16Core::prepare_counterparty_backing_expiry_delta(bucket, source, now_slot)
+    }
+
     pub fn kani_source_credit_lien_amounts_for_effective(
         effective_credit: u128,
         credit_rate_num: u128,
