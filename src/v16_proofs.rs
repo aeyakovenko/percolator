@@ -1614,11 +1614,75 @@ fn contract_check_kernel_side_needs_full_drain_reset() {
         1 => SideModeV16::DrainOnly,
         _ => SideModeV16::ResetPending,
     };
-    let _ = V16Core::kernel_side_needs_full_drain_reset(
+    let reset = V16Core::kernel_side_needs_full_drain_reset(
         effective_oi,
         stored_position_count,
         pending_obligation_count,
         mode,
+    );
+    kani::cover!(reset, "zero OI with stored positions requires reset");
+    kani::cover!(!reset, "a non-reset state remains unchanged");
+}
+
+// Composition proof for the production unilateral-close route. The scalar
+// predicate above is insufficient on its own: this theorem also proves that
+// the mutable view applies the decision to both possible closed-side
+// orientations after the matching side reaches zero OI.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn composition_unilateral_close_resets_both_zero_oi_sides() {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+
+    let closed_side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let stored_position_count = u64::from(kani::any::<u8>()).saturating_add(1);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    match closed_side {
+        SideV16::Long => {
+            asset.oi_eff_long_q = 0;
+            asset.stored_pos_count_long = stored_position_count;
+            asset.oi_eff_short_q = 1;
+            asset.stored_pos_count_short = 1;
+        }
+        SideV16::Short => {
+            asset.oi_eff_short_q = 0;
+            asset.stored_pos_count_short = stored_position_count;
+            asset.oi_eff_long_q = 1;
+            asset.stored_pos_count_long = 1;
+        }
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .kani_reduce_matching_open_interest_for_unilateral_close(0, closed_side, 1)
+            .unwrap();
+    }
+
+    let after = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    assert_eq!(after.mode_long, SideModeV16::ResetPending);
+    assert_eq!(after.mode_short, SideModeV16::ResetPending);
+    kani::cover!(
+        closed_side == SideV16::Long,
+        "long closed side enters reset"
+    );
+    kani::cover!(
+        closed_side == SideV16::Short,
+        "short closed side enters reset"
     );
 }
 

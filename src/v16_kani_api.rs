@@ -454,6 +454,15 @@ impl MarketGroupV16HeaderAccount {
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_reduce_matching_open_interest_for_unilateral_close(
+        &mut self,
+        asset_index: usize,
+        closed_side: SideV16,
+        close_q: u128,
+    ) -> V16Result<()> {
+        self.reduce_matching_open_interest_for_unilateral_close(asset_index, closed_side, close_q)
+    }
+
     pub fn kani_clear_leg(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
