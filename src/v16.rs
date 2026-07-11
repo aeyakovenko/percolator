@@ -1928,11 +1928,48 @@ impl V16Core {
         Ok(leg)
     }
 
+    /// Fold one exiting leg's fractional social-loss remainder into the
+    /// side-level dust bucket. Both inputs are canonical fractions, so the sum
+    /// carries at most one whole quote atom.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(
+        current_dust < SOCIAL_LOSS_DEN && leg_remainder < SOCIAL_LOSS_DEN
+    ))]
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
+        Ok((dust, carry)) => {
+            *dust < SOCIAL_LOSS_DEN
+                && *carry <= 1
+                && current_dust.checked_add(leg_remainder)
+                    == carry.checked_mul(SOCIAL_LOSS_DEN).and_then(|v| v.checked_add(*dust))
+        }
+        Err(_) => true,
+    }))]
+    pub(crate) fn kernel_fold_social_loss_dust(
+        current_dust: u128,
+        leg_remainder: u128,
+    ) -> V16Result<(u128, u128)> {
+        if current_dust >= SOCIAL_LOSS_DEN || leg_remainder >= SOCIAL_LOSS_DEN {
+            return Err(V16Error::InvalidConfig);
+        }
+        let total = current_dust
+            .checked_add(leg_remainder)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if total >= SOCIAL_LOSS_DEN {
+            Ok((total - SOCIAL_LOSS_DEN, 1))
+        } else {
+            Ok((total, 0))
+        }
+    }
+
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
     /// fold its social-loss dust and remove its OI and loss weight. Pure on
     /// (PortfolioLegV16, AssetStateV16); the clear-leg glue calls exactly this.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(
+        leg.b_rem < SOCIAL_LOSS_DEN
+            && asset.social_loss_dust_long_num < SOCIAL_LOSS_DEN
+            && asset.social_loss_dust_short_num < SOCIAL_LOSS_DEN
+    ))]
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<AssetStateV16>| match result {
         Ok(a) => {
             let prior_reset = match leg.side {
@@ -1955,8 +1992,13 @@ impl V16Core {
                     } else {
                         a.oi_eff_long_q == asset.oi_eff_long_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
                             && a.loss_weight_sum_long == asset.loss_weight_sum_long.wrapping_sub(leg.loss_weight)
-                            && a.social_loss_dust_long_num == asset.social_loss_dust_long_num.wrapping_add(leg.b_rem)
-                            && (leg.b_rem == 0 || a.social_loss_dust_long_num < SOCIAL_LOSS_DEN)
+                            && a.social_loss_dust_long_num == if asset.social_loss_dust_long_num
+                                .wrapping_add(leg.b_rem) >= SOCIAL_LOSS_DEN {
+                                    asset.social_loss_dust_long_num.wrapping_add(leg.b_rem)
+                                        .wrapping_sub(SOCIAL_LOSS_DEN)
+                                } else {
+                                    asset.social_loss_dust_long_num.wrapping_add(leg.b_rem)
+                                }
                     })
                     && a.oi_eff_short_q == asset.oi_eff_short_q
                     && a.loss_weight_sum_short == asset.loss_weight_sum_short
@@ -1973,8 +2015,13 @@ impl V16Core {
                     } else {
                         a.oi_eff_short_q == asset.oi_eff_short_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
                             && a.loss_weight_sum_short == asset.loss_weight_sum_short.wrapping_sub(leg.loss_weight)
-                            && a.social_loss_dust_short_num == asset.social_loss_dust_short_num.wrapping_add(leg.b_rem)
-                            && (leg.b_rem == 0 || a.social_loss_dust_short_num < SOCIAL_LOSS_DEN)
+                            && a.social_loss_dust_short_num == if asset.social_loss_dust_short_num
+                                .wrapping_add(leg.b_rem) >= SOCIAL_LOSS_DEN {
+                                    asset.social_loss_dust_short_num.wrapping_add(leg.b_rem)
+                                        .wrapping_sub(SOCIAL_LOSS_DEN)
+                                } else {
+                                    asset.social_loss_dust_short_num.wrapping_add(leg.b_rem)
+                                }
                     })
                     && a.oi_eff_long_q == asset.oi_eff_long_q
                     && a.loss_weight_sum_long == asset.loss_weight_sum_long
@@ -2028,17 +2075,12 @@ impl V16Core {
                     && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
             }
         };
-        let dust_after_clear = if !prior_reset_epoch && leg.b_rem != 0 {
+        let dust_after_clear = if !prior_reset_epoch {
             let current_dust = match leg.side {
                 SideV16::Long => asset.social_loss_dust_long_num,
                 SideV16::Short => asset.social_loss_dust_short_num,
             };
-            let new_dust = current_dust
-                .checked_add(leg.b_rem)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            if new_dust >= SOCIAL_LOSS_DEN {
-                return Err(V16Error::RecoveryRequired);
-            }
+            let (new_dust, _) = Self::kernel_fold_social_loss_dust(current_dust, leg.b_rem)?;
             Some(new_dust)
         } else {
             None
@@ -7040,6 +7082,10 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             || (mode == MarketModeV16::Live && asset.oi_eff_long_q != asset.oi_eff_short_q)
             || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
             || asset.loss_weight_sum_short > SOCIAL_LOSS_DEN
+            || asset.social_loss_remainder_long_num >= SOCIAL_LOSS_DEN
+            || asset.social_loss_remainder_short_num >= SOCIAL_LOSS_DEN
+            || asset.social_loss_dust_long_num >= SOCIAL_LOSS_DEN
+            || asset.social_loss_dust_short_num >= SOCIAL_LOSS_DEN
             || (asset.oi_eff_long_q != 0 && asset.loss_weight_sum_long == 0)
             || (asset.oi_eff_short_q != 0 && asset.loss_weight_sum_short == 0)
             || (asset.loss_weight_sum_long != 0 && asset.stored_pos_count_long == 0)
@@ -12789,7 +12835,62 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let asset = self.asset_state(asset_index)?;
-        let asset = V16Core::kernel_clear_leg(leg, asset)?;
+        let prior_reset_epoch = match leg.side {
+            SideV16::Long => {
+                asset.mode_long == SideModeV16::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_long)
+            }
+            SideV16::Short => {
+                asset.mode_short == SideModeV16::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
+            }
+        };
+        let current_dust = match leg.side {
+            SideV16::Long => asset.social_loss_dust_long_num,
+            SideV16::Short => asset.social_loss_dust_short_num,
+        };
+        let dust_carry = if prior_reset_epoch {
+            0
+        } else {
+            V16Core::kernel_fold_social_loss_dust(current_dust, leg.b_rem)?.1
+        };
+        let mut asset = V16Core::kernel_clear_leg(leg, asset)?;
+
+        // A whole atom assembled from fractional remainders is still part of
+        // the already-booked social loss. Rebook it over the remaining side;
+        // if this was the last weight (or B has no headroom), assign it to the
+        // exiting account instead. Never reject a risk-reducing clear merely
+        // because the fractional bucket crossed its denominator.
+        let exit_loss_charge = if dust_carry == 0 {
+            0
+        } else if V16Core::apply_bankruptcy_residual_chunk_to_loss_side(
+            &mut asset, leg.side, dust_carry, dust_carry,
+        )?
+        .is_some()
+        {
+            self.header.bankruptcy_hlock_active = 1;
+            self.header.risk_epoch = V16PodU64::new(
+                self.header
+                    .risk_epoch
+                    .get()
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?,
+            );
+            0
+        } else {
+            dust_carry
+        };
+        if exit_loss_charge != 0 {
+            let charge =
+                i128::try_from(exit_loss_charge).map_err(|_| V16Error::ArithmeticOverflow)?;
+            let new_pnl = account
+                .header
+                .pnl
+                .get()
+                .checked_sub(charge)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.set_account_pnl(account, new_pnl)?;
+        }
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);

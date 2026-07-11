@@ -1548,6 +1548,18 @@ fn contract_check_kernel_attach_leg() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_fold_social_loss_dust)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_fold_social_loss_dust() {
+    let current_dust: u128 = kani::any();
+    let leg_remainder: u128 = kani::any();
+    kani::assume(current_dust < SOCIAL_LOSS_DEN);
+    kani::assume(leg_remainder < SOCIAL_LOSS_DEN);
+    let _ = V16Core::kernel_fold_social_loss_dust(current_dust, leg_remainder);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::kernel_clear_leg)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -1625,6 +1637,9 @@ fn contract_check_kernel_clear_leg() {
         },
     };
     kani::assume(leg.basis_pos_q > i128::MIN);
+    kani::assume(leg.b_rem < SOCIAL_LOSS_DEN);
+    kani::assume(asset.social_loss_dust_long_num < SOCIAL_LOSS_DEN);
+    kani::assume(asset.social_loss_dust_short_num < SOCIAL_LOSS_DEN);
     let _ = V16Core::kernel_clear_leg(leg, asset);
 }
 
