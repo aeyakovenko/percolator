@@ -1941,7 +1941,7 @@ impl V16Core {
                 && current_dust.checked_add(leg_remainder)
                     == carry.checked_mul(SOCIAL_LOSS_DEN).and_then(|v| v.checked_add(*dust))
         }
-        Err(_) => true,
+        Err(_) => false,
     }))]
     pub(crate) fn kernel_fold_social_loss_dust(
         current_dust: u128,

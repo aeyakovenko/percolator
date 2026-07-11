@@ -1556,7 +1556,17 @@ fn contract_check_kernel_fold_social_loss_dust() {
     let leg_remainder: u128 = kani::any();
     kani::assume(current_dust < SOCIAL_LOSS_DEN);
     kani::assume(leg_remainder < SOCIAL_LOSS_DEN);
-    let _ = V16Core::kernel_fold_social_loss_dust(current_dust, leg_remainder);
+    let result = V16Core::kernel_fold_social_loss_dust(current_dust, leg_remainder);
+    kani::cover!(
+        current_dust + leg_remainder < SOCIAL_LOSS_DEN
+            && result == Ok((current_dust + leg_remainder, 0)),
+        "canonical fractions can fold without a carry"
+    );
+    kani::cover!(
+        current_dust + leg_remainder >= SOCIAL_LOSS_DEN
+            && result == Ok((current_dust + leg_remainder - SOCIAL_LOSS_DEN, 1)),
+        "canonical fractions can fold one whole-atom carry"
+    );
 }
 
 #[cfg(all(kani, feature = "contracts"))]
@@ -1641,6 +1651,87 @@ fn contract_check_kernel_clear_leg() {
     kani::assume(asset.social_loss_dust_long_num < SOCIAL_LOSS_DEN);
     kani::assume(asset.social_loss_dust_short_num < SOCIAL_LOSS_DEN);
     let _ = V16Core::kernel_clear_leg(leg, asset);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_clear_leg_canonical_dust_never_blocks_exit() {
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let current_dust: u128 = kani::any();
+    let leg_remainder: u128 = kani::any();
+    kani::assume(current_dust < SOCIAL_LOSS_DEN);
+    kani::assume(leg_remainder < SOCIAL_LOSS_DEN);
+
+    let basis_abs = POS_SCALE;
+    let basis_pos_q = match side {
+        SideV16::Long => basis_abs as i128,
+        SideV16::Short => -(basis_abs as i128),
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: 1,
+        side,
+        basis_pos_q,
+        a_basis: POS_SCALE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: 1,
+        b_snap: 0,
+        b_rem: leg_remainder,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    match side {
+        SideV16::Long => {
+            asset.oi_eff_long_q = basis_abs;
+            asset.stored_pos_count_long = 1;
+            asset.loss_weight_sum_long = 1;
+            asset.social_loss_dust_long_num = current_dust;
+        }
+        SideV16::Short => {
+            asset.oi_eff_short_q = basis_abs;
+            asset.stored_pos_count_short = 1;
+            asset.loss_weight_sum_short = 1;
+            asset.social_loss_dust_short_num = current_dust;
+        }
+    }
+
+    let cleared = V16Core::kernel_clear_leg(leg, asset).unwrap();
+    let expected_dust = (current_dust + leg_remainder) % SOCIAL_LOSS_DEN;
+    match side {
+        SideV16::Long => {
+            assert_eq!(cleared.oi_eff_long_q, 0);
+            assert_eq!(cleared.stored_pos_count_long, 0);
+            assert_eq!(cleared.loss_weight_sum_long, 0);
+            assert_eq!(cleared.social_loss_dust_long_num, expected_dust);
+        }
+        SideV16::Short => {
+            assert_eq!(cleared.oi_eff_short_q, 0);
+            assert_eq!(cleared.stored_pos_count_short, 0);
+            assert_eq!(cleared.loss_weight_sum_short, 0);
+            assert_eq!(cleared.social_loss_dust_short_num, expected_dust);
+        }
+    }
+    kani::cover!(
+        current_dust + leg_remainder < SOCIAL_LOSS_DEN,
+        "a no-carry exit clears"
+    );
+    kani::cover!(
+        current_dust + leg_remainder >= SOCIAL_LOSS_DEN,
+        "a whole-atom carry exit clears"
+    );
 }
 
 #[cfg(all(kani, feature = "contracts"))]
