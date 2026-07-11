@@ -9838,13 +9838,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn create_account_source_credit_lien_for_effective_not_atomic(
+    // The allocating caller validates once before this per-domain core runs, and
+    // finish_trade_checks_not_atomic performs the committed-state audit afterward.
+    fn create_account_source_credit_lien_for_effective_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         domain: usize,
         effective_credit: u128,
     ) -> V16Result<()> {
-        account.validate_with_market(&self.as_view())?;
         self.domain_asset_side(domain)?;
         if effective_credit == 0 {
             return Ok(());
@@ -9869,7 +9870,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.current_slot.get(),
         )?;
         account.header.health_cert.valid = 0;
-        account.validate_with_market(&self.as_view())
+        Ok(())
     }
 
     fn create_account_source_credit_lien_for_effective_any_not_atomic(
@@ -9903,7 +9904,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let by_backing = self.source_credit_available_backing_num(d)? / BOUND_SCALE;
                 let take = remaining.min(by_claim).min(by_backing);
                 if take != 0 {
-                    self.create_account_source_credit_lien_for_effective_not_atomic(
+                    self.create_account_source_credit_lien_for_effective_core_not_atomic(
                         account, d, take,
                     )?;
                     remaining -= take;
