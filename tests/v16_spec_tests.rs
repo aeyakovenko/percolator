@@ -4108,6 +4108,11 @@ fn v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach() {
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     market.deposit_not_atomic(&mut account, 1_000).unwrap();
     market.force_asset_recovery_not_atomic(0, 1).unwrap();
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let capital_before = account.header.capital.get();
+    let pnl_before = account.header.pnl.get();
     let outcome = market
         .forfeit_recovery_leg_not_atomic(&mut account, 0, POS_SCALE)
         .expect("Recovery forfeit must detach a zero-effective-OI ADL residue");
@@ -4116,6 +4121,11 @@ fn v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach() {
     let reset = market.markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(reset.mode_long, SideModeV16::ResetPending);
     assert_eq!(reset.stored_pos_count_long, 0);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(account.header.capital.get(), capital_before);
+    assert_eq!(account.header.pnl.get(), pnl_before);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
 }

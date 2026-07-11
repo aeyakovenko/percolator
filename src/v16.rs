@@ -2125,6 +2125,68 @@ impl V16Core {
         Ok(leg)
     }
 
+    /// PRODUCTION KERNEL: move an exhausted side behind a reset epoch without
+    /// touching the opposite side. Prior-epoch legs can then detach without
+    /// subtracting their stored basis from already-zero effective OI.
+    fn kernel_begin_full_drain_reset(
+        mut asset: AssetStateV16,
+        side: SideV16,
+    ) -> V16Result<AssetStateV16> {
+        match side {
+            SideV16::Long => {
+                if asset.mode_long == SideModeV16::ResetPending
+                    || asset.oi_eff_long_q != 0
+                    || asset.pending_obligation_count_long != 0
+                {
+                    return Err(V16Error::LockActive);
+                }
+                quarantine_remainder(
+                    &mut asset.social_loss_remainder_long_num,
+                    &mut asset.social_loss_dust_long_num,
+                )?;
+                asset.k_epoch_start_long = asset.k_long;
+                asset.f_epoch_start_long_num = asset.f_long_num;
+                asset.b_epoch_start_long_num = asset.b_long_num;
+                asset.k_long = 0;
+                asset.f_long_num = 0;
+                asset.b_long_num = 0;
+                asset.loss_weight_sum_long = 0;
+                asset.a_long = ADL_ONE;
+                asset.epoch_long = asset
+                    .epoch_long
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+                asset.mode_long = SideModeV16::ResetPending;
+            }
+            SideV16::Short => {
+                if asset.mode_short == SideModeV16::ResetPending
+                    || asset.oi_eff_short_q != 0
+                    || asset.pending_obligation_count_short != 0
+                {
+                    return Err(V16Error::LockActive);
+                }
+                quarantine_remainder(
+                    &mut asset.social_loss_remainder_short_num,
+                    &mut asset.social_loss_dust_short_num,
+                )?;
+                asset.k_epoch_start_short = asset.k_short;
+                asset.f_epoch_start_short_num = asset.f_short_num;
+                asset.b_epoch_start_short_num = asset.b_short_num;
+                asset.k_short = 0;
+                asset.f_short_num = 0;
+                asset.b_short_num = 0;
+                asset.loss_weight_sum_short = 0;
+                asset.a_short = ADL_ONE;
+                asset.epoch_short = asset
+                    .epoch_short
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+                asset.mode_short = SideModeV16::ResetPending;
+            }
+        }
+        Ok(asset)
+    }
+
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
@@ -14174,59 +14236,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.has_pending_domain_loss_barrier(asset_index, side)? {
             return Err(V16Error::LockActive);
         }
-        let mut asset = self.asset_state(asset_index)?;
-        match side {
-            SideV16::Long => {
-                if asset.mode_long == SideModeV16::ResetPending {
-                    return Err(V16Error::LockActive);
-                }
-                if asset.oi_eff_long_q != 0 || asset.pending_obligation_count_long != 0 {
-                    return Err(V16Error::LockActive);
-                }
-                quarantine_remainder(
-                    &mut asset.social_loss_remainder_long_num,
-                    &mut asset.social_loss_dust_long_num,
-                )?;
-                asset.k_epoch_start_long = asset.k_long;
-                asset.f_epoch_start_long_num = asset.f_long_num;
-                asset.b_epoch_start_long_num = asset.b_long_num;
-                asset.k_long = 0;
-                asset.f_long_num = 0;
-                asset.b_long_num = 0;
-                asset.loss_weight_sum_long = 0;
-                asset.a_long = ADL_ONE;
-                asset.epoch_long = asset
-                    .epoch_long
-                    .checked_add(1)
-                    .ok_or(V16Error::CounterOverflow)?;
-                asset.mode_long = SideModeV16::ResetPending;
-            }
-            SideV16::Short => {
-                if asset.mode_short == SideModeV16::ResetPending {
-                    return Err(V16Error::LockActive);
-                }
-                if asset.oi_eff_short_q != 0 || asset.pending_obligation_count_short != 0 {
-                    return Err(V16Error::LockActive);
-                }
-                quarantine_remainder(
-                    &mut asset.social_loss_remainder_short_num,
-                    &mut asset.social_loss_dust_short_num,
-                )?;
-                asset.k_epoch_start_short = asset.k_short;
-                asset.f_epoch_start_short_num = asset.f_short_num;
-                asset.b_epoch_start_short_num = asset.b_short_num;
-                asset.k_short = 0;
-                asset.f_short_num = 0;
-                asset.b_short_num = 0;
-                asset.loss_weight_sum_short = 0;
-                asset.a_short = ADL_ONE;
-                asset.epoch_short = asset
-                    .epoch_short
-                    .checked_add(1)
-                    .ok_or(V16Error::CounterOverflow)?;
-                asset.mode_short = SideModeV16::ResetPending;
-            }
-        }
+        let asset = V16Core::kernel_begin_full_drain_reset(self.asset_state(asset_index)?, side)?;
         self.set_asset_state(asset_index, asset)?;
         self.header.risk_epoch = V16PodU64::new(
             self.header

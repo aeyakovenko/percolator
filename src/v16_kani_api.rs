@@ -543,6 +543,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.begin_zero_oi_residue_resets(asset_index)
     }
 
+    pub fn kani_kernel_begin_full_drain_reset(
+        asset: AssetStateV16,
+        side: SideV16,
+    ) -> V16Result<AssetStateV16> {
+        V16Core::kernel_begin_full_drain_reset(asset, side)
+    }
+
+    pub fn kani_kernel_clear_leg(
+        leg: PortfolioLegV16,
+        asset: AssetStateV16,
+    ) -> V16Result<AssetStateV16> {
+        V16Core::kernel_clear_leg(leg, asset)
+    }
+
     pub fn kani_clear_leg(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

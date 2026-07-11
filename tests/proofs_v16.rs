@@ -16578,3 +16578,139 @@ fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
         "Recovery state cannot mask an unrelated engine error"
     );
 }
+
+// A partial ADL can leave stored basis after matched effective OI reaches zero.
+// Prove the exact production reset+clear composition: reset preserves the old
+// K/F/B epoch targets, and the prior-epoch clear cannot subtract basis or loss
+// weight from the already-zero current epoch.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
+    let side = if kani::any::<bool>() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let mode = if kani::any::<bool>() {
+        SideModeV16::Normal
+    } else {
+        SideModeV16::DrainOnly
+    };
+    let epoch: u64 = kani::any();
+    let stored_count: u64 = kani::any();
+    let basis_abs: u128 = kani::any();
+    let k: i128 = kani::any();
+    let f: i128 = kani::any();
+    let b: u128 = kani::any();
+    let loss_weight: u128 = kani::any();
+    let remainder: u128 = kani::any();
+    let dust: u128 = kani::any();
+    kani::assume(epoch < u64::MAX);
+    kani::assume(stored_count > 0);
+    kani::assume((1..=MAX_POSITION_ABS_Q).contains(&basis_abs));
+    kani::assume(remainder < SOCIAL_LOSS_DEN);
+    kani::assume(dust < SOCIAL_LOSS_DEN - remainder);
+
+    let mut asset = AssetStateV16::default();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    match side {
+        SideV16::Long => {
+            asset.a_long = ADL_ONE / 2;
+            asset.k_long = k;
+            asset.f_long_num = f;
+            asset.b_long_num = b;
+            asset.oi_eff_long_q = 0;
+            asset.stored_pos_count_long = stored_count;
+            asset.pending_obligation_count_long = 0;
+            asset.loss_weight_sum_long = loss_weight;
+            asset.social_loss_remainder_long_num = remainder;
+            asset.social_loss_dust_long_num = dust;
+            asset.epoch_long = epoch;
+            asset.mode_long = mode;
+        }
+        SideV16::Short => {
+            asset.a_short = ADL_ONE / 2;
+            asset.k_short = k;
+            asset.f_short_num = f;
+            asset.b_short_num = b;
+            asset.oi_eff_short_q = 0;
+            asset.stored_pos_count_short = stored_count;
+            asset.pending_obligation_count_short = 0;
+            asset.loss_weight_sum_short = loss_weight;
+            asset.social_loss_remainder_short_num = remainder;
+            asset.social_loss_dust_short_num = dust;
+            asset.epoch_short = epoch;
+            asset.mode_short = mode;
+        }
+    }
+    let before = asset;
+    let reset =
+        MarketGroupV16ViewMut::<u64>::kani_kernel_begin_full_drain_reset(asset, side).unwrap();
+    let mut expected_reset = before;
+    match side {
+        SideV16::Long => {
+            expected_reset.k_epoch_start_long = k;
+            expected_reset.f_epoch_start_long_num = f;
+            expected_reset.b_epoch_start_long_num = b;
+            expected_reset.k_long = 0;
+            expected_reset.f_long_num = 0;
+            expected_reset.b_long_num = 0;
+            expected_reset.loss_weight_sum_long = 0;
+            expected_reset.social_loss_remainder_long_num = 0;
+            expected_reset.social_loss_dust_long_num = dust + remainder;
+            expected_reset.a_long = ADL_ONE;
+            expected_reset.epoch_long = epoch + 1;
+            expected_reset.mode_long = SideModeV16::ResetPending;
+        }
+        SideV16::Short => {
+            expected_reset.k_epoch_start_short = k;
+            expected_reset.f_epoch_start_short_num = f;
+            expected_reset.b_epoch_start_short_num = b;
+            expected_reset.k_short = 0;
+            expected_reset.f_short_num = 0;
+            expected_reset.b_short_num = 0;
+            expected_reset.loss_weight_sum_short = 0;
+            expected_reset.social_loss_remainder_short_num = 0;
+            expected_reset.social_loss_dust_short_num = dust + remainder;
+            expected_reset.a_short = ADL_ONE;
+            expected_reset.epoch_short = epoch + 1;
+            expected_reset.mode_short = SideModeV16::ResetPending;
+        }
+    }
+    assert_eq!(reset, expected_reset);
+
+    let basis_pos_q = match side {
+        SideV16::Long => basis_abs as i128,
+        SideV16::Short => -(basis_abs as i128),
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        side,
+        basis_pos_q,
+        epoch_snap: epoch,
+        loss_weight,
+        b_rem: remainder,
+        ..PortfolioLegV16::EMPTY
+    };
+    let cleared = MarketGroupV16ViewMut::<u64>::kani_kernel_clear_leg(leg, reset).unwrap();
+    let mut expected_clear = expected_reset;
+    match side {
+        SideV16::Long => expected_clear.stored_pos_count_long = stored_count - 1,
+        SideV16::Short => expected_clear.stored_pos_count_short = stored_count - 1,
+    }
+
+    kani::cover!(side == SideV16::Long, "reset+clear covers long residues");
+    kani::cover!(side == SideV16::Short, "reset+clear covers short residues");
+    kani::cover!(
+        mode == SideModeV16::DrainOnly,
+        "reset+clear covers DrainOnly"
+    );
+    kani::cover!(remainder > 0, "reset+clear quarantines nonzero remainder");
+    kani::cover!(stored_count > 1, "reset+clear preserves sibling residues");
+    kani::cover!(
+        k != 0 && f != 0 && b != 0,
+        "reset+clear preserves nonzero K/F/B targets"
+    );
+    assert_eq!(cleared, expected_clear);
+}
