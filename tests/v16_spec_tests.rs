@@ -3279,7 +3279,7 @@ fn v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation() {
         .full_account_refresh_not_atomic(&mut account)
         .expect("setup must produce a current cross-margin liquidation cert");
     let summary = market.build_actionable_summary(&account.as_view()).unwrap();
-    assert!(summary.liquidatable && summary.recovery_eligible);
+    assert!(summary.liquidatable && !summary.recovery_eligible);
 
     let bitmap_before = account.header.active_bitmap;
     let pnl_before = account.header.pnl;
@@ -3300,9 +3300,7 @@ fn v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation() {
 
     assert_eq!(
         result.selected,
-        AutoCrankPlanV16::DeclareRecovery {
-            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-        }
+        AutoCrankPlanV16::Liquidate { asset_index: 0 }
     );
     assert_eq!(
         result.outcome,

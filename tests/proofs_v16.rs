@@ -8,23 +8,22 @@ use percolator::v16::{
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
-    kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
+    kani_commit_declared_liquidation_recovery, kani_expected_source_credit_rate_num_for_state,
+    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
-    kani_liquidation_projected_healthy_after_close, kani_liquidation_recovery_after_close,
-    kani_liquidation_recovery_before_residual, kani_loss_stale_trade_scope_allowed,
+    kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_select_auto_crank_plan,
-    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
-    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
-    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
-    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
+    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
+    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, MarketModeV16, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -15426,116 +15425,82 @@ fn proof_v16_backing_utilization_zero_fee_carries_accrual_forward() {
     assert_eq!(market.header.insurance.get(), insurance_before);
 }
 
-// Rollback-sensitive auto-crank liveness theorem. This composes every
-// liquidation terminal that must select DeclareRecovery before entering a path
-// that would otherwise mutate Recovery and return an error. The scalar inputs
-// span their full production bounds; the resulting plan must be recovery iff
-// no bounded liquidation terminal can commit normally.
+// Rollback-sensitive auto-crank theorem: no engine error may be swallowed unless
+// the same liquidation call left a complete committed Recovery marker. This is
+// exhaustive over every V16Error, market mode, recovery reason, and missing-reason
+// state. The production integration test drives the real cross-margin liquidation
+// into this kernel; this theorem pins the fail-closed conversion boundary.
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
-fn proof_v16_recovery_required_liquidation_is_classified_before_dispatch() {
-    let uncovered_loss: u128 = kani::any();
-    let active_leg_count_raw: u8 = kani::any();
-    let residual: u128 = kani::any();
-    let public_chunk_cap: u128 = kani::any();
-    let close_q: u128 = kani::any();
-    let leaves_uncovered_open_risk: bool = kani::any();
-    let residual_capacity: u128 = kani::any();
-    kani::assume(uncovered_loss <= MAX_VAULT_TVL);
-    kani::assume((1..=V16_MAX_PORTFOLIO_ASSETS_N as u8).contains(&active_leg_count_raw));
-    kani::assume(residual <= MAX_VAULT_TVL);
-    kani::assume(public_chunk_cap <= MAX_VAULT_TVL);
-    kani::assume(close_q <= MAX_POSITION_ABS_Q);
-    kani::assume(residual_capacity <= MAX_VAULT_TVL);
-    let active_leg_count = active_leg_count_raw as u32;
+fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
+    let error_tag: u8 = kani::any();
+    let mode_tag: u8 = kani::any();
+    let reason_tag: u8 = kani::any();
+    kani::assume(error_tag < 12);
+    kani::assume(mode_tag < 3);
+    kani::assume(reason_tag <= 8);
 
-    let requires_recovery =
-        match kani_liquidation_recovery_before_residual(uncovered_loss, active_leg_count) {
-            Some(decision) => decision,
-            None if public_chunk_cap < residual => true,
-            None => match kani_liquidation_recovery_after_close(
-                close_q,
-                leaves_uncovered_open_risk,
-                residual,
-            ) {
-                Some(decision) => decision,
-                None => residual_capacity < residual,
-            },
-        };
-    let expected = uncovered_loss != 0
-        && (active_leg_count > 1
-            || public_chunk_cap < residual
-            || (close_q != 0
-                && (leaves_uncovered_open_risk
-                    || (residual != 0 && residual_capacity < residual))));
-    assert_eq!(requires_recovery, expected);
+    let error = match error_tag {
+        0 => V16Error::InvalidConfig,
+        1 => V16Error::ArithmeticOverflow,
+        2 => V16Error::ProvenanceMismatch,
+        3 => V16Error::HiddenLeg,
+        4 => V16Error::InvalidLeg,
+        5 => V16Error::Stale,
+        6 => V16Error::BStale,
+        7 => V16Error::LockActive,
+        8 => V16Error::NonProgress,
+        9 => V16Error::RecoveryRequired,
+        10 => V16Error::CounterOverflow,
+        _ => V16Error::CounterUnderflow,
+    };
+    let mode = match mode_tag {
+        0 => MarketModeV16::Live,
+        1 => MarketModeV16::Resolved,
+        _ => MarketModeV16::Recovery,
+    };
+    let reason = match reason_tag {
+        0 => Some(PermissionlessRecoveryReasonV16::BelowProgressFloor),
+        1 => Some(PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability),
+        2 => Some(PermissionlessRecoveryReasonV16::AccountBSettlementCannotProgress),
+        3 => Some(PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted),
+        4 => Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress),
+        5 => Some(PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow),
+        6 => Some(PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy),
+        7 => Some(PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery),
+        _ => None,
+    };
 
-    let selected_asset: usize = kani::any();
-    let plan = kani_select_auto_crank_plan(
-        ActionableSummaryV16 {
-            stale: false,
-            b_stale: false,
-            pending_close: false,
-            expired_close: false,
-            liquidatable: true,
-            recovery_eligible: requires_recovery,
-            resolved_winner: false,
-        },
-        0,
-        selected_asset,
-        Some(selected_asset),
-        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-    );
-    if requires_recovery {
+    let result = kani_commit_declared_liquidation_recovery(error, mode, reason);
+    let complete_declaration =
+        error == V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_some();
+    if complete_declaration {
         assert_eq!(
-            plan,
-            AutoCrankPlanV16::DeclareRecovery {
-                reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
-            }
+            result,
+            Ok(PermissionlessProgressOutcomeV16::RecoveryDeclared(
+                reason.unwrap()
+            ))
         );
     } else {
-        assert_eq!(
-            plan,
-            AutoCrankPlanV16::Liquidate {
-                asset_index: selected_asset
-            }
-        );
+        assert_eq!(result, Err(error));
     }
 
     kani::cover!(
-        uncovered_loss != 0 && active_leg_count > 1,
-        "cross-margin uncovered loss selects recovery"
+        complete_declaration
+            && reason == Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress),
+        "a fully declared liquidation terminal commits successful recovery progress"
     );
     kani::cover!(
-        uncovered_loss != 0 && active_leg_count == 1 && public_chunk_cap < residual,
-        "public residual cap exhaustion selects recovery"
+        error == V16Error::RecoveryRequired && mode == MarketModeV16::Live,
+        "a bare recovery-required error is not swallowed"
     );
     kani::cover!(
-        uncovered_loss != 0
-            && active_leg_count == 1
-            && public_chunk_cap >= residual
-            && close_q != 0
-            && leaves_uncovered_open_risk,
-        "partial close leaving uncovered open risk selects recovery"
+        error == V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_none(),
+        "an incomplete Recovery marker fails closed"
     );
     kani::cover!(
-        uncovered_loss != 0
-            && active_leg_count == 1
-            && public_chunk_cap >= residual
-            && close_q != 0
-            && !leaves_uncovered_open_risk
-            && residual != 0
-            && residual_capacity < residual,
-        "insufficient residual capacity selects recovery"
-    );
-    kani::cover!(
-        uncovered_loss != 0
-            && active_leg_count == 1
-            && public_chunk_cap >= residual
-            && close_q != 0
-            && !leaves_uncovered_open_risk
-            && (residual == 0 || residual_capacity >= residual),
-        "ordinary single-leg liquidation remains dispatchable"
+        error != V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_some(),
+        "Recovery state cannot mask an unrelated engine error"
     );
 }

@@ -1533,36 +1533,19 @@ impl V16Core {
         None
     }
 
-    /// PRODUCTION KERNEL: classify the liquidation terminals known before
-    /// residual-capacity work. `None` means the single-leg path must continue.
-    fn kernel_liquidation_recovery_before_residual(
-        uncovered_loss: u128,
-        active_leg_count: u32,
-    ) -> Option<bool> {
-        if uncovered_loss == 0 {
-            Some(false)
-        } else if active_leg_count > 1 {
-            Some(true)
-        } else {
-            None
-        }
-    }
-
-    /// PRODUCTION KERNEL: classify terminals after the engine computes its
-    /// bounded close. `None` means residual capacity decides the outcome.
-    fn kernel_liquidation_recovery_after_close(
-        close_q: u128,
-        leaves_uncovered_loss_with_open_risk: bool,
-        residual_after_principal_and_insurance: u128,
-    ) -> Option<bool> {
-        if close_q == 0 {
-            Some(false)
-        } else if leaves_uncovered_loss_with_open_risk {
-            Some(true)
-        } else if residual_after_principal_and_insurance == 0 {
-            Some(false)
-        } else {
-            None
+    /// PRODUCTION KERNEL: a liquidation error is successful public progress only
+    /// when the same call committed the matching Recovery state. Every other
+    /// error, including an incomplete Recovery marker, remains unchanged.
+    fn kernel_commit_declared_liquidation_recovery(
+        error: V16Error,
+        mode: MarketModeV16,
+        reason: Option<PermissionlessRecoveryReasonV16>,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        match (error, mode, reason) {
+            (V16Error::RecoveryRequired, MarketModeV16::Recovery, Some(reason)) => {
+                Ok(PermissionlessProgressOutcomeV16::RecoveryDeclared(reason))
+            }
+            _ => Err(error),
         }
     }
 
@@ -11620,7 +11603,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             PermissionlessCrankActionV16::Liquidate(_) => {
                 if let PermissionlessCrankActionV16::Liquidate(liq) = request.action {
                     let liquidated_asset_index = liq.asset_index;
-                    self.liquidate_account_not_atomic(account, liq)?;
+                    if let Err(error) = self.liquidate_account_not_atomic(account, liq) {
+                        let mode = decode_market_mode(self.header.mode)?;
+                        let reason = self.header.recovery_reason.try_to_runtime()?;
+                        return V16Core::kernel_commit_declared_liquidation_recovery(
+                            error, mode, reason,
+                        );
+                    }
                     liquidated_asset_index == request.asset_index
                 } else {
                     unreachable!()
@@ -11640,85 +11629,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
     }
 
-    fn liquidation_requires_recovery_from_current_state(
-        &self,
-        account: &PortfolioV16View<'_>,
-        asset_index: usize,
-    ) -> V16Result<bool> {
-        let config = self.header.config.try_to_runtime_shape()?;
-        if asset_index >= config.max_market_slots as usize {
-            return Err(V16Error::InvalidConfig);
-        }
-        let cert = account.header.health_cert.try_to_runtime()?;
-        if cert.certified_liq_deficit == 0 {
-            return Ok(false);
-        }
-        let leg_slot = Self::require_active_leg_slot_for_asset(account, asset_index)?;
-        let leg = account.header.legs[leg_slot].try_to_runtime()?;
-        let asset = self.asset_state(asset_index)?;
-        if !matches!(
-            asset.lifecycle,
-            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
-        ) {
-            return Ok(false);
-        }
-        if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-            return Ok(false);
-        }
-        let uncovered_loss = liquidation_uncovered_loss_after_principal(
-            account.header.pnl.get(),
-            account.header.capital.get(),
-        );
-        let active_bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        let active_leg_count = active_bitmap
-            .iter()
-            .map(|word| word.count_ones())
-            .sum::<u32>();
-        if let Some(requires_recovery) =
-            V16Core::kernel_liquidation_recovery_before_residual(uncovered_loss, active_leg_count)
-        {
-            return Ok(requires_recovery);
-        }
-        let residual_after_principal_and_insurance = self
-            .liquidation_residual_after_principal_and_insurance(asset_index, leg.side, account)?;
-        if self.header.config.public_b_chunk_atoms.get() < residual_after_principal_and_insurance {
-            return Ok(true);
-        }
-        let close_request_q = liquidation_engine_close_request_q(
-            config,
-            cert,
-            account.header.capital.get(),
-            account.header.pnl.get(),
-            leg,
-            asset.effective_price,
-            asset.raw_oracle_target_price,
-            config.liquidation_fee_bps,
-        )?;
-        let (close_q, _) =
-            V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, close_request_q)?;
-        let leaves_uncovered_loss_with_open_risk =
-            liquidation_close_would_leave_uncovered_loss_with_open_risk(
-                account.header.pnl.get(),
-                account.header.capital.get(),
-                account.header.active_bitmap.map(V16PodU64::get),
-                leg_slot,
-                close_q,
-                leg.basis_pos_q.unsigned_abs(),
-            )?;
-        if let Some(requires_recovery) = V16Core::kernel_liquidation_recovery_after_close(
-            close_q,
-            leaves_uncovered_loss_with_open_risk,
-            residual_after_principal_and_insurance,
-        ) {
-            return Ok(requires_recovery);
-        }
-        Ok(self.bankruptcy_residual_single_step_capacity(
-            asset_index,
-            leg.side,
-            residual_after_principal_and_insurance,
-        )? < residual_after_principal_and_insurance)
-    }
-
     /// PRODUCTION CLASSIFIER (roadmap 3C step 4): map the real account/market
     /// state to the ActionableState summary the self-classifying crank dispatches
     /// from. Each flag is exactly its production eligibility predicate, MODE-
@@ -11728,7 +11638,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
-    ///   recovery_eligible— Live liquidation whose only bounded terminal is Recovery
+    ///   recovery_eligible— reserved for selector-level proactive Recovery
     ///   resolved_winner  — Resolved, positive PnL, resolved payout ready
     /// Assembled via the proven actionable_summary_from_signals kernel. Live-only
     /// flags need cert currentness only where their entrypoint does (liquidate),
@@ -11755,7 +11665,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         let has_open_risk =
             !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
-        let (_, first_active_asset) = Self::auto_crank_selected_assets(account)?;
         // A close ledger with residual_remaining==0 is already fully booked/covered
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
         // actionable close work. The `active` flag can linger past that.
@@ -11780,19 +11689,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
         let liquidatable = live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
-        // Recovery must be selected before entering a liquidation route that can
-        // only return RecoveryRequired. Returning that error after mutating the
-        // market to Recovery is not progress on SVM: instruction rollback erases
-        // the declaration. Classify the same engine-selected close and residual
-        // capacity here so the public auto-crank commits Recovery as an Ok outcome.
-        let recovery_eligible = liquidatable
-            && !b_stale
-            && match first_active_asset {
-                Some(asset_index) => {
-                    self.liquidation_requires_recovery_from_current_state(account, asset_index)?
-                }
-                None => false,
-            };
+        // Liquidation-only recovery is discovered by the liquidation itself. The
+        // auto-crank converts that exact committed terminal into successful
+        // progress without repeating liquidation sizing or residual scans here.
+        let recovery_eligible = false;
         // resolved_winner routes to close_resolved, which LAZILY captures the
         // payout snapshot itself (initialize_resolved_payout_ledger_if_needed is
         // reached only via close_resolved -> create_resolved_payout_receipt) — so
@@ -11898,7 +11798,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let summary = self.build_actionable_summary(&account.as_view())?;
         let (b_stale_asset, active_asset) = Self::auto_crank_selected_assets(&account.as_view())?;
-        let recovery_reason = if summary.expired_close || summary.recovery_eligible {
+        let recovery_reason = if summary.expired_close {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {
             PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
