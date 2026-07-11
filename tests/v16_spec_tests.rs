@@ -2695,6 +2695,150 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
 }
 
 #[test]
+fn v16_expired_counterparty_source_lien_is_impaired_before_health_read() {
+    const OPEN_Q: u128 = 1_000 * POS_SCALE;
+    const INCREASE_Q: u128 = 50 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    header.config.backing_fee_base_rate_e9_per_slot = V16PodU64::new(1_000_000_000);
+    let mut long_header = account_fixture(1, 10);
+    let mut short_header = account_fixture(1, 11);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 3)
+        .unwrap();
+    market.deposit_not_atomic(&mut long, 52_501).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(OPEN_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(INCREASE_Q),
+                exec_price: 105,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    let lien_before = long.header.source_domains[0];
+    assert!(lien_before.source_claim_counterparty_liened_num.get() > 0);
+    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+
+    market
+        .accrue_asset_to_not_atomic(0, 3, 105, 0, true)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 4, 105, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    let summary = market.build_actionable_summary(&long.as_view()).unwrap();
+    assert!(
+        summary.stale,
+        "bucket expiry alone must make a current certificate actionable"
+    );
+    let observations = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: 105,
+        funding_rate_e9: 0,
+    }];
+    let crank = market
+        .permissionless_auto_crank_not_atomic(
+            &mut long,
+            AutoCrankWorkV16 {
+                now_slot: 4,
+                observations: &observations,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("an expired source lien must impair and remain progressable");
+    assert_eq!(
+        crank.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(0)
+        }
+    );
+    assert!(matches!(
+        crank.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+    ));
+    let cert = long.header.health_cert.try_to_runtime().unwrap();
+
+    let source = long.header.source_domains[0];
+    let bucket = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    let domain = market.markets[0]
+        .engine
+        .source_credit_short
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.status, BackingBucketStatusV16::Impaired);
+    assert_eq!(
+        bucket.utilization_fee_earnings,
+        lien_before.source_lien_effective_reserved.get(),
+        "utilization rent must stop at expiry rather than charging through reconciliation"
+    );
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(domain.valid_liened_backing_num, 0);
+    assert_eq!(domain.fresh_reserved_backing_num, 0);
+    assert_eq!(domain.credit_rate_num, 0);
+    assert_eq!(source.source_claim_liened_num.get(), 0);
+    assert_eq!(source.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(source.source_lien_effective_reserved.get(), 0);
+    assert_eq!(source.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(
+        source.source_claim_impaired_num.get(),
+        lien_before.source_claim_counterparty_liened_num.get()
+    );
+    assert_eq!(
+        source.source_lien_impaired_effective_reserved.get(),
+        lien_before.source_lien_effective_reserved.get()
+    );
+    assert_eq!(
+        source
+            .source_lien_impaired_capital_at_risk_fee_revenue
+            .get(),
+        lien_before.source_lien_effective_reserved.get()
+    );
+    assert!(cert.valid);
+    assert_eq!(cert.certified_equity, long.header.capital.get() as i128);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_residual_reward_credit_uses_real_principal_not_notional() {
     let (mut header, mut markets) = market_fixture(1, 1_000);
     header.config.initial_margin_bps = V16PodU64::new(500);

@@ -186,7 +186,7 @@ fn empty_recovery_slot_for_market(
 }
 
 #[kani::proof]
-#[kani::unwind(8)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_active_bitmap_set_get_count_is_exact_and_bounds_checked() {
     let slot_raw: u8 = kani::any();
@@ -15966,4 +15966,114 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
         "reset+clear preserves nonzero K/F/B targets"
     );
     assert_eq!(cleared, expected_clear);
+}
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_expired_counterparty_lien_impairment_is_exact_relabel() {
+    let counter_face_atoms: u8 = kani::any();
+    let counter_effective: u8 = kani::any();
+    let insurance_face_atoms: u8 = kani::any();
+    let insurance_effective: u8 = kani::any();
+    let prior_impaired_face_atoms: u8 = kani::any();
+    let prior_impaired_effective: u8 = kani::any();
+    let live_fee: u8 = kani::any();
+    let impaired_fee: u8 = kani::any();
+    kani::assume(counter_face_atoms > 0 && counter_face_atoms <= 8);
+    kani::assume(counter_effective > 0 && counter_effective <= counter_face_atoms);
+    kani::assume(insurance_face_atoms <= 8);
+    kani::assume(insurance_effective <= insurance_face_atoms);
+    kani::assume(prior_impaired_face_atoms <= 8);
+    kani::assume(prior_impaired_effective <= prior_impaired_face_atoms);
+
+    let counter_face = (counter_face_atoms as u128) * BOUND_SCALE;
+    let insurance_face = (insurance_face_atoms as u128) * BOUND_SCALE;
+    let prior_impaired_face = (prior_impaired_face_atoms as u128) * BOUND_SCALE;
+    let counter_backing = (counter_effective as u128) * BOUND_SCALE;
+    let insurance_backing = (insurance_effective as u128) * BOUND_SCALE;
+    let live_effective = counter_effective as u128 + insurance_effective as u128;
+    let source = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(3),
+        source_claim_market_id: V16PodU64::new(9),
+        source_claim_bound_num: V16PodU128::new(
+            counter_face + insurance_face + prior_impaired_face + BOUND_SCALE,
+        ),
+        source_claim_liened_num: V16PodU128::new(counter_face + insurance_face),
+        source_claim_counterparty_liened_num: V16PodU128::new(counter_face),
+        source_claim_insurance_liened_num: V16PodU128::new(insurance_face),
+        source_lien_effective_reserved: V16PodU128::new(live_effective),
+        source_lien_counterparty_backing_num: V16PodU128::new(counter_backing),
+        source_lien_insurance_backing_num: V16PodU128::new(insurance_backing),
+        source_lien_fee_last_slot: V16PodU64::new(7),
+        source_claim_impaired_num: V16PodU128::new(prior_impaired_face),
+        source_lien_impaired_effective_reserved: V16PodU128::new(prior_impaired_effective as u128),
+        source_lien_capital_at_risk_fee_revenue: V16PodU128::new(live_fee as u128),
+        source_lien_impaired_capital_at_risk_fee_revenue: V16PodU128::new(impaired_fee as u128),
+    };
+
+    let (after, impaired_effective) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_account_counterparty_lien_impairment(source)
+            .unwrap();
+
+    kani::cover!(
+        insurance_face_atoms > 0,
+        "counterparty expiry preserves a mixed insurance-backed lien"
+    );
+    kani::cover!(
+        prior_impaired_face_atoms > 0,
+        "counterparty expiry composes with prior impaired face"
+    );
+    kani::cover!(
+        live_fee > 0,
+        "counterparty expiry preserves accrued fee revenue"
+    );
+    assert_eq!(impaired_effective, counter_effective as u128);
+    assert_eq!(after.domain.get(), source.domain.get());
+    assert_eq!(
+        after.source_claim_market_id.get(),
+        source.source_claim_market_id.get()
+    );
+    assert_eq!(
+        after.source_claim_bound_num.get(),
+        source.source_claim_bound_num.get()
+    );
+    assert_eq!(after.source_claim_liened_num.get(), insurance_face);
+    assert_eq!(after.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(
+        after.source_claim_insurance_liened_num.get(),
+        source.source_claim_insurance_liened_num.get()
+    );
+    assert_eq!(
+        after.source_claim_impaired_num.get(),
+        prior_impaired_face + counter_face
+    );
+    assert_eq!(
+        after.source_claim_liened_num.get() + after.source_claim_impaired_num.get(),
+        source.source_claim_liened_num.get() + source.source_claim_impaired_num.get()
+    );
+    assert_eq!(
+        after.source_lien_effective_reserved.get(),
+        insurance_effective as u128
+    );
+    assert_eq!(after.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(
+        after.source_lien_insurance_backing_num.get(),
+        source.source_lien_insurance_backing_num.get()
+    );
+    assert_eq!(
+        after.source_lien_impaired_effective_reserved.get(),
+        prior_impaired_effective as u128 + counter_effective as u128
+    );
+    assert_eq!(
+        after.source_lien_effective_reserved.get()
+            + after.source_lien_impaired_effective_reserved.get(),
+        source.source_lien_effective_reserved.get()
+            + source.source_lien_impaired_effective_reserved.get()
+    );
+    assert_eq!(after.source_lien_fee_last_slot.get(), 0);
+    assert_eq!(after.source_lien_capital_at_risk_fee_revenue.get(), 0);
+    assert_eq!(
+        after.source_lien_impaired_capital_at_risk_fee_revenue.get(),
+        live_fee as u128 + impaired_fee as u128
+    );
 }

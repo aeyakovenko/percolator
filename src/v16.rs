@@ -716,6 +716,65 @@ impl V16Core {
         Ok((required_face_num, required_backing_num))
     }
 
+    fn prepare_account_counterparty_lien_impairment(
+        mut source: PortfolioSourceDomainV16Account,
+    ) -> V16Result<(PortfolioSourceDomainV16Account, u128)> {
+        let face = source.source_claim_counterparty_liened_num.get();
+        let backing_num = source.source_lien_counterparty_backing_num.get();
+        if face == 0 && backing_num == 0 {
+            return Ok((source, 0));
+        }
+        if face == 0 || backing_num == 0 || backing_num % BOUND_SCALE != 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        let effective = backing_num / BOUND_SCALE;
+        if effective == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+
+        source.source_claim_counterparty_liened_num = V16PodU128::new(0);
+        source.source_claim_liened_num = V16PodU128::new(
+            source
+                .source_claim_liened_num
+                .get()
+                .checked_sub(face)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_claim_impaired_num = V16PodU128::new(
+            source
+                .source_claim_impaired_num
+                .get()
+                .checked_add(face)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        source.source_lien_counterparty_backing_num = V16PodU128::new(0);
+        source.source_lien_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_effective_reserved
+                .get()
+                .checked_sub(effective)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_lien_impaired_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_impaired_effective_reserved
+                .get()
+                .checked_add(effective)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        let live_fee = source.source_lien_capital_at_risk_fee_revenue.get();
+        source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(0);
+        source.source_lien_impaired_capital_at_risk_fee_revenue = V16PodU128::new(
+            source
+                .source_lien_impaired_capital_at_risk_fee_revenue
+                .get()
+                .checked_add(live_fee)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        source.source_lien_fee_last_slot = V16PodU64::new(0);
+        Ok((source, effective))
+    }
+
     #[inline]
     fn validate_bound_num_atom_aligned(bound_num: u128) -> V16Result<()> {
         if bound_num == 0 {
@@ -7664,6 +7723,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn refresh_source_credit_domain_after_mutation(&mut self, domain: usize) -> V16Result<()> {
         self.recompute_source_credit_domain_after_mutation(domain)?;
         self.reservation_encumbrance_proof_for_domain(domain)?
@@ -7883,7 +7943,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    pub fn expire_source_backing_bucket_not_atomic(
+    fn expire_source_backing_bucket_core_not_atomic(
         &mut self,
         domain: usize,
         now_slot: u64,
@@ -7895,7 +7955,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        self.recompute_source_credit_domain_after_mutation(domain)?;
+        self.reservation_encumbrance_proof_for_domain(domain)?
+            .validate()
+    }
+
+    pub fn expire_source_backing_bucket_not_atomic(
+        &mut self,
+        domain: usize,
+        now_slot: u64,
+    ) -> V16Result<()> {
+        self.expire_source_backing_bucket_core_not_atomic(domain, now_slot)?;
+        self.validate_shape()
     }
 
     fn expire_first_lapsed_source_backing_for_account_not_atomic(
@@ -8611,6 +8682,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(Self::account_source_claim_bound_sum_num(account)? != 0)
     }
 
+    fn account_has_lapsed_source_backing(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
+        let current_slot = self.header.current_slot.get();
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let domain = source.domain.get() as usize;
+                let bucket = self.backing_bucket_for_domain(domain)?;
+                let newly_lapsed = bucket.status == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= current_slot;
+                let pending_account_impairment = bucket.status == BackingBucketStatusV16::Impaired
+                    && source.source_lien_counterparty_backing_num.get() != 0;
+                if newly_lapsed || pending_account_impairment {
+                    return Ok(true);
+                }
+            }
+            slot += 1;
+        }
+        Ok(false)
+    }
+
     fn source_claim_unliened_num(account: &PortfolioV16View<'_>, domain: usize) -> V16Result<u128> {
         let source = account.source_domain(domain)?;
         let locked = source
@@ -8743,6 +8838,74 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         );
         account.header.health_cert.valid = 0;
         Ok(effective)
+    }
+
+    fn impair_account_source_credit_counterparty_lien_fields(
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+    ) -> V16Result<u128> {
+        let slot = account
+            .source_domain_slot(domain)?
+            .ok_or(V16Error::InvalidLeg)?;
+        let (source, effective) = V16Core::prepare_account_counterparty_lien_impairment(
+            account.header.source_domains[slot],
+        )?;
+        account.header.source_domains[slot] = source;
+        account.header.health_cert.valid = 0;
+        Ok(effective)
+    }
+
+    fn reconcile_live_account_source_backing_expiry_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Ok(());
+        }
+        let current_slot = self.header.current_slot.get();
+        let mut changed = false;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if !source.is_occupied() {
+                slot += 1;
+                continue;
+            }
+            let domain = source.domain.get() as usize;
+            let bucket_before = self.backing_bucket_for_domain(domain)?;
+            let newly_lapsed = bucket_before.status == BackingBucketStatusV16::Fresh
+                && bucket_before.expiry_slot <= current_slot;
+            let pending_account_impairment = source.source_lien_counterparty_backing_num.get() != 0
+                && (newly_lapsed || bucket_before.status == BackingBucketStatusV16::Impaired);
+            if pending_account_impairment {
+                self.collect_account_backing_utilization_fee_for_domain_not_atomic(
+                    account, domain,
+                )?;
+            }
+            if newly_lapsed {
+                self.expire_source_backing_bucket_core_not_atomic(domain, current_slot)?;
+                changed = true;
+            }
+            if pending_account_impairment {
+                let impaired_backing = self
+                    .backing_bucket_for_domain(domain)?
+                    .impaired_liened_backing_num;
+                if impaired_backing < source.source_lien_counterparty_backing_num.get() {
+                    return Err(V16Error::CounterUnderflow);
+                }
+                Self::impair_account_source_credit_counterparty_lien_fields(account, domain)?;
+                changed = true;
+            }
+            slot += 1;
+        }
+        if !changed {
+            return Ok(());
+        }
+        account.validate_with_market(&self.as_view())?;
+        self.validate_shape()
     }
 
     // Release one domain's counterparty/insurance source-credit lien (returning the
@@ -10980,17 +11143,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 source_claim_sum_num,
             )?;
         }
-        // A source-backed winner can remain Live past the backing bucket's expiry.
-        // The permissionless path commits exactly one canonical expiry transition
-        // per call, then returns before valuation. Repeated auto-cranks drain the
-        // bounded domain set without an O(source-domains) CU cliff.
-        if allow_b_chunk {
-            if let Some(domain) =
-                self.expire_first_lapsed_source_backing_for_account_not_atomic(&account.as_view())?
-            {
-                return Ok(AccountRefreshCertOutcomeV16::SourceBackingExpired(domain));
-            }
-        }
+        self.reconcile_live_account_source_backing_expiry_not_atomic(account)?;
         if decode_bool(account.header.b_stale_state)? && !allow_b_chunk {
             return Err(V16Error::BStale);
         }
@@ -11292,12 +11445,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 V16PodU64::new(self.header.current_slot.get());
             return Ok(0);
         }
+        let mut bucket = self.backing_bucket_for_domain(domain)?;
+        let fee_through_slot = if bucket.expiry_slot == 0 {
+            self.header.current_slot.get()
+        } else {
+            self.header.current_slot.get().min(bucket.expiry_slot)
+        };
         let fee = V16Core::backing_utilization_fee_quote_atoms_for_lien(
             self.header.config.try_to_runtime_shape()?,
             self.source_credit_for_domain(domain)?,
             lien_backing_num,
             last_slot,
-            self.header.current_slot.get(),
+            fee_through_slot,
         )?;
         // Carry the floored-away fractional accrual forward: when the rent quote
         // floors to zero this interval, do NOT advance the fee cursor, so a later
@@ -11308,8 +11467,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         account.header.source_domains[slot].source_lien_fee_last_slot =
-            V16PodU64::new(self.header.current_slot.get());
-        let mut bucket = self.backing_bucket_for_domain(domain)?;
+            V16PodU64::new(fee_through_slot);
         let (charged, next_capital, next_c_tot, next_earnings) =
             apply_backing_utilization_fee_charge(
                 account.header.capital.get(),
@@ -11469,6 +11627,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         b_delta_budget: u128,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
+        self.reconcile_live_account_source_backing_expiry_not_atomic(account)?;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -11899,8 +12058,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// state to the ActionableState summary the self-classifying crank dispatches
     /// from. Each flag is exactly its production eligibility predicate, MODE-
     /// GATED so every flag that can be set has a currently-valid dispatch target:
-    ///   stale            — Live, health cert not current or a settled prior-reset
-    ///                      obligation still needs permissionless detachment
+    ///   stale            — Live, health cert not current, source backing needs expiry
+    ///                      reconciliation, or a settled prior-reset obligation remains
     ///   b_stale          — Live, some active leg flagged b-stale (has_b_stale_leg)
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
@@ -11937,7 +12096,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
         // actionable close work. The `active` flag can linger past that.
         let close_outstanding = ledger.active && ledger.residual_remaining > 0;
-        let stale = live && (!cert_current || reset_obligation_asset.is_some());
+        // Expiry is itself actionable even when price/funding epochs did not move:
+        // refresh atomically expires the aggregate bucket and relabels this
+        // account's counterparty lien as impaired before reading source credit.
+        let stale = live
+            && (!cert_current
+                || reset_obligation_asset.is_some()
+                || self.account_has_lapsed_source_backing(account)?);
         let b_stale = live && Self::has_b_stale_leg(account)?;
         // pending_close is NOT proactively classified: the close-ledger residual is
         // booked ONLY inside the liquidation/resolved path that owns it
