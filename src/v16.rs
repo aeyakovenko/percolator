@@ -737,6 +737,30 @@ impl V16Core {
         Self::bound_num_from_amount(effective_release)
     }
 
+    fn source_lien_fee_after_backing_release(
+        fee_revenue: u128,
+        backing_before: u128,
+        backing_after: u128,
+    ) -> V16Result<u128> {
+        if backing_after > backing_before {
+            return Err(V16Error::InvalidLeg);
+        }
+        if backing_after == 0 || fee_revenue == 0 {
+            return Ok(0);
+        }
+        if backing_after == backing_before {
+            return Ok(fee_revenue);
+        }
+        if backing_before == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        Ok(wide_mul_div_floor_u128(
+            fee_revenue,
+            backing_after,
+            backing_before,
+        ))
+    }
+
     #[inline]
     fn validate_bound_num_atom_aligned(bound_num: u128) -> V16Result<()> {
         if bound_num == 0 {
@@ -8690,20 +8714,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .get()
             .checked_sub(counterparty_backing_release)
             .ok_or(V16Error::CounterUnderflow)?;
-        let fee_revenue_after = if counterparty_backing_after == 0 {
-            0
-        } else {
-            let counterparty_backing_before =
-                source_before.source_lien_counterparty_backing_num.get();
-            if counterparty_backing_before == 0 {
-                return Err(V16Error::InvalidLeg);
-            }
-            wide_mul_div_floor_u128(
-                source_before.source_lien_capital_at_risk_fee_revenue.get(),
-                counterparty_backing_after,
-                counterparty_backing_before,
-            )
-        };
+        let fee_revenue_after = V16Core::source_lien_fee_after_backing_release(
+            source_before.source_lien_capital_at_risk_fee_revenue.get(),
+            source_before.source_lien_counterparty_backing_num.get(),
+            counterparty_backing_after,
+        )?;
 
         let source = &mut account.header.source_domains[slot];
         source.source_claim_liened_num = V16PodU128::new(
@@ -8794,12 +8809,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .get()
                     .min(burn_num);
                 if liened_burn != 0 {
-                    self.burn_account_source_lien_face_not_atomic(
-                        account,
-                        slot,
-                        d,
-                        liened_burn,
-                    )?;
+                    self.burn_account_source_lien_face_not_atomic(account, slot, d, liened_burn)?;
                     burn_num -= liened_burn;
                 }
             }

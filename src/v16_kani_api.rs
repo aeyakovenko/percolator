@@ -704,6 +704,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_source_lien_fee_after_backing_release(
+        fee_revenue: u128,
+        backing_before: u128,
+        backing_after: u128,
+    ) -> V16Result<u128> {
+        V16Core::source_lien_fee_after_backing_release(fee_revenue, backing_before, backing_after)
+    }
+
     pub fn kani_counterparty_cure_atoms_from_scaled_backing(amount: u128) -> V16Result<u128> {
         V16Core::validate_bound_num_atom_aligned(amount)?;
         Ok(amount / BOUND_SCALE)
