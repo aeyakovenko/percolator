@@ -3321,7 +3321,6 @@ fn v16_adl_reduced_basis_caps_exit_to_effective_oi_then_detaches_residue() {
             AutoCrankWorkV16 {
                 now_slot: 1,
                 observations: &[],
-                liquidation_max_close_q: 2 * POS_SCALE,
                 resolved_close_fee_rate_per_slot: 0,
             },
         )
@@ -3378,7 +3377,6 @@ fn v16_auto_crank_migrates_legacy_normal_adl_residue_into_reset_cleanup() {
             AutoCrankWorkV16 {
                 now_slot: 1,
                 observations: &[],
-                liquidation_max_close_q: POS_SCALE,
                 resolved_close_fee_rate_per_slot: 0,
             },
         )

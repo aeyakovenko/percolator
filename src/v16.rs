@@ -1436,6 +1436,17 @@ impl V16Core {
         Ok((long_reduction_q, short_reduction_q))
     }
 
+    /// PRODUCTION KERNEL: cap unilateral close work by the account's stored
+    /// basis and by matched effective OI. Liquidation and owner rebalance share
+    /// this bound so neither can subtract more OI than either side contains.
+    fn kernel_unilateral_close_capacity(
+        stored_abs: u128,
+        oi_eff_long_q: u128,
+        oi_eff_short_q: u128,
+    ) -> u128 {
+        stored_abs.min(oi_eff_long_q).min(oi_eff_short_q)
+    }
+
     /// PRODUCTION KERNEL (roadmap 3A.2 risk-reduction / S-L3, A5.dec rank): the
     /// position-reduction core of liquidation/rebalance. Clamps the requested
     /// close to the leg and produces the toward-zero signed delta:
@@ -13691,9 +13702,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn unilateral_close_capacity(&self, asset_index: usize, stored_abs: u128) -> V16Result<u128> {
         let asset = self.asset_state(asset_index)?;
-        Ok(stored_abs
-            .min(asset.oi_eff_long_q)
-            .min(asset.oi_eff_short_q))
+        Ok(V16Core::kernel_unilateral_close_capacity(
+            stored_abs,
+            asset.oi_eff_long_q,
+            asset.oi_eff_short_q,
+        ))
     }
 
     fn begin_side_reset_if_effective_oi_exhausted(

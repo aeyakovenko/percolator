@@ -512,6 +512,26 @@ impl MarketGroupV16HeaderAccount {
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_kernel_unilateral_close_capacity(
+        stored_abs: u128,
+        oi_eff_long_q: u128,
+        oi_eff_short_q: u128,
+    ) -> u128 {
+        V16Core::kernel_unilateral_close_capacity(stored_abs, oi_eff_long_q, oi_eff_short_q)
+    }
+
+    pub fn kani_kernel_reduce_position_delta(
+        pre_basis_signed: i128,
+        side: SideV16,
+        requested: u128,
+    ) -> V16Result<(u128, i128)> {
+        V16Core::kernel_reduce_position_delta(pre_basis_signed, side, requested)
+    }
+
+    pub fn kani_leg_has_exhausted_effective_oi(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
+        Self::leg_has_exhausted_effective_oi(asset, leg)
+    }
+
     pub fn kani_clear_leg(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
