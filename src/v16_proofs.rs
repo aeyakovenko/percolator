@@ -1579,10 +1579,25 @@ fn contract_check_kernel_quarantine_social_loss_remainder() {
     let explicit_before: u128 = kani::any();
     kani::assume(social_remainder < SOCIAL_LOSS_DEN);
     kani::assume(current_dust < SOCIAL_LOSS_DEN);
-    let _ = V16Core::kernel_quarantine_social_loss_remainder(
+    kani::assume(explicit_before < u128::MAX);
+    let result = V16Core::kernel_quarantine_social_loss_remainder(
         social_remainder,
         current_dust,
         explicit_before,
+    );
+    kani::cover!(
+        current_dust + social_remainder < SOCIAL_LOSS_DEN
+            && result == Ok((current_dust + social_remainder, explicit_before)),
+        "canonical reset remainder can fold without a carry"
+    );
+    kani::cover!(
+        current_dust + social_remainder >= SOCIAL_LOSS_DEN
+            && result
+                == Ok((
+                    current_dust + social_remainder - SOCIAL_LOSS_DEN,
+                    explicit_before + 1,
+                )),
+        "canonical reset remainder can quarantine one explicit loss atom"
     );
 }
 

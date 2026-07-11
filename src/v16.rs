@@ -1965,7 +1965,9 @@ impl V16Core {
     /// fractions can produce at most one whole quote atom; that atom is an
     /// explicit unallocated loss, not account health or payout capacity.
     #[cfg_attr(all(kani, feature = "contracts"), kani::requires(
-        current_dust < SOCIAL_LOSS_DEN && social_remainder < SOCIAL_LOSS_DEN
+        current_dust < SOCIAL_LOSS_DEN
+            && social_remainder < SOCIAL_LOSS_DEN
+            && explicit_before < u128::MAX
     ))]
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
         Ok((dust, explicit)) => {
@@ -1976,7 +1978,7 @@ impl V16Core {
                         .and_then(|carry| carry.checked_mul(SOCIAL_LOSS_DEN))
                         .and_then(|whole| whole.checked_add(*dust))
         }
-        Err(_) => true,
+        Err(_) => false,
     }))]
     pub(crate) fn kernel_quarantine_social_loss_remainder(
         social_remainder: u128,
