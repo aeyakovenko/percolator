@@ -1960,6 +1960,36 @@ impl V16Core {
         }
     }
 
+    /// Move a side-wide B-division remainder into the durable dust/audit
+    /// buckets before the side's weight basis is reset. The two canonical
+    /// fractions can produce at most one whole quote atom; that atom is an
+    /// explicit unallocated loss, not account health or payout capacity.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(
+        current_dust < SOCIAL_LOSS_DEN && social_remainder < SOCIAL_LOSS_DEN
+    ))]
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
+        Ok((dust, explicit)) => {
+            *dust < SOCIAL_LOSS_DEN
+                && explicit.checked_sub(explicit_before).is_some_and(|carry| carry <= 1)
+                && current_dust.checked_add(social_remainder)
+                    == explicit.checked_sub(explicit_before)
+                        .and_then(|carry| carry.checked_mul(SOCIAL_LOSS_DEN))
+                        .and_then(|whole| whole.checked_add(*dust))
+        }
+        Err(_) => true,
+    }))]
+    pub(crate) fn kernel_quarantine_social_loss_remainder(
+        social_remainder: u128,
+        current_dust: u128,
+        explicit_before: u128,
+    ) -> V16Result<(u128, u128)> {
+        let (dust, carry) = Self::kernel_fold_social_loss_dust(current_dust, social_remainder)?;
+        let explicit = explicit_before
+            .checked_add(carry)
+            .ok_or(V16Error::CounterOverflow)?;
+        Ok((dust, explicit))
+    }
+
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
@@ -11283,10 +11313,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.loss_weight_sum_short != 0
             || asset.social_loss_remainder_long_num != 0
             || asset.social_loss_remainder_short_num != 0
-            || asset.social_loss_dust_long_num != 0
-            || asset.social_loss_dust_short_num != 0
-            || asset.explicit_unallocated_loss_long != 0
-            || asset.explicit_unallocated_loss_short != 0
+            // Canonical dust and explicit unallocated loss are durable audit
+            // state, not positions, liabilities, or oracle-reset blockers.
             || asset.mode_long != SideModeV16::Normal
             || asset.mode_short != SideModeV16::Normal
             || slot.pending_domain_loss_barrier_long.get() != 0
@@ -12197,10 +12225,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.loss_weight_sum_short != 0
             || asset.social_loss_remainder_long_num != 0
             || asset.social_loss_remainder_short_num != 0
-            || asset.social_loss_dust_long_num != 0
-            || asset.social_loss_dust_short_num != 0
-            || asset.explicit_unallocated_loss_long != 0
-            || asset.explicit_unallocated_loss_short != 0
+            // Retirement canonicalizes audit-only residue after every real
+            // position, loss index, barrier, and funded stock is empty.
             || spent_blocks_empty
             || !long_source.is_empty_amount_shape()
             || !short_source.is_empty_amount_shape()
@@ -13489,10 +13515,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if asset.oi_eff_long_q != 0 || asset.pending_obligation_count_long != 0 {
                     return Err(V16Error::LockActive);
                 }
-                quarantine_remainder(
-                    &mut asset.social_loss_remainder_long_num,
-                    &mut asset.social_loss_dust_long_num,
+                let (dust, explicit) = V16Core::kernel_quarantine_social_loss_remainder(
+                    asset.social_loss_remainder_long_num,
+                    asset.social_loss_dust_long_num,
+                    asset.explicit_unallocated_loss_long,
                 )?;
+                asset.social_loss_remainder_long_num = 0;
+                asset.social_loss_dust_long_num = dust;
+                asset.explicit_unallocated_loss_long = explicit;
                 asset.k_epoch_start_long = asset.k_long;
                 asset.f_epoch_start_long_num = asset.f_long_num;
                 asset.b_epoch_start_long_num = asset.b_long_num;
@@ -13514,10 +13544,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if asset.oi_eff_short_q != 0 || asset.pending_obligation_count_short != 0 {
                     return Err(V16Error::LockActive);
                 }
-                quarantine_remainder(
-                    &mut asset.social_loss_remainder_short_num,
-                    &mut asset.social_loss_dust_short_num,
+                let (dust, explicit) = V16Core::kernel_quarantine_social_loss_remainder(
+                    asset.social_loss_remainder_short_num,
+                    asset.social_loss_dust_short_num,
+                    asset.explicit_unallocated_loss_short,
                 )?;
+                asset.social_loss_remainder_short_num = 0;
+                asset.social_loss_dust_short_num = dust;
+                asset.explicit_unallocated_loss_short = explicit;
                 asset.k_epoch_start_short = asset.k_short;
                 asset.f_epoch_start_short_num = asset.f_short_num;
                 asset.b_epoch_start_short_num = asset.b_short_num;
@@ -16749,21 +16783,6 @@ fn fraction_ge(lhs_num: u128, lhs_den: u128, rhs_num: u128, rhs_den: u128) -> V1
         .checked_mul(U256::from_u128(lhs_den))
         .ok_or(V16Error::ArithmeticOverflow)?;
     Ok(lhs >= rhs)
-}
-
-fn quarantine_remainder(remainder: &mut u128, dust: &mut u128) -> V16Result<()> {
-    if *remainder == 0 {
-        return Ok(());
-    }
-    let new_dust = dust
-        .checked_add(*remainder)
-        .ok_or(V16Error::ArithmeticOverflow)?;
-    if new_dust >= SOCIAL_LOSS_DEN {
-        return Err(V16Error::RecoveryRequired);
-    }
-    *dust = new_dust;
-    *remainder = 0;
-    Ok(())
 }
 
 fn validate_non_min_i128(v: i128) -> V16Result<()> {
