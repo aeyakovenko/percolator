@@ -16024,8 +16024,8 @@ fn proof_v16_expired_counterparty_lien_impairment_is_exact_relabel() {
         "counterparty expiry composes with prior impaired face"
     );
     kani::cover!(
-        live_fee > 0,
-        "counterparty expiry preserves accrued fee revenue"
+        live_fee > 0 && insurance_effective > 0,
+        "counterparty expiry splits mixed-lien fee revenue"
     );
     assert_eq!(impaired_effective, counter_effective as u128);
     assert_eq!(after.domain.get(), source.domain.get());
@@ -16071,9 +16071,19 @@ fn proof_v16_expired_counterparty_lien_impairment_is_exact_relabel() {
             + source.source_lien_impaired_effective_reserved.get()
     );
     assert_eq!(after.source_lien_fee_last_slot.get(), 0);
-    assert_eq!(after.source_lien_capital_at_risk_fee_revenue.get(), 0);
+    let expected_impaired_fee =
+        (live_fee as u128) * (counter_effective as u128) / (live_effective as u128);
+    assert_eq!(
+        after.source_lien_capital_at_risk_fee_revenue.get(),
+        live_fee as u128 - expected_impaired_fee
+    );
     assert_eq!(
         after.source_lien_impaired_capital_at_risk_fee_revenue.get(),
+        impaired_fee as u128 + expected_impaired_fee
+    );
+    assert_eq!(
+        after.source_lien_capital_at_risk_fee_revenue.get()
+            + after.source_lien_impaired_capital_at_risk_fee_revenue.get(),
         live_fee as u128 + impaired_fee as u128
     );
 }

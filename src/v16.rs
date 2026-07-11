@@ -732,6 +732,8 @@ impl V16Core {
             return Err(V16Error::InvalidLeg);
         }
 
+        Self::crystallize_source_lien_fee_for_effective(&mut source, effective)?;
+
         source.source_claim_counterparty_liened_num = V16PodU128::new(0);
         source.source_claim_liened_num = V16PodU128::new(
             source
@@ -762,17 +764,45 @@ impl V16Core {
                 .checked_add(effective)
                 .ok_or(V16Error::CounterOverflow)?,
         );
+        source.source_lien_fee_last_slot = V16PodU64::new(0);
+        Ok((source, effective))
+    }
+
+    fn crystallize_source_lien_fee_for_effective(
+        source: &mut PortfolioSourceDomainV16Account,
+        impaired_effective: u128,
+    ) -> V16Result<u128> {
+        let live_effective = source.source_lien_effective_reserved.get();
+        if impaired_effective > live_effective {
+            return Err(V16Error::CounterUnderflow);
+        }
         let live_fee = source.source_lien_capital_at_risk_fee_revenue.get();
-        source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(0);
+        let impaired_fee = if impaired_effective == live_effective {
+            live_fee
+        } else if impaired_effective == 0 || live_fee == 0 {
+            0
+        } else {
+            U256::from_u128(live_fee)
+                .checked_mul(U256::from_u128(impaired_effective))
+                .ok_or(V16Error::ArithmeticOverflow)?
+                .checked_div(U256::from_u128(live_effective))
+                .ok_or(V16Error::ArithmeticOverflow)?
+                .try_into_u128()
+                .ok_or(V16Error::ArithmeticOverflow)?
+        };
+        source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(
+            live_fee
+                .checked_sub(impaired_fee)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
         source.source_lien_impaired_capital_at_risk_fee_revenue = V16PodU128::new(
             source
                 .source_lien_impaired_capital_at_risk_fee_revenue
                 .get()
-                .checked_add(live_fee)
+                .checked_add(impaired_fee)
                 .ok_or(V16Error::CounterOverflow)?,
         );
-        source.source_lien_fee_last_slot = V16PodU64::new(0);
-        Ok((source, effective))
+        Ok(impaired_fee)
     }
 
     #[inline]
@@ -8793,35 +8823,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::CounterOverflow)?,
         );
         source.source_lien_insurance_backing_num = V16PodU128::new(0);
-        // Genesis counter: move the pro-rata live capital-at-risk fee revenue to the impaired counter,
-        // matched to the backing capital that actually crystallized. Compute BEFORE shrinking the live
-        // effective reserve (the denominator). Floor rounding keeps dust with the still-live counter
-        // (conservative for residual farming; never over-credits).
-        let live_effective_before = source.source_lien_effective_reserved.get();
-        let live_fee = source.source_lien_capital_at_risk_fee_revenue.get();
-        let fee_to_crystallize = if live_effective_before == 0 || live_fee == 0 {
-            0
-        } else {
-            U256::from_u128(live_fee)
-                .checked_mul(U256::from_u128(effective))
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .checked_div(U256::from_u128(live_effective_before))
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .try_into_u128()
-                .ok_or(V16Error::ArithmeticOverflow)?
-        };
-        source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(
-            live_fee
-                .checked_sub(fee_to_crystallize)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        source.source_lien_impaired_capital_at_risk_fee_revenue = V16PodU128::new(
-            source
-                .source_lien_impaired_capital_at_risk_fee_revenue
-                .get()
-                .checked_add(fee_to_crystallize)
-                .ok_or(V16Error::CounterOverflow)?,
-        );
+        V16Core::crystallize_source_lien_fee_for_effective(source, effective)?;
         source.source_lien_effective_reserved = V16PodU128::new(
             source
                 .source_lien_effective_reserved
