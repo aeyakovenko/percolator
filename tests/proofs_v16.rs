@@ -12576,6 +12576,44 @@ fn proof_v16_source_lien_face_burn_releases_only_required_backing() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_source_lien_fee_proration_tracks_remaining_backing() {
+    let fee_raw: u8 = kani::any();
+    let before_raw: u8 = kani::any();
+    let after_raw: u8 = kani::any();
+    kani::assume(fee_raw <= 32);
+    kani::assume((1..=16).contains(&before_raw));
+    kani::assume(after_raw <= before_raw);
+    let fee = fee_raw as u128;
+    let before = before_raw as u128 * BOUND_SCALE;
+    let after = after_raw as u128 * BOUND_SCALE;
+
+    let remaining = MarketGroupV16ViewMut::<u64>::kani_source_lien_fee_after_backing_release(
+        fee, before, after,
+    )
+    .unwrap();
+
+    kani::cover!(
+        after == before,
+        "unchanged backing preserves all fee history"
+    );
+    kani::cover!(after == 0, "full backing release clears live fee history");
+    kani::cover!(
+        after > 0 && after < before && fee > 0,
+        "partial backing release prorates nonzero fee history"
+    );
+    assert_eq!(remaining, fee * after / before);
+    assert!(remaining <= fee);
+    if after == before {
+        assert_eq!(remaining, fee);
+    }
+    if after == 0 {
+        assert_eq!(remaining, 0);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_residual_reward_credit_is_capped_by_principal_and_crystallized_loss() {
     let crystallized_raw: u8 = kani::any();
     let spent_raw: u8 = kani::any();
