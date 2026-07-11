@@ -13,6 +13,40 @@ pub fn kani_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> b
     V16Core::kernel_auto_crank_lifecycle_dispatchable(lifecycle)
 }
 
+pub fn kani_auto_crank_leg_flags(
+    active: bool,
+    lifecycle: AssetLifecycleV16,
+    basis_pos_q: i128,
+    side_oi_q: u128,
+    side_mode: SideModeV16,
+    asset_epoch: u64,
+    leg_epoch_snap: u64,
+    leg_b_stale: bool,
+) -> (bool, bool, bool, bool) {
+    V16Core::kernel_auto_crank_leg_flags(
+        active,
+        lifecycle,
+        basis_pos_q,
+        side_oi_q,
+        side_mode,
+        asset_epoch,
+        leg_epoch_snap,
+        leg_b_stale,
+    )
+}
+
+pub fn kani_should_clear_prior_reset_obligation(
+    already_cleared: bool,
+    prior_reset_obligation: bool,
+    pending_close_residual: bool,
+) -> bool {
+    V16Core::kernel_should_clear_prior_reset_obligation(
+        already_cleared,
+        prior_reset_obligation,
+        pending_close_residual,
+    )
+}
+
 pub fn kani_first_actionable_slot(flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N]) -> Option<usize> {
     V16Core::first_actionable_slot(flags)
 }

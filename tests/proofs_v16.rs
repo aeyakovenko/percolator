@@ -5,7 +5,8 @@ use percolator::v16::{
     backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
     kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
     kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_auto_crank_lifecycle_dispatchable, kani_available_backing_num_for_source_credit_state,
+    kani_auto_crank_leg_flags, kani_auto_crank_lifecycle_dispatchable,
+    kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
@@ -16,18 +17,18 @@ use percolator::v16::{
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_select_auto_crank_plan,
-    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
-    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
-    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
-    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    kani_should_clear_prior_reset_obligation, kani_source_credit_state_realizable_support_for_face,
+    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
+    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    ActionableSummaryV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
@@ -41,7 +42,7 @@ use percolator::v16::{
     kani_eq_portfolio_account_v16_account,
 };
 use percolator::{
-    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS, MAX_OI_SIDE_Q,
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
@@ -15667,4 +15668,185 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
         dispatchable_mask == 0,
         "Recovery-only account has no fake liquidation target"
     );
+}
+
+// Permissionless liveness theorem for mixed prior-reset obligations and live
+// liquidation candidates. The two symbolic bitmasks cover every multiplicity
+// and ordering across the full production 16-leg account shape. Each refresh
+// removes exactly the first prior-reset obligation, so that rank reaches zero
+// within 16 calls; prior-reset legs are never selected as liquidation work, and
+// the first real live-risk leg is selected once cleanup completes.
+#[kani::proof]
+#[kani::unwind(18)]
+#[kani::solver(cadical)]
+fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
+    let reset_mask: u16 = kani::any();
+    let live_mask: u16 = kani::any();
+    let drain_only_mask: u16 = kani::any();
+    let basis_abs: u128 = kani::any();
+    let live_oi_q: u128 = kani::any();
+    let reset_epoch: u64 = kani::any();
+    let negative_basis: bool = kani::any();
+    kani::assume(reset_mask != 0);
+    kani::assume(live_mask != 0);
+    kani::assume(reset_mask & live_mask == 0);
+    kani::assume((1..=MAX_POSITION_ABS_Q).contains(&basis_abs));
+    kani::assume((1..=MAX_OI_SIDE_Q).contains(&live_oi_q));
+    kani::assume(reset_epoch > 0);
+
+    let basis_pos_q = if negative_basis {
+        -(basis_abs as i128)
+    } else {
+        basis_abs as i128
+    };
+    let mut reset_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut slot = 0usize;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        let bit = 1u16 << slot;
+        let is_reset = reset_mask & bit != 0;
+        let is_live = live_mask & bit != 0;
+        let active = is_reset || is_live;
+        let lifecycle = if drain_only_mask & bit != 0 {
+            AssetLifecycleV16::DrainOnly
+        } else {
+            AssetLifecycleV16::Active
+        };
+        let side_mode = if is_reset {
+            SideModeV16::ResetPending
+        } else {
+            SideModeV16::Normal
+        };
+        let asset_epoch = if is_reset { reset_epoch } else { 0 };
+        let leg_epoch_snap = if is_reset { reset_epoch - 1 } else { 0 };
+        let side_oi_q = if is_live { live_oi_q } else { 0 };
+        let (b_stale, refresh, liquidatable, reset_obligation) = kani_auto_crank_leg_flags(
+            active,
+            lifecycle,
+            basis_pos_q,
+            side_oi_q,
+            side_mode,
+            asset_epoch,
+            leg_epoch_snap,
+            false,
+        );
+
+        assert!(!b_stale);
+        assert_eq!(refresh, active);
+        assert_eq!(liquidatable, is_live);
+        assert_eq!(reset_obligation, is_reset);
+        assert!(!(liquidatable && reset_obligation));
+        refresh_flags[slot] = refresh;
+        liquidation_flags[slot] = liquidatable;
+        reset_flags[slot] = reset_obligation;
+        slot += 1;
+    }
+
+    let initial_reset_count = reset_mask.count_ones();
+    let first_reset = kani_first_actionable_slot(reset_flags).unwrap();
+    let first_live = kani_first_actionable_slot(liquidation_flags).unwrap();
+    kani::cover!(
+        initial_reset_count == 1,
+        "single reset obligation is reachable"
+    );
+    kani::cover!(
+        initial_reset_count > 1,
+        "multiple reset obligations are reachable"
+    );
+    kani::cover!(first_reset < first_live, "reset can precede live risk");
+    kani::cover!(first_live < first_reset, "live risk can precede reset");
+    kani::cover!(
+        drain_only_mask & (reset_mask | live_mask) != 0,
+        "DrainOnly legs share the bounded progress classification"
+    );
+
+    let mut calls = 0usize;
+    while calls < V16_MAX_PORTFOLIO_ASSETS_N {
+        let mut pre_reset_count = 0u32;
+        slot = 0;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            pre_reset_count += reset_flags[slot] as u32;
+            slot += 1;
+        }
+        if pre_reset_count != 0 {
+            let selected_reset = kani_first_actionable_slot(reset_flags).unwrap();
+            let refresh_asset = kani_first_actionable_slot(refresh_flags);
+            let plan = kani_select_auto_crank_plan(
+                ActionableSummaryV16 {
+                    stale: true,
+                    b_stale: false,
+                    pending_close: false,
+                    expired_close: false,
+                    liquidatable: false,
+                    recovery_eligible: false,
+                    resolved_winner: false,
+                },
+                0,
+                first_live,
+                refresh_asset,
+                PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+            );
+            assert_eq!(
+                plan,
+                AutoCrankPlanV16::RefreshAccount {
+                    asset_index: refresh_asset
+                }
+            );
+
+            let mut already_cleared = false;
+            slot = 0;
+            while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+                if kani_should_clear_prior_reset_obligation(
+                    already_cleared,
+                    reset_flags[slot],
+                    false,
+                ) {
+                    assert_eq!(slot, selected_reset);
+                    reset_flags[slot] = false;
+                    refresh_flags[slot] = false;
+                    already_cleared = true;
+                }
+                slot += 1;
+            }
+            assert!(already_cleared);
+
+            let mut post_reset_count = 0u32;
+            slot = 0;
+            while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+                post_reset_count += reset_flags[slot] as u32;
+                slot += 1;
+            }
+            assert_eq!(post_reset_count + 1, pre_reset_count);
+        }
+        calls += 1;
+    }
+
+    assert!(kani_first_actionable_slot(reset_flags).is_none());
+    let selected_live = kani_first_actionable_slot(liquidation_flags).unwrap();
+    assert_eq!(selected_live, first_live);
+    let final_plan = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: false,
+            b_stale: false,
+            pending_close: false,
+            expired_close: false,
+            liquidatable: true,
+            recovery_eligible: false,
+            resolved_winner: false,
+        },
+        0,
+        selected_live,
+        kani_first_actionable_slot(refresh_flags),
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    );
+    assert_eq!(
+        final_plan,
+        AutoCrankPlanV16::Liquidate {
+            asset_index: first_live
+        }
+    );
+
+    assert!(!kani_should_clear_prior_reset_obligation(false, true, true));
+    assert!(!kani_should_clear_prior_reset_obligation(true, true, false));
 }
