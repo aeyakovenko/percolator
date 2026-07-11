@@ -1532,6 +1532,16 @@ impl V16Core {
         None
     }
 
+    /// PRODUCTION KERNEL: ordinary refresh accrual and liquidation can target
+    /// only a live or draining asset. Recovery legs remain account obligations,
+    /// but selecting one as the action asset would deterministically fail.
+    fn kernel_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> bool {
+        matches!(
+            lifecycle,
+            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+        )
+    }
+
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
     /// summary and the ENGINE-selected assets, choose the single highest-priority
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
@@ -11695,9 +11705,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let leg = account.header.legs[slot].try_to_runtime()?;
             let active = active_bitmap_get(bitmap, slot) && leg.active;
             if active {
-                dispatchable_flags[slot] = matches!(
+                dispatchable_flags[slot] = V16Core::kernel_auto_crank_lifecycle_dispatchable(
                     self.asset_state(leg.asset_index as usize)?.lifecycle,
-                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
                 );
             }
             b_stale_flags[slot] = active && leg.b_stale;

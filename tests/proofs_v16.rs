@@ -5,20 +5,21 @@ use percolator::v16::{
     backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
     kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
     kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_available_backing_num_for_source_credit_state,
+    kani_auto_crank_lifecycle_dispatchable, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
-    kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
+    kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
+    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    kani_prepare_asset_recovery_transition, kani_select_auto_crank_plan,
+    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
+    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
@@ -15401,4 +15402,147 @@ fn proof_v16_backing_utilization_zero_fee_carries_accrual_forward() {
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+}
+
+// Permissionless mixed-lifecycle liveness theorem. Symbolic masks cover every
+// ordering and multiplicity across the full 16-leg account shape. Recovery
+// obligations must never be selected as ordinary refresh/liquidation targets;
+// when any Active or DrainOnly leg exists, first-match selection and both plans
+// must carry a dispatchable leg. Recovery-only portfolios advertise no fake
+// liquidation target.
+#[kani::proof]
+#[kani::unwind(18)]
+#[kani::solver(cadical)]
+fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
+    let recovery_mask: u16 = kani::any();
+    let active_mask: u16 = kani::any();
+    let drain_only_mask: u16 = kani::any();
+    kani::assume(recovery_mask != 0);
+    kani::assume(recovery_mask & active_mask == 0);
+    kani::assume(recovery_mask & drain_only_mask == 0);
+    kani::assume(active_mask & drain_only_mask == 0);
+
+    let dispatchable_mask = active_mask | drain_only_mask;
+    let mut dispatchable_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut slot = 0usize;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        let bit = 1u16 << slot;
+        let lifecycle = if recovery_mask & bit != 0 {
+            AssetLifecycleV16::Recovery
+        } else if active_mask & bit != 0 {
+            AssetLifecycleV16::Active
+        } else if drain_only_mask & bit != 0 {
+            AssetLifecycleV16::DrainOnly
+        } else {
+            AssetLifecycleV16::Retired
+        };
+        let dispatchable = kani_auto_crank_lifecycle_dispatchable(lifecycle);
+        assert_eq!(dispatchable, dispatchable_mask & bit != 0);
+        dispatchable_flags[slot] = dispatchable;
+        slot += 1;
+    }
+
+    let selected = kani_first_actionable_slot(dispatchable_flags);
+    let mut recovery_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    slot = 0;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        recovery_flags[slot] = recovery_mask & (1u16 << slot) != 0;
+        slot += 1;
+    }
+    let first_recovery = kani_first_actionable_slot(recovery_flags).unwrap();
+
+    if dispatchable_mask == 0 {
+        assert!(selected.is_none());
+        let plan = kani_select_auto_crank_plan(
+            ActionableSummaryV16 {
+                stale: false,
+                b_stale: false,
+                pending_close: false,
+                expired_close: false,
+                liquidatable: false,
+                recovery_eligible: false,
+                resolved_winner: false,
+            },
+            0,
+            0,
+            None,
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        );
+        assert_eq!(plan, AutoCrankPlanV16::NoAction);
+    } else {
+        let selected = selected.unwrap();
+        let selected_bit = 1u16 << selected;
+        assert!(dispatchable_mask & selected_bit != 0);
+        assert!(recovery_mask & selected_bit == 0);
+        slot = 0;
+        while slot < selected {
+            assert!(dispatchable_mask & (1u16 << slot) == 0);
+            slot += 1;
+        }
+
+        let refresh = kani_select_auto_crank_plan(
+            ActionableSummaryV16 {
+                stale: true,
+                b_stale: false,
+                pending_close: false,
+                expired_close: false,
+                liquidatable: false,
+                recovery_eligible: false,
+                resolved_winner: false,
+            },
+            0,
+            selected,
+            Some(selected),
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        );
+        assert_eq!(
+            refresh,
+            AutoCrankPlanV16::RefreshAccount {
+                asset_index: Some(selected)
+            }
+        );
+        let liquidate = kani_select_auto_crank_plan(
+            ActionableSummaryV16 {
+                stale: false,
+                b_stale: false,
+                pending_close: false,
+                expired_close: false,
+                liquidatable: true,
+                recovery_eligible: false,
+                resolved_winner: false,
+            },
+            0,
+            selected,
+            Some(selected),
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        );
+        assert_eq!(
+            liquidate,
+            AutoCrankPlanV16::Liquidate {
+                asset_index: selected
+            }
+        );
+
+        kani::cover!(
+            first_recovery < selected,
+            "Recovery obligation can precede dispatchable work"
+        );
+        kani::cover!(
+            selected < first_recovery,
+            "dispatchable work can precede Recovery obligation"
+        );
+        kani::cover!(
+            active_mask & selected_bit != 0,
+            "Active candidate is selected"
+        );
+        kani::cover!(
+            drain_only_mask & selected_bit != 0,
+            "DrainOnly candidate is selected"
+        );
+    }
+
+    kani::cover!(
+        dispatchable_mask == 0,
+        "Recovery-only account has no fake liquidation target"
+    );
 }

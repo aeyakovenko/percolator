@@ -3108,7 +3108,6 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
     let work = AutoCrankWorkV16 {
         now_slot: 10,
         observations: &obs,
-        liquidation_max_close_q: POS_SCALE,
         resolved_close_fee_rate_per_slot: 0,
     };
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
