@@ -1,6 +1,6 @@
 use percolator::{
-    auto_crank_plan_requires_caller_observation, AutoCrankObservationV16, AutoCrankOutcomeV16,
-    AutoCrankPlanV16, AutoCrankWorkV16,
+    active_bitmap_is_empty, auto_crank_plan_requires_caller_observation, AutoCrankObservationV16,
+    AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankWorkV16,
 };
 use percolator::{
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
@@ -10,10 +10,11 @@ use percolator::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
-    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
-    SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
+    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
+    SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error, V16PodI128, V16PodU128,
+    V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -800,6 +801,72 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         ),
         value_before
     );
+}
+
+#[test]
+fn v16_resolved_close_detaches_adl_basis_above_effective_oi() {
+    const STORED_Q: u128 = 13 * POS_SCALE;
+    const EFFECTIVE_Q: u128 = 10 * POS_SCALE;
+
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 22);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, 100).unwrap();
+        market.resolve_market_not_atomic(1).unwrap();
+    }
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.a_long = ADL_ONE * EFFECTIVE_Q / STORED_Q;
+    asset.oi_eff_long_q = EFFECTIVE_Q;
+    asset.oi_eff_short_q = 0;
+    asset.stored_pos_count_long = 1;
+    asset.loss_weight_sum_long = STORED_Q;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: signed_q(STORED_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: STORED_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("terminal close must saturate ADL-reduced effective OI");
+
+    assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: 100 });
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(account.header.capital.get(), 0);
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset_after.oi_eff_long_q, 0);
+    assert_eq!(asset_after.stored_pos_count_long, 0);
+    assert_eq!(asset_after.loss_weight_sum_long, 0);
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.c_tot.get(), 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 }
 
 #[test]

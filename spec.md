@@ -1495,6 +1495,8 @@ For every recovered account, the engine MUST compute `recovery_value_transfer_bo
 
 Recovery preserves and reconciles `SourceCreditState`, insurance-credit reservations, lien buckets including impaired buckets, liens, close ledgers, pending obligations, B/ADL/support progress, and payout ledgers. It cannot erase ledgered progress and recompute gross loss. Recovery direct positive payout must use resolved receipts or pay no positive junior value.
 
+Resolved terminal leg detachment is ADL-aware. For a current-epoch leg it removes `min(abs(stored_basis_q), remaining_OI_eff_side)` from effective OI while removing the leg's full stored-position count and loss weight; for a leg whose side aggregates were already cleared by a prior reset, it removes only the stored record. Thus quantity ADL cannot leave a basis record that underflows effective OI and permanently blocks resolved close. This terminal metadata step does not move quote value.
+
 Resolved payout is progressive and source-domain based:
 1. initialize a `ResolvedPayoutLedger` after terminal losses, insurance, source-credit liens, barriers, and obligations are settled/reserved;
 2. disable ordinary positive-PnL withdrawals/releases;

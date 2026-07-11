@@ -1629,6 +1629,53 @@ fn contract_check_kernel_clear_leg() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_clear_resolved_leg)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_clear_resolved_leg() {
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let basis_pos_q: i128 = kani::any();
+    kani::assume(basis_pos_q > i128::MIN);
+    let leg = PortfolioLegV16 {
+        active: true,
+        side,
+        basis_pos_q,
+        epoch_snap: kani::any(),
+        loss_weight: kani::any(),
+        b_rem: kani::any(),
+        ..PortfolioLegV16::EMPTY
+    };
+    let mut asset = AssetStateV16::default();
+    asset.oi_eff_long_q = kani::any();
+    asset.oi_eff_short_q = kani::any();
+    asset.stored_pos_count_long = kani::any();
+    asset.stored_pos_count_short = kani::any();
+    asset.pending_obligation_count_long = kani::any();
+    asset.pending_obligation_count_short = kani::any();
+    asset.loss_weight_sum_long = kani::any();
+    asset.loss_weight_sum_short = kani::any();
+    asset.social_loss_dust_long_num = kani::any();
+    asset.social_loss_dust_short_num = kani::any();
+    asset.epoch_long = kani::any();
+    asset.epoch_short = kani::any();
+    asset.mode_long = if kani::any() {
+        SideModeV16::Normal
+    } else {
+        SideModeV16::ResetPending
+    };
+    asset.mode_short = if kani::any() {
+        SideModeV16::Normal
+    } else {
+        SideModeV16::ResetPending
+    };
+    let _ = V16Core::kernel_clear_resolved_leg(leg, asset);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::kernel_advance_leg_b_snap)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
