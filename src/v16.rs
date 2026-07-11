@@ -1533,6 +1533,39 @@ impl V16Core {
         None
     }
 
+    /// PRODUCTION KERNEL: classify the liquidation terminals known before
+    /// residual-capacity work. `None` means the single-leg path must continue.
+    fn kernel_liquidation_recovery_before_residual(
+        uncovered_loss: u128,
+        active_leg_count: u32,
+    ) -> Option<bool> {
+        if uncovered_loss == 0 {
+            Some(false)
+        } else if active_leg_count > 1 {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// PRODUCTION KERNEL: classify terminals after the engine computes its
+    /// bounded close. `None` means residual capacity decides the outcome.
+    fn kernel_liquidation_recovery_after_close(
+        close_q: u128,
+        leaves_uncovered_loss_with_open_risk: bool,
+        residual_after_principal_and_insurance: u128,
+    ) -> Option<bool> {
+        if close_q == 0 {
+            Some(false)
+        } else if leaves_uncovered_loss_with_open_risk {
+            Some(true)
+        } else if residual_after_principal_and_insurance == 0 {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
     /// summary and the ENGINE-selected assets, choose the single highest-priority
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
@@ -11636,17 +11669,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.header.pnl.get(),
             account.header.capital.get(),
         );
-        if uncovered_loss == 0 {
-            return Ok(false);
-        }
         let active_bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        if active_bitmap
+        let active_leg_count = active_bitmap
             .iter()
             .map(|word| word.count_ones())
-            .sum::<u32>()
-            > 1
+            .sum::<u32>();
+        if let Some(requires_recovery) =
+            V16Core::kernel_liquidation_recovery_before_residual(uncovered_loss, active_leg_count)
         {
-            return Ok(true);
+            return Ok(requires_recovery);
         }
         let residual_after_principal_and_insurance = self
             .liquidation_residual_after_principal_and_insurance(asset_index, leg.side, account)?;
@@ -11665,21 +11696,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         let (close_q, _) =
             V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, close_request_q)?;
-        if close_q == 0 {
-            return Ok(false);
-        }
-        if liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            account.header.pnl.get(),
-            account.header.capital.get(),
-            account.header.active_bitmap.map(V16PodU64::get),
-            leg_slot,
+        let leaves_uncovered_loss_with_open_risk =
+            liquidation_close_would_leave_uncovered_loss_with_open_risk(
+                account.header.pnl.get(),
+                account.header.capital.get(),
+                account.header.active_bitmap.map(V16PodU64::get),
+                leg_slot,
+                close_q,
+                leg.basis_pos_q.unsigned_abs(),
+            )?;
+        if let Some(requires_recovery) = V16Core::kernel_liquidation_recovery_after_close(
             close_q,
-            leg.basis_pos_q.unsigned_abs(),
-        )? {
-            return Ok(true);
-        }
-        if residual_after_principal_and_insurance == 0 {
-            return Ok(false);
+            leaves_uncovered_loss_with_open_risk,
+            residual_after_principal_and_insurance,
+        ) {
+            return Ok(requires_recovery);
         }
         Ok(self.bankruptcy_residual_single_step_capacity(
             asset_index,

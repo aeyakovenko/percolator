@@ -9,6 +9,41 @@
 use super::*;
 use crate::wide_math::U256;
 
+pub fn kani_liquidation_recovery_before_residual(
+    uncovered_loss: u128,
+    active_leg_count: u32,
+) -> Option<bool> {
+    V16Core::kernel_liquidation_recovery_before_residual(uncovered_loss, active_leg_count)
+}
+
+pub fn kani_liquidation_recovery_after_close(
+    close_q: u128,
+    leaves_uncovered_loss_with_open_risk: bool,
+    residual_after_principal_and_insurance: u128,
+) -> Option<bool> {
+    V16Core::kernel_liquidation_recovery_after_close(
+        close_q,
+        leaves_uncovered_loss_with_open_risk,
+        residual_after_principal_and_insurance,
+    )
+}
+
+pub fn kani_select_auto_crank_plan(
+    summary: ActionableSummaryV16,
+    b_stale_slot: usize,
+    liq_slot: usize,
+    refresh_asset: Option<usize>,
+    recovery_reason: PermissionlessRecoveryReasonV16,
+) -> AutoCrankPlanV16 {
+    V16Core::select_auto_crank_plan(
+        summary,
+        b_stale_slot,
+        liq_slot,
+        refresh_asset,
+        recovery_reason,
+    )
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,
