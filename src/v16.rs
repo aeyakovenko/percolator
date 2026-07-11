@@ -1992,6 +1992,28 @@ impl V16Core {
         Ok((dust, explicit))
     }
 
+    /// A unilateral close mutates both effective-OI sides. If the liquidated
+    /// side itself reaches zero while other stored legs remain, those legs
+    /// need the same old-epoch reset route as the matching side; otherwise
+    /// they remain live-looking but cannot reduce or use the dead-leg route.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &bool| {
+        *result == (effective_oi == 0
+            && stored_position_count != 0
+            && pending_obligation_count == 0
+            && mode != SideModeV16::ResetPending)
+    }))]
+    pub(crate) fn kernel_side_needs_full_drain_reset(
+        effective_oi: u128,
+        stored_position_count: u64,
+        pending_obligation_count: u64,
+        mode: SideModeV16,
+    ) -> bool {
+        effective_oi == 0
+            && stored_position_count != 0
+            && pending_obligation_count == 0
+            && mode != SideModeV16::ResetPending
+    }
+
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
@@ -13630,6 +13652,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_asset_state(asset_index, asset)?;
         if opp_oi_after == 0 {
             self.begin_full_drain_reset_inner(asset_index, opp)?;
+        }
+        let asset = self.asset_state(asset_index)?;
+        let (closed_oi, closed_stored, closed_pending, closed_mode) = match closed_side {
+            SideV16::Long => (
+                asset.oi_eff_long_q,
+                asset.stored_pos_count_long,
+                asset.pending_obligation_count_long,
+                asset.mode_long,
+            ),
+            SideV16::Short => (
+                asset.oi_eff_short_q,
+                asset.stored_pos_count_short,
+                asset.pending_obligation_count_short,
+                asset.mode_short,
+            ),
+        };
+        if V16Core::kernel_side_needs_full_drain_reset(
+            closed_oi,
+            closed_stored,
+            closed_pending,
+            closed_mode,
+        ) {
+            self.begin_full_drain_reset_inner(asset_index, closed_side)?;
         }
         Ok(())
     }

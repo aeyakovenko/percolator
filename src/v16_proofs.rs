@@ -1602,6 +1602,27 @@ fn contract_check_kernel_quarantine_social_loss_remainder() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_side_needs_full_drain_reset)]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_side_needs_full_drain_reset() {
+    let effective_oi: u128 = kani::any();
+    let stored_position_count: u64 = kani::any();
+    let pending_obligation_count: u64 = kani::any();
+    let mode = match kani::any::<u8>() % 3 {
+        0 => SideModeV16::Normal,
+        1 => SideModeV16::DrainOnly,
+        _ => SideModeV16::ResetPending,
+    };
+    let _ = V16Core::kernel_side_needs_full_drain_reset(
+        effective_oi,
+        stored_position_count,
+        pending_obligation_count,
+        mode,
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::kernel_clear_leg)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
