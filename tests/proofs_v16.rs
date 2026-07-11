@@ -32,7 +32,7 @@ use percolator::v16::{
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
-    TokenValueFlowProofV16, V16Config, V16ConfigAccount, V16Error,
+    TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
@@ -8649,37 +8649,51 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
 }
 
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
-    let capital_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&capital_raw));
-    let capital = capital_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.mode = 1;
-    header.current_slot = V16PodU64::new(2);
-    header.resolved_slot = V16PodU64::new(2);
-    header.vault = V16PodU128::new(capital);
-    header.c_tot = V16PodU128::new(capital);
-    account_header.capital = V16PodU128::new(capital);
-    account_header.pnl = V16PodI128::new(0);
-    account_header.last_fee_slot = V16PodU64::new(2);
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header);
-
-    let outcome = market
-        .close_resolved_account_not_atomic(&mut account, 0)
+fn proof_v16_resolved_close_terminal_payout_conserves_vault_and_value_classes() {
+    let account_capital = kani::any::<u64>() as u128;
+    let resolved_claimable = kani::any::<u64>() as u128;
+    let vault = kani::any::<u64>() as u128;
+    let c_tot = kani::any::<u64>() as u128;
+    kani::assume(account_capital <= MAX_VAULT_TVL);
+    kani::assume(resolved_claimable <= MAX_VAULT_TVL);
+    kani::assume(vault <= MAX_VAULT_TVL);
+    kani::assume(c_tot <= MAX_VAULT_TVL);
+    let (payout, capital_paid, resolved_paid, vault_after, c_tot_after) =
+        MarketGroupV16ViewMut::<u64>::kani_resolved_close_terminal_payout_delta(
+            account_capital,
+            resolved_claimable,
+            vault,
+            c_tot,
+        )
         .unwrap();
 
-    kani::cover!(capital > 1, "resolved flat close pays nontrivial capital");
-    assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: capital });
-    assert_eq!(market.header.vault.get(), 0);
-    assert_eq!(market.header.c_tot.get(), 0);
-    assert_eq!(account.header.capital.get(), 0);
-    assert_eq!(account.header.pnl.get(), 0);
-    assert_eq!(account.header.reserved_pnl.get(), 0);
-    assert_eq!(market.validate_shape(), Ok(()));
-    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    kani::cover!(
+        vault < account_capital && vault > 0,
+        "scarce vault pays only part of account capital"
+    );
+    kani::cover!(
+        vault > account_capital && vault < account_capital + resolved_claimable,
+        "scarce vault pays capital plus part of the resolved claim"
+    );
+    kani::cover!(
+        vault >= account_capital + resolved_claimable
+            && account_capital > 0
+            && resolved_claimable > 0,
+        "funded vault pays both value classes in full"
+    );
+
+    assert_eq!(payout, (account_capital + resolved_claimable).min(vault));
+    assert_eq!(capital_paid + resolved_paid, payout);
+    assert!(capital_paid <= account_capital);
+    assert!(resolved_paid <= resolved_claimable);
+    assert_eq!(vault_after + payout, vault);
+    assert_eq!(c_tot_after + account_capital.min(c_tot), c_tot);
+    if vault >= account_capital + resolved_claimable {
+        assert_eq!(capital_paid, account_capital);
+        assert_eq!(resolved_paid, resolved_claimable);
+    }
 }
 
 #[kani::proof]

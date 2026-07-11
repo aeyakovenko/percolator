@@ -1139,6 +1139,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.create_resolved_payout_receipt_if_needed(account)
     }
 
+    pub fn kani_resolved_close_terminal_payout_delta(
+        account_capital: u128,
+        resolved_claimable: u128,
+        vault: u128,
+        c_tot: u128,
+    ) -> V16Result<(u128, u128, u128, u128, u128)> {
+        V16Core::resolved_close_terminal_payout_delta(
+            account_capital,
+            resolved_claimable,
+            vault,
+            c_tot,
+        )
+    }
+
     pub fn kani_claim_resolved_payout_topup_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

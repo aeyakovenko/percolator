@@ -1373,6 +1373,33 @@ impl V16Core {
         (payout, new_vault)
     }
 
+    fn resolved_close_terminal_payout_delta(
+        account_capital: u128,
+        resolved_claimable: u128,
+        vault: u128,
+        c_tot: u128,
+    ) -> V16Result<(u128, u128, u128, u128, u128)> {
+        let payout = account_capital
+            .checked_add(resolved_claimable)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .min(vault);
+        let capital_paid = account_capital.min(payout);
+        let resolved_paid = payout
+            .checked_sub(capital_paid)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let vault_after = vault
+            .checked_sub(payout)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let c_tot_after = c_tot.saturating_sub(account_capital.min(c_tot));
+        Ok((
+            payout,
+            capital_paid,
+            resolved_paid,
+            vault_after,
+            c_tot_after,
+        ))
+    }
+
     /// PRODUCTION KERNEL (roadmap 3A.1 trade spine): classify a position change
     /// from (current signed, new signed) into its leg route — the EXACT total
     /// decision the position-delta body dispatches on. `delta != 0` is enforced
@@ -15688,14 +15715,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             0
         };
         let account_capital = account.header.capital.get();
-        let payout = account_capital
-            .checked_add(pnl_payout)
-            .ok_or(V16Error::ArithmeticOverflow)?
-            .min(self.header.vault.get());
-        let capital_paid = account_capital.min(payout);
-        let resolved_paid = payout
-            .checked_sub(capital_paid)
-            .ok_or(V16Error::CounterUnderflow)?;
+        let vault_before = self.header.vault.get();
+        let (payout, capital_paid, resolved_paid, vault_after, c_tot_after) =
+            V16Core::resolved_close_terminal_payout_delta(
+                account_capital,
+                pnl_payout,
+                vault_before,
+                self.header.c_tot.get(),
+            )?;
         if let Some(mut receipt) = payout_receipt {
             receipt = apply_resolved_payout_receipt_payment(receipt, resolved_paid)?;
             account.header.resolved_payout_receipt =
@@ -15705,20 +15732,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // (insolvency bad-debt shortfall is not an open obligation) so this close fully
         // settles instead of leaving the portfolio stuck present-but-unfinalized.
         self.clear_fully_diluted_resolved_receipt_if_terminal(account)?;
-        let vault_before = self.header.vault.get();
-        self.header.vault = V16PodU128::new(
-            self.header
-                .vault
-                .get()
-                .checked_sub(payout)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        self.header.c_tot = V16PodU128::new(
-            self.header
-                .c_tot
-                .get()
-                .saturating_sub(account_capital.min(self.header.c_tot.get())),
-        );
+        self.header.vault = V16PodU128::new(vault_after);
+        self.header.c_tot = V16PodU128::new(c_tot_after);
         self.set_account_pnl(account, 0)?;
         account.header.capital = V16PodU128::new(0);
         account.header.reserved_pnl = V16PodU128::new(0);
