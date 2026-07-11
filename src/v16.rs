@@ -1542,6 +1542,52 @@ impl V16Core {
         )
     }
 
+    fn kernel_is_prior_reset_obligation(
+        side_mode: SideModeV16,
+        asset_epoch: u64,
+        leg_epoch_snap: u64,
+    ) -> bool {
+        side_mode == SideModeV16::ResetPending && leg_epoch_snap.checked_add(1) == Some(asset_epoch)
+    }
+
+    /// PRODUCTION KERNEL: classify one account leg for the bounded auto-crank
+    /// scans. A prior-reset obligation remains refreshable but can never be
+    /// dispatched as liquidation work because its effective OI was removed by
+    /// the reset.
+    fn kernel_auto_crank_leg_flags(
+        active: bool,
+        lifecycle: AssetLifecycleV16,
+        basis_pos_q: i128,
+        side_oi_q: u128,
+        side_mode: SideModeV16,
+        asset_epoch: u64,
+        leg_epoch_snap: u64,
+        leg_b_stale: bool,
+    ) -> (bool, bool, bool, bool) {
+        let lifecycle_dispatchable = Self::kernel_auto_crank_lifecycle_dispatchable(lifecycle);
+        let prior_reset_obligation =
+            Self::kernel_is_prior_reset_obligation(side_mode, asset_epoch, leg_epoch_snap);
+        let refresh = active && lifecycle_dispatchable;
+        let liquidatable = refresh && basis_pos_q != 0 && side_oi_q != 0 && !prior_reset_obligation;
+        (
+            active && leg_b_stale,
+            refresh,
+            liquidatable,
+            active && prior_reset_obligation,
+        )
+    }
+
+    /// PRODUCTION KERNEL: a refresh detaches at most one settled prior-reset
+    /// obligation. A pending close residual owns the account and blocks this
+    /// cleanup until its own continuation advances.
+    fn kernel_should_clear_prior_reset_obligation(
+        already_cleared: bool,
+        prior_reset_obligation: bool,
+        pending_close_residual: bool,
+    ) -> bool {
+        !already_cleared && prior_reset_obligation && !pending_close_residual
+    }
+
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
     /// summary and the ENGINE-selected assets, choose the single highest-priority
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
@@ -10833,14 +10879,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // K/F/B claims are settled above, detaching it is bookkeeping, not
             // a position close. Clear at most one per call to keep max-shape CU
             // bounded; the classifier keeps another obligation actionable.
-            if !reset_obligation_cleared
-                && Self::leg_is_prior_reset_obligation(asset, refreshed)
-                && !account
-                    .header
-                    .close_progress
-                    .try_to_runtime()?
-                    .has_pending_residual()
+            let should_clear_reset = if reset_obligation_cleared
+                || !Self::leg_is_prior_reset_obligation(asset, refreshed)
             {
+                false
+            } else {
+                V16Core::kernel_should_clear_prior_reset_obligation(
+                    false,
+                    true,
+                    account
+                        .header
+                        .close_progress
+                        .try_to_runtime()?
+                        .has_pending_residual(),
+                )
+            };
+            if should_clear_reset {
                 self.clear_leg(account, asset_index)?;
                 reset_obligation_cleared = true;
                 slot += 1;
@@ -11722,16 +11776,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// first_actionable_slot contract; the slot->asset_index and lifecycle filter
     /// are bound to production state here.
     fn leg_is_prior_reset_obligation(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
-        match leg.side {
-            SideV16::Long => {
-                asset.mode_long == SideModeV16::ResetPending
-                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_long)
-            }
-            SideV16::Short => {
-                asset.mode_short == SideModeV16::ResetPending
-                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
-            }
-        }
+        let (side_mode, asset_epoch) = match leg.side {
+            SideV16::Long => (asset.mode_long, asset.epoch_long),
+            SideV16::Short => (asset.mode_short, asset.epoch_short),
+        };
+        V16Core::kernel_is_prior_reset_obligation(side_mode, asset_epoch, leg.epoch_snap)
     }
 
     fn auto_crank_selected_assets(
@@ -11749,23 +11798,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let active = active_bitmap_get(bitmap, slot) && leg.active;
             if active {
                 let asset = self.asset_state(leg.asset_index as usize)?;
-                let lifecycle_dispatchable = matches!(
-                    asset.lifecycle,
-                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
-                );
-                refresh_flags[slot] = lifecycle_dispatchable;
-                let side_oi = match leg.side {
-                    SideV16::Long => asset.oi_eff_long_q,
-                    SideV16::Short => asset.oi_eff_short_q,
+                let (side_oi, side_mode, asset_epoch) = match leg.side {
+                    SideV16::Long => (asset.oi_eff_long_q, asset.mode_long, asset.epoch_long),
+                    SideV16::Short => (asset.oi_eff_short_q, asset.mode_short, asset.epoch_short),
                 };
-                let prior_reset_obligation = Self::leg_is_prior_reset_obligation(asset, leg);
-                reset_obligation_flags[slot] = prior_reset_obligation;
-                liquidation_flags[slot] = lifecycle_dispatchable
-                    && leg.basis_pos_q != 0
-                    && side_oi != 0
-                    && !prior_reset_obligation;
+                let (b_stale, refresh, liquidatable, reset_obligation) =
+                    V16Core::kernel_auto_crank_leg_flags(
+                        true,
+                        asset.lifecycle,
+                        leg.basis_pos_q,
+                        side_oi,
+                        side_mode,
+                        asset_epoch,
+                        leg.epoch_snap,
+                        leg.b_stale,
+                    );
+                b_stale_flags[slot] = b_stale;
+                refresh_flags[slot] = refresh;
+                liquidation_flags[slot] = liquidatable;
+                reset_obligation_flags[slot] = reset_obligation;
             }
-            b_stale_flags[slot] = active && leg.b_stale;
             slot += 1;
         }
         let asset_of = |s: Option<usize>| -> V16Result<Option<usize>> {
