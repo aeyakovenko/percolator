@@ -2788,9 +2788,14 @@ fn v16_expired_counterparty_source_lien_is_impaired_before_health_read() {
     );
     assert!(matches!(
         crank.outcome,
-        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::SourceBackingExpired {
+            domain: 1
+        })
     ));
-    let cert = long.header.health_cert.try_to_runtime().unwrap();
+    assert!(
+        !long.header.health_cert.try_to_runtime().unwrap().valid,
+        "the bounded expiry step must not certify before reading the impaired state"
+    );
 
     let source = long.header.source_domains[0];
     let bucket = market.markets[0]
@@ -2831,6 +2836,22 @@ fn v16_expired_counterparty_source_lien_is_impaired_before_health_read() {
             .get(),
         lien_before.source_lien_effective_reserved.get()
     );
+
+    let refresh = market
+        .permissionless_auto_crank_not_atomic(
+            &mut long,
+            AutoCrankWorkV16 {
+                now_slot: 4,
+                observations: &observations,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the next bounded crank must certify from the impaired state");
+    assert!(matches!(
+        refresh.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+    ));
+    let cert = long.header.health_cert.try_to_runtime().unwrap();
     assert!(cert.valid);
     assert_eq!(cert.certified_equity, long.header.capital.get() as i128);
     market.validate_shape().unwrap();

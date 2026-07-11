@@ -7999,32 +7999,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    fn expire_first_lapsed_source_backing_for_account_not_atomic(
-        &mut self,
-        account: &PortfolioV16View<'_>,
-    ) -> V16Result<Option<usize>> {
-        let current_slot = self.header.current_slot.get();
-        let mut slot = 0usize;
-        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = account.header.source_domains[slot];
-            if source.has_default_sparse_tag() && !source.is_occupied() {
-                break;
-            }
-            if source.is_occupied() {
-                let domain = source.domain.get() as usize;
-                let bucket = self.backing_bucket_for_domain(domain)?;
-                if bucket.status == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot <= current_slot
-                {
-                    self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
-                    return Ok(Some(domain));
-                }
-            }
-            slot += 1;
-        }
-        Ok(None)
-    }
-
     #[cfg(any(kani, feature = "fuzz"))]
     pub fn create_source_credit_lien_from_counterparty_not_atomic(
         &mut self,
@@ -8857,15 +8831,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(effective)
     }
 
-    fn reconcile_live_account_source_backing_expiry_not_atomic(
+    fn reconcile_first_live_account_source_backing_expiry_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<()> {
+    ) -> V16Result<Option<usize>> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
-            return Ok(());
+            return Ok(None);
         }
         let current_slot = self.header.current_slot.get();
-        let mut changed = false;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = account.header.source_domains[slot];
@@ -8889,7 +8862,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             if newly_lapsed {
                 self.expire_source_backing_bucket_core_not_atomic(domain, current_slot)?;
-                changed = true;
             }
             if pending_account_impairment {
                 let impaired_backing = self
@@ -8899,15 +8871,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     return Err(V16Error::CounterUnderflow);
                 }
                 Self::impair_account_source_credit_counterparty_lien_fields(account, domain)?;
-                changed = true;
+            }
+            if newly_lapsed || pending_account_impairment {
+                account.validate_with_market(&self.as_view())?;
+                self.validate_shape()?;
+                return Ok(Some(domain));
             }
             slot += 1;
         }
-        if !changed {
-            return Ok(());
-        }
-        account.validate_with_market(&self.as_view())?;
-        self.validate_shape()
+        Ok(None)
     }
 
     // Release one domain's counterparty/insurance source-credit lien (returning the
@@ -11145,7 +11117,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 source_claim_sum_num,
             )?;
         }
-        self.reconcile_live_account_source_backing_expiry_not_atomic(account)?;
+        if allow_b_chunk {
+            if let Some(domain) =
+                self.reconcile_first_live_account_source_backing_expiry_not_atomic(account)?
+            {
+                return Ok(AccountRefreshCertOutcomeV16::SourceBackingExpired(domain));
+            }
+        } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live
+            && self.account_has_lapsed_source_backing(&account.as_view())?
+        {
+            return Err(V16Error::Stale);
+        }
         if decode_bool(account.header.b_stale_state)? && !allow_b_chunk {
             return Err(V16Error::BStale);
         }
@@ -11629,7 +11611,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         b_delta_budget: u128,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
-        self.reconcile_live_account_source_backing_expiry_not_atomic(account)?;
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Live
+            && self.account_has_lapsed_source_backing(&account.as_view())?
+        {
+            return Err(V16Error::Stale);
+        }
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
