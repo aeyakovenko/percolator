@@ -9,6 +9,13 @@
 use super::*;
 use crate::wide_math::U256;
 
+pub fn kani_clear_resolved_leg(
+    leg: PortfolioLegV16,
+    asset: AssetStateV16,
+) -> V16Result<AssetStateV16> {
+    V16Core::kernel_clear_resolved_leg(leg, asset)
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,

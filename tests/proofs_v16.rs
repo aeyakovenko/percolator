@@ -8,8 +8,8 @@ use percolator::v16::{
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
-    kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
+    kani_clear_resolved_leg, kani_expected_source_credit_rate_num_for_state,
+    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
@@ -15401,4 +15401,143 @@ fn proof_v16_backing_utilization_zero_fee_carries_accrual_forward() {
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+}
+
+// Terminal ADL liveness theorem over the production clear kernel. A stored
+// settlement basis may exceed effective OI after quantity ADL; every such record
+// still detaches on either side, while prior-reset records cannot debit the reset
+// side a second time and neither path mutates opposite-side aggregates.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_leg_clear_closes_every_adl_gap_without_cross_side_mutation() {
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let prior_reset: bool = kani::any();
+    let stored_raw: u16 = kani::any();
+    let effective_raw: u16 = kani::any();
+    let trailing_weight_raw: u16 = kani::any();
+    let count_raw: u8 = kani::any();
+    let epoch_raw: u8 = kani::any();
+    let b_rem_raw: u16 = kani::any();
+    kani::assume((1..=1024).contains(&stored_raw));
+    kani::assume(effective_raw < stored_raw);
+    kani::assume(count_raw > 0);
+    kani::assume(epoch_raw < u8::MAX);
+
+    let stored_q = stored_raw as u128 * POS_SCALE;
+    let effective_q = effective_raw as u128 * POS_SCALE;
+    let trailing_weight = trailing_weight_raw as u128 * POS_SCALE;
+    let basis = i128::try_from(stored_q).unwrap();
+    let leg = PortfolioLegV16 {
+        active: true,
+        side,
+        basis_pos_q: if side == SideV16::Long { basis } else { -basis },
+        epoch_snap: epoch_raw as u64,
+        loss_weight: stored_q,
+        b_rem: b_rem_raw as u128,
+        ..PortfolioLegV16::EMPTY
+    };
+    let mut asset = AssetStateV16::default();
+    asset.oi_eff_long_q = if side == SideV16::Long {
+        effective_q
+    } else {
+        7 * POS_SCALE
+    };
+    asset.oi_eff_short_q = if side == SideV16::Short {
+        effective_q
+    } else {
+        11 * POS_SCALE
+    };
+    asset.stored_pos_count_long = if side == SideV16::Long {
+        count_raw as u64
+    } else {
+        5
+    };
+    asset.stored_pos_count_short = if side == SideV16::Short {
+        count_raw as u64
+    } else {
+        3
+    };
+    asset.loss_weight_sum_long = if side == SideV16::Long {
+        stored_q + trailing_weight
+    } else {
+        13 * POS_SCALE
+    };
+    asset.loss_weight_sum_short = if side == SideV16::Short {
+        stored_q + trailing_weight
+    } else {
+        17 * POS_SCALE
+    };
+    if side == SideV16::Long {
+        asset.epoch_long = epoch_raw as u64 + u64::from(prior_reset);
+        asset.mode_long = if prior_reset {
+            SideModeV16::ResetPending
+        } else {
+            SideModeV16::Normal
+        };
+    } else {
+        asset.epoch_short = epoch_raw as u64 + u64::from(prior_reset);
+        asset.mode_short = if prior_reset {
+            SideModeV16::ResetPending
+        } else {
+            SideModeV16::Normal
+        };
+    }
+    let before = asset;
+
+    let after = kani_clear_resolved_leg(leg, asset).unwrap();
+
+    kani::cover!(
+        side == SideV16::Long && !prior_reset && effective_raw > 0 && b_rem_raw > 0,
+        "current-epoch long closes a strict ADL gap and discards terminal B residue"
+    );
+    kani::cover!(
+        side == SideV16::Short && !prior_reset && effective_raw > 0,
+        "current-epoch short closes a strict ADL gap"
+    );
+    kani::cover!(
+        prior_reset && effective_raw > 0,
+        "prior-reset record detaches without debiting reset side aggregates"
+    );
+
+    match side {
+        SideV16::Long => {
+            assert_eq!(after.stored_pos_count_long, count_raw as u64 - 1);
+            assert_eq!(after.stored_pos_count_short, before.stored_pos_count_short);
+            assert_eq!(after.oi_eff_short_q, before.oi_eff_short_q);
+            assert_eq!(after.loss_weight_sum_short, before.loss_weight_sum_short);
+            if prior_reset {
+                assert_eq!(after.oi_eff_long_q, before.oi_eff_long_q);
+                assert_eq!(after.loss_weight_sum_long, before.loss_weight_sum_long);
+            } else {
+                assert_eq!(after.oi_eff_long_q, 0);
+                assert_eq!(after.loss_weight_sum_long, trailing_weight);
+            }
+        }
+        SideV16::Short => {
+            assert_eq!(after.stored_pos_count_short, count_raw as u64 - 1);
+            assert_eq!(after.stored_pos_count_long, before.stored_pos_count_long);
+            assert_eq!(after.oi_eff_long_q, before.oi_eff_long_q);
+            assert_eq!(after.loss_weight_sum_long, before.loss_weight_sum_long);
+            if prior_reset {
+                assert_eq!(after.oi_eff_short_q, before.oi_eff_short_q);
+                assert_eq!(after.loss_weight_sum_short, before.loss_weight_sum_short);
+            } else {
+                assert_eq!(after.oi_eff_short_q, 0);
+                assert_eq!(after.loss_weight_sum_short, trailing_weight);
+            }
+        }
+    }
+    assert_eq!(
+        after.social_loss_dust_long_num,
+        before.social_loss_dust_long_num
+    );
+    assert_eq!(
+        after.social_loss_dust_short_num,
+        before.social_loss_dust_short_num
+    );
 }
