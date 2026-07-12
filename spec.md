@@ -1465,6 +1465,7 @@ Trades require:
 - current B/K/F settlement for touched legs;
 - side-mode gating;
 - OI/position bounds;
+- post-trade initial margin for risk-increasing fills; a matched fill that strictly reduces both counterparties' absolute positions MUST remain admissible below initial margin so fragmented exits can make bounded progress;
 - candidate-slippage neutralization;
 - lien creation for positive credit used beyond no-positive-credit equity;
 - matched-side loss recognition before gain extractability;

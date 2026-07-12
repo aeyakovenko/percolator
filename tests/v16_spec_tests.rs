@@ -700,6 +700,70 @@ fn v16_trade_keeps_two_sided_risk_reduction_open_during_side_recovery() {
 }
 
 #[test]
+fn v16_two_sided_reduction_does_not_require_same_fill_im_recovery() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 20);
+    let mut short_header = account_fixture(1, 21);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(10 * POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    // Move both accounts below IM without changing position direction. This models the public
+    // margin-gap/recovery state produced by an adverse mark or an accrued account fee.
+    assert_eq!(
+        market
+            .sync_account_fee_to_slot_not_atomic(&mut long, 1, 150)
+            .unwrap(),
+        150
+    );
+    assert_eq!(
+        market
+            .sync_account_fee_to_slot_not_atomic(&mut short, 1, 150)
+            .unwrap(),
+        150
+    );
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .expect("a matched reduction must make progress even when one fill cannot restore IM");
+
+    let long_leg = long.header.legs[0].try_to_runtime().unwrap();
+    let short_leg = short.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(long_leg.basis_pos_q, signed_q(9 * POS_SCALE));
+    assert_eq!(short_leg.basis_pos_q, -signed_q(9 * POS_SCALE));
+    let long_cert = long.header.health_cert.try_to_runtime().unwrap();
+    let short_cert = short.header.health_cert.try_to_runtime().unwrap();
+    assert!((long_cert.certified_equity as u128) < long_cert.certified_initial_req);
+    assert!((short_cert.certified_equity as u128) < short_cert.certified_initial_req);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
     const SURVIVOR_Q: u128 = 13 * POS_SCALE;
     const MATCHED_Q: u128 = 10 * POS_SCALE;
