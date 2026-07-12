@@ -3540,6 +3540,41 @@ fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate(
 }
 
 #[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_bankruptcy_hlock_attribution_is_asset_local_and_fail_closed() {
+    let related_lock: bool = kani::any();
+    let unrelated_lock: bool = kani::any();
+    let (mut header, mut markets, mut account_header) = two_market_view_fixture();
+    header.bankruptcy_hlock_active = 1;
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(1);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(related_lock as u128);
+    markets[1].engine.insurance_domain_spent_long = V16PodU128::new(unrelated_lock as u128);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let only_unrelated = market
+        .kani_bankruptcy_hlock_is_only_unrelated_to_account(&account.as_view())
+        .unwrap();
+
+    kani::cover!(
+        only_unrelated,
+        "an attributed unrelated bankruptcy h-lock does not freeze the account"
+    );
+    kani::cover!(
+        related_lock && !only_unrelated,
+        "a related bankruptcy h-lock remains fail-closed"
+    );
+    kani::cover!(
+        !related_lock && !unrelated_lock && !only_unrelated,
+        "an unattributed global bankruptcy h-lock remains fail-closed"
+    );
+    assert_eq!(only_unrelated, unrelated_lock && !related_lock);
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_view_trade_position_delta_preserves_oi_symmetry() {

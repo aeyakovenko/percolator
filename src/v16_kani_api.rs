@@ -864,6 +864,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.h_lock_lane(account, instruction_bankruptcy_candidate)
     }
 
+    pub fn kani_bankruptcy_hlock_is_only_unrelated_to_account(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        self.bankruptcy_hlock_is_only_unrelated_to_account(account)
+    }
+
     pub fn kani_can_ignore_unrelated_loss_stale_for_trade(
         &self,
         long_account: &PortfolioV16View<'_>,

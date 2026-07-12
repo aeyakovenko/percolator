@@ -12308,9 +12308,91 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(false)
     }
 
+    fn asset_has_bankruptcy_lock_state(&self, asset_index: usize) -> V16Result<bool> {
+        let asset = self.asset_state(asset_index)?;
+        let slot = self.markets[asset_index].engine_slot();
+        Ok(asset.mode_long != SideModeV16::Normal
+            || asset.mode_short != SideModeV16::Normal
+            || asset.b_long_num != 0
+            || asset.b_short_num != 0
+            || asset.b_epoch_start_long_num != 0
+            || asset.b_epoch_start_short_num != 0
+            || asset.social_loss_remainder_long_num != 0
+            || asset.social_loss_remainder_short_num != 0
+            || asset.social_loss_dust_long_num != 0
+            || asset.social_loss_dust_short_num != 0
+            || asset.explicit_unallocated_loss_long != 0
+            || asset.explicit_unallocated_loss_short != 0
+            || slot.insurance_domain_spent_long.get() != 0
+            || slot.insurance_domain_spent_short.get() != 0
+            || slot.pending_domain_loss_barrier_long.get() != 0
+            || slot.pending_domain_loss_barrier_short.get() != 0)
+    }
+
+    fn account_references_asset(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+    ) -> V16Result<bool> {
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active && leg.asset_index as usize == asset_index {
+                return Ok(true);
+            }
+            slot += 1;
+        }
+        slot = 0;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let domain = source.domain.get() as usize;
+                self.domain_asset_side(domain)?;
+                if domain / 2 == asset_index {
+                    return Ok(true);
+                }
+            }
+            slot += 1;
+        }
+        let close = account.header.close_progress.try_to_runtime()?;
+        Ok(close.active && close.asset_index as usize == asset_index)
+    }
+
+    fn bankruptcy_hlock_is_only_unrelated_to_account(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        if !decode_bool(self.header.bankruptcy_hlock_active)? {
+            return Ok(false);
+        }
+        let configured_assets = self.header.config.max_market_slots.get() as usize;
+        let mut found_attributed_lock = false;
+        let mut asset_index = 0usize;
+        while asset_index < configured_assets {
+            if self.asset_has_bankruptcy_lock_state(asset_index)? {
+                found_attributed_lock = true;
+                if self.account_references_asset(account, asset_index)? {
+                    return Ok(false);
+                }
+            }
+            asset_index += 1;
+        }
+        // A bare global bit without a local witness remains conservative. This preserves
+        // corrupted/unattributed-state handling while allowing public attributed bankruptcies to
+        // stay inside their source domain.
+        Ok(found_attributed_lock)
+    }
+
     fn ensure_favorable_action_allowed(&self, account: &PortfolioV16View<'_>) -> V16Result<()> {
         account.validate_with_market(&self.as_view())?;
-        if self.h_lock_lane(Some(account), false)? == HLockLaneV16::HMax {
+        let ignore_unrelated_bankruptcy_hlock =
+            self.bankruptcy_hlock_is_only_unrelated_to_account(account)?;
+        if self.h_lock_lane_scoped(Some(account), false, !ignore_unrelated_bankruptcy_hlock)?
+            == HLockLaneV16::HMax
+        {
             return Err(V16Error::LockActive);
         }
         self.ensure_favorable_action_current_certificate(account)?;
@@ -12456,10 +12538,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ))
     }
 
-    fn h_lock_lane(
+    fn h_lock_lane_scoped(
         &self,
         account: Option<&PortfolioV16View<'_>>,
         instruction_bankruptcy_candidate: bool,
+        bankruptcy_hlock_applies: bool,
     ) -> V16Result<HLockLaneV16> {
         if let Some(account) = account {
             if decode_bool(account.header.stale_state)?
@@ -12481,13 +12564,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         if decode_bool(self.header.threshold_stress_active)?
-            || decode_bool(self.header.bankruptcy_hlock_active)?
+            || (bankruptcy_hlock_applies && decode_bool(self.header.bankruptcy_hlock_active)?)
             || decode_market_mode(self.header.mode)? == MarketModeV16::Recovery
             || instruction_bankruptcy_candidate
         {
             return Ok(HLockLaneV16::HMax);
         }
         Ok(HLockLaneV16::HMin)
+    }
+
+    fn h_lock_lane(
+        &self,
+        account: Option<&PortfolioV16View<'_>>,
+        instruction_bankruptcy_candidate: bool,
+    ) -> V16Result<HLockLaneV16> {
+        self.h_lock_lane_scoped(account, instruction_bankruptcy_candidate, true)
     }
 
     fn asset_has_target_effective_lag(&self, asset_index: usize) -> V16Result<bool> {

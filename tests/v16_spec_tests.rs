@@ -2793,6 +2793,90 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
     market.validate_shape().unwrap();
 }
 
+fn source_backed_conversion_hlock_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+    u128,
+) {
+    let (mut header, mut markets) = market_fixture(2, 1);
+    let mut account = account_fixture(2, 118);
+    let claim = 20u128;
+    let claim_num = claim * BOUND_SCALE;
+    header.vault = V16PodU128::new(claim);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    account.pnl = V16PodI128::new(claim as i128);
+    account.source_domains[0].domain = V16PodU32::new(0);
+    account.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account_view = PortfolioV16ViewMut::new(&mut account);
+        market
+            .full_account_refresh_not_atomic(&mut account_view)
+            .unwrap();
+    }
+    (header, markets, account, claim)
+}
+
+#[test]
+fn v16_unrelated_bankruptcy_hlock_does_not_freeze_source_backed_conversion() {
+    let (mut header, mut markets, mut account, claim) = source_backed_conversion_hlock_fixture();
+    header.bankruptcy_hlock_active = 1;
+    markets[1].engine.asset.mode_long = SideModeV16::ResetPending as u8;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account_view = PortfolioV16ViewMut::new(&mut account);
+    let converted = market
+        .convert_released_pnl_to_capital_not_atomic(&mut account_view)
+        .expect("asset-1 bankruptcy cannot freeze asset-0 source-backed PnL");
+    assert_eq!(converted, claim);
+    assert_eq!(account_view.header.capital.get(), claim);
+    assert_eq!(account_view.header.pnl.get(), 0);
+    market.validate_shape().unwrap();
+    account_view
+        .validate_with_market(&market.as_view())
+        .unwrap();
+}
+
+#[test]
+fn v16_related_or_unattributed_bankruptcy_hlock_still_blocks_conversion() {
+    for related in [false, true] {
+        let (mut header, mut markets, mut account, _) = source_backed_conversion_hlock_fixture();
+        header.bankruptcy_hlock_active = 1;
+        if related {
+            markets[0].engine.asset.mode_long = SideModeV16::ResetPending as u8;
+        }
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account_view = PortfolioV16ViewMut::new(&mut account);
+        assert_eq!(
+            market.convert_released_pnl_to_capital_not_atomic(&mut account_view),
+            Err(V16Error::LockActive),
+            "same-asset and unattributed hlocks remain conservative"
+        );
+    }
+}
+
 #[test]
 fn v16_sparse_source_domains_reject_unoccupied_tagged_slot() {
     let (mut header, mut markets) = market_fixture(1, 1);
