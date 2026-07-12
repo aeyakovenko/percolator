@@ -12312,24 +12312,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn asset_has_bankruptcy_lock_state(&self, asset_index: usize) -> V16Result<bool> {
-        let asset = self.asset_state(asset_index)?;
-        let slot = self.markets[asset_index].engine_slot();
-        Ok(asset.mode_long != SideModeV16::Normal
-            || asset.mode_short != SideModeV16::Normal
-            || asset.b_long_num != 0
-            || asset.b_short_num != 0
-            || asset.b_epoch_start_long_num != 0
-            || asset.b_epoch_start_short_num != 0
-            || asset.social_loss_remainder_long_num != 0
-            || asset.social_loss_remainder_short_num != 0
-            || asset.social_loss_dust_long_num != 0
-            || asset.social_loss_dust_short_num != 0
-            || asset.explicit_unallocated_loss_long != 0
-            || asset.explicit_unallocated_loss_short != 0
-            || slot.insurance_domain_spent_long.get() != 0
-            || slot.insurance_domain_spent_short.get() != 0
-            || slot.pending_domain_loss_barrier_long.get() != 0
-            || slot.pending_domain_loss_barrier_short.get() != 0)
+        self.validate_configured_asset_index(asset_index)?;
+        bankruptcy_asset_slot_has_lock_state(self.markets[asset_index].engine_slot())
     }
 
     fn account_references_bankrupt_asset(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
@@ -16662,6 +16646,26 @@ pub fn bankruptcy_hlock_fully_attributed_from_wire(value: u8) -> V16Result<bool>
         2 => Ok(true),
         _ => Err(V16Error::InvalidConfig),
     }
+}
+
+pub fn bankruptcy_asset_slot_has_lock_state(slot: &EngineAssetSlotV16Account) -> V16Result<bool> {
+    let asset = slot.asset.try_to_runtime()?;
+    Ok(asset.mode_long != SideModeV16::Normal
+        || asset.mode_short != SideModeV16::Normal
+        || asset.b_long_num != 0
+        || asset.b_short_num != 0
+        || asset.b_epoch_start_long_num != 0
+        || asset.b_epoch_start_short_num != 0
+        || asset.social_loss_remainder_long_num != 0
+        || asset.social_loss_remainder_short_num != 0
+        || asset.social_loss_dust_long_num != 0
+        || asset.social_loss_dust_short_num != 0
+        || asset.explicit_unallocated_loss_long != 0
+        || asset.explicit_unallocated_loss_short != 0
+        || slot.insurance_domain_spent_long.get() != 0
+        || slot.insurance_domain_spent_short.get() != 0
+        || slot.pending_domain_loss_barrier_long.get() != 0
+        || slot.pending_domain_loss_barrier_short.get() != 0)
 }
 
 fn encode_side(value: SideV16) -> u8 {
