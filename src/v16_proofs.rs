@@ -2819,6 +2819,108 @@ fn closure_asset_one_short_bankruptcy_insurance_is_domain_isolated() {
     prove_bankruptcy_insurance_domain_isolation::<1, false>();
 }
 
+// Liquidation preflight must not treat insurance in any wrong side/asset as
+// durable capacity. With the exact opposing domain empty and every other domain
+// funded, the only safe bounded outcome is RecoveryRequired.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_liquidation_preflight_cannot_borrow_other_domains<
+    const ASSET: usize,
+    const BANKRUPT_LONG: bool,
+>() {
+    assert!(ASSET < 2);
+    let bankrupt_side = if BANKRUPT_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let loss_raw: u8 = kani::any();
+    kani::assume((1..=2).contains(&loss_raw));
+    let loss = loss_raw as u128;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(2);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(2);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(2);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(2);
+    if BANKRUPT_LONG {
+        markets[ASSET].engine.insurance_domain_budget_short = V16PodU128::new(0);
+    } else {
+        markets[ASSET].engine.insurance_domain_budget_long = V16PodU128::new(0);
+    }
+    header.vault = V16PodU128::new(6);
+    header.insurance = V16PodU128::new(6);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(6);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let account_before = account_header;
+    let header_before = header;
+    let mut expected_header = header_before;
+    expected_header.mode = encode_market_mode(MarketModeV16::Recovery);
+    expected_header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    ));
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result =
+        market.preflight_liquidation_residual_durability(ASSET, bankrupt_side, &account.as_view());
+
+    kani::cover!(
+        loss == 2,
+        "preflight isolation covers a multi-atom uncovered residual"
+    );
+    assert_eq!(result, Err(V16Error::RecoveryRequired));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_asset_zero_long_preflight_cannot_borrow_other_domains() {
+    prove_liquidation_preflight_cannot_borrow_other_domains::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_asset_zero_short_preflight_cannot_borrow_other_domains() {
+    prove_liquidation_preflight_cannot_borrow_other_domains::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_asset_one_long_preflight_cannot_borrow_other_domains() {
+    prove_liquidation_preflight_cannot_borrow_other_domains::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_asset_one_short_preflight_cannot_borrow_other_domains() {
+    prove_liquidation_preflight_cannot_borrow_other_domains::<1, false>();
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
