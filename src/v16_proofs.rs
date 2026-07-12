@@ -3147,6 +3147,65 @@ fn closure_asset_one_short_residual_books_only_to_long_domain() {
     prove_bankruptcy_residual_booking_isolation::<1, false>();
 }
 
+// Resolved unattributed bad debt has no defensible asset/domain payer. The
+// production route must clear the terminal account liability for liveness while
+// leaving every funded stock and asset/domain ledger byte-for-byte unchanged.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_resolved_unattributed_bad_debt_is_value_and_domain_neutral() {
+    let loss_raw: u8 = kani::any();
+    kani::assume((1..=2).contains(&loss_raw));
+    let loss = loss_raw as i128;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.resolved_slot = header.current_slot;
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-loss);
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut expected_header = header_before;
+    expected_header.bankruptcy_hlock_active = 1;
+    expected_header.negative_pnl_account_count = V16PodU64::new(0);
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.residual();
+    let result = market.settle_resolved_bankruptcy_negative_pnl(&mut account);
+
+    kani::cover!(
+        loss == 2,
+        "resolved unattributed close clears a multi-atom terminal liability"
+    );
+    assert_eq!(result, Ok(()));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1],
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.residual(), residual_before);
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
