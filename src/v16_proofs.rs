@@ -3458,6 +3458,171 @@ fn closure_resolved_bankruptcy_attribution_is_unique_and_ledger_authoritative() 
     assert_eq!(ambiguous, None);
 }
 
+// Safe shutdown liveness over the wrapper-used public forfeit route. Once an
+// asset is in Recovery, a clean current leg must detach in one call without
+// moving any token-value stock or touching another asset. The selected side's
+// OI/count/weight and the global payout-blocker count fall exactly once; the
+// opposite side remains available for its owner to detach independently.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_clean_recovery_leg_forfeit_is_value_neutral_and_asset_local<
+    const ASSET: usize,
+    const LONG: bool,
+>() {
+    assert!(ASSET < 2);
+    let side = if LONG { SideV16::Long } else { SideV16::Short };
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+
+    let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: match side {
+            SideV16::Long => POS_SCALE as i128,
+            SideV16::Short => -(POS_SCALE as i128),
+        },
+        a_basis: ADL_ONE,
+        k_snap: match side {
+            SideV16::Long => asset.k_long,
+            SideV16::Short => asset.k_short,
+        },
+        f_snap: match side {
+            SideV16::Long => asset.f_long_num,
+            SideV16::Short => asset.f_short_num,
+        },
+        epoch_snap: match side {
+            SideV16::Long => asset.epoch_long,
+            SideV16::Short => asset.epoch_short,
+        },
+        loss_weight: POS_SCALE,
+        b_snap: match side {
+            SideV16::Long => asset.b_long_num,
+            SideV16::Short => asset.b_short_num,
+        },
+        b_epoch_snap: match side {
+            SideV16::Long => asset.epoch_long,
+            SideV16::Short => asset.epoch_short,
+        },
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let other = 1 - ASSET;
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(1);
+    let mut expected_selected = markets_before[ASSET];
+    let mut expected_asset = asset;
+    match side {
+        SideV16::Long => {
+            expected_asset.oi_eff_long_q = 0;
+            expected_asset.stored_pos_count_long = 0;
+            expected_asset.loss_weight_sum_long = 0;
+        }
+        SideV16::Short => {
+            expected_asset.oi_eff_short_q = 0;
+            expected_asset.stored_pos_count_short = 0;
+            expected_asset.loss_weight_sum_short = 0;
+        }
+    }
+    expected_selected.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    let mut expected_account = account_before;
+    expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    expected_account.active_bitmap = V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new);
+    expected_account.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.residual();
+    let outcome = market
+        .forfeit_recovery_leg_not_atomic(&mut account, ASSET, 1)
+        .unwrap();
+
+    kani::cover!(
+        outcome.detached,
+        "clean recovery forfeit reaches the successful detach branch"
+    );
+    assert_eq!(
+        outcome,
+        DeadLegForfeitOutcomeV16 {
+            detached: true,
+            positive_pnl_forfeited: 0,
+            loss_settled: 0,
+            support_consumed: 0,
+            junior_face_burned: 0,
+            principal_used: 0,
+            insurance_used: 0,
+            residual_booked: 0,
+            explicit_loss: 0,
+        }
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[other],
+        &market.markets[other].engine
+    ));
+    assert_eq!(market.residual(), residual_before);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn closure_asset_zero_long_clean_recovery_forfeit_is_local() {
+    prove_clean_recovery_leg_forfeit_is_value_neutral_and_asset_local::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn closure_asset_zero_short_clean_recovery_forfeit_is_local() {
+    prove_clean_recovery_leg_forfeit_is_value_neutral_and_asset_local::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn closure_asset_one_long_clean_recovery_forfeit_is_local() {
+    prove_clean_recovery_leg_forfeit_is_value_neutral_and_asset_local::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn closure_asset_one_short_clean_recovery_forfeit_is_local() {
+    prove_clean_recovery_leg_forfeit_is_value_neutral_and_asset_local::<1, false>();
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
