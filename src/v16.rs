@@ -12403,6 +12403,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn mark_bankruptcy_hlock_for_account(
+        &mut self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        let close = account.header.close_progress.try_to_runtime()?;
+        if close.active {
+            self.validate_configured_asset_index(close.asset_index as usize)?;
+            return self.mark_attributed_bankruptcy_hlock();
+        }
+        let mut attributed_asset = None;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                self.validate_configured_asset_index(leg.asset_index as usize)?;
+                match attributed_asset {
+                    None => attributed_asset = Some(leg.asset_index),
+                    Some(asset_index) if asset_index == leg.asset_index => {}
+                    Some(_) => return self.mark_unattributed_bankruptcy_hlock(),
+                }
+            }
+            slot += 1;
+        }
+        if attributed_asset.is_some() {
+            self.mark_attributed_bankruptcy_hlock()
+        } else {
+            self.mark_unattributed_bankruptcy_hlock()
+        }
+    }
+
     fn ensure_favorable_action_allowed(&self, account: &PortfolioV16View<'_>) -> V16Result<()> {
         account.validate_with_market(&self.as_view())?;
         let ignore_unrelated_bankruptcy_hlock =
@@ -14381,9 +14411,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<u128> {
         account.validate_with_market(&self.as_view())?;
         let paid = self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
-        if account.header.pnl.get() < 0 {
-            self.mark_unattributed_bankruptcy_hlock()?;
-        }
         self.validate_account_audit_scan(&account.as_view())?;
         self.validate_shape_audit_scan()?;
         Ok(paid)
@@ -14404,7 +14431,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             pnl,
         )?;
         if paid == 0 {
-            self.mark_unattributed_bankruptcy_hlock()?;
+            self.mark_bankruptcy_hlock_for_account(&account.as_view())?;
             return Ok(0);
         }
 
@@ -14414,7 +14441,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_account_pnl_after_principal_settlement(account, new_pnl)?;
         Self::record_account_residual_crystallized_loss(account, paid)?;
         if new_pnl < 0 {
-            self.mark_unattributed_bankruptcy_hlock()?;
+            self.mark_bankruptcy_hlock_for_account(&account.as_view())?;
         }
         TokenValueFlowProofV16::account_capital_to_realized_loss(
             paid,
