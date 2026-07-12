@@ -2714,6 +2714,111 @@ fn closure_asset_one_short_loss_backs_only_short_source_domain() {
     prove_negative_kf_backing_mapping::<1, false>();
 }
 
+// Production bankruptcy insurance must debit only the bankrupt asset's
+// opposing-side budget. This executes the real domain lookup, availability
+// cap, insurance kernel, aggregate-spent setter, PnL cure, and flow check.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_bankruptcy_insurance_domain_isolation<const ASSET: usize, const BANKRUPT_LONG: bool>() {
+    assert!(ASSET < 2);
+    let bankrupt_side = if BANKRUPT_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let loss_raw: u8 = kani::any();
+    kani::assume((1..=2).contains(&loss_raw));
+    let loss = loss_raw as u128;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(2);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(3);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(4);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(5);
+    header.vault = V16PodU128::new(14);
+    header.insurance = V16PodU128::new(14);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(14);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+
+    let other = 1 - ASSET;
+    let other_before = markets[other].engine;
+    let selected_before = markets[ASSET].engine;
+    let header_before = header;
+    let account_before = account_header;
+    let mut expected_header = header_before;
+    expected_header.insurance = V16PodU128::new(14 - loss);
+    expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(14 - loss);
+    expected_header.negative_pnl_account_count = V16PodU64::new(0);
+    expected_header.bankruptcy_hlock_active = 1;
+    let mut expected_selected = selected_before;
+    if BANKRUPT_LONG {
+        expected_selected.insurance_domain_spent_short = V16PodU128::new(loss);
+    } else {
+        expected_selected.insurance_domain_spent_long = V16PodU128::new(loss);
+    }
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.residual();
+    let used = market
+        .consume_domain_insurance_for_negative_pnl(ASSET, bankrupt_side, &mut account)
+        .unwrap();
+
+    kani::cover!(loss == 2, "bankruptcy insurance covers a multi-atom cure");
+    assert_eq!(used, loss);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &other_before,
+        &market.markets[other].engine
+    ));
+    assert_eq!(market.residual(), residual_before + loss);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_asset_zero_long_bankruptcy_insurance_is_domain_isolated() {
+    prove_bankruptcy_insurance_domain_isolation::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_asset_zero_short_bankruptcy_insurance_is_domain_isolated() {
+    prove_bankruptcy_insurance_domain_isolation::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_asset_one_long_bankruptcy_insurance_is_domain_isolated() {
+    prove_bankruptcy_insurance_domain_isolation::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_asset_one_short_bankruptcy_insurance_is_domain_isolated() {
+    prove_bankruptcy_insurance_domain_isolation::<1, false>();
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
