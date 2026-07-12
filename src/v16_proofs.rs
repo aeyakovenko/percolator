@@ -2213,6 +2213,273 @@ fn composition_clear_leg_body_frame() {
     assert!(!account_header.legs[0].try_to_runtime().unwrap().active);
 }
 
+// Exact on the only two arithmetic calls reachable from the fixture below:
+// an aligned +2 K delta and a zero F delta. The general production helper is
+// independently proven against its aligned reference in
+// tests/proofs_v16_arithmetic.rs; this stub removes only that bit-vector
+// division leaf so Kani can prove the surrounding attribution/state theorem.
+#[cfg(all(kani, feature = "closure"))]
+fn positive_two_scaled_adl_delta_stub(
+    abs_basis_q: u128,
+    a_basis: u128,
+    then: i128,
+    now: i128,
+) -> Option<i128> {
+    assert_eq!(abs_basis_q, POS_SCALE);
+    assert_eq!(a_basis, ADL_ONE);
+    if then == now {
+        Some(0)
+    } else {
+        assert_eq!(then, 0);
+        assert_eq!(now, 2 * ADL_ONE as i128);
+        Some(2)
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn zero_backing_source_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    // Exact specialization of the independently proven rate helper: these
+    // fixture states have no available counterparty or insurance backing.
+    assert_eq!(state.fresh_reserved_backing_num, 0);
+    assert_eq!(state.valid_liened_backing_num, 0);
+    assert_eq!(state.impaired_liened_backing_num, 0);
+    assert_eq!(state.spent_backing_num, 0);
+    assert_eq!(state.provider_receivable_num, 0);
+    assert_eq!(state.insurance_credit_reserved_num, 0);
+    assert_eq!(state.valid_liened_insurance_num, 0);
+    assert_eq!(state.impaired_liened_insurance_num, 0);
+    if state.positive_claim_bound_num == 0 {
+        Ok(CREDIT_RATE_SCALE)
+    } else {
+        Ok(0)
+    }
+}
+
+// Production K/F settlement must attribute a winning leg to the selected
+// asset's opposing-side source domain. A wrong side leaks the winner's own
+// backing; a wrong asset breaks isolation. This composition executes the real
+// lookup, PnL setter, source-domain insertion, aggregate updates, and snapshots.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_positive_kf_source_mapping<const ASSET: usize, const WINNER_LONG: bool>() {
+    assert!(ASSET < 2);
+    let winner_side = if WINNER_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    // Constructor-equivalent two-asset POD state. Building it directly keeps
+    // activation's separately proven branch tree out of this composition.
+    let market_group_id = [1u8; 32];
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.last_asset_activation_slot = V16PodU64::new(2);
+    header.current_slot = V16PodU64::new(2);
+    header.asset_set_epoch = V16PodU64::new(2);
+    header.risk_epoch = V16PodU64::new(2);
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let mut asset_index = 0usize;
+    while asset_index < 2 {
+        let mut initialized = AssetStateV16::default();
+        initialized.market_id = asset_index as u64 + 1;
+        initialized.lifecycle = AssetLifecycleV16::Active;
+        initialized.raw_oracle_target_price = 100;
+        initialized.effective_price = 100;
+        initialized.fund_px_last = 100;
+        initialized.slot_last = asset_index as u64 + 1;
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&initialized);
+        asset_index += 1;
+    }
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        market_group_id,
+        [2u8; 32],
+        [3u8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.provenance_header = provenance;
+    account_header.owner = [3u8; 32];
+
+    let delta = 2i128;
+    let delta_num = delta as u128 * BOUND_SCALE;
+    let k_target = delta * ADL_ONE as i128;
+    let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    if WINNER_LONG {
+        asset.k_long = k_target;
+        asset.k_short = -k_target;
+    } else {
+        asset.k_short = k_target;
+        asset.k_long = -k_target;
+    }
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    let market_id = asset.market_id;
+    let epoch = match winner_side {
+        SideV16::Long => asset.epoch_long,
+        SideV16::Short => asset.epoch_short,
+    };
+    markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(1);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(2);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(3);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(4);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(10);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(10);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id,
+        side: winner_side,
+        basis_pos_q: if WINNER_LONG {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        },
+        a_basis: ADL_ONE,
+        epoch_snap: epoch,
+        loss_weight: POS_SCALE,
+        b_epoch_snap: epoch,
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let expected_domain = ASSET * 2 + usize::from(WINNER_LONG);
+    let other = 1 - ASSET;
+    let other_before = markets[other].engine;
+    let selected_before = markets[ASSET].engine;
+    let account_before = account_header;
+    let header_before = header;
+
+    let mut expected_header = header_before;
+    expected_header.pnl_pos_tot = V16PodU128::new(delta as u128);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(delta as u128);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(delta_num);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(delta_num);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
+
+    let expected_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: delta_num,
+        exact_positive_claim_num: delta_num,
+        credit_rate_num: 0,
+        credit_epoch: 1,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let mut expected_selected = selected_before;
+    if WINNER_LONG {
+        expected_selected.source_credit_short = expected_source;
+    } else {
+        expected_selected.source_credit_long = expected_source;
+    }
+
+    let mut expected_source_domain = PortfolioSourceDomainV16Account::default();
+    expected_source_domain.domain = V16PodU32::new(expected_domain as u32);
+    expected_source_domain.source_claim_market_id = V16PodU64::new(market_id);
+    expected_source_domain.source_claim_bound_num = V16PodU128::new(delta_num);
+    let mut expected_leg = account_before.legs[0].try_to_runtime().unwrap();
+    expected_leg.k_snap = k_target;
+    expected_leg.f_snap = 0;
+    let expected_leg = PortfolioLegV16Account::from_runtime(&expected_leg);
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(delta);
+    expected_account.source_domains[0] = expected_source_domain;
+    expected_account.legs[0] = expected_leg;
+    expected_account.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.residual();
+    market
+        .settle_leg_kf_effects_at_slot(&mut account, 0)
+        .unwrap();
+
+    kani::cover!(
+        account.header.pnl.get() == delta,
+        "production settlement reaches a positive source claim"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &other_before,
+        &market.markets[other].engine
+    ));
+    assert_eq!(market.residual(), residual_before);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, positive_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    zero_backing_source_credit_rate_stub
+)]
+fn closure_asset_zero_long_profit_maps_only_to_short_source_domain() {
+    prove_positive_kf_source_mapping::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, positive_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    zero_backing_source_credit_rate_stub
+)]
+fn closure_asset_zero_short_profit_maps_only_to_long_source_domain() {
+    prove_positive_kf_source_mapping::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, positive_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    zero_backing_source_credit_rate_stub
+)]
+fn closure_asset_one_long_profit_maps_only_to_short_source_domain() {
+    prove_positive_kf_source_mapping::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, positive_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    zero_backing_source_credit_rate_stub
+)]
+fn closure_asset_one_short_profit_maps_only_to_long_source_domain() {
+    prove_positive_kf_source_mapping::<1, false>();
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
