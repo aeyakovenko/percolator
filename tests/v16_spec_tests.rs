@@ -702,6 +702,9 @@ fn v16_trade_keeps_two_sided_risk_reduction_open_during_side_recovery() {
 #[test]
 fn v16_two_sided_reduction_does_not_require_same_fill_im_recovery() {
     let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(5_000);
+    header.config.initial_margin_bps = V16PodU64::new(10_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(1_000);
     let mut long_header = account_fixture(1, 20);
     let mut short_header = account_fixture(1, 21);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -735,6 +738,23 @@ fn v16_two_sided_reduction_does_not_require_same_fill_im_recovery() {
             .sync_account_fee_to_slot_not_atomic(&mut short, 1, 150)
             .unwrap(),
         150
+    );
+    assert_eq!(
+        long.header
+            .health_cert
+            .try_to_runtime()
+            .unwrap()
+            .certified_liq_deficit,
+        0
+    );
+    assert_eq!(
+        short
+            .header
+            .health_cert
+            .try_to_runtime()
+            .unwrap()
+            .certified_liq_deficit,
+        0
     );
 
     market
