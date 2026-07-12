@@ -3623,6 +3623,140 @@ fn closure_asset_one_short_clean_recovery_forfeit_is_local() {
     prove_clean_recovery_leg_forfeit_is_value_neutral_and_asset_local::<1, false>();
 }
 
+// Permissionless liveness over the wrapper-used auto-crank route. An expired
+// outstanding close is terminally actionable without an oracle observation:
+// the production classifier must select recovery, dispatch it in one call, and
+// preserve every value/account/asset field while changing only market mode and
+// recovery reason. Separate fixed-asset closures keep the dispatcher tractable;
+// each remains symbolic over both domain sides. Symbolic residual arithmetic is
+// independently covered by the close-ledger and expiry proofs.
+#[cfg(all(kani, feature = "closure"))]
+fn recovery_only_permissionless_crank_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _account: &mut PortfolioV16ViewMut<'_>,
+    request: PermissionlessCrankRequestV16,
+) -> V16Result<PermissionlessProgressOutcomeV16> {
+    match request.action {
+        PermissionlessCrankActionV16::Recover(reason) => {
+            market.declare_permissionless_recovery(reason)
+        }
+        _ => panic!("expired-close auto-crank selected a non-recovery action"),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn prove_expired_close_auto_crank_declares_value_neutral_recovery<const ASSET: usize>() {
+    assert!(ASSET < 2);
+    let gross_loss = 2u128;
+    let domain_side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            close_id: 1,
+            asset_index: ASSET as u32,
+            market_id: markets[ASSET].engine.asset.market_id.get(),
+            domain_side,
+            gross_loss_at_close_start: gross_loss,
+            drift_reference_slot: 0,
+            max_close_slot: 1,
+            residual_remaining: gross_loss,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut expected_header = header_before;
+    expected_header.mode = encode_market_mode(MarketModeV16::Recovery);
+    expected_header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    ));
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    // The fixture and ledger are constructor-equivalent valid state. Ledger
+    // shape soundness is independently universal in
+    // proof_v16_close_progress_ledger_residual_equation_is_enforced; repeating
+    // the full account scan here duplicates all bounded tables and exceeds the
+    // per-harness budget without strengthening the dispatch composition.
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: header_before.current_slot.get(),
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+
+    kani::cover!(
+        domain_side == SideV16::Short,
+        "auto-crank recovery covers the selected asset's short domain"
+    );
+    assert_eq!(
+        result,
+        AutoCrankResultV16 {
+            selected: AutoCrankPlanV16::DeclareRecovery {
+                reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            },
+            outcome: AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::RecoveryDeclared(
+                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+                ),
+            ),
+        }
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
+    recovery_only_permissionless_crank_stub
+)]
+fn closure_asset_zero_expired_close_auto_crank_declares_recovery() {
+    prove_expired_close_auto_crank_declares_value_neutral_recovery::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
+    recovery_only_permissionless_crank_stub
+)]
+fn closure_asset_one_expired_close_auto_crank_declares_recovery() {
+    prove_expired_close_auto_crank_declares_value_neutral_recovery::<1>();
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
