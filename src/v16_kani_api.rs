@@ -856,6 +856,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.preflight_convert_released_pnl_to_capital(account)
     }
 
+    pub fn kani_cure_and_cancel_close_with_cert_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        optional_deposit: u128,
+        cert: HealthCertV16,
+    ) -> V16Result<()> {
+        self.cure_and_cancel_close_with_cert_not_atomic(account, optional_deposit, cert)
+    }
+
     pub fn kani_position_change_touches_pending_domain_loss_barrier(
         &self,
         asset_index: usize,
