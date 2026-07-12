@@ -3370,6 +3370,94 @@ fn closure_resolved_asset_one_short_close_uses_only_long_insurance() {
     prove_resolved_attributed_close_cannot_borrow_other_domains::<1, false>();
 }
 
+// Resolved bad debt is attributable only from a unique live obligation or an
+// already-open close ledger. The ledger is authoritative for restart progress;
+// two live obligations are ambiguous and must never pick an arbitrary payer.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn closure_resolved_bankruptcy_attribution_is_unique_and_ledger_authoritative() {
+    let selected_raw: u8 = kani::any();
+    kani::assume(selected_raw < 2);
+    let selected = selected_raw as usize;
+    let leg_side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let ledger_bankrupt_side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let other = 1 - selected;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: selected as u32,
+        market_id: markets[selected].engine.asset.market_id.get(),
+        side: leg_side,
+        basis_pos_q: 0,
+        a_basis: ADL_ONE,
+        loss_weight: 1,
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(
+        market
+            .resolved_bankruptcy_attribution(&account.as_view())
+            .unwrap(),
+        Some((selected, leg_side))
+    );
+
+    account.header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            close_id: 1,
+            asset_index: other as u32,
+            market_id: market.markets[other].engine.asset.market_id.get(),
+            domain_side: opposite_side(ledger_bankrupt_side),
+            gross_loss_at_close_start: 1,
+            residual_remaining: 1,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    assert_eq!(
+        market
+            .resolved_bankruptcy_attribution(&account.as_view())
+            .unwrap(),
+        Some((other, ledger_bankrupt_side))
+    );
+
+    account.header.close_progress = CloseProgressLedgerV16Account::default();
+    account.header.active_bitmap[0] = V16PodU64::new(3);
+    account.header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: other as u32,
+        market_id: market.markets[other].engine.asset.market_id.get(),
+        side: opposite_side(leg_side),
+        basis_pos_q: 0,
+        a_basis: ADL_ONE,
+        loss_weight: 1,
+        ..PortfolioLegV16::EMPTY
+    });
+    let ambiguous = market
+        .resolved_bankruptcy_attribution(&account.as_view())
+        .unwrap();
+
+    kani::cover!(
+        selected == 1 && leg_side != ledger_bankrupt_side,
+        "attribution covers conflicting asset and side authority"
+    );
+    assert_eq!(ambiguous, None);
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
