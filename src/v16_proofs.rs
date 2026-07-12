@@ -3206,6 +3206,170 @@ fn closure_resolved_unattributed_bad_debt_is_value_and_domain_neutral() {
     assert_eq!(market.residual(), residual_before);
 }
 
+// An open resolved close is already bound to one asset/domain. Insurance-funded
+// settlement must debit only that domain, finalize its ledger, and clear the
+// account liability without touching another side or asset.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_resolved_attributed_close_cannot_borrow_other_domains<
+    const ASSET: usize,
+    const BANKRUPT_LONG: bool,
+>() {
+    assert!(ASSET < 2);
+    let bankrupt_side = if BANKRUPT_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let domain_side = opposite_side(bankrupt_side);
+    // Keep closure composition tractable at one nontrivial amount; the
+    // insurance kernel proves the amount relation over its full scalar domain.
+    let loss = 2u128;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.resolved_slot = header.current_slot;
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(2);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(2);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(2);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(2);
+    header.vault = V16PodU128::new(8);
+    header.insurance = V16PodU128::new(8);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(8);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    let market_id = markets[ASSET].engine.asset.market_id.get();
+    let open_ledger = CloseProgressLedgerV16 {
+        active: true,
+        close_id: 1,
+        asset_index: ASSET as u32,
+        market_id,
+        domain_side,
+        gross_loss_at_close_start: loss,
+        drift_reference_slot: header.current_slot.get(),
+        max_close_slot: header.current_slot.get()
+            + header.config.max_bankrupt_close_lifetime_slots.get(),
+        residual_remaining: loss,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&open_ledger);
+    match domain_side {
+        SideV16::Long => markets[ASSET].engine.pending_domain_loss_barrier_long = V16PodU64::new(1),
+        SideV16::Short => {
+            markets[ASSET].engine.pending_domain_loss_barrier_short = V16PodU64::new(1)
+        }
+    }
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut expected_header = header_before;
+    expected_header.bankruptcy_hlock_active = 1;
+    expected_header.insurance = V16PodU128::new(8 - loss);
+    expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(8 - loss);
+    expected_header.negative_pnl_account_count = V16PodU64::new(0);
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(0);
+    let mut expected_markets = markets_before;
+    match domain_side {
+        SideV16::Long => {
+            expected_markets[ASSET].pending_domain_loss_barrier_long = V16PodU64::new(0);
+            expected_markets[ASSET].insurance_domain_spent_long = V16PodU128::new(loss);
+        }
+        SideV16::Short => {
+            expected_markets[ASSET].pending_domain_loss_barrier_short = V16PodU64::new(0);
+            expected_markets[ASSET].insurance_domain_spent_short = V16PodU128::new(loss);
+        }
+    }
+    let expected_ledger = CloseProgressLedgerV16 {
+        active: true,
+        finalized: true,
+        close_id: 1,
+        asset_index: ASSET as u32,
+        market_id,
+        domain_side,
+        gross_loss_at_close_start: loss,
+        drift_reference_slot: header.current_slot.get(),
+        max_close_slot: header.current_slot.get()
+            + header.config.max_bankrupt_close_lifetime_slots.get(),
+        insurance_spent: loss,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.close_progress = CloseProgressLedgerV16Account::from_runtime(&expected_ledger);
+    expected_account.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.residual();
+    let result = market.settle_resolved_bankruptcy_negative_pnl(&mut account);
+
+    kani::cover!(
+        result == Ok(()),
+        "resolved attributed close consumes multi-atom domain insurance"
+    );
+    assert_eq!(result, Ok(()));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(account_value_and_gate_frame_unchanged(
+        &expected_account,
+        account.header
+    ));
+    assert_eq!(
+        account.header.close_progress,
+        expected_account.close_progress
+    );
+    assert_eq!(account.header.health_cert, expected_account.health_cert);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.residual(), residual_before + loss);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn closure_resolved_asset_zero_long_close_uses_only_short_insurance() {
+    prove_resolved_attributed_close_cannot_borrow_other_domains::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn closure_resolved_asset_zero_short_close_uses_only_long_insurance() {
+    prove_resolved_attributed_close_cannot_borrow_other_domains::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn closure_resolved_asset_one_long_close_uses_only_short_insurance() {
+    prove_resolved_attributed_close_cannot_borrow_other_domains::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+fn closure_resolved_asset_one_short_close_uses_only_long_insurance() {
+    prove_resolved_attributed_close_cannot_borrow_other_domains::<1, false>();
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
