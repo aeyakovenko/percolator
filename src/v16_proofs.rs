@@ -2921,6 +2921,232 @@ fn closure_asset_one_short_preflight_cannot_borrow_other_domains() {
     prove_liquidation_preflight_cannot_borrow_other_domains::<1, false>();
 }
 
+// The general split identity is covered by the arithmetic conformance suite.
+// This exact specialization keeps the closure proof on the production control
+// path without bit-blasting a symbolic u128 division already proven elsewhere.
+#[cfg(all(kani, feature = "closure"))]
+fn exact_small_social_loss_split_stub(
+    engine_chunk: u128,
+    carried_rem: u128,
+    weight_sum: u128,
+) -> V16Result<(u128, u128)> {
+    assert!((1..=2).contains(&engine_chunk));
+    assert_eq!(carried_rem, 0);
+    assert_eq!(weight_sum, POS_SCALE);
+    assert_eq!(SOCIAL_LOSS_DEN % POS_SCALE, 0);
+    Ok((engine_chunk * (SOCIAL_LOSS_DEN / POS_SCALE), 0))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn account_value_and_gate_frame_unchanged(
+    before: &PortfolioAccountV16Account,
+    after: &PortfolioAccountV16Account,
+) -> bool {
+    before.provenance_header == after.provenance_header
+        && before.owner == after.owner
+        && before.capital == after.capital
+        && before.pnl == after.pnl
+        && before.reserved_pnl == after.reserved_pnl
+        && before.residual_crystallized_loss_atoms_total
+            == after.residual_crystallized_loss_atoms_total
+        && before.residual_spent_principal_atoms_total == after.residual_spent_principal_atoms_total
+        && before.residual_received_atoms_total == after.residual_received_atoms_total
+        && before.funding_long_paid_atoms_total == after.funding_long_paid_atoms_total
+        && before.funding_long_received_atoms_total == after.funding_long_received_atoms_total
+        && before.funding_short_paid_atoms_total == after.funding_short_paid_atoms_total
+        && before.funding_short_received_atoms_total == after.funding_short_received_atoms_total
+        && before.fee_credits == after.fee_credits
+        && before.cancel_deposit_escrow == after.cancel_deposit_escrow
+        && before.last_fee_slot == after.last_fee_slot
+        && before.active_bitmap == after.active_bitmap
+        && before.stale_state == after.stale_state
+        && before.b_stale_state == after.b_stale_state
+        && before.rebalance_lock == after.rebalance_lock
+        && before.liquidation_lock == after.liquidation_lock
+        && before.resolved_payout_receipt == after.resolved_payout_receipt
+}
+
+// Account-level residual booking must consume an open close only through the
+// selected asset/opposing-side barrier, charge B only there, release that
+// barrier, and finalize the exact loss. This executes the production capacity,
+// ledger, booking, validation, and whole-state writeback composition rather
+// than replaying the leaf kernel. It starts at the valid post-detach close state;
+// begin-close construction and live-leg/domain binding are proven separately.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_bankruptcy_residual_booking_isolation<const ASSET: usize, const BANKRUPT_LONG: bool>() {
+    assert!(ASSET < 2);
+    let bankrupt_side = if BANKRUPT_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let domain_side = opposite_side(bankrupt_side);
+    let loss_raw: u8 = kani::any();
+    kani::assume((1..=2).contains(&loss_raw));
+    let loss = loss_raw as u128;
+    let delta_b = loss * (SOCIAL_LOSS_DEN / POS_SCALE);
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+
+    let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    let market_id = asset.market_id;
+    markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(3);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    let open_ledger = CloseProgressLedgerV16 {
+        active: true,
+        close_id: 1,
+        asset_index: ASSET as u32,
+        market_id,
+        domain_side,
+        gross_loss_at_close_start: loss,
+        drift_reference_slot: header.current_slot.get(),
+        max_close_slot: header.current_slot.get()
+            + header.config.max_bankrupt_close_lifetime_slots.get(),
+        residual_remaining: loss,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&open_ledger);
+    match domain_side {
+        SideV16::Long => markets[ASSET].engine.pending_domain_loss_barrier_long = V16PodU64::new(1),
+        SideV16::Short => {
+            markets[ASSET].engine.pending_domain_loss_barrier_short = V16PodU64::new(1)
+        }
+    }
+
+    let other = 1 - ASSET;
+    let other_before = markets[other].engine;
+    let selected_before = markets[ASSET].engine;
+    let header_before = header;
+    let account_before = account_header;
+
+    let mut expected_header = header_before;
+    expected_header.bankruptcy_hlock_active = 1;
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(2);
+    let mut expected_selected = selected_before;
+    let mut expected_asset = asset;
+    match domain_side {
+        SideV16::Long => expected_asset.b_long_num = delta_b,
+        SideV16::Short => expected_asset.b_short_num = delta_b,
+    }
+    expected_selected.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    match domain_side {
+        SideV16::Long => expected_selected.pending_domain_loss_barrier_long = V16PodU64::new(0),
+        SideV16::Short => expected_selected.pending_domain_loss_barrier_short = V16PodU64::new(0),
+    }
+    let expected_ledger = CloseProgressLedgerV16 {
+        active: true,
+        finalized: true,
+        close_id: 1,
+        asset_index: ASSET as u32,
+        market_id,
+        domain_side,
+        gross_loss_at_close_start: loss,
+        drift_reference_slot: header.current_slot.get(),
+        max_close_slot: header.current_slot.get()
+            + header.config.max_bankrupt_close_lifetime_slots.get(),
+        b_loss_booked: loss,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let mut expected_account = account_before;
+    expected_account.close_progress = CloseProgressLedgerV16Account::from_runtime(&expected_ledger);
+    expected_account.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.residual();
+    let outcome = market
+        .book_bankruptcy_residual_chunk_for_account_core(&mut account, ASSET, bankrupt_side, loss)
+        .unwrap();
+
+    kani::cover!(
+        loss == 2,
+        "account-level residual booking covers multi-atom close progress"
+    );
+    assert_eq!(
+        outcome,
+        BResidualBookingOutcomeV16 {
+            booked_loss: loss,
+            explicit_loss: 0,
+            delta_b,
+            remaining_after: 0,
+        }
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(account_value_and_gate_frame_unchanged(
+        &account_before,
+        account.header
+    ));
+    assert_eq!(
+        account.header.close_progress,
+        expected_account.close_progress
+    );
+    assert_eq!(account.header.health_cert, expected_account.health_cert);
+    // Successful production validation plus these zero summaries implies all
+    // leg and source-domain records remain canonical and unoccupied.
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(account.as_view().source_claim_bound_sum_num().unwrap(), 0);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &other_before,
+        &market.markets[other].engine
+    ));
+    assert_eq!(market.residual(), residual_before);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::social_loss_book_split, exact_small_social_loss_split_stub)]
+fn closure_asset_zero_long_residual_books_only_to_short_domain() {
+    prove_bankruptcy_residual_booking_isolation::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::social_loss_book_split, exact_small_social_loss_split_stub)]
+fn closure_asset_zero_short_residual_books_only_to_long_domain() {
+    prove_bankruptcy_residual_booking_isolation::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::social_loss_book_split, exact_small_social_loss_split_stub)]
+fn closure_asset_one_long_residual_books_only_to_short_domain() {
+    prove_bankruptcy_residual_booking_isolation::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::social_loss_book_split, exact_small_social_loss_split_stub)]
+fn closure_asset_one_short_residual_books_only_to_long_domain() {
+    prove_bankruptcy_residual_booking_isolation::<1, false>();
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
