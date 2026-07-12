@@ -9203,10 +9203,19 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     asset.loss_weight_sum_long = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    // Two independent bankrupt-close domains may be serialized while the
+    // shared asset clock still has to advance. Letting either barrier block
+    // K/F accrual would let one abandoned account freeze every asset user.
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
     let oracle_epoch_before = header.oracle_epoch.get();
+    let blocker_count_before = header.resolved_payout_blocker_count;
+    let long_barrier_before = markets[0].engine.pending_domain_loss_barrier_long;
+    let short_barrier_before = markets[0].engine.pending_domain_loss_barrier_short;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let residual_before = market.kani_residual();
@@ -9240,6 +9249,18 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(
+        market.header.resolved_payout_blocker_count,
+        blocker_count_before
+    );
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_long,
+        long_barrier_before
+    );
+    assert_eq!(
+        market.markets[0].engine.pending_domain_loss_barrier_short,
+        short_barrier_before
+    );
     // Junior-pool isolation: this transition must not move the junior
     // residual pool.
     assert_eq!(market.kani_residual(), residual_before);
