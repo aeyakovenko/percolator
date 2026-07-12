@@ -9266,6 +9266,102 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     assert_eq!(market.kani_residual(), residual_before);
 }
 
+// Cross-asset isolation for the production accrual route. An oracle or funding
+// update is allowed to mutate only the selected asset and the declared group
+// clock/epoch summary. In particular, an attacker-controlled asset must not
+// touch another asset's insurance budget, backing, claims, or close barriers.
+#[inline(always)]
+fn prove_v16_accrual_is_exactly_selected_asset_local<const SELECTED: usize>() {
+    assert!(SELECTED < 2);
+    let price_delta_raw: u8 = kani::any();
+    kani::assume((1..=5).contains(&price_delta_raw));
+    let other = 1 - SELECTED;
+    let price = 100 + price_delta_raw as u64;
+    let (mut header, mut markets, _) = two_market_view_fixture();
+
+    for slot in &mut markets {
+        let mut asset = slot.engine.asset.try_to_runtime().unwrap();
+        asset.raw_oracle_target_price = 100;
+        asset.effective_price = 100;
+        asset.fund_px_last = 100;
+        asset.slot_last = 2;
+        asset.oi_eff_long_q = POS_SCALE;
+        asset.oi_eff_short_q = POS_SCALE;
+        asset.stored_pos_count_long = 1;
+        asset.stored_pos_count_short = 1;
+        asset.loss_weight_sum_long = POS_SCALE;
+        asset.loss_weight_sum_short = POS_SCALE;
+        slot.engine.asset = AssetStateV16Account::from_runtime(&asset);
+        slot.engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+        slot.engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+    }
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(1);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(2);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(3);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(4);
+    header.current_slot = V16PodU64::new(2);
+    header.slot_last = V16PodU64::new(2);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(10);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(10);
+    header.resolved_payout_blocker_count = V16PodU64::new(8);
+
+    let header_before = header;
+    let other_before = markets[other].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let outcome = market
+        .accrue_asset_to_not_atomic(SELECTED, 3, price, 0, true)
+        .unwrap();
+
+    kani::cover!(
+        price_delta_raw > 1,
+        "selected asset accrual preserves the other asset"
+    );
+    assert_eq!(outcome.dt, 1);
+    assert!(outcome.equity_active && outcome.price_move_active);
+    assert!(!outcome.funding_active && !outcome.loss_stale_after);
+
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total,
+        header_before.insurance_domain_budget_remaining_total
+    );
+    assert_eq!(
+        market.header.resolved_payout_blocker_count,
+        header_before.resolved_payout_blocker_count
+    );
+    assert_eq!(
+        market.header.source_claim_bound_total_num,
+        header_before.source_claim_bound_total_num
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num,
+        header_before.source_fresh_backing_total_num
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &other_before,
+        &market.markets[other].engine
+    ));
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_accrual_is_exactly_slot_local() {
+    prove_v16_accrual_is_exactly_selected_asset_local::<0>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_accrual_is_exactly_slot_local() {
+    prove_v16_accrual_is_exactly_selected_asset_local::<1>();
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
