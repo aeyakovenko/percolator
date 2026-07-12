@@ -2,10 +2,10 @@
 
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
-    backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
-    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
-    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_available_backing_num_for_source_credit_state,
+    backing_domain_fee_split_for_lien_delta_num, bankruptcy_hlock_to_wire,
+    kani_active_bitmap_set as active_bitmap_set, kani_add_open_interest_for_new_position,
+    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
+    kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
@@ -3545,8 +3545,9 @@ fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate(
 fn proof_v16_bankruptcy_hlock_attribution_is_asset_local_and_fail_closed() {
     let related_lock: bool = kani::any();
     let unrelated_lock: bool = kani::any();
+    let fully_attributed: bool = kani::any();
     let (mut header, mut markets, mut account_header) = two_market_view_fixture();
-    header.bankruptcy_hlock_active = 1;
+    header.bankruptcy_hlock_active = bankruptcy_hlock_to_wire(true, fully_attributed);
     account_header.source_domains[0].domain = V16PodU32::new(0);
     account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
     account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(1);
@@ -3560,7 +3561,7 @@ fn proof_v16_bankruptcy_hlock_attribution_is_asset_local_and_fail_closed() {
         .unwrap();
 
     kani::cover!(
-        only_unrelated,
+        fully_attributed && unrelated_lock && only_unrelated,
         "an attributed unrelated bankruptcy h-lock does not freeze the account"
     );
     kani::cover!(
@@ -3568,10 +3569,10 @@ fn proof_v16_bankruptcy_hlock_attribution_is_asset_local_and_fail_closed() {
         "a related bankruptcy h-lock remains fail-closed"
     );
     kani::cover!(
-        !related_lock && !unrelated_lock && !only_unrelated,
+        !fully_attributed && !only_unrelated,
         "an unattributed global bankruptcy h-lock remains fail-closed"
     );
-    assert_eq!(only_unrelated, unrelated_lock && !related_lock);
+    assert_eq!(only_unrelated, fully_attributed && !related_lock);
 }
 
 #[kani::proof]

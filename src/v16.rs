@@ -6398,6 +6398,9 @@ pub struct MarketGroupV16HeaderAccount {
     pub funding_epoch: V16PodU64,
     pub slot_last: V16PodU64,
     pub current_slot: V16PodU64,
+    // 0 = inactive, 1 = active with an unattributed event, 2 = active and every event attributed.
+    // The tri-state encoding keeps the persisted layout unchanged while making asset-local exits
+    // bounded by account shape instead of configured market count.
     pub bankruptcy_hlock_active: u8,
     pub threshold_stress_active: u8,
     pub loss_stale_active: u8,
@@ -6780,7 +6783,7 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             self.header.config.max_market_slots.get() as usize,
         )?;
         self.header.config.try_to_runtime_shape()?;
-        decode_bool(self.header.bankruptcy_hlock_active)?;
+        bankruptcy_hlock_active_from_wire(self.header.bankruptcy_hlock_active)?;
         decode_bool(self.header.threshold_stress_active)?;
         decode_bool(self.header.loss_stale_active)?;
         decode_bool(self.header.payout_snapshot_captured)?;
@@ -9235,7 +9238,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() >= 0 {
             return Ok(0);
         }
-        self.header.bankruptcy_hlock_active = 1;
+        self.mark_attributed_bankruptcy_hlock()?;
         let domain_available = self.available_domain_insurance(domain)?;
         let (_, spent_before) = self.domain_insurance_budget_spent(domain)?;
         // PRODUCTION KERNEL: insurance-draw core (capped by deficit AND domain
@@ -11252,7 +11255,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || self.header.stale_certificate_count.get() != 0
             || self.header.b_stale_account_count.get() != 0
             || self.header.negative_pnl_account_count.get() != 0
-            || decode_bool(self.header.bankruptcy_hlock_active)?
+            || bankruptcy_hlock_active_from_wire(self.header.bankruptcy_hlock_active)?
             || decode_bool(self.header.threshold_stress_active)?
             || decode_bool(self.header.loss_stale_active)?
             || self.header.recovery_reason.try_to_runtime()?.is_some()
@@ -12329,15 +12332,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || slot.pending_domain_loss_barrier_short.get() != 0)
     }
 
-    fn account_references_asset(
-        &self,
-        account: &PortfolioV16View<'_>,
-        asset_index: usize,
-    ) -> V16Result<bool> {
+    fn account_references_bankrupt_asset(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active && leg.asset_index as usize == asset_index {
+            if leg.active && self.asset_has_bankruptcy_lock_state(leg.asset_index as usize)? {
                 return Ok(true);
             }
             slot += 1;
@@ -12350,40 +12349,58 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             if source.is_occupied() {
                 let domain = source.domain.get() as usize;
-                self.domain_asset_side(domain)?;
-                if domain / 2 == asset_index {
+                let (asset_index, _) = self.domain_asset_side(domain)?;
+                if self.asset_has_bankruptcy_lock_state(asset_index)? {
                     return Ok(true);
                 }
             }
             slot += 1;
         }
         let close = account.header.close_progress.try_to_runtime()?;
-        Ok(close.active && close.asset_index as usize == asset_index)
+        if close.active {
+            self.asset_has_bankruptcy_lock_state(close.asset_index as usize)
+        } else {
+            Ok(false)
+        }
     }
 
     fn bankruptcy_hlock_is_only_unrelated_to_account(
         &self,
         account: &PortfolioV16View<'_>,
     ) -> V16Result<bool> {
-        if !decode_bool(self.header.bankruptcy_hlock_active)? {
+        if !bankruptcy_hlock_active_from_wire(self.header.bankruptcy_hlock_active)?
+            || !bankruptcy_hlock_fully_attributed_from_wire(self.header.bankruptcy_hlock_active)?
+        {
             return Ok(false);
         }
-        let configured_assets = self.header.config.max_market_slots.get() as usize;
-        let mut found_attributed_lock = false;
-        let mut asset_index = 0usize;
-        while asset_index < configured_assets {
-            if self.asset_has_bankruptcy_lock_state(asset_index)? {
-                found_attributed_lock = true;
-                if self.account_references_asset(account, asset_index)? {
-                    return Ok(false);
-                }
-            }
-            asset_index += 1;
-        }
-        // A bare global bit without a local witness remains conservative. This preserves
-        // corrupted/unattributed-state handling while allowing public attributed bankruptcies to
-        // stay inside their source domain.
-        Ok(found_attributed_lock)
+        Ok(!self.account_references_bankrupt_asset(account)?)
+    }
+
+    fn mark_attributed_bankruptcy_hlock(&mut self) -> V16Result<()> {
+        let active = bankruptcy_hlock_active_from_wire(self.header.bankruptcy_hlock_active)?;
+        let fully_attributed =
+            bankruptcy_hlock_fully_attributed_from_wire(self.header.bankruptcy_hlock_active)?;
+        self.header.bankruptcy_hlock_active =
+            bankruptcy_hlock_to_wire(true, !active || fully_attributed);
+        Ok(())
+    }
+
+    fn mark_attributed_bankruptcy_hlock_after_principal_settlement(
+        &mut self,
+        prior: u8,
+    ) -> V16Result<()> {
+        let prior_active = bankruptcy_hlock_active_from_wire(prior)?;
+        let prior_fully_attributed = bankruptcy_hlock_fully_attributed_from_wire(prior)?;
+        bankruptcy_hlock_active_from_wire(self.header.bankruptcy_hlock_active)?;
+        self.header.bankruptcy_hlock_active =
+            bankruptcy_hlock_to_wire(true, !prior_active || prior_fully_attributed);
+        Ok(())
+    }
+
+    fn mark_unattributed_bankruptcy_hlock(&mut self) -> V16Result<()> {
+        bankruptcy_hlock_active_from_wire(self.header.bankruptcy_hlock_active)?;
+        self.header.bankruptcy_hlock_active = bankruptcy_hlock_to_wire(true, false);
+        Ok(())
     }
 
     fn ensure_favorable_action_allowed(&self, account: &PortfolioV16View<'_>) -> V16Result<()> {
@@ -12564,7 +12581,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         if decode_bool(self.header.threshold_stress_active)?
-            || (bankruptcy_hlock_applies && decode_bool(self.header.bankruptcy_hlock_active)?)
+            || (bankruptcy_hlock_applies
+                && bankruptcy_hlock_active_from_wire(self.header.bankruptcy_hlock_active)?)
             || decode_market_mode(self.header.mode)? == MarketModeV16::Recovery
             || instruction_bankruptcy_candidate
         {
@@ -13398,7 +13416,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if let Some(asset_mut) = new_asset {
                     self.set_asset_state(asset_index, asset_mut)?;
                 }
-                self.header.bankruptcy_hlock_active = 1;
+                self.mark_attributed_bankruptcy_hlock()?;
                 Ok(outcome)
             }
             BResidualStepV16::DeclareRecovery => {
@@ -13700,7 +13718,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             close_q == leg.basis_pos_q.unsigned_abs(),
         )?;
         let charged_fee = self.charge_account_fee_not_atomic(account, fee)?;
+        let bankruptcy_hlock_before_principal = self.header.bankruptcy_hlock_active;
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+        if account.header.pnl.get() < 0 {
+            self.mark_attributed_bankruptcy_hlock_after_principal_settlement(
+                bankruptcy_hlock_before_principal,
+            )?;
+        }
         let gross_bankruptcy_residual = if account.header.pnl.get() < 0 {
             account.header.pnl.get().unsigned_abs()
         } else {
@@ -13747,7 +13771,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_add(cleared_i128)
                 .ok_or(V16Error::ArithmeticOverflow)?;
             self.set_account_pnl(account, new_pnl)?;
-            self.header.bankruptcy_hlock_active = 1;
+            self.mark_attributed_bankruptcy_hlock()?;
         }
         self.reduce_position(account, request.asset_index, close_q)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
@@ -14282,7 +14306,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() >= 0 {
             return Ok(());
         }
-        self.header.bankruptcy_hlock_active = 1;
+        self.mark_unattributed_bankruptcy_hlock()?;
         self.set_account_pnl(account, 0)?;
         account.header.health_cert.valid = 0;
         Ok(())
@@ -14304,7 +14328,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return self.clear_resolved_unattributed_negative_pnl(account);
         };
 
-        self.header.bankruptcy_hlock_active = 1;
+        self.mark_attributed_bankruptcy_hlock()?;
         let gross_residual = account.header.pnl.get().unsigned_abs();
         if !account.header.close_progress.try_to_runtime()?.active {
             self.begin_close_progress_ledger(
@@ -14357,6 +14381,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<u128> {
         account.validate_with_market(&self.as_view())?;
         let paid = self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+        if account.header.pnl.get() < 0 {
+            self.mark_unattributed_bankruptcy_hlock()?;
+        }
         self.validate_account_audit_scan(&account.as_view())?;
         self.validate_shape_audit_scan()?;
         Ok(paid)
@@ -14377,7 +14404,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             pnl,
         )?;
         if paid == 0 {
-            self.header.bankruptcy_hlock_active = 1;
+            self.mark_unattributed_bankruptcy_hlock()?;
             return Ok(0);
         }
 
@@ -14387,7 +14414,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_account_pnl_after_principal_settlement(account, new_pnl)?;
         Self::record_account_residual_crystallized_loss(account, paid)?;
         if new_pnl < 0 {
-            self.header.bankruptcy_hlock_active = 1;
+            self.mark_unattributed_bankruptcy_hlock()?;
         }
         TokenValueFlowProofV16::account_capital_to_realized_loss(
             paid,
@@ -16580,6 +16607,32 @@ fn decode_bool(value: u8) -> V16Result<bool> {
     match value {
         0 => Ok(false),
         1 => Ok(true),
+        _ => Err(V16Error::InvalidConfig),
+    }
+}
+
+pub fn bankruptcy_hlock_to_wire(active: bool, fully_attributed: bool) -> u8 {
+    if !active {
+        0
+    } else if fully_attributed {
+        2
+    } else {
+        1
+    }
+}
+
+pub fn bankruptcy_hlock_active_from_wire(value: u8) -> V16Result<bool> {
+    match value {
+        0 => Ok(false),
+        1 | 2 => Ok(true),
+        _ => Err(V16Error::InvalidConfig),
+    }
+}
+
+pub fn bankruptcy_hlock_fully_attributed_from_wire(value: u8) -> V16Result<bool> {
+    match value {
+        0 | 1 => Ok(false),
+        2 => Ok(true),
         _ => Err(V16Error::InvalidConfig),
     }
 }

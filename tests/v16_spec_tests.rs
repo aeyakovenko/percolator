@@ -2841,7 +2841,7 @@ fn source_backed_conversion_hlock_fixture() -> (
 #[test]
 fn v16_unrelated_bankruptcy_hlock_does_not_freeze_source_backed_conversion() {
     let (mut header, mut markets, mut account, claim) = source_backed_conversion_hlock_fixture();
-    header.bankruptcy_hlock_active = 1;
+    header.bankruptcy_hlock_active = 2;
     markets[1].engine.asset.mode_long = SideModeV16::ResetPending as u8;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -2862,7 +2862,7 @@ fn v16_unrelated_bankruptcy_hlock_does_not_freeze_source_backed_conversion() {
 fn v16_related_or_unattributed_bankruptcy_hlock_still_blocks_conversion() {
     for related in [false, true] {
         let (mut header, mut markets, mut account, _) = source_backed_conversion_hlock_fixture();
-        header.bankruptcy_hlock_active = 1;
+        header.bankruptcy_hlock_active = if related { 2 } else { 1 };
         if related {
             markets[0].engine.asset.mode_long = SideModeV16::ResetPending as u8;
         }
