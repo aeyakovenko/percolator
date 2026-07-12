@@ -13993,11 +13993,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.create_initial_margin_source_lien_if_needed(short_account)?;
             }
         }
-        Self::ensure_initial_margin(&long_account.as_view())?;
-        Self::ensure_initial_margin(&short_account.as_view())?;
-        if locked {
-            Self::ensure_no_positive_credit_initial_margin(&long_account.as_view())?;
-            Self::ensure_no_positive_credit_initial_margin(&short_account.as_view())?;
+        // Initial margin is an admission gate for new risk, not an exit gate. A matched
+        // two-sided reduction has already proved that neither account's absolute position grows.
+        // Requiring both accounts to regain IM in the same fill can deadlock fragmented recovery:
+        // every available counterparty may be smaller than the reduction needed to cross the IM
+        // boundary. Keep the locked-lane no-positive-credit gate scoped to risk admission too.
+        if risk_increasing {
+            Self::ensure_initial_margin(&long_account.as_view())?;
+            Self::ensure_initial_margin(&short_account.as_view())?;
+            if locked {
+                Self::ensure_no_positive_credit_initial_margin(&long_account.as_view())?;
+                Self::ensure_no_positive_credit_initial_margin(&short_account.as_view())?;
+            }
         }
         self.validate_shape_audit_scan()?;
         self.validate_account_audit_scan(&long_account.as_view())?;
