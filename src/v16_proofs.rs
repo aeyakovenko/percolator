@@ -4095,6 +4095,163 @@ fn closure_asset_one_short_insurance_withdrawal_is_cross_asset_isolated() {
     prove_domain_insurance_withdrawal_is_cross_asset_isolated::<3>();
 }
 
+// Budget crediting is the bridge from shared, already-collected insurance to
+// domain-withdrawable capacity. Compose that bridge with an immediate public
+// withdrawal while every domain is funded: only the selected budget may gain
+// and spend capacity, and neither other domains nor unallocated insurance can
+// be drawn through a domain-routing error.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_budget_credit_then_withdrawal_is_cross_asset_isolated<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let budgets = [
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+    ];
+    let credit = kani::any::<u8>();
+    let withdraw = kani::any::<u8>();
+    let capital = kani::any::<u8>();
+    let unallocated = kani::any::<u8>();
+    let junior = kani::any::<u8>();
+    kani::assume((1..=8).contains(&budgets[0]) && (1..=8).contains(&budgets[1]));
+    kani::assume((1..=8).contains(&budgets[2]) && (1..=8).contains(&budgets[3]));
+    kani::assume((1..=8).contains(&credit));
+    kani::assume(withdraw > 0 && withdraw as u16 <= budgets[DOMAIN] as u16 + credit as u16);
+    kani::assume(capital <= 8 && unallocated <= 8 && junior <= 8);
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budgets[0] as u128);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budgets[1] as u128);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(budgets[2] as u128);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(budgets[3] as u128);
+    let total_budget = budgets.iter().map(|value| *value as u128).sum::<u128>();
+    let credit = credit as u128;
+    let withdraw = withdraw as u128;
+    let insurance = total_budget + credit + unallocated as u128;
+    let initial_vault = capital as u128 + insurance + junior as u128;
+    header.c_tot = V16PodU128::new(capital as u128);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(total_budget);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(initial_vault);
+
+    let mut expected_header = header;
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(total_budget + credit - withdraw);
+    expected_header.insurance = V16PodU128::new(insurance - withdraw);
+    expected_header.vault = V16PodU128::new(initial_vault - withdraw);
+    let mut expected_markets = [markets[0].engine, markets[1].engine];
+    let selected_final = budgets[DOMAIN] as u128 + credit - withdraw;
+    match DOMAIN {
+        0 => expected_markets[0].insurance_domain_budget_long = V16PodU128::new(selected_final),
+        1 => expected_markets[0].insurance_domain_budget_short = V16PodU128::new(selected_final),
+        2 => expected_markets[1].insurance_domain_budget_long = V16PodU128::new(selected_final),
+        3 => expected_markets[1].insurance_domain_budget_short = V16PodU128::new(selected_final),
+        _ => unreachable!(),
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    market
+        .credit_domain_insurance_budget_not_atomic(DOMAIN, credit)
+        .unwrap();
+    market
+        .withdraw_domain_insurance_not_atomic(DOMAIN, withdraw)
+        .unwrap();
+
+    kani::cover!(
+        withdraw < budgets[DOMAIN] as u128 + credit,
+        "credited domain supports a partial withdrawal"
+    );
+    kani::cover!(
+        withdraw == budgets[DOMAIN] as u128 + credit,
+        "credited domain supports a full withdrawal"
+    );
+    kani::cover!(
+        withdraw > budgets[DOMAIN] as u128,
+        "withdrawal can consume newly credited capacity"
+    );
+    assert_eq!(initial_vault - market.header.vault.get(), withdraw);
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        unallocated as u128,
+        "unallocated insurance cannot leak through a selected domain"
+    );
+    assert_eq!(
+        market.residual(),
+        residual_before,
+        "budget relabeling and withdrawal cannot consume junior value"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_long_budget_credit_then_withdrawal_is_isolated() {
+    prove_budget_credit_then_withdrawal_is_cross_asset_isolated::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_short_budget_credit_then_withdrawal_is_isolated() {
+    prove_budget_credit_then_withdrawal_is_cross_asset_isolated::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_long_budget_credit_then_withdrawal_is_isolated() {
+    prove_budget_credit_then_withdrawal_is_cross_asset_isolated::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_short_budget_credit_then_withdrawal_is_isolated() {
+    prove_budget_credit_then_withdrawal_is_cross_asset_isolated::<3>();
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn install_fresh_backing_fixture(
     slot: &mut EngineAssetSlotV16Account,
