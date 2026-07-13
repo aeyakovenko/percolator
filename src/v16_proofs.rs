@@ -4418,6 +4418,269 @@ fn closure_asset_one_short_provider_earnings_withdrawal_is_cross_asset_isolated(
     prove_provider_earnings_withdrawal_is_cross_asset_isolated::<3>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn install_fee_domain_fixture(
+    slot: &mut EngineAssetSlotV16Account,
+    side: SideV16,
+    earnings: u128,
+    credit_epoch: u64,
+) {
+    let principal = BOUND_SCALE;
+    let bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: slot.asset.market_id.get(),
+        fresh_unliened_backing_num: principal,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        utilization_fee_earnings: earnings,
+        ..BackingBucketV16::EMPTY
+    });
+    let source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        fresh_reserved_backing_num: principal,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch,
+        ..SourceCreditStateV16::EMPTY
+    });
+    match side {
+        SideV16::Long => {
+            slot.backing_long = bucket;
+            slot.source_credit_long = source;
+        }
+        SideV16::Short => {
+            slot.backing_short = bucket;
+            slot.source_credit_short = source;
+        }
+    }
+}
+
+// The wrapper routes both components of an account backing fee to the source
+// domain being charged. Prove the complete successful transition for every
+// domain while all four domains carry withdrawable value: user capital and
+// c_tot fall by the total fee, only the selected provider/insurance ledgers
+// rise, vault value and total senior claims remain constant, and post-fee IM
+// stays valid. A domain-routing error would transfer user value to another
+// permissionless operator.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_account_backing_fee_is_cross_asset_isolated<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let earnings = [
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+    ];
+    let provider_fee = kani::any::<u8>();
+    let insurance_fee = kani::any::<u8>();
+    let margin_slack = kani::any::<u8>();
+    let surplus = kani::any::<u8>();
+    kani::assume(earnings[0] <= 4 && earnings[1] <= 4);
+    kani::assume(earnings[2] <= 4 && earnings[3] <= 4);
+    kani::assume(provider_fee <= 4 && insurance_fee <= 4);
+    kani::assume(provider_fee > 0 || insurance_fee > 0);
+    kani::assume((1..=8).contains(&margin_slack));
+    kani::assume(surplus <= 8);
+
+    let provider_fee = provider_fee as u128;
+    let insurance_fee = insurance_fee as u128;
+    let total_fee = provider_fee + insurance_fee;
+    let capital = total_fee + margin_slack as u128;
+    let total_earnings = earnings.iter().map(|value| *value as u128).sum::<u128>();
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    let credit_epoch = header.risk_epoch.get();
+    install_fee_domain_fixture(
+        &mut markets[0].engine,
+        SideV16::Long,
+        earnings[0] as u128,
+        credit_epoch,
+    );
+    install_fee_domain_fixture(
+        &mut markets[0].engine,
+        SideV16::Short,
+        earnings[1] as u128,
+        credit_epoch,
+    );
+    install_fee_domain_fixture(
+        &mut markets[1].engine,
+        SideV16::Long,
+        earnings[2] as u128,
+        credit_epoch,
+    );
+    install_fee_domain_fixture(
+        &mut markets[1].engine,
+        SideV16::Short,
+        earnings[3] as u128,
+        credit_epoch,
+    );
+    header.c_tot = V16PodU128::new(capital);
+    header.backing_provider_earnings_total = V16PodU128::new(total_earnings);
+    header.source_fresh_backing_total_num = V16PodU128::new(4 * BOUND_SCALE);
+    header.vault = V16PodU128::new(capital + 10 + total_earnings + 4 + surplus as u128);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: margin_slack as u128,
+        certified_maintenance_req: margin_slack as u128,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let initial_vault = header.vault.get();
+    let initial_senior =
+        header.c_tot.get() + header.insurance.get() + header.backing_provider_earnings_total.get();
+    let mut expected_header = header;
+    expected_header.c_tot = V16PodU128::new(capital - total_fee);
+    expected_header.insurance = V16PodU128::new(header.insurance.get() + insurance_fee);
+    expected_header.backing_provider_earnings_total =
+        V16PodU128::new(total_earnings + provider_fee);
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(header.insurance_domain_budget_remaining_total.get() + insurance_fee);
+    let mut expected_markets = [markets[0].engine, markets[1].engine];
+    install_fee_domain_fixture(
+        &mut expected_markets[DOMAIN / 2],
+        if DOMAIN % 2 == 0 {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
+        earnings[DOMAIN] as u128 + provider_fee,
+        credit_epoch,
+    );
+    match DOMAIN {
+        0 => expected_markets[0].insurance_domain_budget_long = V16PodU128::new(1 + insurance_fee),
+        1 => expected_markets[0].insurance_domain_budget_short = V16PodU128::new(2 + insurance_fee),
+        2 => expected_markets[1].insurance_domain_budget_long = V16PodU128::new(3 + insurance_fee),
+        3 => expected_markets[1].insurance_domain_budget_short = V16PodU128::new(4 + insurance_fee),
+        _ => unreachable!(),
+    }
+    let mut expected_account = account_header;
+    expected_account.capital = V16PodU128::new(capital - total_fee);
+    let mut expected_cert = expected_account.health_cert.try_to_runtime().unwrap();
+    expected_cert.certified_equity -= total_fee as i128;
+    expected_account.health_cert = HealthCertV16Account::from_runtime(&expected_cert);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let charged = market
+        .charge_account_backing_fee_not_atomic(
+            &mut account,
+            DOMAIN,
+            provider_fee,
+            DOMAIN,
+            insurance_fee,
+        )
+        .unwrap();
+
+    kani::cover!(
+        provider_fee > 0 && insurance_fee > 0,
+        "mixed provider and insurance fee routing is reachable"
+    );
+    kani::cover!(
+        provider_fee > 0 && insurance_fee == 0,
+        "provider-only fee routing is reachable"
+    );
+    kani::cover!(
+        provider_fee == 0 && insurance_fee > 0,
+        "insurance-only fee routing is reachable"
+    );
+    assert_eq!(charged, total_fee);
+    assert_eq!(market.header.vault.get(), initial_vault);
+    assert_eq!(
+        market.header.c_tot.get()
+            + market.header.insurance.get()
+            + market.header.backing_provider_earnings_total.get(),
+        initial_senior,
+        "fee routing must conserve total senior claims"
+    );
+    assert_eq!(
+        account.header.health_cert.certified_equity.get(),
+        margin_slack as i128,
+        "the exact post-fee IM boundary must remain valid"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(112)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_long_backing_fee_is_cross_asset_isolated() {
+    prove_account_backing_fee_is_cross_asset_isolated::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(112)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_short_backing_fee_is_cross_asset_isolated() {
+    prove_account_backing_fee_is_cross_asset_isolated::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(112)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_long_backing_fee_is_cross_asset_isolated() {
+    prove_account_backing_fee_is_cross_asset_isolated::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(112)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_short_backing_fee_is_cross_asset_isolated() {
+    prove_account_backing_fee_is_cross_asset_isolated::<3>();
+}
+
 // Asset-0 authority may force an individual asset into Recovery, but this
 // control is bounded: it freezes the selected asset at its committed effective
 // mark, moves no value, touches no other asset, bumps epochs once, and is then
