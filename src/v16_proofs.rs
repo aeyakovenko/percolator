@@ -3668,6 +3668,709 @@ fn closure_scoped_trade_short_is_live_and_isolated_from_unrelated_loss_stale_ass
     prove_scoped_trade_is_live_and_isolated_from_unrelated_loss_stale_asset::<false>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_current_bankrupt_refresh_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    price_override: Option<(usize, u64)>,
+    b_delta_budget: u128,
+    allow_b_chunk: bool,
+) -> V16Result<AccountRefreshCertOutcomeV16> {
+    assert_eq!(price_override, None);
+    assert_eq!(
+        b_delta_budget,
+        market.header.config.public_b_chunk_atoms.get()
+    );
+    assert!(!allow_b_chunk);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    assert!((-2..=-1).contains(&account.header.pnl.get()));
+    assert_eq!(account.header.capital.get(), 0);
+    let loss = account.header.pnl.get().unsigned_abs();
+    let cert = HealthCertV16 {
+        certified_equity: account.header.pnl.get(),
+        certified_initial_req: 100,
+        certified_maintenance_req: 100,
+        certified_liq_deficit: 100 + loss,
+        certified_worst_case_loss: 100,
+        cert_oracle_epoch: market.header.oracle_epoch.get(),
+        cert_funding_epoch: market.header.funding_epoch.get(),
+        cert_risk_epoch: market.header.risk_epoch.get(),
+        cert_asset_set_epoch: market.header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account.header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+    };
+    account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+    Ok(AccountRefreshCertOutcomeV16::Certified(cert))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_current_leg_settlement_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    leg_slot: usize,
+) -> V16Result<()> {
+    assert_eq!(leg_slot, 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.capital.get(), 0);
+    let close = account.header.close_progress.try_to_runtime()?;
+    assert!(close.active && close.finalized && !close.has_pending_residual());
+    let leg = account.header.legs[leg_slot].try_to_runtime()?;
+    assert!(leg.active && !leg.stale && !leg.b_stale);
+    let asset_index = leg.asset_index as usize;
+    assert!(asset_index < 2);
+    let asset = market.markets[asset_index].engine.asset.try_to_runtime()?;
+    assert_eq!(leg.market_id, asset.market_id);
+    let (k_now, f_now, b_now, epoch_now) = match leg.side {
+        SideV16::Long => (
+            asset.k_long,
+            asset.f_long_num,
+            asset.b_long_num,
+            asset.epoch_long,
+        ),
+        SideV16::Short => (
+            asset.k_short,
+            asset.f_short_num,
+            asset.b_short_num,
+            asset.epoch_short,
+        ),
+    };
+    assert_eq!(leg.epoch_snap, epoch_now);
+    assert_eq!(leg.b_epoch_snap, epoch_now);
+    assert_eq!(leg.k_snap, k_now);
+    assert_eq!(leg.f_snap, f_now);
+    assert_eq!(leg.b_snap, b_now);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_full_clear_position_delta_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    asset_index: usize,
+    delta_q: i128,
+) -> V16Result<()> {
+    liquidation_current_leg_settlement_stub(market, account, 0)?;
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert_eq!(asset_index, leg.asset_index as usize);
+    assert_eq!(delta_q, leg.basis_pos_q.checked_neg().unwrap());
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    assert_eq!(leg.b_rem, 0);
+    assert!(!market.has_pending_domain_loss_barrier(asset_index, leg.side)?);
+
+    let asset = market.asset_state(asset_index)?;
+    let (remainder, dust) = match leg.side {
+        SideV16::Long => (
+            asset.social_loss_remainder_long_num,
+            asset.social_loss_dust_long_num,
+        ),
+        SideV16::Short => (
+            asset.social_loss_remainder_short_num,
+            asset.social_loss_dust_short_num,
+        ),
+    };
+    assert_eq!(remainder, 0);
+    assert_eq!(dust, 0);
+    let asset = V16Core::kernel_clear_leg(leg, asset)?;
+    account.header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
+    active_bitmap_clear(&mut bitmap, 0)?;
+    account.header.active_bitmap = bitmap.map(V16PodU64::new);
+    account.header.health_cert.valid = 0;
+    market.set_asset_state(asset_index, asset)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_risk_notional_stub(abs_pos_q: u128, price: u64) -> V16Result<u128> {
+    assert_eq!(abs_pos_q, POS_SCALE);
+    assert_eq!(price, 100);
+    Ok(100)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_matching_a_ratio_stub(a: u128, b: u128, d: u128) -> u128 {
+    assert_eq!(a, ADL_ONE);
+    assert_eq!(b, POS_SCALE);
+    assert_eq!(d, 2 * POS_SCALE);
+    ADL_ONE / 2
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn unreachable_liquidation_residual_capacity_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    _bankrupt_side: SideV16,
+    residual_remaining: u128,
+) -> V16Result<u128> {
+    assert!(asset_index < 2);
+    assert_eq!(residual_remaining, 0);
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn unreachable_liquidation_residual_booking_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _account: &mut PortfolioV16ViewMut<'_>,
+    asset_index: usize,
+    _bankrupt_side: SideV16,
+    residual_remaining: u128,
+) -> V16Result<BResidualBookingOutcomeV16> {
+    assert!(asset_index < 2);
+    assert_eq!(residual_remaining, 0);
+    Ok(BResidualBookingOutcomeV16 {
+        booked_loss: 0,
+        explicit_loss: 0,
+        delta_b: 0,
+        remaining_after: 0,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_risk_score_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<RiskScoreV16> {
+    let cert = account.header.health_cert.try_to_runtime()?;
+    assert!(cert.valid);
+    assert!((101..=102).contains(&cert.certified_liq_deficit));
+    assert_eq!(cert.certified_worst_case_loss, 100);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    Ok(RiskScoreV16 {
+        certified_liq_deficit: cert.certified_liq_deficit,
+        unsettled_b_loss_bound: 0,
+        stale_loss_bound: 0,
+        gross_risk_notional: cert.certified_worst_case_loss,
+        active_leg_count: 1,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_final_cert_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    price_override: Option<(usize, u64)>,
+) -> V16Result<HealthCertV16> {
+    assert_eq!(price_override, None);
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.capital.get(), 0);
+    let close = account.header.close_progress.try_to_runtime()?;
+    assert!(close.active && close.finalized && !close.has_pending_residual());
+    let cert = HealthCertV16 {
+        cert_oracle_epoch: market.header.oracle_epoch.get(),
+        cert_funding_epoch: market.header.funding_epoch.get(),
+        cert_risk_epoch: market.header.risk_epoch.get(),
+        cert_asset_set_epoch: market.header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+    Ok(cert)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_progress_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    before: RiskScoreV16,
+    after: &PortfolioV16View<'_>,
+) -> V16Result<()> {
+    assert!((101..=102).contains(&before.certified_liq_deficit));
+    assert_eq!(before.unsettled_b_loss_bound, 0);
+    assert_eq!(before.stale_loss_bound, 0);
+    assert_eq!(before.gross_risk_notional, 100);
+    assert_eq!(before.active_leg_count, 1);
+    let cert = after.header.health_cert.try_to_runtime()?;
+    assert!(cert.valid);
+    assert_eq!(cert.certified_liq_deficit, 0);
+    assert_eq!(cert.certified_worst_case_loss, 0);
+    assert_eq!(after.header.active_bitmap[0].get(), 0);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.capital.get(), 0);
+    assert!((-2..=0).contains(&account.header.pnl.get()));
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(
+        account.header.source_domains[0],
+        PortfolioSourceDomainV16Account::default()
+    );
+    assert!(account.header.active_bitmap[0].get() <= 1);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn liquidation_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(market.header.vault.get(), 12);
+    assert_eq!(market.header.c_tot.get(), 0);
+    let slot0 = market.markets[0].engine_slot();
+    let slot1 = market.markets[1].engine_slot();
+    let remaining = slot0
+        .insurance_domain_budget_long
+        .get()
+        .checked_sub(slot0.insurance_domain_spent_long.get())
+        .and_then(|v| {
+            v.checked_add(
+                slot0
+                    .insurance_domain_budget_short
+                    .get()
+                    .checked_sub(slot0.insurance_domain_spent_short.get())?,
+            )
+        })
+        .and_then(|v| {
+            v.checked_add(
+                slot1
+                    .insurance_domain_budget_long
+                    .get()
+                    .checked_sub(slot1.insurance_domain_spent_long.get())?,
+            )
+        })
+        .and_then(|v| {
+            v.checked_add(
+                slot1
+                    .insurance_domain_budget_short
+                    .get()
+                    .checked_sub(slot1.insurance_domain_spent_short.get())?,
+            )
+        })
+        .ok_or(V16Error::CounterUnderflow)?;
+    assert_eq!(market.header.insurance.get(), remaining);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        remaining
+    );
+    let asset0 = slot0.asset.try_to_runtime()?;
+    let asset1 = slot1.asset.try_to_runtime()?;
+    assert_eq!(asset0.oi_eff_long_q, asset0.oi_eff_short_q);
+    assert_eq!(asset1.oi_eff_long_q, asset1.oi_eff_short_q);
+    Ok(())
+}
+
+// Public liquidation composition. A bankrupt single-leg account is fully
+// closed against only its opposing source domain while another asset carries
+// live balanced risk and funded insurance. The route must consume exactly the
+// selected budget, finalize its close barrier, preserve all unrelated state,
+// keep OI symmetric, and move no vault value.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_public_bankrupt_liquidation_is_value_conservative_and_asset_local<
+    const ASSET: usize,
+    const LONG: bool,
+>() {
+    assert!(ASSET < 2);
+    // Keep public orchestration at one nontrivial amount. The production
+    // insurance kernel's symbolic closure theorems prove the scalar relation;
+    // these four instantiations prove end-to-end asset/side routing and frames.
+    let loss = 2u128;
+    let side = if LONG { SideV16::Long } else { SideV16::Short };
+    let domain_side = opposite_side(side);
+    let signed_position = if LONG {
+        POS_SCALE as i128
+    } else {
+        -(POS_SCALE as i128)
+    };
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.vault = V16PodU128::new(12);
+    header.insurance = V16PodU128::new(12);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(12);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(6);
+    markets[0].wrapper = 11;
+    markets[1].wrapper = 22;
+    let mut asset_index = 0usize;
+    while asset_index < 2 {
+        markets[asset_index].engine.insurance_domain_budget_long = V16PodU128::new(3);
+        markets[asset_index].engine.insurance_domain_budget_short = V16PodU128::new(3);
+        let mut asset = markets[asset_index].engine.asset.try_to_runtime().unwrap();
+        asset.slot_last = header.current_slot.get();
+        if asset_index == ASSET {
+            asset.oi_eff_long_q = 2 * POS_SCALE;
+            asset.oi_eff_short_q = 2 * POS_SCALE;
+            asset.stored_pos_count_long = 2;
+            asset.stored_pos_count_short = 2;
+            asset.loss_weight_sum_long = 2 * POS_SCALE;
+            asset.loss_weight_sum_short = 2 * POS_SCALE;
+        } else {
+            asset.oi_eff_long_q = POS_SCALE;
+            asset.oi_eff_short_q = POS_SCALE;
+            asset.stored_pos_count_long = 1;
+            asset.stored_pos_count_short = 1;
+            asset.loss_weight_sum_long = POS_SCALE;
+            asset.loss_weight_sum_short = POS_SCALE;
+        }
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        asset_index += 1;
+    }
+    let selected_asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: selected_asset.market_id,
+        side,
+        basis_pos_q: signed_position,
+        a_basis: ADL_ONE,
+        k_snap: if LONG {
+            selected_asset.k_long
+        } else {
+            selected_asset.k_short
+        },
+        f_snap: if LONG {
+            selected_asset.f_long_num
+        } else {
+            selected_asset.f_short_num
+        },
+        epoch_snap: if LONG {
+            selected_asset.epoch_long
+        } else {
+            selected_asset.epoch_short
+        },
+        loss_weight: POS_SCALE,
+        b_snap: if LONG {
+            selected_asset.b_long_num
+        } else {
+            selected_asset.b_short_num
+        },
+        b_epoch_snap: if LONG {
+            selected_asset.epoch_long
+        } else {
+            selected_asset.epoch_short
+        },
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let other = 1 - ASSET;
+    let residual_before = header.vault.get() - header.insurance.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market
+        .liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: ASSET })
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        LiquidationOutcomeV16 {
+            closed_q: POS_SCALE,
+            insurance_used: loss,
+            residual_booked: 0,
+            explicit_loss: 0,
+            fee_charged: 0,
+        }
+    );
+
+    let mut expected_header = header_before;
+    expected_header.insurance = V16PodU128::new(12 - loss);
+    expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(12 - loss);
+    expected_header.negative_pnl_account_count = V16PodU64::new(0);
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(5);
+    expected_header.bankruptcy_hlock_active = 1;
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+
+    let mut expected_selected = markets_before[ASSET].engine;
+    let mut expected_asset = selected_asset;
+    if LONG {
+        expected_asset.oi_eff_long_q = POS_SCALE;
+        expected_asset.stored_pos_count_long = 1;
+        expected_asset.loss_weight_sum_long = POS_SCALE;
+        expected_asset.oi_eff_short_q = POS_SCALE;
+        expected_asset.a_short = ADL_ONE / 2;
+        expected_selected.insurance_domain_spent_short = V16PodU128::new(loss);
+    } else {
+        expected_asset.oi_eff_short_q = POS_SCALE;
+        expected_asset.stored_pos_count_short = 1;
+        expected_asset.loss_weight_sum_short = POS_SCALE;
+        expected_asset.oi_eff_long_q = POS_SCALE;
+        expected_asset.a_long = ADL_ONE / 2;
+        expected_selected.insurance_domain_spent_long = V16PodU128::new(loss);
+    }
+    expected_selected.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[other].engine,
+        &market.markets[other].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+
+    let final_cert = HealthCertV16 {
+        cert_oracle_epoch: header_before.oracle_epoch.get(),
+        cert_funding_epoch: header_before.funding_epoch.get(),
+        cert_risk_epoch: header_before.risk_epoch.get(),
+        cert_asset_set_epoch: header_before.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    let final_close = CloseProgressLedgerV16 {
+        active: true,
+        finalized: true,
+        close_id: 1,
+        asset_index: ASSET as u32,
+        market_id: selected_asset.market_id,
+        domain_side,
+        gross_loss_at_close_start: loss,
+        drift_reference_slot: header_before.current_slot.get(),
+        max_close_slot: header_before.current_slot.get()
+            + header_before.config.max_bankrupt_close_lifetime_slots.get(),
+        insurance_spent: loss,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.active_bitmap = V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new);
+    expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    expected_account.health_cert = HealthCertV16Account::from_runtime(&final_cert);
+    expected_account.close_progress = CloseProgressLedgerV16Account::from_runtime(&final_close);
+    assert!(account_value_and_gate_frame_unchanged(
+        &expected_account,
+        account.header
+    ));
+    assert_eq!(account.header.legs[0], expected_account.legs[0]);
+    assert_eq!(account.header.health_cert, expected_account.health_cert);
+    assert_eq!(
+        account.header.close_progress,
+        expected_account.close_progress
+    );
+    assert_eq!(account.as_view().source_claim_bound_sum_num().unwrap(), 0);
+    // The exact header and account value/gate frames above prove vault, C_tot,
+    // and account capital unchanged; residual growth is funded insurance use.
+    assert_eq!(market.residual(), residual_before + loss);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::refresh_account_and_certify_not_atomic,
+    liquidation_current_bankrupt_refresh_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::apply_position_delta,
+    liquidation_full_clear_position_delta_stub
+)]
+#[kani::stub(
+    crate::v16::liquidation_risk_notional_ceil,
+    liquidation_risk_notional_stub
+)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    liquidation_matching_a_ratio_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::bankruptcy_residual_single_step_capacity,
+    unreachable_liquidation_residual_capacity_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::book_bankruptcy_residual_chunk_for_account_core,
+    unreachable_liquidation_residual_booking_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::risk_score_unchecked,
+    liquidation_risk_score_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    liquidation_final_cert_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_liquidation_progress_from_score,
+    liquidation_progress_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    liquidation_market_validation_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    liquidation_account_validation_stub
+)]
+fn closure_public_asset_zero_long_bankrupt_liquidation_is_value_conservative_and_local() {
+    prove_public_bankrupt_liquidation_is_value_conservative_and_asset_local::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::refresh_account_and_certify_not_atomic,
+    liquidation_current_bankrupt_refresh_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::apply_position_delta,
+    liquidation_full_clear_position_delta_stub
+)]
+#[kani::stub(
+    crate::v16::liquidation_risk_notional_ceil,
+    liquidation_risk_notional_stub
+)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    liquidation_matching_a_ratio_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::bankruptcy_residual_single_step_capacity,
+    unreachable_liquidation_residual_capacity_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::book_bankruptcy_residual_chunk_for_account_core,
+    unreachable_liquidation_residual_booking_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::risk_score_unchecked,
+    liquidation_risk_score_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    liquidation_final_cert_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_liquidation_progress_from_score,
+    liquidation_progress_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    liquidation_market_validation_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    liquidation_account_validation_stub
+)]
+fn closure_public_asset_zero_short_bankrupt_liquidation_is_value_conservative_and_local() {
+    prove_public_bankrupt_liquidation_is_value_conservative_and_asset_local::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::refresh_account_and_certify_not_atomic,
+    liquidation_current_bankrupt_refresh_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::apply_position_delta,
+    liquidation_full_clear_position_delta_stub
+)]
+#[kani::stub(
+    crate::v16::liquidation_risk_notional_ceil,
+    liquidation_risk_notional_stub
+)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    liquidation_matching_a_ratio_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::bankruptcy_residual_single_step_capacity,
+    unreachable_liquidation_residual_capacity_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::book_bankruptcy_residual_chunk_for_account_core,
+    unreachable_liquidation_residual_booking_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::risk_score_unchecked,
+    liquidation_risk_score_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    liquidation_final_cert_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_liquidation_progress_from_score,
+    liquidation_progress_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    liquidation_market_validation_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    liquidation_account_validation_stub
+)]
+fn closure_public_asset_one_long_bankrupt_liquidation_is_value_conservative_and_local() {
+    prove_public_bankrupt_liquidation_is_value_conservative_and_asset_local::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::refresh_account_and_certify_not_atomic,
+    liquidation_current_bankrupt_refresh_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::apply_position_delta,
+    liquidation_full_clear_position_delta_stub
+)]
+#[kani::stub(
+    crate::v16::liquidation_risk_notional_ceil,
+    liquidation_risk_notional_stub
+)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    liquidation_matching_a_ratio_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::bankruptcy_residual_single_step_capacity,
+    unreachable_liquidation_residual_capacity_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::book_bankruptcy_residual_chunk_for_account_core,
+    unreachable_liquidation_residual_booking_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::risk_score_unchecked,
+    liquidation_risk_score_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    liquidation_final_cert_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_liquidation_progress_from_score,
+    liquidation_progress_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    liquidation_market_validation_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    liquidation_account_validation_stub
+)]
+fn closure_public_asset_one_short_bankrupt_liquidation_is_value_conservative_and_local() {
+    prove_public_bankrupt_liquidation_is_value_conservative_and_asset_local::<1, false>();
+}
+
 // Production bankruptcy insurance must debit only the bankrupt asset's
 // opposing-side budget. This executes the real domain lookup, availability
 // cap, insurance kernel, aggregate-spent setter, PnL cure, and flow check.
