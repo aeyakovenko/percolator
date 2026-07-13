@@ -4289,6 +4289,159 @@ fn install_fresh_backing_fixture(
     }
 }
 
+// External backing deposits create senior, provider-withdrawable principal.
+// Keep every domain live with heterogeneous principal and prove that only the
+// selected domain receives the deposit; otherwise another permissionless
+// operator could withdraw the depositor's value through an otherwise-correct
+// local withdrawal API.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_backing_deposit_is_cross_asset_isolated<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let amounts = [
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+    ];
+    let deposit = kani::any::<u8>();
+    let capital = kani::any::<u8>();
+    let junior = kani::any::<u8>();
+    kani::assume((1..=8).contains(&amounts[0]) && (1..=8).contains(&amounts[1]));
+    kani::assume((1..=8).contains(&amounts[2]) && (1..=8).contains(&amounts[3]));
+    kani::assume((1..=8).contains(&deposit));
+    kani::assume(capital <= 8 && junior <= 8);
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    install_fresh_backing_fixture(&mut markets[0].engine, SideV16::Long, amounts[0] as u128, 0);
+    install_fresh_backing_fixture(
+        &mut markets[0].engine,
+        SideV16::Short,
+        amounts[1] as u128,
+        0,
+    );
+    install_fresh_backing_fixture(&mut markets[1].engine, SideV16::Long, amounts[2] as u128, 0);
+    install_fresh_backing_fixture(
+        &mut markets[1].engine,
+        SideV16::Short,
+        amounts[3] as u128,
+        0,
+    );
+    let total = amounts.iter().map(|value| *value as u128).sum::<u128>();
+    let initial_vault = capital as u128 + 10 + total + junior as u128;
+    header.c_tot = V16PodU128::new(capital as u128);
+    header.source_fresh_backing_total_num = V16PodU128::new(total * BOUND_SCALE);
+    header.vault = V16PodU128::new(initial_vault);
+
+    let deposit = deposit as u128;
+    let mut expected_header = header;
+    expected_header.source_fresh_backing_total_num =
+        V16PodU128::new((total + deposit) * BOUND_SCALE);
+    expected_header.vault = V16PodU128::new(initial_vault + deposit);
+    expected_header.risk_epoch = V16PodU64::new(header.risk_epoch.get() + 1);
+    let mut expected_markets = [markets[0].engine, markets[1].engine];
+    install_fresh_backing_fixture(
+        &mut expected_markets[DOMAIN / 2],
+        if DOMAIN % 2 == 0 {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
+        amounts[DOMAIN] as u128 + deposit,
+        1,
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(DOMAIN, deposit, 10)
+        .unwrap();
+
+    kani::cover!(deposit > 1, "multi-atom backing deposit is reachable");
+    kani::cover!(
+        amounts[DOMAIN] != amounts[(DOMAIN + 1) % 4],
+        "selected and neighboring domains can hold different principal"
+    );
+    assert_eq!(market.header.vault.get() - initial_vault, deposit);
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get() - total * BOUND_SCALE,
+        deposit * BOUND_SCALE,
+        "vault atoms and scaled backing must increase in lockstep"
+    );
+    assert_eq!(
+        market.residual(),
+        residual_before,
+        "a backing deposit cannot inflate junior value"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_long_backing_deposit_is_cross_asset_isolated() {
+    prove_backing_deposit_is_cross_asset_isolated::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_short_backing_deposit_is_cross_asset_isolated() {
+    prove_backing_deposit_is_cross_asset_isolated::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_long_backing_deposit_is_cross_asset_isolated() {
+    prove_backing_deposit_is_cross_asset_isolated::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_short_backing_deposit_is_cross_asset_isolated() {
+    prove_backing_deposit_is_cross_asset_isolated::<3>();
+}
+
 // Counterparty backing is provider-owned principal, but a provider for one
 // permissionless domain must never extract another domain's principal. Each
 // instance keeps all four domains nonzero and symbolic, withdraws from exactly
