@@ -4281,6 +4281,143 @@ fn closure_asset_one_short_backing_withdrawal_is_cross_asset_isolated() {
     prove_backing_withdrawal_is_cross_asset_isolated::<3>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn install_provider_earnings_fixture(
+    slot: &mut EngineAssetSlotV16Account,
+    side: SideV16,
+    earnings: u128,
+) {
+    let bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: slot.asset.market_id.get(),
+        utilization_fee_earnings: earnings,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    match side {
+        SideV16::Long => slot.backing_long = bucket,
+        SideV16::Short => slot.backing_short = bucket,
+    }
+}
+
+// Provider earnings are senior claims held in a shared vault, but authority is
+// domain-local. Keep every domain funded and prove that a withdrawal can debit
+// only its selected earnings bucket; the global earnings class and vault move
+// by the same amount while insurance and junior surplus remain isolated.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_provider_earnings_withdrawal_is_cross_asset_isolated<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let earnings = [
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+    ];
+    let withdraw = kani::any::<u8>();
+    let surplus = kani::any::<u8>();
+    kani::assume((1..=8).contains(&earnings[0]) && (1..=8).contains(&earnings[1]));
+    kani::assume((1..=8).contains(&earnings[2]) && (1..=8).contains(&earnings[3]));
+    kani::assume(withdraw > 0 && withdraw <= earnings[DOMAIN]);
+    kani::assume(surplus <= 8);
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    install_provider_earnings_fixture(&mut markets[0].engine, SideV16::Long, earnings[0] as u128);
+    install_provider_earnings_fixture(&mut markets[0].engine, SideV16::Short, earnings[1] as u128);
+    install_provider_earnings_fixture(&mut markets[1].engine, SideV16::Long, earnings[2] as u128);
+    install_provider_earnings_fixture(&mut markets[1].engine, SideV16::Short, earnings[3] as u128);
+    let total = earnings.iter().map(|value| *value as u128).sum::<u128>();
+    header.backing_provider_earnings_total = V16PodU128::new(total);
+    header.vault = V16PodU128::new(10 + total + surplus as u128);
+    let initial_vault = header.vault.get();
+
+    let withdraw = withdraw as u128;
+    let mut expected_header = header;
+    expected_header.backing_provider_earnings_total = V16PodU128::new(total - withdraw);
+    expected_header.vault = V16PodU128::new(initial_vault - withdraw);
+    let mut expected_markets = [markets[0].engine, markets[1].engine];
+    install_provider_earnings_fixture(
+        &mut expected_markets[DOMAIN / 2],
+        if DOMAIN % 2 == 0 {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
+        earnings[DOMAIN] as u128 - withdraw,
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    market
+        .withdraw_backing_provider_earnings_not_atomic(DOMAIN, withdraw)
+        .unwrap();
+
+    kani::cover!(
+        withdraw < earnings[DOMAIN] as u128,
+        "partial provider-earnings withdrawal is reachable"
+    );
+    kani::cover!(
+        withdraw == earnings[DOMAIN] as u128,
+        "full provider-earnings withdrawal is reachable"
+    );
+    assert_eq!(
+        initial_vault - market.header.vault.get(),
+        withdraw,
+        "vault outflow must equal the selected earnings debit"
+    );
+    assert_eq!(
+        market.residual(),
+        residual_before,
+        "provider earnings cannot consume junior surplus"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_asset_zero_long_provider_earnings_withdrawal_is_cross_asset_isolated() {
+    prove_provider_earnings_withdrawal_is_cross_asset_isolated::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_asset_zero_short_provider_earnings_withdrawal_is_cross_asset_isolated() {
+    prove_provider_earnings_withdrawal_is_cross_asset_isolated::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_asset_one_long_provider_earnings_withdrawal_is_cross_asset_isolated() {
+    prove_provider_earnings_withdrawal_is_cross_asset_isolated::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_asset_one_short_provider_earnings_withdrawal_is_cross_asset_isolated() {
+    prove_provider_earnings_withdrawal_is_cross_asset_isolated::<3>();
+}
+
 // Asset-0 authority may force an individual asset into Recovery, but this
 // control is bounded: it freezes the selected asset at its committed effective
 // mark, moves no value, touches no other asset, bumps epochs once, and is then
