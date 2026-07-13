@@ -2368,6 +2368,39 @@ fn valid_conversion_market_stub<'a: 'a, T>(
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn withdrawal_flow_validate_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
+    let amount = proof.debits[TokenValueClassV16::AccountCapital as usize];
+    assert_ne!(amount, 0);
+    assert_eq!(
+        proof.credits[TokenValueClassV16::ExternalQuote as usize],
+        amount
+    );
+    let mut i = 0usize;
+    while i < V16_TOKEN_VALUE_CLASS_COUNT {
+        if i != TokenValueClassV16::AccountCapital as usize {
+            assert_eq!(proof.debits[i], 0);
+        }
+        if i != TokenValueClassV16::ExternalQuote as usize {
+            assert_eq!(proof.credits[i], 0);
+        }
+        i += 1;
+    }
+    assert_eq!(proof.external_quote_in, 0);
+    assert_eq!(proof.external_quote_out, amount);
+    assert_eq!(proof.vault_before - proof.vault_after, amount);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn zero_pnl_principal_settlement_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<u128> {
+    assert_eq!(account.header.pnl.get(), 0);
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn two_asset_kf_mapping_fixture() -> (
     MarketGroupV16HeaderAccount,
     [Market<u64>; 2],
@@ -3848,6 +3881,79 @@ fn closure_asset_one_long_insurance_backed_conversion_is_local() {
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_one_short_insurance_backed_conversion_is_local() {
     prove_source_backed_conversion_is_asset_local::<1, false, true>();
+}
+
+// The source-backed conversion proofs above establish the maximum capital that
+// can be realized from a claim. This companion theorem proves the external leg:
+// for every nonzero valid withdrawal amount and capital balance, the public API
+// removes exactly that amount from account capital, C_tot, and V, and cannot
+// mutate either market slot. Together, conversion backing is the hard upper
+// bound on quote atoms that can leave the vault through this route.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(TokenValueFlowProofV16::validate, withdrawal_flow_validate_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_core_not_atomic,
+    zero_pnl_principal_settlement_stub
+)]
+fn closure_flat_public_withdrawal_is_conservative_and_asset_local() {
+    let capital = kani::any::<u128>();
+    let amount = kani::any::<u128>();
+    kani::assume(capital > 0 && capital <= MAX_VAULT_TVL - 10);
+    kani::assume(amount > 0 && amount <= capital);
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(10 + capital);
+    account_header.capital = V16PodU128::new(capital);
+
+    let mut expected_header = header;
+    expected_header.c_tot = V16PodU128::new(capital - amount);
+    expected_header.vault = V16PodU128::new(10 + capital - amount);
+    let expected_markets = [markets[0].engine, markets[1].engine];
+    let mut expected_account = account_header;
+    expected_account.capital = V16PodU128::new(capital - amount);
+    expected_account.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.withdraw_not_atomic(&mut account, amount).unwrap();
+
+    kani::cover!(amount == capital, "full capital withdrawal is reachable");
+    kani::cover!(amount < capital, "partial capital withdrawal is reachable");
+    assert_eq!(
+        (10 + capital) - market.header.vault.get(),
+        amount,
+        "external vault outflow must equal the caller's capital debit"
+    );
+    assert_eq!(
+        capital - market.header.c_tot.get(),
+        amount,
+        "aggregate capital must fund the same outflow"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
 }
 
 // Safe shutdown liveness over the wrapper-used public forfeit route. Once an
