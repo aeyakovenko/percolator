@@ -2368,6 +2368,15 @@ fn valid_conversion_market_stub<'a: 'a, T>(
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn valid_domain_ledger_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    domain: usize,
+) -> V16Result<()> {
+    assert!(domain < market.markets.len() * 2);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn withdrawal_flow_validate_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
     let amount = proof.debits[TokenValueClassV16::AccountCapital as usize];
     assert_ne!(amount, 0);
@@ -4084,6 +4093,192 @@ fn closure_asset_one_long_insurance_withdrawal_is_cross_asset_isolated() {
 #[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
 fn closure_asset_one_short_insurance_withdrawal_is_cross_asset_isolated() {
     prove_domain_insurance_withdrawal_is_cross_asset_isolated::<3>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn install_fresh_backing_fixture(
+    slot: &mut EngineAssetSlotV16Account,
+    side: SideV16,
+    amount: u128,
+    credit_epoch: u64,
+) {
+    let amount_num = amount * BOUND_SCALE;
+    let bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: slot.asset.market_id.get(),
+        fresh_unliened_backing_num: amount_num,
+        expiry_slot: if amount == 0 { 0 } else { 10 },
+        status: if amount == 0 {
+            BackingBucketStatusV16::Empty
+        } else {
+            BackingBucketStatusV16::Fresh
+        },
+        ..BackingBucketV16::EMPTY
+    });
+    let source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        fresh_reserved_backing_num: amount_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch,
+        ..SourceCreditStateV16::EMPTY
+    });
+    match side {
+        SideV16::Long => {
+            slot.backing_long = bucket;
+            slot.source_credit_long = source;
+        }
+        SideV16::Short => {
+            slot.backing_short = bucket;
+            slot.source_credit_short = source;
+        }
+    }
+}
+
+// Counterparty backing is provider-owned principal, but a provider for one
+// permissionless domain must never extract another domain's principal. Each
+// instance keeps all four domains nonzero and symbolic, withdraws from exactly
+// one, and frames both complete market slots plus every global stock counter.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_backing_withdrawal_is_cross_asset_isolated<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let amounts = [
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+    ];
+    let withdraw = kani::any::<u8>();
+    kani::assume((1..=8).contains(&amounts[0]) && (1..=8).contains(&amounts[1]));
+    kani::assume((1..=8).contains(&amounts[2]) && (1..=8).contains(&amounts[3]));
+    kani::assume(withdraw > 0 && withdraw <= amounts[DOMAIN]);
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    install_fresh_backing_fixture(&mut markets[0].engine, SideV16::Long, amounts[0] as u128, 0);
+    install_fresh_backing_fixture(
+        &mut markets[0].engine,
+        SideV16::Short,
+        amounts[1] as u128,
+        0,
+    );
+    install_fresh_backing_fixture(&mut markets[1].engine, SideV16::Long, amounts[2] as u128, 0);
+    install_fresh_backing_fixture(
+        &mut markets[1].engine,
+        SideV16::Short,
+        amounts[3] as u128,
+        0,
+    );
+    let total = amounts.iter().map(|value| *value as u128).sum::<u128>();
+    header.source_fresh_backing_total_num = V16PodU128::new(total * BOUND_SCALE);
+    header.vault = V16PodU128::new(10 + total);
+
+    let withdraw = withdraw as u128;
+    let remaining = amounts[DOMAIN] as u128 - withdraw;
+    let mut expected_header = header;
+    expected_header.source_fresh_backing_total_num =
+        V16PodU128::new((total - withdraw) * BOUND_SCALE);
+    expected_header.vault = V16PodU128::new(10 + total - withdraw);
+    expected_header.risk_epoch = V16PodU64::new(header.risk_epoch.get() + 1);
+    let mut expected_markets = [markets[0].engine, markets[1].engine];
+    install_fresh_backing_fixture(
+        &mut expected_markets[DOMAIN / 2],
+        if DOMAIN % 2 == 0 {
+            SideV16::Long
+        } else {
+            SideV16::Short
+        },
+        remaining,
+        1,
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .withdraw_fresh_counterparty_backing_not_atomic(DOMAIN, withdraw)
+        .unwrap();
+
+    kani::cover!(
+        withdraw < amounts[DOMAIN] as u128,
+        "partial backing withdrawal is reachable"
+    );
+    kani::cover!(
+        withdraw == amounts[DOMAIN] as u128,
+        "full backing withdrawal is reachable"
+    );
+    assert_eq!(
+        (10 + total) - market.header.vault.get(),
+        withdraw,
+        "vault outflow must equal selected backing principal"
+    );
+    assert_eq!(
+        market.header.insurance.get(),
+        10,
+        "backing withdrawal cannot consume insurance"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_long_backing_withdrawal_is_cross_asset_isolated() {
+    prove_backing_withdrawal_is_cross_asset_isolated::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_short_backing_withdrawal_is_cross_asset_isolated() {
+    prove_backing_withdrawal_is_cross_asset_isolated::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_long_backing_withdrawal_is_cross_asset_isolated() {
+    prove_backing_withdrawal_is_cross_asset_isolated::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_short_backing_withdrawal_is_cross_asset_isolated() {
+    prove_backing_withdrawal_is_cross_asset_isolated::<3>();
 }
 
 // Safe shutdown liveness over the wrapper-used public forfeit route. Once an
