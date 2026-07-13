@@ -4281,6 +4281,99 @@ fn closure_asset_one_short_backing_withdrawal_is_cross_asset_isolated() {
     prove_backing_withdrawal_is_cross_asset_isolated::<3>();
 }
 
+// Asset-0 authority may force an individual asset into Recovery, but this
+// control is bounded: it freezes the selected asset at its committed effective
+// mark, moves no value, touches no other asset, bumps epochs once, and is then
+// idempotent. This is the engine half of safe permissionless-market shutdown.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_forced_asset_recovery_is_value_neutral_local_and_idempotent<const ASSET: usize>() {
+    assert!(ASSET < 2);
+    let starts_drain_only = kani::any::<bool>();
+    let capital = kani::any::<u8>();
+    let extra_insurance = kani::any::<u8>();
+    let surplus = kani::any::<u8>();
+    kani::assume(capital <= 8 && extra_insurance <= 8 && surplus <= 8);
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    let insurance = 10 + extra_insurance as u128;
+    header.c_tot = V16PodU128::new(capital as u128);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(capital as u128 + insurance + surplus as u128);
+    let mut selected = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    selected.lifecycle = if starts_drain_only {
+        AssetLifecycleV16::DrainOnly
+    } else {
+        AssetLifecycleV16::Active
+    };
+    selected.raw_oracle_target_price = 150;
+    selected.effective_price = 100;
+    markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&selected);
+
+    let mut expected_header = header;
+    expected_header.asset_set_epoch = V16PodU64::new(header.asset_set_epoch.get() + 1);
+    expected_header.risk_epoch = V16PodU64::new(header.risk_epoch.get() + 1);
+    let mut expected_markets = [markets[0].engine, markets[1].engine];
+    selected.lifecycle = AssetLifecycleV16::Recovery;
+    selected.raw_oracle_target_price = selected.effective_price;
+    expected_markets[ASSET].asset = AssetStateV16Account::from_runtime(&selected);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.force_asset_recovery_not_atomic(ASSET, 2).unwrap();
+    let first_header = *market.header;
+    let first_markets = [market.markets[0].engine, market.markets[1].engine];
+    market.force_asset_recovery_not_atomic(ASSET, 2).unwrap();
+
+    kani::cover!(!starts_drain_only, "forced recovery covers an active asset");
+    kani::cover!(
+        starts_drain_only,
+        "forced recovery covers a drain-only asset"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &first_header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &first_markets[0]
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &first_markets[1]
+    ));
+    assert!(kani_eq_market_group_v16_header_account(
+        &first_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &first_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &first_markets[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_forced_asset_zero_recovery_is_bounded_and_idempotent() {
+    prove_forced_asset_recovery_is_value_neutral_local_and_idempotent::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_forced_asset_one_recovery_is_bounded_and_idempotent() {
+    prove_forced_asset_recovery_is_value_neutral_local_and_idempotent::<1>();
+}
+
 // Safe shutdown liveness over the wrapper-used public forfeit route. Once an
 // asset is in Recovery, a clean current leg must detach in one call without
 // moving any token-value stock or touching another asset. The selected side's
