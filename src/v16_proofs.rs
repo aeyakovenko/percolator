@@ -3956,6 +3956,136 @@ fn closure_flat_public_withdrawal_is_conservative_and_asset_local() {
     ));
 }
 
+// A permissionless market operator may withdraw only the budget of the exact
+// domain it controls. Symbolically select any side of either asset and prove
+// that the public route debits V, I, and that domain's budget in lockstep while
+// every byte of both slots outside that one budget field remains unchanged.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_domain_insurance_withdrawal_is_cross_asset_isolated<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let amount = kani::any::<u8>();
+    let budgets = [
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+    ];
+    let surplus = kani::any::<u8>();
+    kani::assume(amount > 0);
+    let selected_budget = budgets[DOMAIN];
+    kani::assume(amount <= selected_budget);
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budgets[0] as u128);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budgets[1] as u128);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(budgets[2] as u128);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(budgets[3] as u128);
+    let total_budget = budgets.iter().map(|value| *value as u128).sum::<u128>();
+    let initial_insurance = total_budget + surplus as u128;
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(total_budget);
+    header.insurance = V16PodU128::new(initial_insurance);
+    header.vault = V16PodU128::new(initial_insurance);
+
+    let amount = amount as u128;
+    let mut expected_header = header;
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(total_budget - amount);
+    expected_header.insurance = V16PodU128::new(initial_insurance - amount);
+    expected_header.vault = V16PodU128::new(initial_insurance - amount);
+    let mut expected_markets = [markets[0].engine, markets[1].engine];
+    match DOMAIN {
+        0 => {
+            expected_markets[0].insurance_domain_budget_long =
+                V16PodU128::new(budgets[0] as u128 - amount)
+        }
+        1 => {
+            expected_markets[0].insurance_domain_budget_short =
+                V16PodU128::new(budgets[1] as u128 - amount)
+        }
+        2 => {
+            expected_markets[1].insurance_domain_budget_long =
+                V16PodU128::new(budgets[2] as u128 - amount)
+        }
+        3 => {
+            expected_markets[1].insurance_domain_budget_short =
+                V16PodU128::new(budgets[3] as u128 - amount)
+        }
+        _ => unreachable!(),
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .withdraw_domain_insurance_not_atomic(DOMAIN, amount)
+        .unwrap();
+
+    kani::cover!(
+        amount < selected_budget as u128,
+        "partial domain withdrawal is reachable"
+    );
+    kani::cover!(
+        amount == selected_budget as u128,
+        "full domain withdrawal is reachable"
+    );
+    assert_eq!(
+        initial_insurance - market.header.vault.get(),
+        amount,
+        "vault outflow must equal the selected domain debit"
+    );
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        surplus as u128,
+        "unbudgeted insurance must remain isolated"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_asset_zero_long_insurance_withdrawal_is_cross_asset_isolated() {
+    prove_domain_insurance_withdrawal_is_cross_asset_isolated::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_asset_zero_short_insurance_withdrawal_is_cross_asset_isolated() {
+    prove_domain_insurance_withdrawal_is_cross_asset_isolated::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_asset_one_long_insurance_withdrawal_is_cross_asset_isolated() {
+    prove_domain_insurance_withdrawal_is_cross_asset_isolated::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_asset_one_short_insurance_withdrawal_is_cross_asset_isolated() {
+    prove_domain_insurance_withdrawal_is_cross_asset_isolated::<3>();
+}
+
 // Safe shutdown liveness over the wrapper-used public forfeit route. Once an
 // asset is in Recovery, a clean current leg must detach in one call without
 // moving any token-value stock or touching another asset. The selected side's
