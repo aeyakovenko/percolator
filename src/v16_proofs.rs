@@ -4218,6 +4218,139 @@ fn closure_asset_one_liquidatable_auto_crank_selects_active_asset() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn refresh_plan_only_permissionless_crank_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    request: PermissionlessCrankRequestV16,
+) -> V16Result<PermissionlessProgressOutcomeV16> {
+    match request.action {
+        PermissionlessCrankActionV16::Refresh => {
+            assert_eq!(
+                request.asset_index,
+                account.header.legs[0].asset_index.get() as usize
+            );
+            Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+        }
+        _ => panic!("stale-certificate auto-crank selected a non-refresh action"),
+    }
+}
+
+// Stale-certificate liquidation safety. A persisted deficit certified at an
+// old oracle epoch must select RefreshAccount, never Liquidate, and must use the
+// first active leg's engine-owned asset without requiring a caller observation.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_stale_deficit_auto_crank_refreshes_active_asset<const ASSET: usize>() {
+    let (mut header, mut markets, mut account_header, mut leg, _) =
+        b_stale_transition_fixture::<ASSET>();
+    let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    asset.b_long_num = 0;
+    asset.b_short_num = 0;
+    markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.b_stale_account_count = V16PodU64::new(0);
+    header.oracle_epoch = V16PodU64::new(1);
+    header.stale_certificate_count = V16PodU64::new(1);
+    leg.b_stale = false;
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
+    account_header.b_stale_state = 0;
+    account_header.stale_state = 1;
+    let bitmap = account_header.active_bitmap.map(V16PodU64::get);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 0,
+        certified_initial_req: 2,
+        certified_maintenance_req: 1,
+        certified_liq_deficit: 1,
+        certified_worst_case_loss: 1,
+        cert_oracle_epoch: 0,
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        valid: true,
+    });
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    kani::cover!(
+        leg.side == SideV16::Short,
+        "stale-deficit refresh covers the active asset's short side"
+    );
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: header_before.current_slot.get(),
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result,
+        AutoCrankResultV16 {
+            selected: AutoCrankPlanV16::RefreshAccount {
+                asset_index: Some(ASSET),
+            },
+            outcome: AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::AccountCurrent,
+            ),
+        }
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
+    refresh_plan_only_permissionless_crank_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::close_resolved_account_not_atomic,
+    unreachable_resolved_close_stub
+)]
+fn closure_asset_zero_stale_deficit_auto_crank_refreshes_active_asset() {
+    prove_stale_deficit_auto_crank_refreshes_active_asset::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
+    refresh_plan_only_permissionless_crank_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::close_resolved_account_not_atomic,
+    unreachable_resolved_close_stub
+)]
+fn closure_asset_one_stale_deficit_auto_crank_refreshes_active_asset() {
+    prove_stale_deficit_auto_crank_refreshes_active_asset::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn first_winner_close_stub<'a: 'a, T>(
     market: &mut MarketGroupV16ViewMut<'a, T>,
     account: &mut PortfolioV16ViewMut<'_>,
