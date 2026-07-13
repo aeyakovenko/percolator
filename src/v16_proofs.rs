@@ -4095,6 +4095,161 @@ fn closure_asset_one_short_insurance_withdrawal_is_cross_asset_isolated() {
     prove_domain_insurance_withdrawal_is_cross_asset_isolated::<3>();
 }
 
+// An external insurance deposit creates domain-withdrawable capacity. Prove
+// that the quote inflow and insurance stock increase in lockstep and that only
+// the requested domain receives the new budget; otherwise the wrong market
+// operator could withdraw a donor's insurance despite global conservation.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_domain_insurance_deposit_is_cross_asset_isolated<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let budgets = [
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+        kani::any::<u8>(),
+    ];
+    let deposit = kani::any::<u8>();
+    let capital = kani::any::<u8>();
+    let unallocated = kani::any::<u8>();
+    let junior = kani::any::<u8>();
+    kani::assume((1..=8).contains(&budgets[0]) && (1..=8).contains(&budgets[1]));
+    kani::assume((1..=8).contains(&budgets[2]) && (1..=8).contains(&budgets[3]));
+    kani::assume((1..=8).contains(&deposit));
+    kani::assume(capital <= 8 && unallocated <= 8 && junior <= 8);
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budgets[0] as u128);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budgets[1] as u128);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(budgets[2] as u128);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(budgets[3] as u128);
+    let total_budget = budgets.iter().map(|value| *value as u128).sum::<u128>();
+    let insurance = total_budget + unallocated as u128;
+    let initial_vault = capital as u128 + insurance + junior as u128;
+    header.c_tot = V16PodU128::new(capital as u128);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(total_budget);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(initial_vault);
+
+    let deposit = deposit as u128;
+    let mut expected_header = header;
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(total_budget + deposit);
+    expected_header.insurance = V16PodU128::new(insurance + deposit);
+    expected_header.vault = V16PodU128::new(initial_vault + deposit);
+    let mut expected_markets = [markets[0].engine, markets[1].engine];
+    match DOMAIN {
+        0 => {
+            expected_markets[0].insurance_domain_budget_long =
+                V16PodU128::new(budgets[0] as u128 + deposit)
+        }
+        1 => {
+            expected_markets[0].insurance_domain_budget_short =
+                V16PodU128::new(budgets[1] as u128 + deposit)
+        }
+        2 => {
+            expected_markets[1].insurance_domain_budget_long =
+                V16PodU128::new(budgets[2] as u128 + deposit)
+        }
+        3 => {
+            expected_markets[1].insurance_domain_budget_short =
+                V16PodU128::new(budgets[3] as u128 + deposit)
+        }
+        _ => unreachable!(),
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    market
+        .deposit_domain_insurance_not_atomic(DOMAIN, deposit)
+        .unwrap();
+
+    kani::cover!(deposit > 1, "multi-atom insurance deposit is reachable");
+    kani::cover!(
+        budgets[DOMAIN] != budgets[(DOMAIN + 1) % 4],
+        "selected and neighboring insurance budgets can differ"
+    );
+    assert_eq!(market.header.vault.get() - initial_vault, deposit);
+    assert_eq!(market.header.insurance.get() - insurance, deposit);
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        unallocated as u128,
+        "deposit cannot relabel preexisting unallocated insurance"
+    );
+    assert_eq!(
+        market.residual(),
+        residual_before,
+        "insurance deposit cannot inflate junior value"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_long_insurance_deposit_is_cross_asset_isolated() {
+    prove_domain_insurance_deposit_is_cross_asset_isolated::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_zero_short_insurance_deposit_is_cross_asset_isolated() {
+    prove_domain_insurance_deposit_is_cross_asset_isolated::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_long_insurance_deposit_is_cross_asset_isolated() {
+    prove_domain_insurance_deposit_is_cross_asset_isolated::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+fn closure_asset_one_short_insurance_deposit_is_cross_asset_isolated() {
+    prove_domain_insurance_deposit_is_cross_asset_isolated::<3>();
+}
+
 // Budget crediting is the bridge from shared, already-collected insurance to
 // domain-withdrawable capacity. Compose that bridge with an immediate public
 // withdrawal while every domain is funded: only the selected budget may gain
