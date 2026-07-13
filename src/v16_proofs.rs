@@ -3315,6 +3315,359 @@ fn closure_unsupported_cross_asset_profit_cannot_move_loss_when_loser_settles_fi
     prove_cross_asset_loser_first_funded::<4>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn current_empty_trade_refresh_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<HealthCertV16> {
+    assert_eq!(account.header.stale_state, 0);
+    assert_eq!(account.header.b_stale_state, 0);
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    let cert = account.header.health_cert.try_to_runtime()?;
+    assert!(cert.valid);
+    assert_eq!(cert.certified_equity, account.header.capital.get() as i128);
+    assert_eq!(cert.certified_initial_req, 0);
+    assert_eq!(cert.certified_maintenance_req, 0);
+    assert_eq!(cert.certified_liq_deficit, 0);
+    assert_eq!(cert.certified_worst_case_loss, 0);
+    assert_eq!(cert.cert_oracle_epoch, market.header.oracle_epoch.get());
+    assert_eq!(cert.cert_funding_epoch, market.header.funding_epoch.get());
+    assert_eq!(cert.cert_risk_epoch, market.header.risk_epoch.get());
+    assert_eq!(
+        cert.cert_asset_set_epoch,
+        market.header.asset_set_epoch.get()
+    );
+    assert_eq!(cert.active_bitmap_at_cert, [0; V16_ACTIVE_BITMAP_WORDS]);
+    Ok(cert)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn scoped_trade_risk_notional_stub(abs_pos_q: u128, price: u64) -> V16Result<u128> {
+    assert!(abs_pos_q == 0 || abs_pos_q == POS_SCALE);
+    assert_eq!(price, 100);
+    Ok(if abs_pos_q == 0 { 0 } else { 100 })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn scoped_trade_notional_floor_stub(size_q: u128, exec_price: u64) -> V16Result<u128> {
+    assert_eq!(size_q, POS_SCALE);
+    assert_eq!(exec_price, 100);
+    Ok(100)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn scoped_trade_fee_notional_stub(size_q: u128, exec_price: u64) -> V16Result<u128> {
+    scoped_trade_notional_floor_stub(size_q, exec_price)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn scoped_trade_fee_stub(notional: u128, fee_bps: u64) -> V16Result<u128> {
+    assert_eq!(notional, 100);
+    assert_eq!(fee_bps, 0);
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn scoped_trade_margin_stub(notional: u128, bps: u64, floor: u128) -> V16Result<u128> {
+    assert!(notional == 0 || notional == 100);
+    assert_eq!(bps, 10_000);
+    assert!(floor == 1 || floor == 2);
+    Ok(notional)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn unreachable_empty_trade_source_lien_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<()> {
+    assert_eq!(account.header.pnl.get(), 0);
+    panic!("claim-free scoped trade attempted to create a source lien")
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn scoped_trade_recertify_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    asset_index: usize,
+    old_abs_q: u128,
+    new_abs_q: u128,
+    price: u64,
+) -> V16Result<HealthCertV16> {
+    assert_eq!(asset_index, 0);
+    assert_eq!(old_abs_q, 0);
+    assert_eq!(new_abs_q, POS_SCALE);
+    assert_eq!(price, 100);
+    assert!((100..=102).contains(&account.header.capital.get()));
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    let prior = account.header.health_cert.try_to_runtime()?;
+    assert!(!prior.valid);
+    assert_eq!(prior.certified_initial_req, 0);
+    assert_eq!(prior.certified_maintenance_req, 0);
+    assert_eq!(prior.certified_worst_case_loss, 0);
+    let cert = HealthCertV16 {
+        certified_equity: account.header.capital.get() as i128,
+        certified_initial_req: 100,
+        certified_maintenance_req: 100,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 100,
+        cert_oracle_epoch: market.header.oracle_epoch.get(),
+        cert_funding_epoch: market.header.funding_epoch.get(),
+        cert_risk_epoch: market.header.risk_epoch.get(),
+        cert_asset_set_epoch: market.header.asset_set_epoch.get(),
+        active_bitmap_at_cert: [1; V16_ACTIVE_BITMAP_WORDS],
+        valid: true,
+    };
+    account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+    Ok(cert)
+}
+
+// Wrapper-critical scoped trade closure. Asset 1 has real balanced open risk
+// and is one slot loss-stale; asset 0 is current. The public scoped API must
+// still admit an economically valid asset-0 trade, restore the global stale
+// summary, frame asset 1 exactly, preserve every value stock, and create only
+// matched opposite asset-0 exposure. Direction and the funded IM boundary are
+// symbolic so this is not a fixed trace. The two directions are separate
+// harnesses to avoid duplicating the full production control-flow graph.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_scoped_trade_is_live_and_isolated_from_unrelated_loss_stale_asset<
+    const FIRST_ACCOUNT_LONG: bool,
+>() {
+    let capital_raw: u8 = kani::any();
+    kani::assume((100..=102).contains(&capital_raw));
+    let capital = capital_raw as u128;
+    let signed_size_q = if FIRST_ACCOUNT_LONG {
+        POS_SCALE as i128
+    } else {
+        -(POS_SCALE as i128)
+    };
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    header.loss_stale_active = 1;
+    header.c_tot = V16PodU128::new(2 * capital);
+    header.vault = V16PodU128::new(2 * capital + header.insurance.get());
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    let mut current_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    current_asset.slot_last = header.current_slot.get();
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&current_asset);
+    let mut stale_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    stale_asset.slot_last = header.current_slot.get() - 1;
+    stale_asset.oi_eff_long_q = POS_SCALE;
+    stale_asset.oi_eff_short_q = POS_SCALE;
+    stale_asset.stored_pos_count_long = 1;
+    stale_asset.stored_pos_count_short = 1;
+    stale_asset.loss_weight_sum_long = POS_SCALE;
+    stale_asset.loss_weight_sum_short = POS_SCALE;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&stale_asset);
+
+    let current_empty_cert = |owner: [u8; 32], account_id: [u8; 32]| {
+        let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+            header.market_group_id,
+            account_id,
+            owner,
+        ));
+        let mut account = PortfolioAccountV16Account::default();
+        account.init_empty_in_place(provenance).unwrap();
+        account.capital = V16PodU128::new(capital);
+        account.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+            certified_equity: capital as i128,
+            certified_initial_req: 0,
+            certified_maintenance_req: 0,
+            certified_liq_deficit: 0,
+            certified_worst_case_loss: 0,
+            cert_oracle_epoch: header.oracle_epoch.get(),
+            cert_funding_epoch: header.funding_epoch.get(),
+            cert_risk_epoch: header.risk_epoch.get(),
+            cert_asset_set_epoch: header.asset_set_epoch.get(),
+            active_bitmap_at_cert: [0; V16_ACTIVE_BITMAP_WORDS],
+            valid: true,
+        });
+        account
+    };
+    let mut first_header = current_empty_cert([3u8; 32], [4u8; 32]);
+    let mut second_header = current_empty_cert([5u8; 32], [6u8; 32]);
+
+    let header_before = header;
+    let markets_before = markets;
+    let first_before = first_header;
+    let second_before = second_header;
+    let request = TradeRequestV16 {
+        asset_index: 0,
+        size_q: signed_size_q,
+        exec_price: current_asset.effective_price,
+        fee_bps: 0,
+    };
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut first = PortfolioV16ViewMut::new(&mut first_header);
+    let mut second = PortfolioV16ViewMut::new(&mut second_header);
+    let outcome = market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut first, &mut second, request)
+        .unwrap();
+
+    kani::cover!(capital == 100, "scoped trade covers the exact IM boundary");
+    kani::cover!(capital > 100, "scoped trade covers surplus capital");
+    assert_eq!(
+        outcome,
+        TradeOutcomeV16 {
+            fee_a: 0,
+            fee_b: 0,
+            notional: 100,
+        }
+    );
+
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(4);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+
+    let mut expected_current_slot = markets_before[0].engine;
+    let mut expected_current_asset = current_asset;
+    expected_current_asset.oi_eff_long_q = POS_SCALE;
+    expected_current_asset.oi_eff_short_q = POS_SCALE;
+    expected_current_asset.stored_pos_count_long = 1;
+    expected_current_asset.stored_pos_count_short = 1;
+    expected_current_asset.loss_weight_sum_long = POS_SCALE;
+    expected_current_asset.loss_weight_sum_short = POS_SCALE;
+    expected_current_slot.asset = AssetStateV16Account::from_runtime(&expected_current_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_current_slot,
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1].engine,
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+
+    let first_side = if FIRST_ACCOUNT_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let second_side = opposite_side(first_side);
+    let expected_account =
+        |before: PortfolioAccountV16Account, side: SideV16, basis_pos_q: i128| {
+            let mut account = before;
+            account.active_bitmap[0] = V16PodU64::new(1);
+            account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+                active: true,
+                asset_index: 0,
+                market_id: current_asset.market_id,
+                side,
+                basis_pos_q,
+                a_basis: ADL_ONE,
+                k_snap: 0,
+                f_snap: 0,
+                epoch_snap: 0,
+                loss_weight: POS_SCALE,
+                b_snap: 0,
+                b_rem: 0,
+                b_epoch_snap: 0,
+                b_stale: false,
+                stale: false,
+            });
+            account.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+                certified_equity: capital as i128,
+                certified_initial_req: 100,
+                certified_maintenance_req: 100,
+                certified_liq_deficit: 0,
+                certified_worst_case_loss: 100,
+                cert_oracle_epoch: header_before.oracle_epoch.get(),
+                cert_funding_epoch: header_before.funding_epoch.get(),
+                cert_risk_epoch: header_before.risk_epoch.get(),
+                cert_asset_set_epoch: header_before.asset_set_epoch.get(),
+                active_bitmap_at_cert: [1; V16_ACTIVE_BITMAP_WORDS],
+                valid: true,
+            });
+            account
+        };
+    let expected_first = expected_account(first_before, first_side, signed_size_q);
+    let expected_second = expected_account(second_before, second_side, -signed_size_q);
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_first,
+        first.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_second,
+        second.header
+    ));
+
+    assert_eq!(market.header.loss_stale_active, 1);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(first.header.capital, first_before.capital);
+    assert_eq!(second.header.capital, second_before.capital);
+    assert_eq!(first.header.pnl.get(), 0);
+    assert_eq!(second.header.pnl.get(), 0);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_for_position_action_and_refresh_not_atomic,
+    current_empty_trade_refresh_stub
+)]
+#[kani::stub(crate::v16::risk_notional_ceil, scoped_trade_risk_notional_stub)]
+#[kani::stub(crate::v16::trade_notional_floor, scoped_trade_notional_floor_stub)]
+#[kani::stub(crate::v16::trade_fee_notional_ceil, scoped_trade_fee_notional_stub)]
+#[kani::stub(crate::v16::checked_fee_bps, scoped_trade_fee_stub)]
+#[kani::stub(crate::v16::margin_requirement, scoped_trade_margin_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::create_initial_margin_source_lien_if_needed,
+    unreachable_empty_trade_source_lien_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::recertify_account_after_trade_delta,
+    scoped_trade_recertify_stub
+)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_scoped_trade_long_is_live_and_isolated_from_unrelated_loss_stale_asset_explicit_coverage(
+) {
+    prove_scoped_trade_is_live_and_isolated_from_unrelated_loss_stale_asset::<true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_for_position_action_and_refresh_not_atomic,
+    current_empty_trade_refresh_stub
+)]
+#[kani::stub(crate::v16::risk_notional_ceil, scoped_trade_risk_notional_stub)]
+#[kani::stub(crate::v16::trade_notional_floor, scoped_trade_notional_floor_stub)]
+#[kani::stub(crate::v16::trade_fee_notional_ceil, scoped_trade_fee_notional_stub)]
+#[kani::stub(crate::v16::checked_fee_bps, scoped_trade_fee_stub)]
+#[kani::stub(crate::v16::margin_requirement, scoped_trade_margin_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::create_initial_margin_source_lien_if_needed,
+    unreachable_empty_trade_source_lien_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::recertify_account_after_trade_delta,
+    scoped_trade_recertify_stub
+)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_scoped_trade_short_is_live_and_isolated_from_unrelated_loss_stale_asset_explicit_coverage(
+) {
+    prove_scoped_trade_is_live_and_isolated_from_unrelated_loss_stale_asset::<false>();
+}
+
 // Production bankruptcy insurance must debit only the bankrupt asset's
 // opposing-side budget. This executes the real domain lookup, availability
 // cap, insurance kernel, aggregate-spent setter, PnL cure, and flow check.
