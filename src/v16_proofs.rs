@@ -2303,12 +2303,32 @@ fn bounded_u256_div_rem_stub(num: U256, den: U256) -> (U256, U256) {
 }
 
 #[cfg(all(kani, feature = "closure"))]
-fn counterparty_conversion_flow_validate_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
-    let amount = proof.debits[TokenValueClassV16::AccountCapital as usize];
+fn conversion_flow_validate_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
+    let account_debit = proof.debits[TokenValueClassV16::AccountCapital as usize];
+    let insurance_debit = proof.debits[TokenValueClassV16::InsuranceCapital as usize];
+    let counterparty_credit =
+        proof.credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize];
+    let insurance_credit = proof.credits[TokenValueClassV16::CloseInsuranceSpent as usize];
     let mut expected_debits = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
     let mut expected_credits = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
-    expected_debits[TokenValueClassV16::AccountCapital as usize] = amount;
-    expected_credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize] = amount;
+    if account_debit == 0 && insurance_debit == 0 {
+        assert_eq!(counterparty_credit, 0);
+        assert_eq!(insurance_credit, 0);
+    } else if insurance_debit != 0 {
+        assert_eq!(account_debit, 0);
+        assert_eq!(counterparty_credit, 0);
+        assert_eq!(insurance_credit, insurance_debit);
+        expected_debits[TokenValueClassV16::InsuranceCapital as usize] = insurance_debit;
+        expected_credits[TokenValueClassV16::CloseInsuranceSpent as usize] = insurance_debit;
+    } else {
+        assert_ne!(account_debit, 0);
+        assert_eq!(counterparty_credit + insurance_credit, account_debit);
+        assert!(counterparty_credit == 0 || insurance_credit == 0);
+        expected_debits[TokenValueClassV16::AccountCapital as usize] = account_debit;
+        expected_credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize] =
+            counterparty_credit;
+        expected_credits[TokenValueClassV16::CloseInsuranceSpent as usize] = insurance_credit;
+    }
     let mut i = 0usize;
     while i < V16_TOKEN_VALUE_CLASS_COUNT {
         assert_eq!(proof.debits[i], expected_debits[i]);
@@ -3519,10 +3539,14 @@ fn closure_resolved_bankruptcy_attribution_is_unique_and_ledger_authoritative() 
 
 // Public source-backed conversion is the boundary where junior, oracle-derived
 // PnL becomes withdrawable capital. The conversion must consume the selected
-// domain's real counterparty backing, move that exact stock into C_tot, and
-// leave every byte of the other asset untouched.
+// domain's real counterparty or reserved-insurance backing, move that exact
+// stock into C_tot, and leave every byte of the other asset untouched.
 #[cfg(all(kani, feature = "closure"))]
-fn prove_source_backed_conversion_is_asset_local<const ASSET: usize, const SOURCE_LONG: bool>() {
+fn prove_source_backed_conversion_is_asset_local<
+    const ASSET: usize,
+    const SOURCE_LONG: bool,
+    const INSURANCE_BACKED: bool,
+>() {
     assert!(ASSET < 2);
     let claim = 2u128;
     let source_side = if SOURCE_LONG {
@@ -3537,13 +3561,22 @@ fn prove_source_backed_conversion_is_asset_local<const ASSET: usize, const SOURC
         .init_empty_in_place(account_header.provenance_header)
         .unwrap();
 
-    header.vault = V16PodU128::new(10 + claim);
+    header.vault = V16PodU128::new(if INSURANCE_BACKED { 10 } else { 10 + claim });
     header.c_tot = V16PodU128::new(0);
     header.pnl_pos_tot = V16PodU128::new(claim);
     header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
     header.pnl_pos_bound_tot = V16PodU128::new(claim);
     header.source_claim_bound_total_num = V16PodU128::new(claim_num);
-    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    if INSURANCE_BACKED {
+        header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(claim);
+        header.insurance_domain_budget_remaining_total = V16PodU128::new(8);
+        for market in &mut markets {
+            market.engine.insurance_domain_budget_long = V16PodU128::new(claim);
+            market.engine.insurance_domain_budget_short = V16PodU128::new(claim);
+        }
+    } else {
+        header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    }
     account_header.pnl = V16PodI128::new(claim as i128);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
         certified_equity: claim as i128,
@@ -3565,7 +3598,8 @@ fn prove_source_backed_conversion_is_asset_local<const ASSET: usize, const SOURC
     let initial_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
         positive_claim_bound_num: claim_num,
         exact_positive_claim_num: claim_num,
-        fresh_reserved_backing_num: claim_num,
+        fresh_reserved_backing_num: if INSURANCE_BACKED { 0 } else { claim_num },
+        insurance_credit_reserved_num: if INSURANCE_BACKED { claim_num } else { 0 },
         credit_rate_num: CREDIT_RATE_SCALE,
         ..SourceCreditStateV16::EMPTY
     });
@@ -3576,14 +3610,27 @@ fn prove_source_backed_conversion_is_asset_local<const ASSET: usize, const SOURC
         status: BackingBucketStatusV16::Fresh,
         ..BackingBucketV16::EMPTY
     });
+    let initial_reservation =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: claim_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
     match source_side {
         SideV16::Long => {
             markets[ASSET].engine.source_credit_long = initial_source;
-            markets[ASSET].engine.backing_long = initial_bucket;
+            if INSURANCE_BACKED {
+                markets[ASSET].engine.insurance_reservation_long = initial_reservation;
+            } else {
+                markets[ASSET].engine.backing_long = initial_bucket;
+            }
         }
         SideV16::Short => {
             markets[ASSET].engine.source_credit_short = initial_source;
-            markets[ASSET].engine.backing_short = initial_bucket;
+            if INSURANCE_BACKED {
+                markets[ASSET].engine.insurance_reservation_short = initial_reservation;
+            } else {
+                markets[ASSET].engine.backing_short = initial_bucket;
+            }
         }
     }
 
@@ -3594,12 +3641,17 @@ fn prove_source_backed_conversion_is_asset_local<const ASSET: usize, const SOURC
     expected_header.pnl_pos_bound_tot = V16PodU128::new(0);
     expected_header.source_claim_bound_total_num = V16PodU128::new(0);
     expected_header.source_fresh_backing_total_num = V16PodU128::new(0);
+    if INSURANCE_BACKED {
+        expected_header.insurance = V16PodU128::new(10 - claim);
+        expected_header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(0);
+        expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(8 - claim);
+    }
     expected_header.risk_epoch = V16PodU64::new(header.risk_epoch.get() + 2);
 
     let mut expected_markets = [markets[0].engine, markets[1].engine];
     let consumed_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
-        spent_backing_num: claim_num,
-        provider_receivable_num: claim_num,
+        spent_backing_num: if INSURANCE_BACKED { 0 } else { claim_num },
+        provider_receivable_num: if INSURANCE_BACKED { 0 } else { claim_num },
         credit_rate_num: CREDIT_RATE_SCALE,
         credit_epoch: 2,
         ..SourceCreditStateV16::EMPTY
@@ -3611,14 +3663,29 @@ fn prove_source_backed_conversion_is_asset_local<const ASSET: usize, const SOURC
         status: BackingBucketStatusV16::Expired,
         ..BackingBucketV16::EMPTY
     });
+    let consumed_reservation =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            consumed_insurance_num: claim_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
     match source_side {
         SideV16::Long => {
             expected_markets[ASSET].source_credit_long = consumed_source;
-            expected_markets[ASSET].backing_long = consumed_bucket;
+            if INSURANCE_BACKED {
+                expected_markets[ASSET].insurance_reservation_long = consumed_reservation;
+                expected_markets[ASSET].insurance_domain_spent_long = V16PodU128::new(claim);
+            } else {
+                expected_markets[ASSET].backing_long = consumed_bucket;
+            }
         }
         SideV16::Short => {
             expected_markets[ASSET].source_credit_short = consumed_source;
-            expected_markets[ASSET].backing_short = consumed_bucket;
+            if INSURANCE_BACKED {
+                expected_markets[ASSET].insurance_reservation_short = consumed_reservation;
+                expected_markets[ASSET].insurance_domain_spent_short = V16PodU128::new(claim);
+            } else {
+                expected_markets[ASSET].backing_short = consumed_bucket;
+            }
         }
     }
 
@@ -3660,10 +3727,7 @@ fn prove_source_backed_conversion_is_asset_local<const ASSET: usize, const SOURC
 #[kani::unwind(96)]
 #[kani::solver(cadical)]
 #[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
-#[kani::stub(
-    TokenValueFlowProofV16::validate,
-    counterparty_conversion_flow_validate_stub
-)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
 #[kani::stub(
     PortfolioV16ViewMut::compact_source_domains,
     canonical_conversion_compact_stub
@@ -3671,7 +3735,7 @@ fn prove_source_backed_conversion_is_asset_local<const ASSET: usize, const SOURC
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_zero_long_source_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<0, true>();
+    prove_source_backed_conversion_is_asset_local::<0, true, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -3679,10 +3743,7 @@ fn closure_asset_zero_long_source_backed_conversion_is_local() {
 #[kani::unwind(96)]
 #[kani::solver(cadical)]
 #[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
-#[kani::stub(
-    TokenValueFlowProofV16::validate,
-    counterparty_conversion_flow_validate_stub
-)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
 #[kani::stub(
     PortfolioV16ViewMut::compact_source_domains,
     canonical_conversion_compact_stub
@@ -3690,7 +3751,7 @@ fn closure_asset_zero_long_source_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_zero_short_source_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<0, false>();
+    prove_source_backed_conversion_is_asset_local::<0, false, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -3698,10 +3759,7 @@ fn closure_asset_zero_short_source_backed_conversion_is_local() {
 #[kani::unwind(96)]
 #[kani::solver(cadical)]
 #[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
-#[kani::stub(
-    TokenValueFlowProofV16::validate,
-    counterparty_conversion_flow_validate_stub
-)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
 #[kani::stub(
     PortfolioV16ViewMut::compact_source_domains,
     canonical_conversion_compact_stub
@@ -3709,7 +3767,7 @@ fn closure_asset_zero_short_source_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_one_long_source_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<1, true>();
+    prove_source_backed_conversion_is_asset_local::<1, true, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -3717,10 +3775,7 @@ fn closure_asset_one_long_source_backed_conversion_is_local() {
 #[kani::unwind(96)]
 #[kani::solver(cadical)]
 #[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
-#[kani::stub(
-    TokenValueFlowProofV16::validate,
-    counterparty_conversion_flow_validate_stub
-)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
 #[kani::stub(
     PortfolioV16ViewMut::compact_source_domains,
     canonical_conversion_compact_stub
@@ -3728,7 +3783,71 @@ fn closure_asset_one_long_source_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_one_short_source_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<1, false>();
+    prove_source_backed_conversion_is_asset_local::<1, false, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_asset_zero_long_insurance_backed_conversion_is_local() {
+    prove_source_backed_conversion_is_asset_local::<0, true, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_asset_zero_short_insurance_backed_conversion_is_local() {
+    prove_source_backed_conversion_is_asset_local::<0, false, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_asset_one_long_insurance_backed_conversion_is_local() {
+    prove_source_backed_conversion_is_asset_local::<1, true, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_asset_one_short_insurance_backed_conversion_is_local() {
+    prove_source_backed_conversion_is_asset_local::<1, false, true>();
 }
 
 // Safe shutdown liveness over the wrapper-used public forfeit route. Once an
