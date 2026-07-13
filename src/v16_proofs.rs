@@ -4217,6 +4217,103 @@ fn closure_asset_one_liquidatable_auto_crank_selects_active_asset() {
     prove_liquidatable_auto_crank_selects_active_asset::<1>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn first_winner_close_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    _fee_rate_per_slot: u128,
+) -> V16Result<ResolvedCloseOutcomeV16> {
+    assert_eq!(market.header.payout_snapshot_captured, 0);
+    assert!(account.header.pnl.get() > 0);
+    Ok(ResolvedCloseOutcomeV16::ProgressOnly)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn unreachable_permissionless_crank_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _account: &mut PortfolioV16ViewMut<'_>,
+    _request: PermissionlessCrankRequestV16,
+) -> V16Result<PermissionlessProgressOutcomeV16> {
+    panic!("resolved winner selected a live-market crank action")
+}
+
+// First-winner payout liveness. In Resolved mode, a positive-PnL account with
+// every blocker clear must select CloseResolved even before the payout snapshot
+// exists; the selected close call is the only path that captures that snapshot.
+// Requiring pre-capture would deadlock every winner and permanently strand the
+// residual vault. The stub asserts this is specifically the first-winner call.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
+    unreachable_permissionless_crank_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::close_resolved_account_not_atomic,
+    first_winner_close_stub
+)]
+fn closure_resolved_first_winner_auto_crank_reaches_snapshot_capture() {
+    let pnl_raw: u8 = kani::any();
+    kani::assume((1..=2).contains(&pnl_raw));
+    let pnl = pnl_raw as u128;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.resolved_slot = header.current_slot;
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(pnl * BOUND_SCALE);
+    account_header.pnl = V16PodI128::new(pnl as i128);
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: header_before.current_slot.get(),
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+
+    kani::cover!(
+        pnl == 2 && header_before.payout_snapshot_captured == 0,
+        "first-winner route covers a multi-atom claim before snapshot capture"
+    );
+    assert_eq!(
+        result,
+        AutoCrankResultV16 {
+            selected: AutoCrankPlanV16::CloseResolved,
+            outcome: AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::ProgressOnly,),
+        }
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1],
+        &market.markets[1].engine
+    ));
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
