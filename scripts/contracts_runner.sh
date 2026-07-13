@@ -47,8 +47,11 @@ for h in "${HARNESSES[@]}"; do
     cleanup; sleep 1
     logf="$LOG_DIR/${h}.log"
     start=$(date +%s)
+    reach_args=()
+    # Explicit economic-state covers replace Kani's costly per-assertion reach report.
+    [[ "$h" == *_explicit_coverage ]] && reach_args=(--no-assertion-reach-checks)
     # shellcheck disable=SC2086
-    if timeout --kill-after=30 "$BUDGET_S" cargo kani $KANI_Z \
+    if timeout --kill-after=30 "$BUDGET_S" cargo kani $KANI_Z "${reach_args[@]}" \
         --features "$FEATURES" --harness "$h" --output-format terse \
         > "$logf" 2>&1; then
         status="PASS"

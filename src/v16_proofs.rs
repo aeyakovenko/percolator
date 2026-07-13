@@ -2254,6 +2254,32 @@ fn negative_two_scaled_adl_delta_stub(
     }
 }
 
+// Exact on the four calls reachable from the two-leg cross-asset fixture:
+// aligned +/-2 K deltas and zero F deltas. The generic arithmetic remains
+// independently full-domain proven in proofs_v16_arithmetic.rs.
+#[cfg(all(kani, feature = "closure"))]
+fn signed_two_scaled_adl_delta_stub(
+    abs_basis_q: u128,
+    a_basis: u128,
+    then: i128,
+    now: i128,
+) -> Option<i128> {
+    assert_eq!(abs_basis_q, POS_SCALE);
+    assert_eq!(a_basis, ADL_ONE);
+    if then == now {
+        assert_eq!(then, 0);
+        Some(0)
+    } else {
+        assert_eq!(then, 0);
+        if now == 2 * ADL_ONE as i128 {
+            Some(2)
+        } else {
+            assert_eq!(now, -2 * ADL_ONE as i128);
+            Some(-2)
+        }
+    }
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn zero_backing_source_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
     // Exact specialization of the independently proven rate helper: these
@@ -2286,6 +2312,49 @@ fn no_claim_source_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u1
     assert_eq!(state.impaired_liened_insurance_num, 0);
     assert_eq!(state.credit_rate_num, CREDIT_RATE_SCALE);
     Ok(CREDIT_RATE_SCALE)
+}
+
+// Exact rate specialization for cross-asset settlement. A reachable domain is
+// either an unsupported positive claim or a claim-free domain with optional
+// fresh backing; no lien, spend, receivable, or insurance state is abstracted.
+#[cfg(all(kani, feature = "closure"))]
+fn cross_asset_source_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    assert_eq!(state.valid_liened_backing_num, 0);
+    assert_eq!(state.impaired_liened_backing_num, 0);
+    assert_eq!(state.spent_backing_num, 0);
+    assert_eq!(state.provider_receivable_num, 0);
+    assert_eq!(state.insurance_credit_reserved_num, 0);
+    assert_eq!(state.valid_liened_insurance_num, 0);
+    assert_eq!(state.impaired_liened_insurance_num, 0);
+    if state.positive_claim_bound_num == 0 {
+        assert_eq!(state.exact_positive_claim_num, 0);
+        Ok(CREDIT_RATE_SCALE)
+    } else {
+        assert_eq!(
+            state.exact_positive_claim_num,
+            state.positive_claim_bound_num
+        );
+        assert_eq!(state.fresh_reserved_backing_num, 0);
+        Ok(0)
+    }
+}
+
+// Exact specialization of the independently proven source-support arithmetic.
+// An underfunded loser queries the winner's opposing-side domain before any
+// claim or backing exists there, so no effective support can be realized.
+#[cfg(all(kani, feature = "closure"))]
+fn empty_cross_asset_source_support_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    domain: usize,
+    face_claim: u128,
+) -> V16Result<u128> {
+    assert_eq!(domain, 1);
+    assert_eq!(face_claim, 2);
+    assert_eq!(
+        market.source_credit_for_domain(domain)?,
+        SourceCreditStateV16::EMPTY
+    );
+    Ok(0)
 }
 
 // Exact division seam for small closure fixtures. Every reachable wide value
@@ -2358,6 +2427,21 @@ fn valid_conversion_account_stub<'a: 'a, T>(
     _market: &MarketGroupV16View<'_, T>,
 ) -> V16Result<()> {
     Ok(())
+}
+
+// The winner-first cross-asset fixture burns its sole source claim and resets
+// that slot before canonical compaction. Assert that local precondition and
+// elide the independently proven fixed-cap table scan.
+#[cfg(all(kani, feature = "closure"))]
+fn empty_cross_asset_compact_stub<'a: 'a>(account: &mut PortfolioV16ViewMut<'a>) {
+    assert_eq!(
+        account.header.source_domains[0],
+        PortfolioSourceDomainV16Account::default()
+    );
+    assert_eq!(
+        account.header.source_domains[1],
+        PortfolioSourceDomainV16Account::default()
+    );
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -2833,6 +2917,402 @@ fn closure_asset_one_long_loss_backs_only_long_source_domain() {
 )]
 fn closure_asset_one_short_loss_backs_only_short_source_domain() {
     prove_negative_kf_backing_mapping::<1, false>();
+}
+
+// A cross-asset account can settle an unsupported winner and a real loser in
+// either leg order. The winner's oracle must not preserve account capital or
+// route realized backing into its own (or either unrelated) domain. The only
+// permitted real-value mutation is capital crystallized into the losing
+// asset/side domain. If the loser is fully funded and settles first, the later
+// unsupported winner may retain a source-attributed claim, but that claim has
+// zero credit and remains confined to the winner's opposing-side domain.
+#[cfg(all(kani, feature = "closure"))]
+#[derive(Clone, Copy)]
+struct CrossAssetSettlementWitness {
+    initial_capital: u128,
+    final_capital: u128,
+    final_pnl: i128,
+    crystallized_loss: u128,
+    winner_claim_bound_num: u128,
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn prove_cross_asset_unsupported_profit_cannot_move_loss<
+    const WINNER_FIRST: bool,
+    const MIN_CAPITAL: u8,
+    const MAX_CAPITAL: u8,
+>() -> CrossAssetSettlementWitness {
+    assert!(MIN_CAPITAL <= MAX_CAPITAL);
+    assert!(MAX_CAPITAL <= 4);
+    let capital_raw: u8 = if MIN_CAPITAL == MAX_CAPITAL {
+        MIN_CAPITAL
+    } else {
+        let symbolic: u8 = kani::any();
+        kani::assume(symbolic >= MIN_CAPITAL && symbolic <= MAX_CAPITAL);
+        symbolic
+    };
+    let capital = capital_raw as u128;
+    let loss = 2u128;
+    let backing = capital.min(loss);
+    let backing_num = backing * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+
+    header.vault = V16PodU128::new(10 + capital);
+    header.c_tot = V16PodU128::new(capital);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+    let mut leg_slot = 0usize;
+    while leg_slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        account_header.legs[leg_slot] =
+            PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+        leg_slot += 1;
+    }
+
+    let winner_k = 2 * ADL_ONE as i128;
+    let loser_k = -winner_k;
+    let mut winner_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    winner_asset.k_long = winner_k;
+    winner_asset.k_short = loser_k;
+    winner_asset.oi_eff_long_q = POS_SCALE;
+    winner_asset.oi_eff_short_q = POS_SCALE;
+    winner_asset.stored_pos_count_long = 1;
+    winner_asset.stored_pos_count_short = 1;
+    winner_asset.loss_weight_sum_long = POS_SCALE;
+    winner_asset.loss_weight_sum_short = POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&winner_asset);
+
+    let mut loser_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    loser_asset.k_long = loser_k;
+    loser_asset.k_short = winner_k;
+    loser_asset.oi_eff_long_q = POS_SCALE;
+    loser_asset.oi_eff_short_q = POS_SCALE;
+    loser_asset.stored_pos_count_long = 1;
+    loser_asset.stored_pos_count_short = 1;
+    loser_asset.loss_weight_sum_long = POS_SCALE;
+    loser_asset.loss_weight_sum_short = POS_SCALE;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&loser_asset);
+
+    let winner_slot = if WINNER_FIRST { 0 } else { 1 };
+    let loser_slot = 1 - winner_slot;
+    account_header.legs[winner_slot] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: winner_asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        epoch_snap: winner_asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_epoch_snap: winner_asset.epoch_long,
+        ..PortfolioLegV16::EMPTY
+    });
+    account_header.legs[loser_slot] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: loser_asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        epoch_snap: loser_asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_epoch_snap: loser_asset.epoch_long,
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let winner_claim = if !WINNER_FIRST && backing == loss {
+        loss
+    } else {
+        0
+    };
+    let final_pnl = if winner_claim != 0 {
+        winner_claim as i128
+    } else {
+        -((loss - backing) as i128)
+    };
+
+    let mut expected_header = header_before;
+    expected_header.c_tot = V16PodU128::new(capital - backing);
+    expected_header.pnl_pos_tot = V16PodU128::new(winner_claim);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(winner_claim);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(winner_claim * BOUND_SCALE);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(winner_claim * BOUND_SCALE);
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    expected_header.negative_pnl_account_count = V16PodU64::new(u64::from(final_pnl < 0));
+    let risk_mutations = if WINNER_FIRST {
+        2 + u64::from(backing != 0)
+    } else {
+        u64::from(backing != 0) + u64::from(winner_claim != 0)
+    };
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + risk_mutations);
+
+    let mut expected_markets = markets_before;
+    expected_markets[0].engine.source_credit_short = if WINNER_FIRST {
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            credit_epoch: 2,
+            ..SourceCreditStateV16::EMPTY
+        })
+    } else if winner_claim != 0 {
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: winner_claim * BOUND_SCALE,
+            exact_positive_claim_num: winner_claim * BOUND_SCALE,
+            credit_rate_num: 0,
+            credit_epoch: 1,
+            ..SourceCreditStateV16::EMPTY
+        })
+    } else {
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16::EMPTY)
+    };
+    if backing != 0 {
+        let config = header_before.config.try_to_runtime_shape().unwrap();
+        let freshness_horizon = config
+            .max_accrual_dt_slots
+            .max(config.h_max)
+            .max(config.max_bankrupt_close_lifetime_slots)
+            .max(1);
+        expected_markets[1].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                fresh_reserved_backing_num: backing_num,
+                credit_epoch: 1,
+                ..SourceCreditStateV16::EMPTY
+            });
+        expected_markets[1].engine.backing_long =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                market_id: loser_asset.market_id,
+                fresh_unliened_backing_num: backing_num,
+                expiry_slot: header_before.current_slot.get() + freshness_horizon,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            });
+    }
+
+    let mut expected_account = account_before;
+    expected_account.capital = V16PodU128::new(capital - backing);
+    expected_account.pnl = V16PodI128::new(final_pnl);
+    expected_account.residual_crystallized_loss_atoms_total = V16PodU128::new(backing);
+    let mut expected_winner_leg = expected_account.legs[winner_slot].try_to_runtime().unwrap();
+    expected_winner_leg.k_snap = winner_k;
+    expected_winner_leg.f_snap = 0;
+    expected_account.legs[winner_slot] = PortfolioLegV16Account::from_runtime(&expected_winner_leg);
+    let mut expected_loser_leg = expected_account.legs[loser_slot].try_to_runtime().unwrap();
+    expected_loser_leg.k_snap = loser_k;
+    expected_loser_leg.f_snap = 0;
+    expected_account.legs[loser_slot] = PortfolioLegV16Account::from_runtime(&expected_loser_leg);
+    if winner_claim != 0 {
+        expected_account.source_domains[0].domain = V16PodU32::new(1);
+        expected_account.source_domains[0].source_claim_market_id =
+            V16PodU64::new(winner_asset.market_id);
+        expected_account.source_domains[0].source_claim_bound_num =
+            V16PodU128::new(winner_claim * BOUND_SCALE);
+    }
+    expected_account.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.residual();
+    market
+        .settle_leg_kf_effects_at_slot(&mut account, 0)
+        .unwrap();
+    market
+        .settle_leg_kf_effects_at_slot(&mut account, 1)
+        .unwrap();
+
+    kani::cover!(
+        account.header.legs[winner_slot].k_snap.get() == winner_k
+            && account.header.legs[loser_slot].k_snap.get() == loser_k
+            && market.header.vault.get() == header_before.vault.get(),
+        "cross-asset two-leg settlement completes without moving vault value"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0].engine,
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1].engine,
+        &market.markets[1].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert_eq!(market.header.vault.get(), header_before.vault.get());
+    assert_eq!(market.header.insurance.get(), header_before.insurance.get());
+    assert_eq!(market.residual(), residual_before);
+    CrossAssetSettlementWitness {
+        initial_capital: capital,
+        final_capital: account.header.capital.get(),
+        final_pnl: account.header.pnl.get(),
+        crystallized_loss: account.header.residual_crystallized_loss_atoms_total.get(),
+        winner_claim_bound_num: account.header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    cross_asset_source_credit_rate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    empty_cross_asset_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_unsupported_cross_asset_profit_cannot_move_loss_when_winner_settles_first_explicit_coverage(
+) {
+    let witness = prove_cross_asset_unsupported_profit_cannot_move_loss::<true, 0, 4>();
+    kani::cover!(
+        witness.initial_capital == 0 && witness.final_capital == 0 && witness.final_pnl == -2,
+        "winner-first settlement covers a fully bankrupt loser"
+    );
+    kani::cover!(
+        witness.initial_capital == 1 && witness.final_capital == 0 && witness.final_pnl == -1,
+        "winner-first settlement covers partial principal crystallization"
+    );
+    kani::cover!(
+        witness.initial_capital >= 2
+            && witness.final_capital == witness.initial_capital - 2
+            && witness.crystallized_loss == 2,
+        "winner-first settlement covers a fully principal-backed loss"
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    cross_asset_source_credit_rate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    empty_cross_asset_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_domain_realizable_support_for_face,
+    empty_cross_asset_source_support_stub
+)]
+fn closure_unsupported_cross_asset_profit_cannot_move_loss_when_loser_settles_first_bankrupt_explicit_coverage(
+) {
+    let witness = prove_cross_asset_unsupported_profit_cannot_move_loss::<false, 0, 0>();
+    kani::cover!(
+        witness.initial_capital == 0 && witness.final_capital == 0 && witness.final_pnl == -2,
+        "loser-first settlement covers a fully bankrupt loser"
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    cross_asset_source_credit_rate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    empty_cross_asset_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_domain_realizable_support_for_face,
+    empty_cross_asset_source_support_stub
+)]
+fn closure_unsupported_cross_asset_profit_cannot_move_loss_when_loser_settles_first_partially_funded_explicit_coverage(
+) {
+    let witness = prove_cross_asset_unsupported_profit_cannot_move_loss::<false, 1, 1>();
+    kani::cover!(
+        witness.initial_capital == 1 && witness.final_capital == 0 && witness.final_pnl == -1,
+        "loser-first settlement covers partial principal crystallization"
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn prove_cross_asset_loser_first_funded<const CAPITAL: u8>() {
+    assert!(CAPITAL >= 2 && CAPITAL <= 4);
+    let witness =
+        prove_cross_asset_unsupported_profit_cannot_move_loss::<false, CAPITAL, CAPITAL>();
+    kani::cover!(
+        witness.final_capital == witness.initial_capital - 2 && witness.crystallized_loss == 2,
+        "loser-first settlement covers a fully principal-backed loss"
+    );
+    kani::cover!(
+        witness.final_pnl == 2 && witness.winner_claim_bound_num == 2 * BOUND_SCALE,
+        "loser-first settlement covers a retained zero-credit winner claim"
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    cross_asset_source_credit_rate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    empty_cross_asset_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_unsupported_cross_asset_profit_cannot_move_loss_when_loser_settles_first_at_loss_boundary_explicit_coverage(
+) {
+    prove_cross_asset_loser_first_funded::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    cross_asset_source_credit_rate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    empty_cross_asset_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_unsupported_cross_asset_profit_cannot_move_loss_when_loser_settles_first_with_one_surplus_atom_explicit_coverage(
+) {
+    prove_cross_asset_loser_first_funded::<3>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    cross_asset_source_credit_rate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    empty_cross_asset_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_unsupported_cross_asset_profit_cannot_move_loss_when_loser_settles_first_with_two_surplus_atoms_explicit_coverage(
+) {
+    prove_cross_asset_loser_first_funded::<4>();
 }
 
 // Production bankruptcy insurance must debit only the bankrupt asset's
