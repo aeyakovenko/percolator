@@ -3757,6 +3757,338 @@ fn closure_asset_one_expired_close_auto_crank_declares_recovery() {
     prove_expired_close_auto_crank_declares_value_neutral_recovery::<1>();
 }
 
+// Constructor-valid account witness seam. Account validator soundness is
+// independently universal; repeating its full 16-leg/source-domain scans in
+// this transition composition exceeds the per-harness budget.
+#[cfg(all(kani, feature = "closure"))]
+fn valid_b_account_shape_stub<'a: 'a, T>(
+    _account: &PortfolioV16View<'a>,
+    _market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn one_position_loss_weight_stub(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
+    assert_eq!(abs_basis_q, POS_SCALE);
+    assert_eq!(a_basis, ADL_ONE);
+    Ok(POS_SCALE)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn zero_to_negative_one_pnl_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    new_pnl: i128,
+) -> V16Result<()> {
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(new_pnl, -1);
+    assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    market.header.negative_pnl_account_count = V16PodU64::new(1);
+    account.header.pnl = V16PodI128::new(-1);
+    account.header.health_cert.valid = 0;
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn selected_leg_is_no_longer_b_stale_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'_>,
+) -> V16Result<bool> {
+    let _ = core::marker::PhantomData::<(&'a (), T)>;
+    assert_eq!(account.header.legs[0].b_stale, 0);
+    Ok(false)
+}
+
+// Auto-crank selection seam. Any classifier/selector regression reaches the
+// rejecting branch; the real selected transition is proven separately below.
+#[cfg(all(kani, feature = "closure"))]
+fn b_plan_only_permissionless_crank_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _account: &mut PortfolioV16ViewMut<'_>,
+    request: PermissionlessCrankRequestV16,
+) -> V16Result<PermissionlessProgressOutcomeV16> {
+    match request.action {
+        PermissionlessCrankActionV16::SettleB { asset_index } => {
+            assert_eq!(request.asset_index, asset_index);
+            Ok(PermissionlessProgressOutcomeV16::AccountBChunk(
+                AccountBSettlementChunkV16 {
+                    delta_b: 0,
+                    loss: 0,
+                    new_remainder: 0,
+                    remaining_after: 0,
+                },
+            ))
+        }
+        _ => panic!("b-stale auto-crank selected a non-settlement action"),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn unreachable_resolved_close_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _account: &mut PortfolioV16ViewMut<'_>,
+    _fee_rate_per_slot: u128,
+) -> V16Result<ResolvedCloseOutcomeV16> {
+    panic!("b-stale auto-crank selected resolved close")
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn b_stale_transition_fixture<const ASSET: usize>() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+    PortfolioLegV16,
+    u128,
+) {
+    assert!(ASSET < 2);
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let delta_b = SOCIAL_LOSS_DEN / POS_SCALE;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+
+    let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    asset.b_long_num = delta_b;
+    asset.b_short_num = delta_b;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    header.b_stale_account_count = V16PodU64::new(1);
+
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: match side {
+            SideV16::Long => POS_SCALE as i128,
+            SideV16::Short => -(POS_SCALE as i128),
+        },
+        a_basis: ADL_ONE,
+        k_snap: match side {
+            SideV16::Long => asset.k_long,
+            SideV16::Short => asset.k_short,
+        },
+        f_snap: match side {
+            SideV16::Long => asset.f_long_num,
+            SideV16::Short => asset.f_short_num,
+        },
+        epoch_snap: match side {
+            SideV16::Long => asset.epoch_long,
+            SideV16::Short => asset.epoch_short,
+        },
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: match side {
+            SideV16::Long => asset.epoch_long,
+            SideV16::Short => asset.epoch_short,
+        },
+        b_stale: true,
+        stale: false,
+    };
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
+    account_header.b_stale_state = 1;
+
+    (header, markets, account_header, leg, delta_b)
+}
+
+// Real B-settlement transition: a current leg one atom behind its side's B
+// target fully settles in one bounded chunk, charges exactly one PnL atom,
+// clears both stale flags/counter, and preserves both market slots.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_b_stale_settlement_advances_selected_asset<const ASSET: usize>() {
+    let (mut header, mut markets, mut account_header, leg, delta_b) =
+        b_stale_transition_fixture::<ASSET>();
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut expected_header = header_before;
+    expected_header.b_stale_account_count = V16PodU64::new(0);
+    expected_header.negative_pnl_account_count = V16PodU64::new(1);
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(-1);
+    expected_account.b_stale_state = 0;
+    let mut expected_leg = leg;
+    expected_leg.b_snap = delta_b;
+    expected_leg.b_stale = false;
+    expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&expected_leg);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market
+        .settle_account_b_chunk(
+            &mut account,
+            ASSET,
+            header_before.config.public_b_chunk_atoms.get(),
+        )
+        .unwrap();
+
+    kani::cover!(
+        leg.side == SideV16::Short,
+        "B settlement covers the selected asset's short side"
+    );
+    let chunk = AccountBSettlementChunkV16 {
+        delta_b,
+        loss: 1,
+        new_remainder: 0,
+        remaining_after: 0,
+    };
+    assert_eq!(result, chunk);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1],
+        &market.markets[1].engine
+    ));
+}
+
+// Wrapper-used auto-crank selection composition. The persisted b-stale leg must
+// select SettleB for the engine-owned asset without an oracle observation. The
+// transition body is the separately proven theorem above.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_b_stale_auto_crank_selects_asset<const ASSET: usize>() {
+    let (mut header, mut markets, mut account_header, leg, _) =
+        b_stale_transition_fixture::<ASSET>();
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: header_before.current_slot.get(),
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+    let dispatch_witness = AccountBSettlementChunkV16 {
+        delta_b: 0,
+        loss: 0,
+        new_remainder: 0,
+        remaining_after: 0,
+    };
+
+    kani::cover!(
+        leg.side == SideV16::Short,
+        "B-stale auto-crank selection covers the selected asset's short side"
+    );
+    assert_eq!(
+        result,
+        AutoCrankResultV16 {
+            selected: AutoCrankPlanV16::SettleBChunk { asset_index: ASSET },
+            outcome: AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::AccountBChunk(dispatch_witness),
+            ),
+        }
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_b_account_shape_stub)]
+#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
+#[kani::stub(MarketGroupV16ViewMut::set_account_pnl, zero_to_negative_one_pnl_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::has_b_stale_leg,
+    selected_leg_is_no_longer_b_stale_stub
+)]
+fn closure_asset_zero_b_stale_settlement_advances_selected_asset() {
+    prove_b_stale_settlement_advances_selected_asset::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_b_account_shape_stub)]
+#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
+#[kani::stub(MarketGroupV16ViewMut::set_account_pnl, zero_to_negative_one_pnl_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::has_b_stale_leg,
+    selected_leg_is_no_longer_b_stale_stub
+)]
+fn closure_asset_one_b_stale_settlement_advances_selected_asset() {
+    prove_b_stale_settlement_advances_selected_asset::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
+    b_plan_only_permissionless_crank_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::close_resolved_account_not_atomic,
+    unreachable_resolved_close_stub
+)]
+fn closure_asset_zero_b_stale_auto_crank_selects_asset() {
+    prove_b_stale_auto_crank_selects_asset::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
+    b_plan_only_permissionless_crank_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::close_resolved_account_not_atomic,
+    unreachable_resolved_close_stub
+)]
+fn closure_asset_one_b_stale_auto_crank_selects_asset() {
+    prove_b_stale_auto_crank_selects_asset::<1>();
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
