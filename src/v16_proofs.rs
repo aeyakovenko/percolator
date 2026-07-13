@@ -5404,6 +5404,342 @@ fn closure_asset_one_short_clean_recovery_forfeit_is_local() {
     prove_clean_recovery_leg_forfeit_is_value_neutral_and_asset_local::<1, false>();
 }
 
+// Production post-settlement rebalance mutation seam. Full-domain contracts
+// separately prove admission and arbitrary request clamping. These closures
+// join that clamp to the real current-position mutation, matching OI update,
+// and terminal reset for a partial and full witness on both sides/assets. The
+// exact frame proves the mutation moves no value and touches no other asset.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_rebalance_mutation_is_value_neutral_and_asset_local<
+    const ASSET: usize,
+    const LONG: bool,
+    const FULL: bool,
+>() {
+    assert!(ASSET < 2);
+    let position_units = 3u8;
+    let request_units = if FULL { 3u8 } else { 1u8 };
+    let capital_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 8 && surplus_raw <= 3);
+    let position_q = position_units as u128 * POS_SCALE;
+    let request_q = request_units as u128 * POS_SCALE;
+    let remaining_q = position_q - request_q.min(position_q);
+    let expected_partial_a = ADL_ONE * 2 / 3;
+    let side = if LONG { SideV16::Long } else { SideV16::Short };
+    let pre_signed = if LONG {
+        position_q as i128
+    } else {
+        -(position_q as i128)
+    };
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    let capital = capital_raw as u128;
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(capital + 10 + surplus_raw as u128);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    account_header.capital = V16PodU128::new(capital);
+
+    let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = position_q;
+    asset.oi_eff_short_q = position_q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = position_q;
+    asset.loss_weight_sum_short = position_q;
+    markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: pre_signed,
+        a_basis: ADL_ONE,
+        k_snap: if LONG { asset.k_long } else { asset.k_short },
+        f_snap: if LONG {
+            asset.f_long_num
+        } else {
+            asset.f_short_num
+        },
+        epoch_snap: if LONG {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        loss_weight: position_q,
+        b_snap: if LONG {
+            asset.b_long_num
+        } else {
+            asset.b_short_num
+        },
+        b_epoch_snap: if LONG {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        ..PortfolioLegV16::EMPTY
+    };
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
+
+    let header_before = header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let account_before = account_header;
+    let other = 1 - ASSET;
+    let mut expected_header = header_before;
+    let mut expected_selected = markets_before[ASSET];
+    let mut expected_asset = asset;
+    let mut expected_account = account_before;
+    if FULL {
+        expected_header.resolved_payout_blocker_count = V16PodU64::new(1);
+        expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
+        expected_asset.oi_eff_long_q = 0;
+        expected_asset.oi_eff_short_q = 0;
+        expected_asset.loss_weight_sum_long = 0;
+        expected_asset.loss_weight_sum_short = 0;
+        expected_asset.a_long = ADL_ONE;
+        expected_asset.a_short = ADL_ONE;
+        if LONG {
+            expected_asset.stored_pos_count_long = 0;
+            expected_asset.epoch_short += 1;
+            expected_asset.mode_short = SideModeV16::ResetPending;
+        } else {
+            expected_asset.stored_pos_count_short = 0;
+            expected_asset.epoch_long += 1;
+            expected_asset.mode_long = SideModeV16::ResetPending;
+        }
+        expected_account.active_bitmap = V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new);
+        expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    } else {
+        if LONG {
+            expected_asset.oi_eff_long_q = remaining_q;
+            expected_asset.oi_eff_short_q = remaining_q;
+            expected_asset.loss_weight_sum_long = remaining_q;
+            expected_asset.a_short = expected_partial_a;
+        } else {
+            expected_asset.oi_eff_short_q = remaining_q;
+            expected_asset.oi_eff_long_q = remaining_q;
+            expected_asset.loss_weight_sum_short = remaining_q;
+            expected_asset.a_long = expected_partial_a;
+        }
+        let mut expected_leg = leg;
+        expected_leg.basis_pos_q = if LONG {
+            remaining_q as i128
+        } else {
+            -(remaining_q as i128)
+        };
+        expected_leg.loss_weight = remaining_q;
+        expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&expected_leg);
+    }
+    expected_selected.asset = AssetStateV16Account::from_runtime(&expected_asset);
+
+    let (reduced_q, reduce_delta) =
+        V16Core::kernel_reduce_position_delta(pre_signed, side, request_q).unwrap();
+    let lookup = PositionDeltaLookupV16 {
+        existing_slot: Some(0),
+        empty_slot: None,
+        current_q: pre_signed,
+        next_q: pre_signed.checked_add(reduce_delta).unwrap(),
+    };
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .apply_current_position_delta_with_lookup(&mut account, ASSET, reduce_delta, lookup)
+        .unwrap();
+    market
+        .reduce_matching_open_interest_for_unilateral_close(ASSET, side, reduced_q)
+        .unwrap();
+
+    kani::cover!(
+        (FULL && request_units == position_units && remaining_q == 0)
+            || (!FULL && position_units == 3 && request_units == 1 && remaining_q == 2 * POS_SCALE),
+        "rebalance mutation reaches the selected partial or full reduction"
+    );
+    kani::cover!(surplus_raw > 0, "rebalance mutation covers junior surplus");
+    assert_eq!(reduced_q, request_q.min(position_q));
+    assert_eq!(remaining_q == 0, FULL);
+    assert_eq!(
+        pre_signed.checked_add(reduce_delta).unwrap().unsigned_abs(),
+        remaining_q
+    );
+    assert!(reduced_q > 0 && remaining_q < position_q);
+    assert!(market.header.vault == expected_header.vault);
+    assert!(market.header.insurance == expected_header.insurance);
+    assert!(market.header.c_tot == expected_header.c_tot);
+    assert!(market.header.pnl_pos_tot == expected_header.pnl_pos_tot);
+    assert!(market.header.pnl_pos_bound_tot_num == expected_header.pnl_pos_bound_tot_num);
+    assert!(
+        market.header.source_claim_bound_total_num == expected_header.source_claim_bound_total_num
+    );
+    assert!(
+        market.header.source_fresh_backing_total_num
+            == expected_header.source_fresh_backing_total_num
+    );
+    assert!(
+        market.header.insurance_domain_budget_remaining_total
+            == expected_header.insurance_domain_budget_remaining_total
+    );
+    assert!(
+        market.header.resolved_payout_blocker_count
+            == expected_header.resolved_payout_blocker_count
+    );
+    assert!(market.header.risk_epoch == expected_header.risk_epoch);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(account_value_and_gate_frame_unchanged(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_portfolio_leg_v16_account(
+        &expected_account.legs[0],
+        &account.header.legs[0]
+    ));
+    assert_eq!(account.header.health_cert, expected_account.health_cert);
+    assert_eq!(
+        account.header.close_progress,
+        expected_account.close_progress
+    );
+    assert_eq!(
+        account.header.source_domains,
+        expected_account.source_domains
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[other],
+        &market.markets[other].engine
+    ));
+    assert_eq!(market.residual(), residual_before);
+}
+
+// Exact arithmetic specializations for this composition's reachable values;
+// the generic loss-weight and wide-ratio helpers have separate domain proofs.
+#[cfg(all(kani, feature = "closure"))]
+fn rebalance_mutation_loss_weight_stub(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
+    assert!(abs_basis_q == 2 * POS_SCALE || abs_basis_q == 3 * POS_SCALE);
+    assert_eq!(a_basis, ADL_ONE);
+    Ok(abs_basis_q)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn rebalance_mutation_a_ratio_stub(a: u128, b: u128, d: u128) -> u128 {
+    assert_eq!(a, ADL_ONE);
+    assert_eq!(b, 2 * POS_SCALE);
+    assert_eq!(d, 3 * POS_SCALE);
+    ADL_ONE * 2 / 3
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, rebalance_mutation_loss_weight_stub)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    rebalance_mutation_a_ratio_stub
+)]
+fn closure_asset_zero_long_partial_rebalance_mutation_is_local() {
+    prove_rebalance_mutation_is_value_neutral_and_asset_local::<0, true, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, rebalance_mutation_loss_weight_stub)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    rebalance_mutation_a_ratio_stub
+)]
+fn closure_asset_zero_short_partial_rebalance_mutation_is_local() {
+    prove_rebalance_mutation_is_value_neutral_and_asset_local::<0, false, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, rebalance_mutation_loss_weight_stub)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    rebalance_mutation_a_ratio_stub
+)]
+fn closure_asset_one_long_partial_rebalance_mutation_is_local() {
+    prove_rebalance_mutation_is_value_neutral_and_asset_local::<1, true, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, rebalance_mutation_loss_weight_stub)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    rebalance_mutation_a_ratio_stub
+)]
+fn closure_asset_one_short_partial_rebalance_mutation_is_local() {
+    prove_rebalance_mutation_is_value_neutral_and_asset_local::<1, false, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, rebalance_mutation_loss_weight_stub)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    rebalance_mutation_a_ratio_stub
+)]
+fn closure_asset_zero_long_full_rebalance_mutation_is_local() {
+    prove_rebalance_mutation_is_value_neutral_and_asset_local::<0, true, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, rebalance_mutation_loss_weight_stub)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    rebalance_mutation_a_ratio_stub
+)]
+fn closure_asset_zero_short_full_rebalance_mutation_is_local() {
+    prove_rebalance_mutation_is_value_neutral_and_asset_local::<0, false, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, rebalance_mutation_loss_weight_stub)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    rebalance_mutation_a_ratio_stub
+)]
+fn closure_asset_one_long_full_rebalance_mutation_is_local() {
+    prove_rebalance_mutation_is_value_neutral_and_asset_local::<1, true, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, rebalance_mutation_loss_weight_stub)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    rebalance_mutation_a_ratio_stub
+)]
+fn closure_asset_one_short_full_rebalance_mutation_is_local() {
+    prove_rebalance_mutation_is_value_neutral_and_asset_local::<1, false, true>();
+}
+
 // Permissionless liveness over the wrapper-used auto-crank route. An expired
 // outstanding close is terminally actionable without an oracle observation:
 // the production classifier must select recovery, dispatch it in one call, and
