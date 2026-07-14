@@ -10699,6 +10699,251 @@ fn closure_resolved_first_winner_auto_crank_reaches_snapshot_capture() {
     ));
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_topup_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    let mut slot = 0usize;
+    while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert!(!account.header.source_domains[slot].is_occupied());
+        slot += 1;
+    }
+
+    let ledger = market.header.resolved_payout_ledger.try_to_runtime()?;
+    let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
+    let residual = market
+        .header
+        .vault
+        .get()
+        .checked_sub(market.header.insurance.get())
+        .expect("topup cannot consume senior insurance");
+    if receipt.is_empty() {
+        assert_eq!(residual, 0);
+        return Ok(());
+    }
+    assert!(receipt.present);
+    assert_eq!(
+        receipt.prior_bound_contribution_num,
+        ledger.terminal_claim_exact_receipts_num
+    );
+    assert_eq!(receipt.live_released_face_at_receipt, 0);
+    assert_eq!(
+        receipt.terminal_positive_claim_face * BOUND_SCALE,
+        ledger.terminal_claim_exact_receipts_num
+    );
+    assert!(receipt.paid_effective <= ledger.snapshot_residual);
+    assert_eq!(
+        receipt.finalized,
+        receipt.paid_effective == receipt.terminal_positive_claim_face
+    );
+    assert_eq!(receipt.paid_effective + residual, ledger.snapshot_residual);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_topup_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(
+        decode_market_mode(market.header.mode)?,
+        MarketModeV16::Resolved
+    );
+    assert_eq!(market.header.payout_snapshot_captured, 1);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.insurance.get(), 10);
+    assert!(market.header.vault.get() >= market.header.insurance.get());
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
+
+    let ledger = market.header.resolved_payout_ledger.try_to_runtime()?;
+    assert!((1..=8).contains(&ledger.snapshot_residual));
+    assert_eq!(
+        ledger.snapshot_residual,
+        market.header.payout_snapshot.get()
+    );
+    assert!((BOUND_SCALE..=8 * BOUND_SCALE).contains(&ledger.terminal_claim_exact_receipts_num));
+    assert_eq!(ledger.terminal_claim_exact_receipts_num % BOUND_SCALE, 0);
+    assert_eq!(ledger.terminal_claim_bound_unreceipted_num, 0);
+    assert_eq!(
+        ledger.current_payout_rate_num,
+        ledger.snapshot_residual * BOUND_SCALE
+    );
+    assert_eq!(
+        ledger.current_payout_rate_den,
+        ledger.terminal_claim_exact_receipts_num
+    );
+    assert!(!ledger.payout_halted);
+    assert!(market.header.vault.get() - market.header.insurance.get() <= ledger.snapshot_residual);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_topup_flow_validation_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
+    let payout = proof.debits[TokenValueClassV16::ResolvedPayoutPaid as usize];
+    assert_ne!(payout, 0);
+    assert_eq!(
+        proof.credits[TokenValueClassV16::ExternalQuote as usize],
+        payout
+    );
+    let mut class = 0usize;
+    while class < V16_TOKEN_VALUE_CLASS_COUNT {
+        if class != TokenValueClassV16::ResolvedPayoutPaid as usize {
+            assert_eq!(proof.debits[class], 0);
+        }
+        if class != TokenValueClassV16::ExternalQuote as usize {
+            assert_eq!(proof.credits[class], 0);
+        }
+        class += 1;
+    }
+    assert_eq!(proof.external_quote_in, 0);
+    assert_eq!(proof.external_quote_out, payout);
+    assert_eq!(proof.vault_before - proof.vault_after, payout);
+    Ok(())
+}
+
+// A terminal receipt can withdraw only its unpaid snapshot entitlement. The
+// payout consumes junior residual exactly, never insurance or another asset;
+// full-rate receipts finalize, haircut receipts clear, and a second call is
+// value-idempotent so neither branch can strand a materialized portfolio.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_topup_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_topup_market_validation_stub
+)]
+#[kani::stub(TokenValueFlowProofV16::validate, resolved_topup_flow_validation_stub)]
+fn closure_resolved_payout_topup_is_capped_conservative_and_terminal() {
+    let face_raw: u8 = kani::any();
+    let pool_raw: u8 = kani::any();
+    let paid_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&face_raw));
+    kani::assume((1..=face_raw).contains(&pool_raw));
+    kani::assume(paid_raw < pool_raw);
+    let face = face_raw as u128;
+    let pool = pool_raw as u128;
+    let paid = paid_raw as u128;
+    let claimable = pool - paid;
+
+    let (mut header, fixture_markets, mut account_header) = two_asset_kf_mapping_fixture();
+    let mut markets = [
+        Market::new(0u8, fixture_markets[0].engine),
+        Market::new(0u8, fixture_markets[1].engine),
+    ];
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.resolved_slot = header.current_slot;
+    header.payout_snapshot_captured = 1;
+    header.payout_snapshot = V16PodU128::new(pool);
+    header.payout_snapshot_pnl_pos_tot = V16PodU128::new(face);
+    header.vault = V16PodU128::new(header.insurance.get() + claimable);
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: pool,
+            terminal_claim_exact_receipts_num: face * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: pool * BOUND_SCALE,
+            current_payout_rate_den: face * BOUND_SCALE,
+            snapshot_slot: header.resolved_slot.get(),
+            payout_halted: false,
+            finalized: false,
+        });
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: face * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: face,
+            paid_effective: paid,
+            finalized: false,
+        });
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = markets;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let first = market
+        .claim_resolved_payout_topup_not_atomic(&mut account)
+        .unwrap();
+    let receipt_after_first = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+    let second = market
+        .claim_resolved_payout_topup_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(
+        pool == face && claimable > 1,
+        "multi-atom full-rate topup finalizes"
+    );
+    kani::cover!(
+        pool < face && paid > 0,
+        "part-paid haircut receipt reaches terminal clear"
+    );
+    assert_eq!(first, claimable);
+    assert_eq!(second, 0);
+    assert_eq!(receipt_after_first.paid_effective, pool);
+    assert_eq!(receipt_after_first.finalized, pool == face);
+
+    let mut expected_header = header_before;
+    expected_header.vault = header_before.insurance;
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    let mut expected_account = account_before;
+    expected_account.resolved_payout_receipt = if pool == face {
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: face * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: face,
+            paid_effective: face,
+            finalized: true,
+        })
+    } else {
+        ResolvedPayoutReceiptV16Account::default()
+    };
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0].engine,
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1].engine,
+        &market.markets[1].engine
+    ));
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
