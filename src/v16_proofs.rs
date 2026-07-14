@@ -4553,6 +4553,423 @@ fn closure_insurance_reward_is_budget_isolated_and_failure_atomic() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn small_source_grant_bound_num_stub(amount: u128) -> V16Result<u128> {
+    assert!(amount <= 8);
+    Ok(amount * BOUND_SCALE)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn small_source_grant_amount_stub(bound_num: u128) -> V16Result<u128> {
+    let mut amount = 0u128;
+    while amount <= 8 {
+        if bound_num == amount * BOUND_SCALE {
+            return Ok(amount);
+        }
+        amount += 1;
+    }
+    panic!("grant bound is not one of the constrained aligned values")
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_grant_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    let pnl = account.header.pnl.get();
+    assert!((0..=8).contains(&pnl));
+    let expected_bound = pnl as u128 * BOUND_SCALE;
+    let mut account_bound = 0u128;
+    let mut occupied = 0usize;
+    let mut slot = 0usize;
+    while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let source = account.header.source_domains[slot];
+        account_bound += source.source_claim_bound_num.get();
+        if source.is_occupied() {
+            occupied += 1;
+        }
+        slot += 1;
+    }
+    assert_eq!(account_bound, expected_bound);
+    assert_eq!(occupied, usize::from(pnl != 0));
+    assert_eq!(market.header.pnl_pos_tot.get(), pnl as u128);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), expected_bound);
+    assert_eq!(
+        market.header.source_claim_bound_total_num.get(),
+        expected_bound
+    );
+    assert_eq!(account.header.health_cert.valid, u8::from(pnl == 0));
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_grant_mut_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16ViewMut<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    source_grant_account_validation_stub(&account.as_view(), market)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_grant_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(decode_market_mode(market.header.mode)?, MarketModeV16::Live);
+    assert_eq!(
+        market.header.vault.get(),
+        market.header.c_tot.get() + market.header.insurance.get()
+    );
+    let source_total = market.markets[0]
+        .engine
+        .source_credit_long
+        .positive_claim_bound_num
+        .get()
+        + market.markets[0]
+            .engine
+            .source_credit_short
+            .positive_claim_bound_num
+            .get()
+        + market.markets[1]
+            .engine
+            .source_credit_long
+            .positive_claim_bound_num
+            .get()
+        + market.markets[1]
+            .engine
+            .source_credit_short
+            .positive_claim_bound_num
+            .get();
+    assert_eq!(
+        source_total,
+        market.header.source_claim_bound_total_num.get()
+    );
+    assert_eq!(
+        market.header.pnl_pos_bound_tot_num.get(),
+        market.header.source_claim_bound_total_num.get()
+    );
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+// The fixture's source domains are constructor-empty. Constrain only that POD
+// read; real domain decoding, mutation, aggregate maintenance, and writes remain.
+fn source_grant_empty_credit_shape_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    domain: usize,
+) -> V16Result<SourceCreditStateV16> {
+    let (asset_index, side) = market.domain_asset_side(domain)?;
+    assert_eq!(asset_index, domain / 2);
+    assert_eq!(encode_side(side) as usize, domain % 2);
+    Ok(SourceCreditStateV16::EMPTY)
+}
+
+// Source-PnL grants are pure junior attribution: all account, selected-domain,
+// and group claim bounds rise by exactly the same scaled amount while every
+// quote-value stock and every unrelated domain remains unchanged.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_source_positive_pnl_grant_is_value_neutral_and_domain_exact<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&amount_raw));
+    let amount = amount_raw as u128;
+    let domain = DOMAIN;
+    let bound_num = amount * BOUND_SCALE;
+
+    let (mut header, fixture_markets, mut account_header) = two_asset_kf_mapping_fixture();
+    let mut markets = [
+        Market::new(0u8, fixture_markets[0].engine),
+        Market::new(0u8, fixture_markets[1].engine),
+    ];
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 0,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: [0; V16_ACTIVE_BITMAP_WORDS],
+        valid: true,
+    });
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.residual();
+
+    market
+        .add_account_source_positive_pnl_not_atomic(&mut account, domain, amount)
+        .unwrap();
+
+    kani::cover!(amount == 1, "minimum nonzero grant");
+    kani::cover!(amount > 1, "nontrivial grant");
+
+    assert_eq!(market.header.pnl_pos_tot.get(), amount);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), bound_num);
+    assert_eq!(market.header.pnl_pos_bound_tot.get(), amount);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), bound_num);
+    assert_eq!(
+        market.header.risk_epoch.get(),
+        header_before.risk_epoch.get() + 1
+    );
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(
+        market.header.source_fresh_backing_total_num,
+        header_before.source_fresh_backing_total_num
+    );
+    assert_eq!(
+        market.header.source_insurance_credit_reserved_total_atoms,
+        header_before.source_insurance_credit_reserved_total_atoms
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total,
+        header_before.insurance_domain_budget_remaining_total
+    );
+    assert_eq!(
+        market.header.backing_provider_earnings_total,
+        header_before.backing_provider_earnings_total
+    );
+    assert_eq!(
+        market.header.resolved_payout_blocker_count,
+        header_before.resolved_payout_blocker_count
+    );
+    assert_eq!(
+        market.header.bankruptcy_hlock_active,
+        header_before.bankruptcy_hlock_active
+    );
+    assert_eq!(
+        market.header.threshold_stress_active,
+        header_before.threshold_stress_active
+    );
+    assert_eq!(market.header.mode, header_before.mode);
+    assert_eq!(market.header.recovery_reason, header_before.recovery_reason);
+
+    let asset_index = domain / 2;
+    let market_id = markets_before[asset_index].engine.asset.market_id.get();
+    assert_eq!(account.header.capital, account_before.capital);
+    assert_eq!(account.header.pnl.get(), amount as i128);
+    assert_eq!(account.header.reserved_pnl, account_before.reserved_pnl);
+    assert_eq!(account.header.fee_credits, account_before.fee_credits);
+    assert_eq!(account.header.active_bitmap, account_before.active_bitmap);
+    let mut expected_source_domain = PortfolioSourceDomainV16Account::default();
+    expected_source_domain.domain = V16PodU32::new(domain as u32);
+    expected_source_domain.source_claim_market_id = V16PodU64::new(market_id);
+    expected_source_domain.source_claim_bound_num = V16PodU128::new(bound_num);
+    assert!(kani_eq_portfolio_source_domain_v16_account(
+        &expected_source_domain,
+        &account.header.source_domains[0]
+    ));
+    let mut source_slot = 1usize;
+    while source_slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert!(!account.header.source_domains[source_slot].is_occupied());
+        source_slot += 1;
+    }
+    let mut leg_slot = 0usize;
+    while leg_slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        assert_eq!(account.header.legs[leg_slot].active, 0);
+        leg_slot += 1;
+    }
+    let mut expected_cert = account_before.health_cert;
+    expected_cert.valid = 0;
+    assert!(kani_eq_health_cert_v16_account(
+        &expected_cert,
+        &account.header.health_cert
+    ));
+    assert_eq!(account.header.stale_state, account_before.stale_state);
+    assert_eq!(account.header.b_stale_state, account_before.b_stale_state);
+    assert_eq!(account.header.rebalance_lock, account_before.rebalance_lock);
+    assert_eq!(
+        account.header.liquidation_lock,
+        account_before.liquidation_lock
+    );
+    assert_eq!(account.header.close_progress.active, 0);
+    assert_eq!(account.header.resolved_payout_receipt.present, 0);
+
+    let expected_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: bound_num,
+        exact_positive_claim_num: bound_num,
+        credit_rate_num: 0,
+        credit_epoch: 1,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let mut asset = 0usize;
+    while asset < 2 {
+        let mut expected_slot = markets_before[asset].engine;
+        if asset == asset_index {
+            if domain % 2 == 0 {
+                expected_slot.source_credit_long = expected_source;
+            } else {
+                expected_slot.source_credit_short = expected_source;
+            }
+        }
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &expected_slot,
+            &market.markets[asset].engine
+        ));
+        assert_eq!(market.markets[asset].wrapper, markets_before[asset].wrapper);
+        asset += 1;
+    }
+    assert_eq!(market.residual(), residual_before);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::v16::V16Core::bound_num_from_amount,
+    small_source_grant_bound_num_stub
+)]
+#[kani::stub(
+    crate::v16::V16Core::amount_from_bound_num,
+    small_source_grant_amount_stub
+)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    zero_backing_source_credit_rate_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_credit_for_domain_shape,
+    source_grant_empty_credit_shape_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    source_grant_mut_account_validation_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    source_grant_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    source_grant_market_validation_stub
+)]
+fn closure_asset_zero_long_source_pnl_grant_is_value_neutral_and_domain_exact() {
+    prove_source_positive_pnl_grant_is_value_neutral_and_domain_exact::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::v16::V16Core::bound_num_from_amount,
+    small_source_grant_bound_num_stub
+)]
+#[kani::stub(
+    crate::v16::V16Core::amount_from_bound_num,
+    small_source_grant_amount_stub
+)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    zero_backing_source_credit_rate_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_credit_for_domain_shape,
+    source_grant_empty_credit_shape_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    source_grant_mut_account_validation_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    source_grant_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    source_grant_market_validation_stub
+)]
+fn closure_asset_zero_short_source_pnl_grant_is_value_neutral_and_domain_exact() {
+    prove_source_positive_pnl_grant_is_value_neutral_and_domain_exact::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::v16::V16Core::bound_num_from_amount,
+    small_source_grant_bound_num_stub
+)]
+#[kani::stub(
+    crate::v16::V16Core::amount_from_bound_num,
+    small_source_grant_amount_stub
+)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    zero_backing_source_credit_rate_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_credit_for_domain_shape,
+    source_grant_empty_credit_shape_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    source_grant_mut_account_validation_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    source_grant_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    source_grant_market_validation_stub
+)]
+fn closure_asset_one_long_source_pnl_grant_is_value_neutral_and_domain_exact() {
+    prove_source_positive_pnl_grant_is_value_neutral_and_domain_exact::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::v16::V16Core::bound_num_from_amount,
+    small_source_grant_bound_num_stub
+)]
+#[kani::stub(
+    crate::v16::V16Core::amount_from_bound_num,
+    small_source_grant_amount_stub
+)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    zero_backing_source_credit_rate_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_credit_for_domain_shape,
+    source_grant_empty_credit_shape_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    source_grant_mut_account_validation_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    source_grant_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    source_grant_market_validation_stub
+)]
+fn closure_asset_one_short_source_pnl_grant_is_value_neutral_and_domain_exact() {
+    prove_source_positive_pnl_grant_is_value_neutral_and_domain_exact::<3>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn liquidation_current_bankrupt_refresh_stub<'a: 'a, T>(
     market: &mut MarketGroupV16ViewMut<'a, T>,
     account: &mut PortfolioV16ViewMut<'_>,
