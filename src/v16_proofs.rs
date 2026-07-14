@@ -4357,6 +4357,202 @@ fn closure_two_asset_batch_trade_asset_zero_short_reversed_is_conservative() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn insurance_reward_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert_eq!(market.header.c_tot.get(), account.header.capital.get());
+    assert_eq!(
+        market.header.vault.get(),
+        market.header.c_tot.get() + market.header.insurance.get()
+    );
+    assert!(
+        market.header.insurance.get()
+            >= market.header.insurance_domain_budget_remaining_total.get()
+    );
+    let mut domain = 0usize;
+    while domain < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert!(!account.header.source_domains[domain].is_occupied());
+        domain += 1;
+    }
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn insurance_reward_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(decode_market_mode(market.header.mode)?, MarketModeV16::Live);
+    assert_eq!(
+        market.header.vault.get(),
+        market.header.c_tot.get() + market.header.insurance.get()
+    );
+    assert_eq!(
+        market
+            .markets
+            .iter()
+            .map(|slot| {
+                slot.engine.insurance_domain_budget_long.get()
+                    - slot.engine.insurance_domain_spent_long.get()
+                    + slot.engine.insurance_domain_budget_short.get()
+                    - slot.engine.insurance_domain_spent_short.get()
+            })
+            .sum::<u128>(),
+        market.header.insurance_domain_budget_remaining_total.get()
+    );
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn insurance_reward_flow_validation_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
+    let amount = proof.debits[TokenValueClassV16::InsuranceCapital as usize];
+    assert_ne!(amount, 0);
+    assert_eq!(
+        proof.credits[TokenValueClassV16::AccountCapital as usize],
+        amount
+    );
+    let mut class = 0usize;
+    while class < V16_TOKEN_VALUE_CLASS_COUNT {
+        if class != TokenValueClassV16::InsuranceCapital as usize {
+            assert_eq!(proof.debits[class], 0);
+        }
+        if class != TokenValueClassV16::AccountCapital as usize {
+            assert_eq!(proof.credits[class], 0);
+        }
+        class += 1;
+    }
+    assert_eq!(proof.external_quote_in, 0);
+    assert_eq!(proof.external_quote_out, 0);
+    assert_eq!(proof.vault_before, proof.vault_after);
+    Ok(())
+}
+
+// The wrapper pays crank rewards through this public route. For every bounded
+// symbolic budget/available/request tuple it either performs the exact internal
+// insurance->capital relabel, or rejects before mutation. Thus per-domain
+// budgets remain isolated even though the reward comes from the shared vault.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    insurance_reward_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    insurance_reward_market_validation_stub
+)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    insurance_reward_flow_validation_stub
+)]
+fn closure_insurance_reward_is_budget_isolated_and_failure_atomic() {
+    let amount_raw: u8 = kani::any();
+    let budget_raw: u8 = kani::any();
+    let unbudgeted_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&amount_raw));
+    kani::assume(budget_raw <= 8);
+    kani::assume(unbudgeted_raw <= 8);
+    kani::assume((1..=8).contains(&capital_raw));
+    let amount = amount_raw as u128;
+    let budget = budget_raw as u128;
+    let unbudgeted = unbudgeted_raw as u128;
+    let capital = capital_raw as u128;
+    let insurance = budget + unbudgeted;
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budget);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(0);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(0);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(0);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget);
+    header.insurance = V16PodU128::new(insurance);
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(capital + insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: [0; V16_ACTIVE_BITMAP_WORDS],
+        valid: true,
+    });
+
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.credit_account_from_insurance_not_atomic(&mut account, amount);
+    let succeeds = amount <= unbudgeted;
+
+    kani::cover!(succeeds, "reward uses available unbudgeted insurance");
+    kani::cover!(
+        !succeeds && amount <= insurance,
+        "domain budget blocks an otherwise funded reward"
+    );
+    kani::cover!(
+        amount > insurance,
+        "reward rejects when aggregate insurance is insufficient"
+    );
+
+    let mut expected_header = header_before;
+    let mut expected_account = account_before;
+    if succeeds {
+        assert_eq!(result, Ok(()));
+        expected_header.insurance = V16PodU128::new(insurance - amount);
+        expected_header.c_tot = V16PodU128::new(capital + amount);
+        expected_account.capital = V16PodU128::new(capital + amount);
+        expected_account.health_cert.valid = 0;
+    } else if amount > insurance {
+        assert_eq!(result, Err(V16Error::CounterUnderflow));
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0].engine,
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1].engine,
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+    assert_eq!(
+        market.header.c_tot.get() + market.header.insurance.get(),
+        header_before.c_tot.get() + header_before.insurance.get()
+    );
+    assert_eq!(market.header.vault, header_before.vault);
+    assert!(market.header.insurance.get() >= budget);
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn liquidation_current_bankrupt_refresh_stub<'a: 'a, T>(
     market: &mut MarketGroupV16ViewMut<'a, T>,
     account: &mut PortfolioV16ViewMut<'_>,
