@@ -8113,38 +8113,269 @@ fn closure_asset_one_b_stale_auto_crank_selects_asset() {
     prove_b_stale_auto_crank_selects_asset::<1>();
 }
 
+// The wrapper cannot choose the asset dispatched by auto-crank. Over both
+// permutations of two distinct asset IDs and both first-leg stale states, the
+// real selector must map the first active slot and first active b-stale slot
+// back to their engine-owned asset IDs.
 #[cfg(all(kani, feature = "closure"))]
-fn liquidation_plan_only_permissionless_crank_stub<'a: 'a, T>(
-    _market: &mut MarketGroupV16ViewMut<'a, T>,
-    _account: &mut PortfolioV16ViewMut<'_>,
-    request: PermissionlessCrankRequestV16,
-) -> V16Result<PermissionlessProgressOutcomeV16> {
-    match request.action {
-        PermissionlessCrankActionV16::Liquidate(liquidation) => {
-            assert_eq!(request.asset_index, liquidation.asset_index);
-            Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
-        }
-        _ => panic!("liquidatable auto-crank selected a non-liquidation action"),
-    }
+#[kani::proof]
+#[kani::unwind(17)]
+#[kani::solver(cadical)]
+fn closure_auto_crank_selector_maps_first_active_and_b_stale_assets() {
+    let first_asset: u32 = kani::any();
+    let second_asset: u32 = kani::any();
+    let first_b_stale: bool = kani::any();
+    kani::assume(first_asset < 2);
+    kani::assume(second_asset < 2);
+    kani::assume(first_asset != second_asset);
+
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.legs =
+        [PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY); V16_MAX_PORTFOLIO_ASSETS_N];
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: first_asset,
+        market_id: first_asset as u64 + 1,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        loss_weight: POS_SCALE,
+        b_stale: first_b_stale,
+        ..PortfolioLegV16::EMPTY
+    });
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: second_asset,
+        market_id: second_asset as u64 + 1,
+        side: SideV16::Short,
+        basis_pos_q: -(POS_SCALE as i128),
+        a_basis: ADL_ONE,
+        loss_weight: POS_SCALE,
+        b_stale: true,
+        ..PortfolioLegV16::EMPTY
+    });
+    let account = PortfolioV16View::new(&account_header);
+
+    let (b_stale_asset, active_asset) =
+        MarketGroupV16ViewMut::<u64>::auto_crank_selected_assets(&account).unwrap();
+    let expected_b_stale = (if first_b_stale {
+        first_asset
+    } else {
+        second_asset
+    }) as usize;
+
+    assert!(active_asset == Some(first_asset as usize));
+    assert!(b_stale_asset == Some(expected_b_stale));
+    kani::cover!(
+        first_b_stale,
+        "the first active leg is also the first b-stale leg"
+    );
+    kani::cover!(
+        !first_b_stale,
+        "the first active and first b-stale legs are distinct"
+    );
+    kani::cover!(first_asset == 0, "asset-zero can occupy the first slot");
+    kani::cover!(first_asset == 1, "asset-one can occupy the first slot");
 }
 
-// Liquidation DoS/asset-ownership seam over persisted state. A current health
-// certificate with a real deficit and one active leg must select liquidation
-// for that leg's engine-owned asset, without an oracle observation or mutation
-// before dispatch. Real liquidation value/isolation is proven by the dedicated
-// preflight, residual-booking, and domain-insurance closure theorems.
 #[cfg(all(kani, feature = "closure"))]
-fn prove_liquidatable_auto_crank_selects_active_asset<const ASSET: usize>() {
-    let (mut header, mut markets, mut account_header, mut leg, _) =
-        b_stale_transition_fixture::<ASSET>();
+fn selected_asset_liquidation_dispatch_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    request: LiquidationRequestV16,
+) -> V16Result<LiquidationOutcomeV16> {
+    assert_eq!(market.header.bankruptcy_hlock_active, 0);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && !leg.stale && !leg.b_stale);
+    assert_eq!(request.asset_index, leg.asset_index as usize);
+    let cert = account.header.health_cert.try_to_runtime()?;
+    assert!(cert.valid && cert.certified_liq_deficit != 0);
+    market.header.bankruptcy_hlock_active = 1;
+    Ok(LiquidationOutcomeV16 {
+        closed_q: leg.basis_pos_q.unsigned_abs(),
+        insurance_used: 0,
+        residual_booked: 0,
+        explicit_loss: 0,
+        fee_charged: 0,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn valid_two_asset_market_tail_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(market.header.asset_slot_capacity.get(), 2);
+    assert_eq!(market.header.config.max_market_slots.get(), 2);
+    assert_eq!(market.markets[0].engine.asset.market_id.get(), 1);
+    assert_eq!(market.markets[1].engine.asset.market_id.get(), 2);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn current_liquidatable_summary_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<ActionableSummaryV16> {
+    assert_eq!(decode_market_mode(market.header.mode)?, MarketModeV16::Live);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && !leg.stale && !leg.b_stale);
+    let cert = account.header.health_cert.try_to_runtime()?;
+    assert!(cert.valid);
+    assert_eq!(cert.certified_liq_deficit, 1);
+    assert_eq!(cert.cert_oracle_epoch, market.header.oracle_epoch.get());
+    assert_eq!(cert.cert_funding_epoch, market.header.funding_epoch.get());
+    assert_eq!(cert.cert_risk_epoch, market.header.risk_epoch.get());
+    assert_eq!(
+        cert.cert_asset_set_epoch,
+        market.header.asset_set_epoch.get()
+    );
+    assert_eq!(
+        cert.active_bitmap_at_cert[0],
+        account.header.active_bitmap[0].get()
+    );
+    Ok(ActionableSummaryV16 {
+        stale: false,
+        b_stale: false,
+        pending_close: false,
+        expired_close: false,
+        liquidatable: true,
+        recovery_eligible: false,
+        resolved_winner: false,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn selected_active_asset_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'_>,
+) -> V16Result<(Option<usize>, Option<usize>)> {
+    let _ = core::marker::PhantomData::<(&'a (), T)>;
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && !leg.stale && !leg.b_stale);
+    Ok((None, Some(leg.asset_index as usize)))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn dispatch_asset_risk_frame_unchanged(
+    before: &AssetStateV16Account,
+    after: &AssetStateV16Account,
+) -> bool {
+    before.market_id.get() == after.market_id.get()
+        && before.lifecycle == after.lifecycle
+        && before.raw_oracle_target_price.get() == after.raw_oracle_target_price.get()
+        && before.effective_price.get() == after.effective_price.get()
+        && before.slot_last.get() == after.slot_last.get()
+        && before.a_long.get() == after.a_long.get()
+        && before.a_short.get() == after.a_short.get()
+        && before.k_long.get() == after.k_long.get()
+        && before.k_short.get() == after.k_short.get()
+        && before.f_long_num.get() == after.f_long_num.get()
+        && before.f_short_num.get() == after.f_short_num.get()
+        && before.b_long_num.get() == after.b_long_num.get()
+        && before.b_short_num.get() == after.b_short_num.get()
+        && before.oi_eff_long_q.get() == after.oi_eff_long_q.get()
+        && before.oi_eff_short_q.get() == after.oi_eff_short_q.get()
+        && before.stored_pos_count_long.get() == after.stored_pos_count_long.get()
+        && before.stored_pos_count_short.get() == after.stored_pos_count_short.get()
+        && before.pending_obligation_count_long.get() == after.pending_obligation_count_long.get()
+        && before.pending_obligation_count_short.get() == after.pending_obligation_count_short.get()
+        && before.loss_weight_sum_long.get() == after.loss_weight_sum_long.get()
+        && before.loss_weight_sum_short.get() == after.loss_weight_sum_short.get()
+        && before.explicit_unallocated_loss_long.get() == after.explicit_unallocated_loss_long.get()
+        && before.explicit_unallocated_loss_short.get()
+            == after.explicit_unallocated_loss_short.get()
+        && before.epoch_long.get() == after.epoch_long.get()
+        && before.epoch_short.get() == after.epoch_short.get()
+        && before.mode_long == after.mode_long
+        && before.mode_short == after.mode_short
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn selected_asset_protective_accrual_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    now_slot: u64,
+    effective_price: u64,
+    funding_rate_e9: i128,
+    protective_progress_committed: bool,
+) -> V16Result<AccrueAssetOutcomeV16> {
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert!(asset_index < 2);
+    assert_eq!(now_slot, market.header.current_slot.get());
+    assert_eq!(effective_price, 100);
+    assert_eq!(funding_rate_e9, 0);
+    assert!(protective_progress_committed);
+    Ok(AccrueAssetOutcomeV16 {
+        dt: 0,
+        price_move_active: false,
+        funding_active: false,
+        equity_active: false,
+        loss_stale_after: false,
+    })
+}
+
+// Liquidation DoS/asset-ownership composition over the wrapper-used route. A
+// current deficit and one active leg must select that leg's engine-owned asset,
+// enter the real internal liquidation dispatch, and forward the authenticated
+// observation to protective accrual only after liquidation. Four public
+// liquidation closures independently prove the exact asset/side value
+// transition behind the assertion-heavy call seam.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_liquidatable_auto_crank_selects_active_asset<const ASSET: usize, const LONG: bool>() {
+    assert!(ASSET < 2);
+    let side = if LONG { SideV16::Long } else { SideV16::Short };
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
     let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
-    asset.b_long_num = 0;
-    asset.b_short_num = 0;
+    asset.slot_last = header.current_slot.get();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
     markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&asset);
-    header.b_stale_account_count = V16PodU64::new(0);
-    leg.b_stale = false;
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: if LONG {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        },
+        a_basis: ADL_ONE,
+        k_snap: if LONG { asset.k_long } else { asset.k_short },
+        f_snap: if LONG {
+            asset.f_long_num
+        } else {
+            asset.f_short_num
+        },
+        epoch_snap: if LONG {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        loss_weight: POS_SCALE,
+        b_snap: if LONG {
+            asset.b_long_num
+        } else {
+            asset.b_short_num
+        },
+        b_epoch_snap: if LONG {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        ..PortfolioLegV16::EMPTY
+    };
+    account_header.active_bitmap[0] = V16PodU64::new(1);
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
-    account_header.b_stale_state = 0;
     let bitmap = account_header.active_bitmap.map(V16PodU64::get);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
         certified_equity: 0,
@@ -8163,6 +8394,11 @@ fn prove_liquidatable_auto_crank_selects_active_asset<const ASSET: usize>() {
     let header_before = header;
     let account_before = account_header;
     let markets_before = [markets[0].engine, markets[1].engine];
+    let observations = [AutoCrankObservationV16 {
+        asset_index: ASSET,
+        effective_price: asset.effective_price,
+        funding_rate_e9: 0,
+    }];
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let result = market
@@ -8170,15 +8406,15 @@ fn prove_liquidatable_auto_crank_selects_active_asset<const ASSET: usize>() {
             &mut account,
             AutoCrankWorkV16 {
                 now_slot: header_before.current_slot.get(),
-                observations: &[],
+                observations: &observations,
                 resolved_close_fee_rate_per_slot: 0,
             },
         )
         .unwrap();
 
     kani::cover!(
-        leg.side == SideV16::Short,
-        "liquidation selection covers the active asset's short side"
+        market.header.bankruptcy_hlock_active == 1,
+        "auto-crank reaches the selected liquidation dispatch seam"
     );
     assert_eq!(
         result,
@@ -8189,56 +8425,196 @@ fn prove_liquidatable_auto_crank_selects_active_asset<const ASSET: usize>() {
             ),
         }
     );
-    assert!(kani_eq_market_group_v16_header_account(
-        &header_before,
-        market.header
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert_eq!(market.header.mode, header_before.mode);
+    assert_eq!(market.header.vault.get(), header_before.vault.get());
+    assert_eq!(market.header.c_tot.get(), header_before.c_tot.get());
+    assert_eq!(market.header.insurance.get(), header_before.insurance.get());
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        header_before.insurance_domain_budget_remaining_total.get()
+    );
+    assert_eq!(
+        market.header.pnl_pos_tot.get(),
+        header_before.pnl_pos_tot.get()
+    );
+    assert_eq!(
+        market.header.pnl_pos_bound_tot_num.get(),
+        header_before.pnl_pos_bound_tot_num.get()
+    );
+    assert_eq!(
+        market.header.current_slot.get(),
+        header_before.current_slot.get()
+    );
+    assert_eq!(
+        market.header.oracle_epoch.get(),
+        header_before.oracle_epoch.get()
+    );
+    assert_eq!(
+        market.header.funding_epoch.get(),
+        header_before.funding_epoch.get()
+    );
+    assert_eq!(
+        market.header.risk_epoch.get(),
+        header_before.risk_epoch.get()
+    );
+    assert_eq!(
+        market.header.asset_set_epoch.get(),
+        header_before.asset_set_epoch.get()
+    );
+    assert_eq!(account.header.capital.get(), account_before.capital.get());
+    assert_eq!(account.header.pnl.get(), account_before.pnl.get());
+    assert_eq!(
+        account.header.reserved_pnl.get(),
+        account_before.reserved_pnl.get()
+    );
+    assert_eq!(
+        account.header.fee_credits.get(),
+        account_before.fee_credits.get()
+    );
+    assert_eq!(
+        account.header.cancel_deposit_escrow.get(),
+        account_before.cancel_deposit_escrow.get()
+    );
+    assert_eq!(
+        account.header.active_bitmap[0].get(),
+        account_before.active_bitmap[0].get()
+    );
+    let leg_after = account.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(leg_after.active, leg.active);
+    assert_eq!(leg_after.asset_index, leg.asset_index);
+    assert_eq!(leg_after.market_id, leg.market_id);
+    assert_eq!(leg_after.side, leg.side);
+    assert_eq!(leg_after.basis_pos_q, leg.basis_pos_q);
+    assert_eq!(leg_after.stale, leg.stale);
+    assert_eq!(leg_after.b_stale, leg.b_stale);
+    let cert_after = account.header.health_cert.try_to_runtime().unwrap();
+    assert!(cert_after.valid);
+    assert_eq!(cert_after.certified_liq_deficit, 1);
+    assert_eq!(
+        cert_after.cert_oracle_epoch,
+        header_before.oracle_epoch.get()
+    );
+    assert_eq!(
+        cert_after.cert_funding_epoch,
+        header_before.funding_epoch.get()
+    );
+    assert_eq!(cert_after.cert_risk_epoch, header_before.risk_epoch.get());
+    assert_eq!(
+        cert_after.cert_asset_set_epoch,
+        header_before.asset_set_epoch.get()
+    );
+    assert_eq!(account.header.close_progress.active, 0);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+        0
+    );
+    assert!(dispatch_asset_risk_frame_unchanged(
+        &markets_before[0].asset,
+        &market.markets[0].engine.asset
     ));
-    assert!(kani_eq_portfolio_account_v16_account(
-        &account_before,
-        account.header
+    assert!(dispatch_asset_risk_frame_unchanged(
+        &markets_before[1].asset,
+        &market.markets[1].engine.asset
     ));
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &markets_before[0],
-        &market.markets[0].engine
-    ));
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &markets_before[1],
-        &market.markets[1].engine
-    ));
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        markets_before[0].insurance_domain_budget_long.get()
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        markets_before[0].insurance_domain_budget_short.get()
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        markets_before[0].insurance_domain_spent_long.get()
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        markets_before[0].insurance_domain_spent_short.get()
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        markets_before[1].insurance_domain_budget_long.get()
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_short.get(),
+        markets_before[1].insurance_domain_budget_short.get()
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_spent_long.get(),
+        markets_before[1].insurance_domain_spent_long.get()
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_spent_short.get(),
+        markets_before[1].insurance_domain_spent_short.get()
+    );
 }
 
 #[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
-#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
 #[kani::stub(
-    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
-    liquidation_plan_only_permissionless_crank_stub
+    MarketGroupV16ViewMut::build_actionable_summary,
+    current_liquidatable_summary_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::auto_crank_selected_assets,
+    selected_active_asset_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_unconfigured_market_tail,
+    valid_two_asset_market_tail_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::liquidate_account_not_atomic,
+    selected_asset_liquidation_dispatch_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_to_not_atomic,
+    selected_asset_protective_accrual_stub
 )]
 #[kani::stub(
     MarketGroupV16ViewMut::close_resolved_account_not_atomic,
     unreachable_resolved_close_stub
 )]
 fn closure_asset_zero_liquidatable_auto_crank_selects_active_asset() {
-    prove_liquidatable_auto_crank_selects_active_asset::<0>();
+    prove_liquidatable_auto_crank_selects_active_asset::<0, true>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(8)]
 #[kani::solver(cadical)]
-#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
 #[kani::stub(
-    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
-    liquidation_plan_only_permissionless_crank_stub
+    MarketGroupV16ViewMut::build_actionable_summary,
+    current_liquidatable_summary_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::auto_crank_selected_assets,
+    selected_active_asset_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_unconfigured_market_tail,
+    valid_two_asset_market_tail_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::liquidate_account_not_atomic,
+    selected_asset_liquidation_dispatch_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_to_not_atomic,
+    selected_asset_protective_accrual_stub
 )]
 #[kani::stub(
     MarketGroupV16ViewMut::close_resolved_account_not_atomic,
     unreachable_resolved_close_stub
 )]
 fn closure_asset_one_liquidatable_auto_crank_selects_active_asset() {
-    prove_liquidatable_auto_crank_selects_active_asset::<1>();
+    prove_liquidatable_auto_crank_selects_active_asset::<1, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
