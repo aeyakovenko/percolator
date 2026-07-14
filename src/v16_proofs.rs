@@ -9047,6 +9047,183 @@ fn closure_asset_one_stale_deficit_auto_crank_refreshes_active_asset() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn selected_observation_permissionless_crank_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    request: PermissionlessCrankRequestV16,
+) -> V16Result<PermissionlessProgressOutcomeV16>
+where
+    T: Into<u64> + Copy,
+{
+    let leg = account.header.legs[0].try_to_runtime()?;
+    let selected = leg.asset_index as usize;
+    let selected_price: u64 = market.markets[selected].wrapper.into();
+    assert!(request.asset_index == selected);
+    assert!(request.effective_price == selected_price);
+    assert!(request.funding_rate_e9 == selected_price as i128);
+    assert!(request.now_slot == market.header.current_slot.get());
+    assert!(matches!(
+        request.action,
+        PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 { asset_index })
+            if asset_index == selected
+    ));
+    Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+}
+
+// Permissionless observation isolation. With authenticated observations for
+// both assets in either order, the real auto-crank lookup must forward only the
+// engine-selected active asset's price/funding pair. A first-entry or wrong-
+// asset lookup would let one oracle domain drive another domain's liquidation.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_auto_crank_routes_only_selected_asset_observation<const ASSET: usize>() {
+    assert!(ASSET < 2);
+    let other = 1 - ASSET;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    let asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        loss_weight: POS_SCALE,
+        ..PortfolioLegV16::EMPTY
+    });
+    let bitmap = account_header.active_bitmap.map(V16PodU64::get);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_liq_deficit: 1,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let selected_price: u64 = kani::any();
+    let other_price: u64 = kani::any();
+    kani::assume(selected_price > 0 && selected_price <= MAX_ORACLE_PRICE);
+    kani::assume(other_price > 0 && other_price <= MAX_ORACLE_PRICE);
+    kani::assume(selected_price != other_price);
+    markets[ASSET].wrapper = selected_price;
+    markets[other].wrapper = other_price;
+    let selected_observation = AutoCrankObservationV16 {
+        asset_index: ASSET,
+        effective_price: selected_price,
+        funding_rate_e9: selected_price as i128,
+    };
+    let other_observation = AutoCrankObservationV16 {
+        asset_index: other,
+        effective_price: other_price,
+        funding_rate_e9: -(other_price as i128),
+    };
+    let reversed: bool = kani::any();
+    let observations = if reversed {
+        [other_observation, selected_observation]
+    } else {
+        [selected_observation, other_observation]
+    };
+
+    let header_before = header;
+    let account_before = account_header;
+    let engines_before = [markets[0].engine, markets[1].engine];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: header_before.current_slot.get(),
+                observations: &observations,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        result,
+        AutoCrankResultV16 {
+            selected: AutoCrankPlanV16::Liquidate { asset_index: ASSET },
+            outcome: AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::AccountCurrent,
+            ),
+        }
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &engines_before[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &engines_before[1],
+        &market.markets[1].engine
+    ));
+    kani::cover!(!reversed, "selected observation appears first");
+    kani::cover!(reversed, "selected observation appears second");
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::build_actionable_summary,
+    current_liquidatable_summary_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::auto_crank_selected_assets,
+    selected_active_asset_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
+    selected_observation_permissionless_crank_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::close_resolved_account_not_atomic,
+    unreachable_resolved_close_stub
+)]
+fn closure_asset_zero_auto_crank_routes_only_selected_observation() {
+    prove_auto_crank_routes_only_selected_asset_observation::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::build_actionable_summary,
+    current_liquidatable_summary_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::auto_crank_selected_assets,
+    selected_active_asset_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
+    selected_observation_permissionless_crank_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::close_resolved_account_not_atomic,
+    unreachable_resolved_close_stub
+)]
+fn closure_asset_one_auto_crank_routes_only_selected_observation() {
+    prove_auto_crank_routes_only_selected_asset_observation::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn no_active_auto_crank_assets_stub<'a: 'a, T>(
     account: &PortfolioV16View<'_>,
 ) -> V16Result<(Option<usize>, Option<usize>)> {
