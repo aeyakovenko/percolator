@@ -6940,6 +6940,377 @@ fn closure_asset_one_short_clean_recovery_forfeit_is_local() {
     prove_clean_recovery_leg_forfeit_is_value_neutral_and_asset_local::<1, false>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn forfeit_current_kf_effects_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    asset_index: usize,
+) -> V16Result<(u128, u128, u128, u128)> {
+    assert!(asset_index < 2);
+    assert_eq!(account.header.pnl.get(), -2);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && !leg.stale && !leg.b_stale);
+    assert_eq!(leg.asset_index as usize, asset_index);
+    let asset = market.asset_state(asset_index)?;
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Recovery);
+    let (k_now, f_now, b_now, epoch_now) = match leg.side {
+        SideV16::Long => (
+            asset.k_long,
+            asset.f_long_num,
+            asset.b_long_num,
+            asset.epoch_long,
+        ),
+        SideV16::Short => (
+            asset.k_short,
+            asset.f_short_num,
+            asset.b_short_num,
+            asset.epoch_short,
+        ),
+    };
+    assert_eq!(leg.k_snap, k_now);
+    assert_eq!(leg.f_snap, f_now);
+    assert_eq!(leg.b_snap, b_now);
+    assert_eq!(leg.epoch_snap, epoch_now);
+    assert_eq!(leg.b_epoch_snap, epoch_now);
+    Ok((0, 0, 0, 0))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn forfeit_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(market.header.vault.get(), 12);
+    assert_eq!(market.header.c_tot.get(), 0);
+    let slot0 = market.markets[0].engine_slot();
+    let slot1 = market.markets[1].engine_slot();
+    let remaining = slot0
+        .insurance_domain_budget_long
+        .get()
+        .checked_sub(slot0.insurance_domain_spent_long.get())
+        .and_then(|v| {
+            v.checked_add(
+                slot0
+                    .insurance_domain_budget_short
+                    .get()
+                    .checked_sub(slot0.insurance_domain_spent_short.get())?,
+            )
+        })
+        .and_then(|v| {
+            v.checked_add(
+                slot1
+                    .insurance_domain_budget_long
+                    .get()
+                    .checked_sub(slot1.insurance_domain_spent_long.get())?,
+            )
+        })
+        .and_then(|v| {
+            v.checked_add(
+                slot1
+                    .insurance_domain_budget_short
+                    .get()
+                    .checked_sub(slot1.insurance_domain_spent_short.get())?,
+            )
+        })
+        .ok_or(V16Error::CounterUnderflow)?;
+    assert_eq!(market.header.insurance.get(), remaining);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        remaining
+    );
+    let asset0 = slot0.asset.try_to_runtime()?;
+    let asset1 = slot1.asset.try_to_runtime()?;
+    assert_eq!(
+        asset0.oi_eff_long_q,
+        asset0.stored_pos_count_long as u128 * POS_SCALE
+    );
+    assert_eq!(
+        asset0.oi_eff_short_q,
+        asset0.stored_pos_count_short as u128 * POS_SCALE
+    );
+    assert_eq!(asset0.loss_weight_sum_long, asset0.oi_eff_long_q);
+    assert_eq!(asset0.loss_weight_sum_short, asset0.oi_eff_short_q);
+    assert_eq!(
+        asset1.oi_eff_long_q,
+        asset1.stored_pos_count_long as u128 * POS_SCALE
+    );
+    assert_eq!(
+        asset1.oi_eff_short_q,
+        asset1.stored_pos_count_short as u128 * POS_SCALE
+    );
+    assert_eq!(asset1.loss_weight_sum_long, asset1.oi_eff_long_q);
+    assert_eq!(asset1.loss_weight_sum_short, asset1.oi_eff_short_q);
+    assert!(
+        (asset0.lifecycle == AssetLifecycleV16::Recovery
+            && asset1.lifecycle == AssetLifecycleV16::Active)
+            || (asset1.lifecycle == AssetLifecycleV16::Recovery
+                && asset0.lifecycle == AssetLifecycleV16::Active)
+    );
+    Ok(())
+}
+
+// A recovery-mode forfeit is the permissionless exit for an abandoned losing
+// leg. With current K/F/B snapshots and funded domain insurance, the public
+// route must finalize the loss, release its barrier, detach in one call, and
+// charge only the selected asset's opposing insurance domain. The general K/F
+// and insurance scalar relations are proven separately; this composes their
+// zero-delta/two-atom witnesses through the wrapper-used production API.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_funded_recovery_forfeit_is_value_conservative_and_asset_local<
+    const ASSET: usize,
+    const LONG: bool,
+>() {
+    assert!(ASSET < 2);
+    let loss = 2u128;
+    let side = if LONG { SideV16::Long } else { SideV16::Short };
+    let domain_side = opposite_side(side);
+    let signed_position = if LONG {
+        POS_SCALE as i128
+    } else {
+        -(POS_SCALE as i128)
+    };
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.vault = V16PodU128::new(12);
+    header.insurance = V16PodU128::new(12);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(12);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(6);
+    markets[0].wrapper = 11;
+    markets[1].wrapper = 22;
+    let mut asset_index = 0usize;
+    while asset_index < 2 {
+        markets[asset_index].engine.insurance_domain_budget_long = V16PodU128::new(3);
+        markets[asset_index].engine.insurance_domain_budget_short = V16PodU128::new(3);
+        let mut asset = markets[asset_index].engine.asset.try_to_runtime().unwrap();
+        asset.slot_last = header.current_slot.get();
+        if asset_index == ASSET {
+            asset.lifecycle = AssetLifecycleV16::Recovery;
+            asset.oi_eff_long_q = 2 * POS_SCALE;
+            asset.oi_eff_short_q = 2 * POS_SCALE;
+            asset.stored_pos_count_long = 2;
+            asset.stored_pos_count_short = 2;
+            asset.loss_weight_sum_long = 2 * POS_SCALE;
+            asset.loss_weight_sum_short = 2 * POS_SCALE;
+        } else {
+            asset.oi_eff_long_q = POS_SCALE;
+            asset.oi_eff_short_q = POS_SCALE;
+            asset.stored_pos_count_long = 1;
+            asset.stored_pos_count_short = 1;
+            asset.loss_weight_sum_long = POS_SCALE;
+            asset.loss_weight_sum_short = POS_SCALE;
+        }
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        asset_index += 1;
+    }
+    let selected_asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: selected_asset.market_id,
+        side,
+        basis_pos_q: signed_position,
+        a_basis: ADL_ONE,
+        k_snap: if LONG {
+            selected_asset.k_long
+        } else {
+            selected_asset.k_short
+        },
+        f_snap: if LONG {
+            selected_asset.f_long_num
+        } else {
+            selected_asset.f_short_num
+        },
+        epoch_snap: if LONG {
+            selected_asset.epoch_long
+        } else {
+            selected_asset.epoch_short
+        },
+        loss_weight: POS_SCALE,
+        b_snap: if LONG {
+            selected_asset.b_long_num
+        } else {
+            selected_asset.b_short_num
+        },
+        b_epoch_snap: if LONG {
+            selected_asset.epoch_long
+        } else {
+            selected_asset.epoch_short
+        },
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let other = 1 - ASSET;
+    let residual_before = header.vault.get() - header.insurance.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market
+        .forfeit_recovery_leg_not_atomic(&mut account, ASSET, 1)
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        DeadLegForfeitOutcomeV16 {
+            detached: true,
+            positive_pnl_forfeited: 0,
+            loss_settled: 0,
+            support_consumed: 0,
+            junior_face_burned: 0,
+            principal_used: 0,
+            insurance_used: loss,
+            residual_booked: 0,
+            explicit_loss: 0,
+        }
+    );
+
+    let mut expected_header = header_before;
+    expected_header.insurance = V16PodU128::new(12 - loss);
+    expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(12 - loss);
+    expected_header.negative_pnl_account_count = V16PodU64::new(0);
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(5);
+    expected_header.bankruptcy_hlock_active = 1;
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+
+    let mut expected_selected = markets_before[ASSET].engine;
+    let mut expected_asset = selected_asset;
+    if LONG {
+        expected_asset.oi_eff_long_q = POS_SCALE;
+        expected_asset.stored_pos_count_long = 1;
+        expected_asset.loss_weight_sum_long = POS_SCALE;
+        expected_selected.insurance_domain_spent_short = V16PodU128::new(loss);
+    } else {
+        expected_asset.oi_eff_short_q = POS_SCALE;
+        expected_asset.stored_pos_count_short = 1;
+        expected_asset.loss_weight_sum_short = POS_SCALE;
+        expected_selected.insurance_domain_spent_long = V16PodU128::new(loss);
+    }
+    expected_selected.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[other].engine,
+        &market.markets[other].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+
+    let final_close = CloseProgressLedgerV16 {
+        active: true,
+        finalized: true,
+        close_id: 1,
+        asset_index: ASSET as u32,
+        market_id: selected_asset.market_id,
+        domain_side,
+        gross_loss_at_close_start: loss,
+        drift_reference_slot: header_before.current_slot.get(),
+        max_close_slot: header_before.current_slot.get()
+            + header_before.config.max_bankrupt_close_lifetime_slots.get(),
+        insurance_spent: loss,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.active_bitmap = V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new);
+    expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    expected_account.health_cert.valid = 0;
+    expected_account.close_progress = CloseProgressLedgerV16Account::from_runtime(&final_close);
+    assert!(account_value_and_gate_frame_unchanged(
+        &expected_account,
+        account.header
+    ));
+    assert_eq!(account.header.legs[0], expected_account.legs[0]);
+    assert_eq!(account.header.health_cert, expected_account.health_cert);
+    assert_eq!(
+        account.header.close_progress,
+        expected_account.close_progress
+    );
+    assert_eq!(account.as_view().source_claim_bound_sum_num().unwrap(), 0);
+    assert_eq!(market.residual(), residual_before + loss);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_forfeited_leg_kf_effects,
+    forfeit_current_kf_effects_stub
+)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, forfeit_market_validation_stub)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    liquidation_account_validation_stub
+)]
+fn closure_asset_zero_long_funded_recovery_forfeit_is_local() {
+    prove_funded_recovery_forfeit_is_value_conservative_and_asset_local::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_forfeited_leg_kf_effects,
+    forfeit_current_kf_effects_stub
+)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, forfeit_market_validation_stub)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    liquidation_account_validation_stub
+)]
+fn closure_asset_zero_short_funded_recovery_forfeit_is_local() {
+    prove_funded_recovery_forfeit_is_value_conservative_and_asset_local::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_forfeited_leg_kf_effects,
+    forfeit_current_kf_effects_stub
+)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, forfeit_market_validation_stub)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    liquidation_account_validation_stub
+)]
+fn closure_asset_one_long_funded_recovery_forfeit_is_local() {
+    prove_funded_recovery_forfeit_is_value_conservative_and_asset_local::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_forfeited_leg_kf_effects,
+    forfeit_current_kf_effects_stub
+)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, forfeit_market_validation_stub)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    liquidation_account_validation_stub
+)]
+fn closure_asset_one_short_funded_recovery_forfeit_is_local() {
+    prove_funded_recovery_forfeit_is_value_conservative_and_asset_local::<1, false>();
+}
+
 // Production post-settlement rebalance mutation seam. Full-domain contracts
 // separately prove admission and arbitrary request clamping. These closures
 // join that clamp to the real current-position mutation, matching OI update,
