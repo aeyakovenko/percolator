@@ -3310,9 +3310,8 @@ fn v16_auto_crank_declares_recovery_for_expired_live_close() {
 // the sole capturer), so gating on it would deadlock the first winner (never
 // classified -> never captured). Here the snapshot is NOT pre-captured yet a
 // payout-ready winner is still classified resolved_winner. (The dispatch's
-// terminal payout realization itself is covered by the resolved-close proofs and
-// the v16_resolved_payout_topup_* tests, whose fixtures fully set up the payout
-// ledger; building that consistent fixture by hand here is out of scope.)
+// terminal payout realization is covered directly by the following route test
+// and symbolically by the corresponding closure theorem.)
 #[test]
 fn v16_auto_crank_classifies_payout_ready_resolved_winner_without_snapshot() {
     let (mut header, mut markets) = market_fixture(1, 100);
@@ -3340,6 +3339,55 @@ fn v16_auto_crank_classifies_payout_ready_resolved_winner_without_snapshot() {
          snapshot is captured (no snapshot gate -> no first-winner deadlock): {summary:?}"
     );
     assert!(!summary.recovery_eligible && !summary.stale && !summary.liquidatable);
+}
+
+#[test]
+fn v16_auto_crank_first_resolved_winner_captures_snapshot_and_pays() {
+    let pnl = 2u128;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 43);
+    header.mode = 1;
+    header.resolved_slot = header.current_slot;
+    header.vault = V16PodU128::new(pnl);
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(pnl * BOUND_SCALE);
+    account_header.pnl = V16PodI128::new(pnl as i128);
+    account_header.last_fee_slot = header.resolved_slot;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: market.header.current_slot.get(),
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(result.selected, AutoCrankPlanV16::CloseResolved);
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::ResolvedClose(percolator::ResolvedCloseOutcomeV16::Closed {
+            payout: pnl,
+        })
+    );
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+    assert_eq!(market.header.payout_snapshot.get(), pnl);
+    let receipt = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+    assert!(receipt.present && receipt.finalized);
+    assert_eq!(receipt.terminal_positive_claim_face, pnl);
+    assert_eq!(receipt.paid_effective, pnl);
 }
 
 // ROADMAP 3C step 4 — b-stale dispatch arm: an account with a b-stale active leg

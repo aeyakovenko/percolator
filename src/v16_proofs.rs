@@ -8751,14 +8751,62 @@ fn closure_asset_one_stale_deficit_auto_crank_refreshes_active_asset() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
-fn first_winner_close_stub<'a: 'a, T>(
-    market: &mut MarketGroupV16ViewMut<'a, T>,
-    account: &mut PortfolioV16ViewMut<'_>,
-    _fee_rate_per_slot: u128,
-) -> V16Result<ResolvedCloseOutcomeV16> {
-    assert_eq!(market.header.payout_snapshot_captured, 0);
-    assert!(account.header.pnl.get() > 0);
-    Ok(ResolvedCloseOutcomeV16::ProgressOnly)
+fn no_active_auto_crank_assets_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'_>,
+) -> V16Result<(Option<usize>, Option<usize>)> {
+    let _ = core::marker::PhantomData::<(&'a (), T)>;
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    Ok((None, None))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_winner_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.capital.get(), 0);
+    assert!((0..=2).contains(&account.header.pnl.get()));
+    assert_eq!(
+        account.header.pnl.get() as u128,
+        market.header.pnl_pos_tot.get()
+    );
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(
+        account.header.last_fee_slot.get(),
+        market.header.resolved_slot.get()
+    );
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_winner_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(
+        decode_market_mode(market.header.mode)?,
+        MarketModeV16::Resolved
+    );
+    assert_eq!(market.header.vault.get(), 10);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.insurance.get(), 10);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+    assert_eq!(market.header.payout_snapshot_captured, 1);
+    assert!((1..=2).contains(&market.header.payout_snapshot.get()));
+    Ok(())
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -8770,22 +8818,31 @@ fn unreachable_permissionless_crank_stub<'a: 'a, T>(
     panic!("resolved winner selected a live-market crank action")
 }
 
-// First-winner payout liveness. In Resolved mode, a positive-PnL account with
-// every blocker clear must select CloseResolved even before the payout snapshot
-// exists; the selected close call is the only path that captures that snapshot.
-// Requiring pre-capture would deadlock every winner and permanently strand the
-// residual vault. The stub asserts this is specifically the first-winner call.
+// First-winner payout liveness and conservation. In Resolved mode, a positive-
+// PnL account with every blocker clear must select CloseResolved before the
+// payout snapshot exists, lazily capture it, pay exactly the funded claim, and
+// leave a terminal finalized receipt. Requiring pre-capture would deadlock every
+// winner and permanently strand the residual vault.
 #[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
 #[kani::stub(
     MarketGroupV16ViewMut::permissionless_crank_not_atomic,
     unreachable_permissionless_crank_stub
 )]
 #[kani::stub(
-    MarketGroupV16ViewMut::close_resolved_account_not_atomic,
-    first_winner_close_stub
+    MarketGroupV16ViewMut::auto_crank_selected_assets,
+    no_active_auto_crank_assets_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_winner_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_winner_market_validation_stub
 )]
 fn closure_resolved_first_winner_auto_crank_reaches_snapshot_capture() {
     let pnl_raw: u8 = kani::any();
@@ -8800,7 +8857,9 @@ fn closure_resolved_first_winner_auto_crank_reaches_snapshot_capture() {
     header.pnl_pos_tot = V16PodU128::new(pnl);
     header.pnl_pos_bound_tot = V16PodU128::new(pnl);
     header.pnl_pos_bound_tot_num = V16PodU128::new(pnl * BOUND_SCALE);
+    header.vault = V16PodU128::new(header.insurance.get() + pnl);
     account_header.pnl = V16PodI128::new(pnl as i128);
+    account_header.last_fee_slot = header.resolved_slot;
 
     let header_before = header;
     let account_before = account_header;
@@ -8826,17 +8885,36 @@ fn closure_resolved_first_winner_auto_crank_reaches_snapshot_capture() {
         result,
         AutoCrankResultV16 {
             selected: AutoCrankPlanV16::CloseResolved,
-            outcome: AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::ProgressOnly,),
+            outcome: AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed {
+                payout: pnl,
+            }),
         }
     );
-    assert!(kani_eq_market_group_v16_header_account(
-        &header_before,
-        market.header
-    ));
-    assert!(kani_eq_portfolio_account_v16_account(
-        &account_before,
-        account.header
-    ));
+    assert_eq!(market.header.vault.get(), header_before.vault.get() - pnl);
+    assert_eq!(market.header.c_tot.get(), header_before.c_tot.get());
+    assert_eq!(market.header.insurance.get(), header_before.insurance.get());
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+    assert_eq!(market.header.payout_snapshot_captured, 1);
+    assert_eq!(market.header.payout_snapshot.get(), pnl);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(
+        account.header.last_fee_slot.get(),
+        account_before.last_fee_slot.get()
+    );
+    let receipt = account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+    assert!(receipt.present && receipt.finalized);
+    assert_eq!(receipt.prior_bound_contribution_num, pnl * BOUND_SCALE);
+    assert_eq!(receipt.terminal_positive_claim_face, pnl);
+    assert_eq!(receipt.paid_effective, pnl);
     assert!(kani_eq_engine_asset_slot_v16_account(
         &markets_before[0],
         &market.markets[0].engine

@@ -22,8 +22,8 @@ use percolator::v16::{
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
@@ -8643,14 +8643,55 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
     }
 }
 
+fn resolved_flat_close_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> Result<(), V16Error> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.capital.get(), market.header.c_tot.get());
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    Ok(())
+}
+
+fn resolved_flat_close_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> Result<(), V16Error> {
+    assert_eq!(market.markets.len(), 1);
+    assert_eq!(market.header.mode, 1);
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+    Ok(())
+}
+
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_flat_close_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_flat_close_market_validation_stub
+)]
 fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
     let capital_raw: u8 = kani::any();
     kani::assume((1..=5).contains(&capital_raw));
     let capital = capital_raw as u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let (mut header, mut markets, _) = one_market_direct_view_fixture();
+    let mut account_header = empty_account_fixture(header.market_group_id, 2);
     header.mode = 1;
     header.current_slot = V16PodU64::new(2);
     header.resolved_slot = V16PodU64::new(2);
