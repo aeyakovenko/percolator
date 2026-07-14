@@ -8618,47 +8618,218 @@ fn closure_asset_one_liquidatable_auto_crank_selects_active_asset() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
-fn refresh_plan_only_permissionless_crank_stub<'a: 'a, T>(
-    _market: &mut MarketGroupV16ViewMut<'a, T>,
+fn stale_cert_refresh_dispatch_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
     account: &mut PortfolioV16ViewMut<'_>,
-    request: PermissionlessCrankRequestV16,
-) -> V16Result<PermissionlessProgressOutcomeV16> {
-    match request.action {
-        PermissionlessCrankActionV16::Refresh => {
-            assert_eq!(
-                request.asset_index,
-                account.header.legs[0].asset_index.get() as usize
-            );
-            Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
-        }
-        _ => panic!("stale-certificate auto-crank selected a non-refresh action"),
-    }
+    price_override: Option<(usize, u64)>,
+    b_delta_budget: u128,
+    allow_b_chunk: bool,
+) -> V16Result<AccountRefreshCertOutcomeV16> {
+    assert!(
+        account.header.stale_state == 1,
+        "refresh receives stale account"
+    );
+    assert!(
+        market.header.stale_certificate_count.get() == 1,
+        "refresh receives matching stale count"
+    );
+    assert!(
+        account.header.active_bitmap[0].get() == 1,
+        "refresh receives the one-leg bitmap"
+    );
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && !leg.stale && !leg.b_stale);
+    let asset_index = leg.asset_index as usize;
+    let asset = market.markets[asset_index].engine.asset.try_to_runtime()?;
+    assert!(
+        price_override == Some((asset_index, asset.effective_price)),
+        "refresh receives the selected asset and committed price"
+    );
+    assert!(
+        b_delta_budget == market.header.config.public_b_chunk_atoms.get(),
+        "refresh receives the configured B budget"
+    );
+    assert!(allow_b_chunk);
+    let mut cert = account.header.health_cert.try_to_runtime()?;
+    assert!(cert.valid && cert.certified_liq_deficit != 0);
+    assert_ne!(cert.cert_oracle_epoch, market.header.oracle_epoch.get());
+    cert.cert_oracle_epoch = market.header.oracle_epoch.get();
+    cert.cert_funding_epoch = market.header.funding_epoch.get();
+    cert.cert_risk_epoch = market.header.risk_epoch.get();
+    cert.cert_asset_set_epoch = market.header.asset_set_epoch.get();
+    cert.active_bitmap_at_cert = account.header.active_bitmap.map(V16PodU64::get);
+    market.header.stale_certificate_count = V16PodU64::new(0);
+    account.header.stale_state = 0;
+    account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+    Ok(AccountRefreshCertOutcomeV16::Certified(cert))
 }
 
-// Stale-certificate liquidation safety. A persisted deficit certified at an
-// old oracle epoch must select RefreshAccount, never Liquidate, and must use the
-// first active leg's engine-owned asset without requiring a caller observation.
+#[cfg(all(kani, feature = "closure"))]
+fn stale_cert_refresh_accrual_stub<'a: 'a, const ASSET: usize, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    now_slot: u64,
+    effective_price: u64,
+    funding_rate_e9: i128,
+    protective_progress_committed: bool,
+) -> V16Result<AccrueAssetOutcomeV16> {
+    assert!(ASSET < 2);
+    assert!(
+        market.header.stale_certificate_count.get() == 0,
+        "accrual follows recertification"
+    );
+    assert!(
+        asset_index == ASSET,
+        "accrual receives the engine-selected asset"
+    );
+    let asset = market.markets[ASSET].engine.asset.try_to_runtime()?;
+    assert!(
+        now_slot == market.header.current_slot.get(),
+        "accrual receives the authenticated slot"
+    );
+    assert!(
+        effective_price == asset.effective_price,
+        "accrual receives the selected asset price"
+    );
+    assert!(
+        funding_rate_e9 == 0,
+        "committed-price fallback has zero funding"
+    );
+    assert!(protective_progress_committed);
+    Ok(AccrueAssetOutcomeV16 {
+        dt: 0,
+        price_move_active: false,
+        funding_active: false,
+        equity_active: false,
+        loss_stale_after: false,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stale_cert_refresh_asset_zero_accrual_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    now_slot: u64,
+    effective_price: u64,
+    funding_rate_e9: i128,
+    protective_progress_committed: bool,
+) -> V16Result<AccrueAssetOutcomeV16> {
+    stale_cert_refresh_accrual_stub::<0, T>(
+        market,
+        asset_index,
+        now_slot,
+        effective_price,
+        funding_rate_e9,
+        protective_progress_committed,
+    )
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stale_cert_refresh_asset_one_accrual_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    now_slot: u64,
+    effective_price: u64,
+    funding_rate_e9: i128,
+    protective_progress_committed: bool,
+) -> V16Result<AccrueAssetOutcomeV16> {
+    stale_cert_refresh_accrual_stub::<1, T>(
+        market,
+        asset_index,
+        now_slot,
+        effective_price,
+        funding_rate_e9,
+        protective_progress_committed,
+    )
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stale_current_asset_state_stub<'a: 'a, const ASSET: usize, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+) -> V16Result<AssetStateV16> {
+    assert!(ASSET < 2);
+    assert!(
+        asset_index == ASSET,
+        "committed-price fallback receives the engine-selected asset"
+    );
+    let persisted = &market.markets[ASSET].engine.asset;
+    assert!(
+        persisted.market_id.get() == ASSET as u64 + 1,
+        "committed-price fallback reads the selected market"
+    );
+    let mut asset = AssetStateV16::default();
+    asset.market_id = persisted.market_id.get();
+    asset.lifecycle = AssetLifecycleV16::Active;
+    asset.effective_price = persisted.effective_price.get();
+    Ok(asset)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stale_current_asset_zero_state_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+) -> V16Result<AssetStateV16> {
+    stale_current_asset_state_stub::<0, T>(market, asset_index)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stale_current_asset_one_state_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+) -> V16Result<AssetStateV16> {
+    stale_current_asset_state_stub::<1, T>(market, asset_index)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn unreachable_stale_cert_liquidation_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _account: &mut PortfolioV16ViewMut<'_>,
+    _request: LiquidationRequestV16,
+) -> V16Result<LiquidationOutcomeV16> {
+    panic!("stale certificate dispatched liquidation before refresh")
+}
+
+// Stale-certificate liquidation safety and progress. A persisted deficit
+// certified at an old oracle epoch must enter the real Refresh arm, never
+// Liquidate, use the first active leg's engine-owned asset, clear stale state,
+// and forward committed observation data to accrual only after recertification.
 #[cfg(all(kani, feature = "closure"))]
 fn prove_stale_deficit_auto_crank_refreshes_active_asset<const ASSET: usize>() {
-    let (mut header, mut markets, mut account_header, mut leg, _) =
-        b_stale_transition_fixture::<ASSET>();
-    let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
-    asset.b_long_num = 0;
-    asset.b_short_num = 0;
-    markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&asset);
-    header.b_stale_account_count = V16PodU64::new(0);
+    assert!(ASSET < 2);
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    let asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_epoch_snap: asset.epoch_long,
+        ..PortfolioLegV16::EMPTY
+    };
     header.oracle_epoch = V16PodU64::new(1);
     header.stale_certificate_count = V16PodU64::new(1);
-    leg.b_stale = false;
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
-    account_header.b_stale_state = 0;
+    account_header.active_bitmap[0] = V16PodU64::new(1);
     account_header.stale_state = 1;
+    let certified_liq_deficit: u128 = kani::any();
+    kani::assume(certified_liq_deficit > 0 && certified_liq_deficit < (1u128 << 64));
     let bitmap = account_header.active_bitmap.map(V16PodU64::get);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
         certified_equity: 0,
         certified_initial_req: 2,
         certified_maintenance_req: 1,
-        certified_liq_deficit: 1,
+        certified_liq_deficit,
         certified_worst_case_loss: 1,
         cert_oracle_epoch: 0,
         cert_funding_epoch: header.funding_epoch.get(),
@@ -8671,9 +8842,15 @@ fn prove_stale_deficit_auto_crank_refreshes_active_asset<const ASSET: usize>() {
     let header_before = header;
     let account_before = account_header;
     let markets_before = [markets[0].engine, markets[1].engine];
+    let mut expected_cert = account_before.health_cert.try_to_runtime().unwrap();
+    expected_cert.cert_oracle_epoch = header_before.oracle_epoch.get();
+    expected_cert.cert_funding_epoch = header_before.funding_epoch.get();
+    expected_cert.cert_risk_epoch = header_before.risk_epoch.get();
+    expected_cert.cert_asset_set_epoch = header_before.asset_set_epoch.get();
+    expected_cert.active_bitmap_at_cert = account_before.active_bitmap.map(V16PodU64::get);
     kani::cover!(
-        leg.side == SideV16::Short,
-        "stale-deficit refresh covers the active asset's short side"
+        certified_liq_deficit > 1,
+        "stale refresh covers non-unit certified liquidation deficits"
     );
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -8698,32 +8875,131 @@ fn prove_stale_deficit_auto_crank_refreshes_active_asset<const ASSET: usize>() {
             ),
         }
     );
-    assert!(kani_eq_market_group_v16_header_account(
-        &header_before,
-        market.header
+    assert_eq!(market.header.stale_certificate_count.get(), 0);
+    assert_eq!(account.header.stale_state, 0);
+    assert!(kani_eq_health_cert_v16_account(
+        &HealthCertV16Account::from_runtime(&expected_cert),
+        &account.header.health_cert,
     ));
-    assert!(kani_eq_portfolio_account_v16_account(
-        &account_before,
-        account.header
+
+    // Refresh is value-neutral: it can update only certification metadata and
+    // the matching stale counter. These are the stock/claim fields whose drift
+    // could create LoF or cross-domain leakage.
+    assert_eq!(market.header.vault.get(), header_before.vault.get());
+    assert_eq!(market.header.insurance.get(), header_before.insurance.get());
+    assert_eq!(market.header.c_tot.get(), header_before.c_tot.get());
+    assert_eq!(
+        market.header.pnl_pos_tot.get(),
+        header_before.pnl_pos_tot.get()
+    );
+    assert_eq!(
+        market.header.pnl_pos_bound_tot_num.get(),
+        header_before.pnl_pos_bound_tot_num.get()
+    );
+    assert_eq!(
+        market.header.source_claim_bound_total_num.get(),
+        header_before.source_claim_bound_total_num.get()
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        header_before.source_fresh_backing_total_num.get()
+    );
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        header_before
+            .source_insurance_credit_reserved_total_atoms
+            .get()
+    );
+    assert_eq!(account.header.capital.get(), account_before.capital.get());
+    assert_eq!(account.header.pnl.get(), account_before.pnl.get());
+    assert_eq!(
+        account.header.reserved_pnl.get(),
+        account_before.reserved_pnl.get()
+    );
+    assert_eq!(
+        account.header.active_bitmap[0].get(),
+        account_before.active_bitmap[0].get()
+    );
+    assert!(kani_eq_portfolio_leg_v16_account(
+        &account_before.legs[0],
+        &account.header.legs[0],
     ));
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &markets_before[0],
-        &market.markets[0].engine
-    ));
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &markets_before[1],
-        &market.markets[1].engine
-    ));
+    let mut asset_index = 0usize;
+    while asset_index < 2 {
+        assert_eq!(
+            market.markets[asset_index]
+                .engine
+                .insurance_domain_budget_long
+                .get(),
+            markets_before[asset_index]
+                .insurance_domain_budget_long
+                .get()
+        );
+        assert_eq!(
+            market.markets[asset_index]
+                .engine
+                .insurance_domain_budget_short
+                .get(),
+            markets_before[asset_index]
+                .insurance_domain_budget_short
+                .get()
+        );
+        assert_eq!(
+            market.markets[asset_index]
+                .engine
+                .insurance_domain_spent_long
+                .get(),
+            markets_before[asset_index]
+                .insurance_domain_spent_long
+                .get()
+        );
+        assert_eq!(
+            market.markets[asset_index]
+                .engine
+                .insurance_domain_spent_short
+                .get(),
+            markets_before[asset_index]
+                .insurance_domain_spent_short
+                .get()
+        );
+        asset_index += 1;
+    }
 }
 
 #[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(17)]
 #[kani::solver(cadical)]
-#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
 #[kani::stub(
-    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
-    refresh_plan_only_permissionless_crank_stub
+    MarketGroupV16ViewMut::auto_crank_selected_assets,
+    selected_active_asset_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::has_b_stale_leg,
+    selected_leg_is_no_longer_b_stale_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::asset_state,
+    stale_current_asset_zero_state_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_unconfigured_market_tail,
+    valid_two_asset_market_tail_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::refresh_account_and_certify_not_atomic,
+    stale_cert_refresh_dispatch_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_to_not_atomic,
+    stale_cert_refresh_asset_zero_accrual_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::liquidate_account_not_atomic,
+    unreachable_stale_cert_liquidation_stub
 )]
 #[kani::stub(
     MarketGroupV16ViewMut::close_resolved_account_not_atomic,
@@ -8735,12 +9011,32 @@ fn closure_asset_zero_stale_deficit_auto_crank_refreshes_active_asset() {
 
 #[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(17)]
 #[kani::solver(cadical)]
-#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
 #[kani::stub(
-    MarketGroupV16ViewMut::permissionless_crank_not_atomic,
-    refresh_plan_only_permissionless_crank_stub
+    MarketGroupV16ViewMut::auto_crank_selected_assets,
+    selected_active_asset_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::has_b_stale_leg,
+    selected_leg_is_no_longer_b_stale_stub
+)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, stale_current_asset_one_state_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_unconfigured_market_tail,
+    valid_two_asset_market_tail_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::refresh_account_and_certify_not_atomic,
+    stale_cert_refresh_dispatch_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_to_not_atomic,
+    stale_cert_refresh_asset_one_accrual_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::liquidate_account_not_atomic,
+    unreachable_stale_cert_liquidation_stub
 )]
 #[kani::stub(
     MarketGroupV16ViewMut::close_resolved_account_not_atomic,
