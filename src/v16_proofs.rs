@@ -13348,6 +13348,66 @@ fn selected_leg_is_no_longer_b_stale_stub<'a: 'a, T>(
     Ok(false)
 }
 
+// Exact result of the independently proved one-position B arithmetic theorem.
+// The mutation composition below only needs the chunk as its input contract.
+#[cfg(all(kani, feature = "closure"))]
+fn one_atom_liened_b_chunk_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+    asset_index: usize,
+    endpoint_delta_budget: u128,
+) -> V16Result<AccountBSettlementChunkV16> {
+    assert_eq!(asset_index, 1);
+    assert_eq!(
+        endpoint_delta_budget,
+        market.header.config.public_b_chunk_atoms.get()
+    );
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && leg.b_stale);
+    assert_eq!(leg.loss_weight, POS_SCALE);
+    Ok(AccountBSettlementChunkV16 {
+        delta_b: SOCIAL_LOSS_DEN / POS_SCALE,
+        loss: 1,
+        new_remainder: 0,
+        remaining_after: 0,
+    })
+}
+
+// Composition seam for B settlement. Exact counterparty/insurance source-lien
+// consumption is proved through the same production helper by the four adverse
+// K/F whole-state theorems. This seam proves that the B body routes its exact
+// loss through that helper while the claim is fully pledged; direct PnL burn
+// cannot satisfy these preconditions and was the original deadlock.
+#[cfg(all(kani, feature = "closure"))]
+fn funded_b_loss_application_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    loss_abs: u128,
+) -> V16Result<SupportLossApplicationV16> {
+    assert_eq!(loss_abs, 1);
+    assert_eq!(account.header.pnl.get(), 2);
+    let source = account.header.source_domains[0];
+    assert!(source.is_occupied());
+    assert_eq!(source.domain.get(), 0);
+    assert_eq!(source.source_claim_bound_num.get(), 2 * BOUND_SCALE);
+    assert_eq!(source.source_claim_liened_num.get(), 2 * BOUND_SCALE);
+    assert_eq!(source.source_lien_effective_reserved.get(), 2);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .valid_liened_backing_num
+            .get(),
+        2 * BOUND_SCALE
+    );
+    account.header.pnl = V16PodI128::new(1);
+    account.header.health_cert.valid = 0;
+    Ok(SupportLossApplicationV16 {
+        support_consumed: 1,
+        junior_face_burned: 1,
+    })
+}
+
 // Auto-crank selection seam. Any classifier/selector regression reaches the
 // rejecting branch; the real selected transition is proven separately below.
 #[cfg(all(kani, feature = "closure"))]
@@ -13512,6 +13572,99 @@ fn prove_b_stale_settlement_advances_selected_asset<const ASSET: usize>() {
         &markets_before[1],
         &market.markets[1].engine
     ));
+}
+
+// A B loss is permissionless protocol progress, not an account-chosen claim
+// mutation. If the positive claim is already fully pledged, the settlement
+// must consume that funded lien rather than asking the ordinary PnL setter to
+// burn an unavailable claim face and leaving the account permanently B-stale.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_b_settlement_chunk,
+    one_atom_liened_b_chunk_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::apply_haircut_bounded_close_loss_to_pnl,
+    funded_b_loss_application_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::has_b_stale_leg,
+    selected_leg_is_no_longer_b_stale_stub
+)]
+fn closure_b_settlement_routes_liened_loss_through_funded_support() {
+    const SOURCE_ASSET: usize = 0;
+    const RISK_ASSET: usize = 1;
+    let claim = 2u128;
+    let claim_num = claim * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header, risk_leg, delta_b) =
+        b_stale_transition_fixture::<RISK_ASSET>();
+    kani::assume(risk_leg.side == SideV16::Long);
+
+    header.vault = V16PodU128::new(10 + claim);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    markets[SOURCE_ASSET].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            valid_liened_backing_num: claim_num,
+            credit_rate_num: 0,
+            credit_epoch: header.risk_epoch.get(),
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[SOURCE_ASSET].engine.backing_long =
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: markets[SOURCE_ASSET].engine.asset.market_id.get(),
+            valid_liened_backing_num: claim_num,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: markets[SOURCE_ASSET].engine.asset.market_id,
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_liened_num: V16PodU128::new(claim_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(claim_num),
+        source_lien_effective_reserved: V16PodU128::new(claim),
+        source_lien_counterparty_backing_num: V16PodU128::new(claim_num),
+        source_lien_fee_last_slot: header.current_slot,
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.settle_account_b_chunk(
+        &mut account,
+        RISK_ASSET,
+        market.header.config.public_b_chunk_atoms.get(),
+    );
+
+    let expected_chunk = AccountBSettlementChunkV16 {
+        delta_b,
+        loss: 1,
+        new_remainder: 0,
+        remaining_after: 0,
+    };
+    kani::cover!(
+        result == Ok(expected_chunk) && account.header.pnl.get() == (claim - 1) as i128,
+        "a fully liened positive claim makes B-settlement progress"
+    );
+    assert_eq!(result, Ok(expected_chunk));
+    assert_eq!(market.header.b_stale_account_count.get(), 0);
+    assert_eq!(account.header.b_stale_state, 0);
+    assert_eq!(account.header.pnl.get(), claim as i128 - 1);
+    let settled_leg = account.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(settled_leg.b_snap, delta_b);
+    assert!(!settled_leg.b_stale);
 }
 
 // Wrapper-used auto-crank selection composition. The persisted b-stale leg must

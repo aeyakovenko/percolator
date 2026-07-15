@@ -11595,11 +11595,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             return Ok(chunk);
         }
-        let old_pnl = account.header.pnl.get();
-        let loss_i128 = i128::try_from(chunk.loss).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let new_pnl = old_pnl
-            .checked_sub(loss_i128)
-            .ok_or(V16Error::ArithmeticOverflow)?;
         let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
         let leg = account.header.legs[leg_slot].try_to_runtime()?;
         let leg = V16Core::kernel_advance_leg_b_snap(
@@ -11609,7 +11604,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             chunk.remaining_after,
         )?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
-        self.set_account_pnl(account, new_pnl)?;
+        self.apply_haircut_bounded_close_loss_to_pnl(account, chunk.loss)?;
         if chunk.remaining_after != 0 {
             self.mark_account_b_stale(account)?;
         } else if !Self::has_b_stale_leg(&account.as_view())? {
