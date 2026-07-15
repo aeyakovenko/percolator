@@ -3351,6 +3351,264 @@ fn closure_asset_one_short_loss_backs_only_short_source_domain() {
     prove_negative_kf_backing_mapping::<1, false>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn nonflat_fee_sync_account_boundary_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    assert_eq!(account.header.capital, market.header.c_tot);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(
+        account.header.source_domains,
+        [PortfolioSourceDomainV16Account::default(); PORTFOLIO_SOURCE_DOMAIN_CAP]
+    );
+    assert_eq!(
+        account.header.close_progress,
+        CloseProgressLedgerV16Account::default()
+    );
+
+    let leg = account.header.legs[0].try_to_runtime()?;
+    let asset = market.markets[0].engine.asset.try_to_runtime()?;
+    assert!(leg.active);
+    assert_eq!(leg.asset_index, 0);
+    assert_eq!(leg.market_id, asset.market_id);
+    assert_eq!(leg.side, SideV16::Long);
+    assert_eq!(leg.basis_pos_q, POS_SCALE as i128);
+    assert_eq!(leg.a_basis, ADL_ONE);
+    assert_eq!(leg.loss_weight, POS_SCALE);
+    assert_eq!(leg.f_snap, 0);
+    assert_eq!(leg.b_snap, 0);
+    assert_eq!(leg.b_rem, 0);
+    assert_eq!(leg.epoch_snap, asset.epoch_long);
+    assert_eq!(leg.b_epoch_snap, asset.epoch_long);
+    assert!(leg.k_snap == 0 || leg.k_snap == -2 * ADL_ONE as i128);
+    let mut slot = 1usize;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        assert_eq!(account.header.legs[slot].active, 0);
+        slot += 1;
+    }
+
+    let backing_num = market.header.source_fresh_backing_total_num.get();
+    assert_eq!(backing_num % BOUND_SCALE, 0);
+    let backing = backing_num / BOUND_SCALE;
+    assert!(backing <= 2);
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()?;
+    let bucket = market.markets[0].engine.backing_long.try_to_runtime()?;
+    assert_eq!(source.fresh_reserved_backing_num, backing_num);
+    assert_eq!(source.positive_claim_bound_num, 0);
+    assert_eq!(source.exact_positive_claim_num, 0);
+    assert_eq!(bucket.fresh_unliened_backing_num, backing_num);
+    assert_eq!(
+        account.header.residual_crystallized_loss_atoms_total.get(),
+        backing
+    );
+    if leg.k_snap == 0 {
+        assert_eq!(backing, 0);
+        assert_eq!(account.header.pnl.get(), 0);
+    } else {
+        assert_eq!(account.header.pnl.get(), -(2i128) + backing as i128);
+    }
+    assert_eq!(
+        market.header.negative_pnl_account_count.get(),
+        u64::from(account.header.pnl.get() < 0)
+    );
+    // Side-effect settlement validates once after materializing K/F and before
+    // the caller settles principal. The public fee-sync postcondition below
+    // separately proves that an uncovered loss raises the global lock.
+    assert!(market.header.bankruptcy_hlock_active <= 1);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        10
+    );
+    assert_eq!(
+        market.header.c_tot.get() + market.header.insurance.get() + backing,
+        market.header.vault.get()
+    );
+    assert!((2..=3).contains(&account.header.last_fee_slot.get()));
+    Ok(())
+}
+
+// The wrapper's permissionless maintenance-fee route must first materialize a
+// live leg's adverse K/F delta. That loss is senior to the fee: capital backing
+// is reserved for the losing domain before any remainder can move to insurance.
+// This public composition also proves the insolvent branch remains callable,
+// advances the fee anchor, and cannot mutate an unrelated asset slab.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, negative_two_scaled_adl_delta_stub)]
+#[kani::stub(crate::v16::loss_weight_for_basis, one_position_loss_weight_stub)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    PortfolioLegV16Account::try_to_runtime,
+    two_leg_refresh_leg_decode_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    nonflat_fee_sync_account_boundary_stub
+)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    no_claim_source_credit_rate_stub
+)]
+fn closure_public_nonflat_fee_sync_settles_kf_loss_before_fee_and_isolates_assets() {
+    let capital_raw: u8 = kani::any();
+    let fee_rate_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 8 && fee_rate_raw <= 8);
+    let capital = u128::from(capital_raw);
+    let fee_rate = u128::from(fee_rate_raw);
+    let loss = 2u128;
+    let backing = capital.min(loss);
+    let remaining_capital = capital - backing;
+    let expected_fee = if backing == loss {
+        fee_rate.min(remaining_capital)
+    } else {
+        0
+    };
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    let now_slot = 3u64;
+    header.current_slot = V16PodU64::new(now_slot);
+    header.vault = V16PodU128::new(10 + capital);
+    header.c_tot = V16PodU128::new(capital);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    markets[0].wrapper = 11;
+    markets[1].wrapper = 22;
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.k_long = -2 * ADL_ONE as i128;
+    asset.k_short = 2 * ADL_ONE as i128;
+    asset.slot_last = now_slot;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.last_fee_slot = V16PodU64::new(now_slot - 1);
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_epoch_snap: asset.epoch_long,
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let header_before = header;
+    let selected_before = markets[0].engine;
+    let unrelated_before = markets[1];
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let charged = market
+        .sync_account_fee_to_slot_not_atomic(&mut account, now_slot, fee_rate)
+        .unwrap();
+
+    kani::cover!(
+        capital > loss && fee_rate > capital - loss,
+        "latent K/F loss caps the maintenance fee to remaining capital"
+    );
+    kani::cover!(
+        capital < loss && fee_rate > 0,
+        "undercapitalized K/F loss blocks junior maintenance fee collection"
+    );
+    kani::cover!(
+        capital > loss + 1 && fee_rate > 0 && fee_rate < capital - loss,
+        "fully funded K/F loss permits only the requested maintenance fee"
+    );
+    assert_eq!(charged, expected_fee);
+    assert_eq!(
+        account.header.capital.get(),
+        remaining_capital - expected_fee
+    );
+    assert_eq!(account.header.pnl.get(), -(loss as i128) + backing as i128);
+    assert_eq!(
+        account.header.residual_crystallized_loss_atoms_total.get(),
+        backing
+    );
+    assert_eq!(account.header.last_fee_slot.get(), now_slot);
+    assert!(!account.header.health_cert.try_to_runtime().unwrap().valid);
+    assert_eq!(
+        market.header.c_tot.get(),
+        header_before.c_tot.get() - backing - expected_fee
+    );
+    assert_eq!(
+        market.header.insurance.get(),
+        header_before.insurance.get() + expected_fee
+    );
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        backing * BOUND_SCALE
+    );
+    assert_eq!(market.residual(), residual_before);
+    assert_eq!(
+        market.header.c_tot.get()
+            + market.header.insurance.get()
+            + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE,
+        header_before.c_tot.get() + header_before.insurance.get()
+    );
+    assert_eq!(
+        market.header.negative_pnl_account_count.get(),
+        u64::from(backing < loss)
+    );
+    assert_eq!(
+        market.header.bankruptcy_hlock_active,
+        u8::from(backing < loss)
+    );
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(source.fresh_reserved_backing_num, backing * BOUND_SCALE);
+    assert_eq!(bucket.fresh_unliened_backing_num, backing * BOUND_SCALE);
+    assert_eq!(market.markets[0].wrapper, 11);
+    assert_eq!(market.markets[1].wrapper, 22);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long,
+        selected_before.insurance_domain_budget_long
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short,
+        selected_before.insurance_domain_budget_short
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &unrelated_before.engine,
+        &market.markets[1].engine
+    ));
+    assert_eq!(account.header.active_bitmap, account_before.active_bitmap);
+    assert_eq!(account.header.source_domains, account_before.source_domains);
+}
+
 // A cross-asset account can settle an unsupported winner and a real loser in
 // either leg order. The winner's oracle must not preserve account capital or
 // route realized backing into its own (or either unrelated) domain. The only
