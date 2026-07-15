@@ -3153,6 +3153,80 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
 }
 
 #[test]
+fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut long_header = account_fixture(2, 14);
+    let mut short_header = account_fixture(2, 15);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    market.deposit_not_atomic(&mut long, 1_000_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    for asset_index in [1, 0] {
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        long.header.legs[0].try_to_runtime().unwrap().asset_index,
+        1,
+        "the Recovery asset must occupy the first active leg"
+    );
+
+    market.force_asset_recovery_not_atomic(1, 3).unwrap();
+    let summary = market.build_actionable_summary(&long.as_view()).unwrap();
+    assert!(
+        summary.stale,
+        "the lifecycle epoch bump must stale the account"
+    );
+
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut long,
+            AutoCrankWorkV16 {
+                now_slot: 3,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the auto-crank must select the later live leg");
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(0)
+        }
+    );
+    assert!(
+        !market
+            .build_actionable_summary(&long.as_view())
+            .unwrap()
+            .stale,
+        "the selected live refresh must certify the mixed-lifecycle account"
+    );
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .lifecycle,
+        AssetLifecycleV16::Recovery
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_auto_crank_liquidates_current_account_without_observation() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 14);

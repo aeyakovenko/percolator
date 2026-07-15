@@ -11676,20 +11676,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// ENGINE asset self-selection (engine.md): scan the account's bounded legs and
     /// return, for each asset-scoped continuation, the engine-chosen asset_index —
     /// the FIRST active b-stale leg's asset (SettleBChunk), and the FIRST active
-    /// leg's asset (used for both Liquidate and the refresh accrual target). The
-    /// selection is proven in-range / actionable / first-match / complete by the
-    /// first_actionable_slot contract; the slot->asset_index read is by inspection.
+    /// reducible leg's asset (used for both Liquidate and the refresh accrual target).
+    /// Recovery legs stay available to the separate frozen-mark exit/force-close
+    /// route, but cannot be selected for a continuation that always accrues or
+    /// liquidates its asset. The selection is proven in-range / actionable /
+    /// first-match / complete by the first_actionable_slot contract; the
+    /// slot->asset_index and lifecycle reads are by inspection.
     fn auto_crank_selected_assets(
+        &self,
         account: &PortfolioV16View<'_>,
     ) -> V16Result<(Option<usize>, Option<usize>)> {
         let bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        let mut active_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut reducible_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
             let active = active_bitmap_get(bitmap, slot) && leg.active;
-            active_flags[slot] = active;
+            if active {
+                let lifecycle = self.asset_state(leg.asset_index as usize)?.lifecycle;
+                reducible_flags[slot] = matches!(
+                    lifecycle,
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                );
+            }
             b_stale_flags[slot] = active && leg.b_stale;
             slot += 1;
         }
@@ -11702,8 +11712,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         };
         let b_stale_asset = asset_of(V16Core::first_actionable_slot(b_stale_flags))?;
-        let active_asset = asset_of(V16Core::first_actionable_slot(active_flags))?;
+        let active_asset = asset_of(V16Core::first_actionable_slot(reducible_flags))?;
         Ok((b_stale_asset, active_asset))
+    }
+
+    /// Pure production plan query for wrappers that must authenticate the oracle
+    /// observation required by the exact continuation the engine will dispatch.
+    /// Keeping this query beside execution prevents wrappers from duplicating
+    /// lifecycle-sensitive asset selection.
+    pub fn build_auto_crank_plan(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<AutoCrankPlanV16> {
+        let summary = self.build_actionable_summary(account)?;
+        let (b_stale_asset, active_asset) = self.auto_crank_selected_assets(account)?;
+        let recovery_reason = if summary.expired_close {
+            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
+        } else {
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
+        };
+        Ok(V16Core::select_auto_crank_plan(
+            summary,
+            b_stale_asset.unwrap_or(0),
+            active_asset.unwrap_or(0),
+            active_asset,
+            recovery_reason,
+        ))
     }
 
     /// THE SINGLE PUBLIC PERMISSIONLESS CRANK (engine.md): the only crank the
@@ -11736,22 +11770,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         work: AutoCrankWorkV16<'_>,
     ) -> V16Result<AutoCrankResultV16> {
-        let summary = self.build_actionable_summary(&account.as_view())?;
-        let (b_stale_asset, active_asset) = Self::auto_crank_selected_assets(&account.as_view())?;
-        let recovery_reason = if summary.expired_close {
-            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
-        } else {
-            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
-        };
         // PRODUCTION KERNEL: the proven plan selector (priority + totality +
-        // engine-selected asset). refresh accrues the first active leg's asset.
-        let plan = V16Core::select_auto_crank_plan(
-            summary,
-            b_stale_asset.unwrap_or(0),
-            active_asset.unwrap_or(0),
-            active_asset,
-            recovery_reason,
-        );
+        // engine-selected asset), exposed through the same pure query wrappers
+        // use to authenticate its selected observation.
+        let plan = self.build_auto_crank_plan(&account.as_view())?;
 
         let obs_or_current_asset = |me: &Self, i: usize| -> V16Result<AutoCrankObservationV16> {
             match work
