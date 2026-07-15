@@ -7495,6 +7495,337 @@ fn closure_asset_one_short_resolved_source_close_is_conservative_and_local() {
     prove_resolved_counterparty_source_close_is_local::<1, false>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_liened_source_close_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert!(market.markets.len() == 2);
+    assert!(decode_market_mode(market.header.mode)? == MarketModeV16::Resolved);
+    assert!(market.header.c_tot.get() == 0);
+    assert!(market.header.insurance.get() == 10);
+    assert!(market.header.payout_snapshot_captured == 0);
+    if market.header.vault.get() == 12 {
+        // Intermediate state after the real terminal lien release.
+        assert!(market.header.pnl_pos_tot.get() == 2);
+        assert!(market.header.pnl_pos_bound_tot.get() == 2);
+        assert!(market.header.pnl_pos_bound_tot_num.get() == 2 * BOUND_SCALE);
+        assert!(market.header.source_claim_bound_total_num.get() == 2 * BOUND_SCALE);
+        assert!(market.header.source_fresh_backing_total_num.get() == 2 * BOUND_SCALE);
+        assert!(market.header.risk_epoch.get() == 3);
+    } else {
+        // Terminal state after realization and external payout.
+        assert!(market.header.vault.get() == 10);
+        assert!(market.header.pnl_pos_tot.get() == 0);
+        assert!(market.header.pnl_pos_bound_tot.get() == 0);
+        assert!(market.header.pnl_pos_bound_tot_num.get() == 0);
+        assert!(market.header.source_claim_bound_total_num.get() == 0);
+        assert!(market.header.source_fresh_backing_total_num.get() == 0);
+        assert!(market.header.risk_epoch.get() == 5);
+    }
+    Ok(())
+}
+
+// The terminal release is kept concrete in the composition theorem below.
+// This seam starts only after that release and is the epoch-shifted instance of
+// the eight independently proved source-backed conversion closure harnesses.
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_liened_source_close_conversion_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<u128> {
+    let claim = account.header.pnl.get() as u128;
+    assert!(claim == 2);
+    assert!(account.header.capital.get() == 0);
+    assert!(account.header.reserved_pnl.get() == 0);
+    assert!(market.header.c_tot.get() == 0);
+    assert!(market.header.risk_epoch.get() == 3);
+    let source = account.header.source_domains[0];
+    assert!(source.is_occupied());
+    assert!(source.source_claim_liened_num.get() == 0);
+    assert!(source.source_lien_effective_reserved.get() == 0);
+    assert!(source.source_lien_counterparty_backing_num.get() == 0);
+    let domain = source.domain.get() as usize;
+    let (asset_index, side) = market.domain_asset_side(domain)?;
+    let claim_num = claim * BOUND_SCALE;
+    assert!(source.source_claim_bound_num.get() == claim_num);
+    let source_state = market.source_credit_for_domain(domain)?;
+    let bucket = market.backing_bucket_for_domain(domain)?;
+    assert!(source_state.positive_claim_bound_num == claim_num);
+    assert!(source_state.exact_positive_claim_num == claim_num);
+    assert!(source_state.fresh_reserved_backing_num == claim_num);
+    assert!(source_state.valid_liened_backing_num == 0);
+    assert!(source_state.credit_rate_num == CREDIT_RATE_SCALE);
+    assert!(source_state.credit_epoch == 1);
+    assert!(bucket.status == BackingBucketStatusV16::Fresh);
+    assert!(bucket.fresh_unliened_backing_num == claim_num);
+    assert!(bucket.valid_liened_backing_num == 0);
+
+    let consumed_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        spent_backing_num: claim_num,
+        provider_receivable_num: claim_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 3,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let consumed_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: bucket.market_id,
+        consumed_liened_backing_num: claim_num,
+        expiry_slot: bucket.expiry_slot,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    match side {
+        SideV16::Long => {
+            market.markets[asset_index].engine.source_credit_long = consumed_source;
+            market.markets[asset_index].engine.backing_long = consumed_bucket;
+        }
+        SideV16::Short => {
+            market.markets[asset_index].engine.source_credit_short = consumed_source;
+            market.markets[asset_index].engine.backing_short = consumed_bucket;
+        }
+    }
+    market.header.pnl_pos_tot = V16PodU128::new(0);
+    market.header.pnl_pos_bound_tot = V16PodU128::new(0);
+    market.header.pnl_pos_bound_tot_num = V16PodU128::new(0);
+    market.header.source_claim_bound_total_num = V16PodU128::new(0);
+    market.header.source_fresh_backing_total_num = V16PodU128::new(0);
+    market.header.risk_epoch = V16PodU64::new(5);
+    market.header.c_tot = V16PodU128::new(claim);
+    account.header.pnl = V16PodI128::new(0);
+    account.header.capital = V16PodU128::new(claim);
+    account.header.source_domains[0] = PortfolioSourceDomainV16Account::default();
+    account.header.health_cert.valid = 0;
+    Ok(claim)
+}
+
+// A pre-existing source lien must be released before terminal realization.
+// This executes the real release transition for both partial and full liens,
+// then proves exact payout, conservation, and isolation through public close.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_liened_resolved_counterparty_source_close_is_local<
+    const ASSET: usize,
+    const SOURCE_LONG: bool,
+    const FULL_LIEN: bool,
+>() {
+    assert!(ASSET < 2);
+    let claim = 2u128;
+    let lien = if FULL_LIEN { claim } else { 1 };
+    let claim_num = claim * BOUND_SCALE;
+    let lien_num = lien * BOUND_SCALE;
+    let source_side = if SOURCE_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let domain = ASSET * 2 + encode_side(source_side) as usize;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.resolved_slot = header.current_slot;
+    header.vault = V16PodU128::new(10 + claim);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.last_fee_slot = header.resolved_slot;
+    let account_source = &mut account_header.source_domains[0];
+    account_source.domain = V16PodU32::new(domain as u32);
+    account_source.source_claim_market_id = markets[ASSET].engine.asset.market_id;
+    account_source.source_claim_bound_num = V16PodU128::new(claim_num);
+    account_source.source_claim_liened_num = V16PodU128::new(lien_num);
+    account_source.source_claim_counterparty_liened_num = V16PodU128::new(lien_num);
+    account_source.source_lien_effective_reserved = V16PodU128::new(lien);
+    account_source.source_lien_counterparty_backing_num = V16PodU128::new(lien_num);
+    account_source.source_lien_fee_last_slot = header.current_slot;
+
+    let initial_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: claim_num,
+        valid_liened_backing_num: lien_num,
+        credit_rate_num: (claim_num - lien_num) * CREDIT_RATE_SCALE / claim_num,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let initial_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets[ASSET].engine.asset.market_id.get(),
+        fresh_unliened_backing_num: claim_num - lien_num,
+        valid_liened_backing_num: lien_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    match source_side {
+        SideV16::Long => {
+            markets[ASSET].engine.source_credit_long = initial_source;
+            markets[ASSET].engine.backing_long = initial_bucket;
+        }
+        SideV16::Short => {
+            markets[ASSET].engine.source_credit_short = initial_source;
+            markets[ASSET].engine.backing_short = initial_bucket;
+        }
+    }
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(10);
+    expected_header.pnl_pos_tot = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(0);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(0);
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(0);
+    expected_header.risk_epoch = V16PodU64::new(5);
+
+    let consumed_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        spent_backing_num: claim_num,
+        provider_receivable_num: claim_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 3,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let consumed_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets[ASSET].engine.asset.market_id.get(),
+        consumed_liened_backing_num: claim_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    let mut expected_markets = markets_before;
+    match source_side {
+        SideV16::Long => {
+            expected_markets[ASSET].source_credit_long = consumed_source;
+            expected_markets[ASSET].backing_long = consumed_bucket;
+        }
+        SideV16::Short => {
+            expected_markets[ASSET].source_credit_short = consumed_source;
+            expected_markets[ASSET].backing_short = consumed_bucket;
+        }
+    }
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.source_domains[0] = PortfolioSourceDomainV16Account::default();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .unwrap();
+
+    kani::cover!(
+        outcome == ResolvedCloseOutcomeV16::Closed { payout: claim },
+        "terminal close releases persisted source backing and pays it"
+    );
+    assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: claim });
+    assert_resolved_source_close_header_frame(&expected_header, market.header);
+    assert_resolved_source_close_account_frame(&expected_account, account.header);
+    assert_resolved_source_close_market_frames(&expected_markets, &market);
+    assert_eq!(market.residual(), residual_before);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    resolved_source_close_flow_validate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    resolved_source_close_compact_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_source_close_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_liened_source_close_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    resolved_source_close_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::sync_account_fee_to_slot_not_atomic,
+    resolved_source_close_zero_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    resolved_source_close_nonnegative_principal_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::detach_solvent_active_legs_for_resolved_close,
+    resolved_source_close_empty_detach_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_source_realizable_support,
+    resolved_source_close_full_support_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::convert_released_pnl_to_capital_core_not_atomic,
+    resolved_liened_source_close_conversion_stub
+)]
+fn closure_asset_zero_long_full_lien_resolved_source_close_is_conservative_and_local() {
+    prove_liened_resolved_counterparty_source_close_is_local::<0, true, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    resolved_source_close_flow_validate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    resolved_source_close_compact_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_source_close_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_liened_source_close_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    resolved_source_close_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::sync_account_fee_to_slot_not_atomic,
+    resolved_source_close_zero_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    resolved_source_close_nonnegative_principal_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::detach_solvent_active_legs_for_resolved_close,
+    resolved_source_close_empty_detach_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_source_realizable_support,
+    resolved_source_close_full_support_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::convert_released_pnl_to_capital_core_not_atomic,
+    resolved_liened_source_close_conversion_stub
+)]
+fn closure_asset_one_short_partial_lien_resolved_source_close_is_conservative_and_local() {
+    prove_liened_resolved_counterparty_source_close_is_local::<1, false, false>();
+}
+
 // The source-backed conversion proofs above establish the maximum capital that
 // can be realized from a claim. This companion theorem proves the external leg:
 // for every nonzero valid withdrawal amount and capital balance, the public API
