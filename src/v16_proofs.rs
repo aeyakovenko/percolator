@@ -8664,6 +8664,258 @@ fn closure_expired_counterparty_lien_cannot_remain_favorable_account_credit() {
     assert_eq!(support, insurance_atoms);
 }
 
+// A lapsed source domain must fail closed without poisoning a later current
+// domain in the same cross-margin account. This selector feeds refresh,
+// conversion, trade margin, and liquidation; one faulty asset must contribute
+// zero without suppressing independently funded support from another asset.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_lapsed_source_cannot_poison_current_domain_support() {
+    let stale_is_wider: bool = kani::any();
+    let (stale_atoms, current_atoms) = if stale_is_wider {
+        (4u128, 1u128)
+    } else {
+        (1u128, 4u128)
+    };
+    let total_atoms = stale_atoms + current_atoms;
+    let stale_num = stale_atoms * BOUND_SCALE;
+    let current_num = current_atoms * BOUND_SCALE;
+    let total_num = total_atoms * BOUND_SCALE;
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    let stale_market_id = markets[0].engine.asset.market_id;
+    let current_market_id = markets[1].engine.asset.market_id;
+    header.current_slot = V16PodU64::new(20);
+    header.vault = V16PodU128::new(10 + total_atoms);
+    header.pnl_pos_tot = V16PodU128::new(total_atoms);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_atoms);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_num);
+    header.source_claim_bound_total_num = V16PodU128::new(total_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(total_num);
+    account_header.pnl = V16PodI128::new(total_atoms as i128);
+
+    let stale_account_source = &mut account_header.source_domains[0];
+    stale_account_source.domain = V16PodU32::new(0);
+    stale_account_source.source_claim_market_id = stale_market_id;
+    stale_account_source.source_claim_bound_num = V16PodU128::new(stale_num);
+    let current_account_source = &mut account_header.source_domains[1];
+    current_account_source.domain = V16PodU32::new(2);
+    current_account_source.source_claim_market_id = current_market_id;
+    current_account_source.source_claim_bound_num = V16PodU128::new(current_num);
+
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: stale_num,
+            exact_positive_claim_num: stale_num,
+            fresh_reserved_backing_num: stale_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: 1,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: stale_market_id.get(),
+        fresh_unliened_backing_num: stale_num,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: current_num,
+            exact_positive_claim_num: current_num,
+            fresh_reserved_backing_num: current_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: 1,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: current_market_id.get(),
+        fresh_unliened_backing_num: current_num,
+        expiry_slot: 30,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let support = market
+        .account_source_realizable_support(&account, total_atoms)
+        .unwrap();
+
+    kani::cover!(
+        !stale_is_wider,
+        "small stale domain cannot poison wider current support"
+    );
+    kani::cover!(
+        stale_is_wider,
+        "wide stale domain cannot poison smaller current support"
+    );
+    assert_eq!(support, current_atoms);
+}
+
+// Mutable account touch reconciles lapsed counterparty backing before any
+// favorable or settlement calculation. Expiry is domain-local: independently
+// funded insurance in the same domain and all state in a later asset survive.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_account_touch_expires_only_lapsed_backing_and_preserves_insurance() {
+    let has_insurance: bool = kani::any();
+    let insurance_atoms = u128::from(has_insurance);
+    let stale_backing_atoms = 2u128;
+    let current_atoms = 2u128;
+    let stale_claim_atoms = 1u128;
+    let total_claim_atoms = stale_claim_atoms + current_atoms;
+    let stale_backing_num = stale_backing_atoms * BOUND_SCALE;
+    let current_num = current_atoms * BOUND_SCALE;
+    let insurance_num = insurance_atoms * BOUND_SCALE;
+    let stale_claim_num = stale_claim_atoms * BOUND_SCALE;
+    let total_claim_num = total_claim_atoms * BOUND_SCALE;
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    let stale_market_id = markets[0].engine.asset.market_id;
+    let current_market_id = markets[1].engine.asset.market_id;
+    header.current_slot = V16PodU64::new(20);
+    header.vault = V16PodU128::new(10 + stale_backing_atoms + current_atoms);
+    header.pnl_pos_tot = V16PodU128::new(total_claim_atoms);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_claim_atoms);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(total_claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(stale_backing_num + current_num);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(insurance_atoms);
+    account_header.pnl = V16PodI128::new(total_claim_atoms as i128);
+
+    let stale_account_source = &mut account_header.source_domains[0];
+    stale_account_source.domain = V16PodU32::new(0);
+    stale_account_source.source_claim_market_id = stale_market_id;
+    stale_account_source.source_claim_bound_num = V16PodU128::new(stale_claim_num);
+    let current_account_source = &mut account_header.source_domains[1];
+    current_account_source.domain = V16PodU32::new(2);
+    current_account_source.source_claim_market_id = current_market_id;
+    current_account_source.source_claim_bound_num = V16PodU128::new(current_num);
+
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: stale_claim_num,
+            exact_positive_claim_num: stale_claim_num,
+            fresh_reserved_backing_num: stale_backing_num,
+            insurance_credit_reserved_num: insurance_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: 1,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: stale_market_id.get(),
+        fresh_unliened_backing_num: stale_backing_num,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: insurance_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: current_num,
+            exact_positive_claim_num: current_num,
+            fresh_reserved_backing_num: current_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: 1,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: current_market_id.get(),
+        fresh_unliened_backing_num: current_num,
+        expiry_slot: 30,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let header_before = header;
+    let selected_before = markets[0].engine;
+    let current_before = markets[1].engine;
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let account = PortfolioV16View::new(&account_header);
+    market
+        .expire_lapsed_source_backing_for_account_not_atomic(&account)
+        .unwrap();
+    let support = market
+        .account_source_realizable_support(&account, total_claim_atoms)
+        .unwrap();
+
+    kani::cover!(
+        !has_insurance,
+        "lapsed source contributes zero without insurance"
+    );
+    kani::cover!(
+        has_insurance,
+        "lapsed counterparty backing preserves funded insurance support"
+    );
+    assert_eq!(support, current_atoms + insurance_atoms);
+    let stale_source = market.source_credit_for_domain(0).unwrap();
+    let stale_bucket = market.backing_bucket_for_domain(0).unwrap();
+    assert_eq!(stale_source.fresh_reserved_backing_num, 0);
+    assert_eq!(stale_source.insurance_credit_reserved_num, insurance_num);
+    assert_eq!(
+        stale_source.credit_rate_num,
+        if has_insurance { CREDIT_RATE_SCALE } else { 0 }
+    );
+    assert_eq!(stale_bucket.fresh_unliened_backing_num, 0);
+    assert_eq!(stale_bucket.status, BackingBucketStatusV16::Expired);
+
+    let mut expected_header = header_before;
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(current_num);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert_eq!(market.residual(), residual_before + stale_backing_atoms);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &current_before,
+        &market.markets[1].engine
+    ));
+    assert!(kani_eq_asset_state_v16_account(
+        &selected_before.asset,
+        &market.markets[0].engine.asset
+    ));
+    assert!(kani_eq_source_credit_state_v16_account(
+        &selected_before.source_credit_short,
+        &market.markets[0].engine.source_credit_short
+    ));
+    assert!(kani_eq_backing_bucket_v16_account(
+        &selected_before.backing_short,
+        &market.markets[0].engine.backing_short
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &selected_before.insurance_reservation_long,
+        &market.markets[0].engine.insurance_reservation_long
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &selected_before.insurance_reservation_short,
+        &market.markets[0].engine.insurance_reservation_short
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn resolved_expired_counterparty_cleanup_shape_stub<'a: 'a, T>(
     market: &MarketGroupV16ViewMut<'a, T>,

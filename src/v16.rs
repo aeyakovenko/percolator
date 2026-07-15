@@ -7542,24 +7542,49 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
-    fn validate_source_domain_ledger(&self, domain: usize) -> V16Result<()> {
+    fn validated_source_domain_ledger_parts(
+        &self,
+        domain: usize,
+    ) -> V16Result<(
+        SourceCreditStateV16,
+        BackingBucketV16,
+        InsuranceCreditReservationV16,
+    )> {
         let source = self.source_credit_for_domain_shape(domain)?;
         let bucket = self.backing_bucket_for_domain(domain)?;
         let reservation = self.insurance_reservation_for_domain(domain)?;
         let (asset_index, _) = self.domain_asset_side(domain)?;
         let market_id = self.markets[asset_index].engine.asset.market_id.get();
-        V16Core::validate_source_domain_ledger_parts(market_id, source, bucket, reservation)
+        V16Core::validate_source_domain_ledger_parts(market_id, source, bucket, reservation)?;
+        Ok((source, bucket, reservation))
+    }
+
+    fn validate_source_domain_ledger(&self, domain: usize) -> V16Result<()> {
+        self.validated_source_domain_ledger_parts(domain)
+            .map(|_| ())
     }
 
     fn validate_source_domain_ledger_current(&self, domain: usize) -> V16Result<()> {
-        self.validate_source_domain_ledger(domain)?;
-        let bucket = self.backing_bucket_for_domain(domain)?;
+        let (_, bucket, _) = self.validated_source_domain_ledger_parts(domain)?;
         if bucket.status == BackingBucketStatusV16::Fresh
             && bucket.expiry_slot <= self.header.current_slot.get()
         {
             return Err(V16Error::Stale);
         }
         Ok(())
+    }
+
+    // Read-only account checks cannot expire a bucket. Treat lapsed
+    // counterparty backing as zero instead of letting one domain suppress
+    // independently current support from later domains.
+    fn source_credit_if_current(&self, domain: usize) -> V16Result<Option<SourceCreditStateV16>> {
+        let (source, bucket, _) = self.validated_source_domain_ledger_parts(domain)?;
+        if bucket.status == BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot <= self.header.current_slot.get()
+        {
+            return Ok(None);
+        }
+        Ok(Some(source))
     }
 
     fn recompute_source_credit_domain_after_mutation(&mut self, domain: usize) -> V16Result<()> {
@@ -7573,6 +7598,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn refresh_source_credit_domain_after_mutation(&mut self, domain: usize) -> V16Result<()> {
         self.recompute_source_credit_domain_after_mutation(domain)?;
         self.reservation_encumbrance_proof_for_domain(domain)?
@@ -7792,7 +7818,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    pub fn expire_source_backing_bucket_not_atomic(
+    fn expire_source_backing_bucket_core_not_atomic(
         &mut self,
         domain: usize,
         now_slot: u64,
@@ -7831,7 +7857,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        self.recompute_source_credit_domain_after_mutation(domain)?;
+        self.reservation_encumbrance_proof_for_domain(domain)?
+            .validate()
+    }
+
+    pub fn expire_source_backing_bucket_not_atomic(
+        &mut self,
+        domain: usize,
+        now_slot: u64,
+    ) -> V16Result<()> {
+        self.expire_source_backing_bucket_core_not_atomic(domain, now_slot)?;
+        self.validate_shape()
+    }
+
+    fn expire_lapsed_source_backing_for_account_not_atomic(
+        &mut self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        let current_slot = self.header.current_slot.get();
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let domain = source.domain.get() as usize;
+                let bucket = self.backing_bucket_for_domain(domain)?;
+                if bucket.status == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= current_slot
+                {
+                    self.expire_source_backing_bucket_core_not_atomic(domain, current_slot)?;
+                }
+            }
+            slot += 1;
+        }
+        Ok(())
     }
 
     #[cfg(any(kani, feature = "fuzz"))]
@@ -8780,11 +8842,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if face_claim == 0 {
             return Ok(0);
         }
-        self.validate_source_domain_ledger_current(domain)?;
-        V16Core::source_credit_state_realizable_support_for_face(
-            self.source_credit_for_domain(domain)?,
-            face_claim,
-        )
+        let Some(source) = self.source_credit_if_current(domain)? else {
+            return Ok(0);
+        };
+        V16Core::source_credit_state_realizable_support_for_face(source, face_claim)
     }
 
     fn account_source_realizable_support(
@@ -8853,11 +8914,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::CounterUnderflow)?
                 .min(remaining_num);
             if claim_num != 0 {
-                self.validate_source_domain_ledger_current(d)?;
+                let rate = self
+                    .source_credit_if_current(d)?
+                    .map_or(0, |source| source.credit_rate_num);
                 let credited_num = U256::from_u128(claim_num)
-                    .checked_mul(U256::from_u128(
-                        self.source_credit_for_domain(d)?.credit_rate_num,
-                    ))
+                    .checked_mul(U256::from_u128(rate))
                     .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 support_num = support_num
@@ -8896,11 +8957,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let d = source.domain.get() as usize;
             let claim_num = Self::source_claim_unliened_num(account, d)?.min(remaining_num);
             if claim_num != 0 {
-                self.validate_source_domain_ledger_current(d)?;
+                let rate = self
+                    .source_credit_if_current(d)?
+                    .map_or(0, |source| source.credit_rate_num);
                 let credited_num = U256::from_u128(claim_num)
-                    .checked_mul(U256::from_u128(
-                        self.source_credit_for_domain(d)?.credit_rate_num,
-                    ))
+                    .checked_mul(U256::from_u128(rate))
                     .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 support_num = support_num
@@ -10856,6 +10917,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 account.header.pnl.get(),
                 source_claim_sum_num,
             )?;
+            self.expire_lapsed_source_backing_for_account_not_atomic(&account.as_view())?;
         }
         if decode_bool(account.header.b_stale_state)? && !allow_b_chunk {
             return Err(V16Error::BStale);
@@ -11286,6 +11348,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         b_delta_budget: u128,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
+        self.expire_lapsed_source_backing_for_account_not_atomic(&account.as_view())?;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -14744,6 +14807,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if released == 0 {
             return Ok(0);
         }
+        self.expire_lapsed_source_backing_for_account_not_atomic(&account.as_view())?;
         if Self::account_has_source_claims(&account.as_view())?
             && self.account_has_active_source_claim_exposure(&account.as_view())?
         {

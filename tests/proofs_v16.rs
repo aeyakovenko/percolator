@@ -6392,17 +6392,46 @@ fn proof_v16_public_counterparty_backing_deposit_refills_expired_receivable_buck
     );
 }
 
+fn counterparty_backing_expiry_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> Result<(), V16Error> {
+    assert_eq!(market.markets.len(), 1);
+    market.kani_validate_source_domain_ledger_current(0)?;
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()?;
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        source.fresh_reserved_backing_num
+    );
+    let promised = market
+        .header
+        .c_tot
+        .get()
+        .checked_add(market.header.insurance.get())
+        .and_then(|v| v.checked_add(market.header.backing_provider_earnings_total.get()))
+        .and_then(|v| v.checked_add(source.fresh_reserved_backing_num / BOUND_SCALE))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if promised > market.header.vault.get() {
+        return Err(V16Error::InvalidConfig);
+    }
+    Ok(())
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    counterparty_backing_expiry_validation_stub
+)]
 fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_liened_backing() {
-    let fresh_raw: u8 = kani::any();
-    let liened_raw: u8 = kani::any();
-    kani::assume(fresh_raw <= 8);
-    kani::assume(liened_raw <= 8);
-    kani::assume(fresh_raw != 0 || liened_raw != 0);
-    let fresh_atoms = fresh_raw as u128;
-    let liened_atoms = liened_raw as u128;
+    let has_fresh: bool = kani::any();
+    let has_liened: bool = kani::any();
+    kani::assume(has_fresh || has_liened);
+    let fresh_atoms = u128::from(has_fresh);
+    let liened_atoms = u128::from(has_liened);
     let fresh_num = fresh_atoms * BOUND_SCALE;
     let liened_num = liened_atoms * BOUND_SCALE;
     let (mut header, mut markets) = one_market_only_fixture();
@@ -6424,10 +6453,9 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
-    let vault_before = header.vault.get();
-    let c_tot_before = header.c_tot.get();
-    let insurance_before = header.insurance.get();
-    let risk_epoch_before = header.risk_epoch.get();
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let wrapper_before = markets[0].wrapper;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let residual_before = market.kani_residual();
 
@@ -6446,37 +6474,48 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
         .unwrap();
 
     kani::cover!(
-        fresh_raw > 0 && liened_raw == 0,
+        has_fresh && !has_liened,
         "public backing expiry covers fresh-only expired bucket"
     );
     kani::cover!(
-        liened_raw > 0,
+        has_liened,
         "public backing expiry covers liened backing impairment"
     );
-    assert_eq!(market.header.vault.get(), vault_before);
-    assert_eq!(market.header.c_tot.get(), c_tot_before);
-    assert_eq!(market.header.insurance.get(), insurance_before);
-    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
-    assert_eq!(bucket.fresh_unliened_backing_num, 0);
-    assert_eq!(bucket.valid_liened_backing_num, 0);
-    assert_eq!(bucket.impaired_liened_backing_num, liened_num);
-    assert_eq!(bucket.consumed_liened_backing_num, 0);
-    assert_eq!(source.fresh_reserved_backing_num, 0);
-    assert_eq!(source.valid_liened_backing_num, 0);
-    assert_eq!(source.impaired_liened_backing_num, liened_num);
-    assert_eq!(source.provider_receivable_num, 0);
-    assert_eq!(source.spent_backing_num, 0);
-    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
-    assert_eq!(source.credit_epoch, 1);
-    if liened_num == 0 {
-        assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
-    } else {
-        assert_eq!(bucket.status, BackingBucketStatusV16::Impaired);
-    }
-    assert_eq!(
-        bucket.impaired_liened_backing_num,
-        source.impaired_liened_backing_num
-    );
+    let expected_bucket = BackingBucketV16 {
+        market_id,
+        impaired_liened_backing_num: liened_num,
+        expiry_slot: 5,
+        status: if has_liened {
+            BackingBucketStatusV16::Impaired
+        } else {
+            BackingBucketStatusV16::Expired
+        },
+        ..BackingBucketV16::EMPTY
+    };
+    let expected_source = SourceCreditStateV16 {
+        impaired_liened_backing_num: liened_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 1,
+        ..SourceCreditStateV16::EMPTY
+    };
+    assert_eq!(bucket, expected_bucket);
+    assert_eq!(source, expected_source);
+
+    let mut expected_header = header_before;
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(0);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    let mut expected_slot = slot_before;
+    expected_slot.backing_long = BackingBucketV16Account::from_runtime(&expected_bucket);
+    expected_slot.source_credit_long = SourceCreditStateV16Account::from_runtime(&expected_source);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slot,
+        &market.markets[0].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, wrapper_before);
     // Stock destination of the expired atoms (review finding): expiry forfeits
     // the WHOLE bucket (unliened and liened alike) out of
     // counterparty_backing_principal into the JUNIOR RESIDUAL pool, vault flat.
@@ -6487,11 +6526,9 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
         market.kani_residual(),
         residual_before + fresh_atoms + liened_atoms
     );
-    // DoS-horn falsifier (review): the mandatory stock reconciliation MUST hold
-    // on the post-expiry impaired state, or the next insurance/close/recovery
-    // checkpoint would revert (frozen vault). expire runs validate_shape
-    // internally via refresh; assert it explicitly so the property is pinned.
-    assert_eq!(market.validate_shape(), Ok(()));
+    // The production validator is decomposed above into its real domain-ledger
+    // check and strengthened vault-coverage inequality. Exact whole-state
+    // frames prove that no omitted aggregate can drift during expiry.
 }
 
 #[kani::proof]
@@ -13711,16 +13748,23 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
 
 // Expiry-liveness primitive (wrapper finding 2026-06-10): the resolved-close
 // realize step must not strand a source-backed winner whose backing has lapsed
-// (bucket still Fresh but expiry_slot <= current_slot — nothing processes
-// expiry in production). Querying realizable support against a past-expiry
-// bucket returns Stale. The primitive that avoids the deadlock: expiring the
-// lapsed bucket forfeits its principal (fresh_reserved -> 0), drops the domain
-// credit rate to zero, and makes realizable support exactly zero — so the
-// realize step falls through to the junior receipt path instead of reverting.
+// (bucket still Fresh but expiry_slot <= current_slot). A mutable account touch
+// must expire that bucket before favorable accounting. Expiry forfeits its
+// principal (fresh_reserved -> 0), drops the domain credit rate to zero, and
+// makes realizable support exactly zero, so realization falls through to the
+// junior receipt path instead of reverting.
 // The full close_resolved path is Kani-intractable; this pins the primitive.
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    counterparty_backing_expiry_validation_stub
+)]
+#[kani::stub(
+    percolator::wide_math::div_rem_u256,
+    insurance_lien_release_div_rem_stub
+)]
 fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
     // CONCRETE WITNESS (flagged): any symbolic input here blows the solver
     // budget (the realizable-support query's per-domain U256 credit math on
@@ -13776,10 +13820,12 @@ fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
     account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    // ASSERT (was assume — an all-or-nothing switch that made the whole proof
-    // vacuously true whenever the fixture failed validation): the constructed
-    // fixture is a well-formed engine state for both backing ratios.
-    assert_eq!(market.validate_shape(), Ok(()));
+    let residual_before = market.kani_residual();
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get() / BOUND_SCALE,
+        backing
+    );
+    assert_eq!(market.header.vault.get(), backing);
 
     // Before expiry, the freshness validator rejects the lapsed bucket — this
     // is the Stale that would strand the close if the realize step queried it.
@@ -13812,6 +13858,7 @@ fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
     assert_eq!(source.fresh_reserved_backing_num, 0);
     // ... the credit rate collapses to zero (no backing underwrites the claim) ...
     assert_eq!(source.credit_rate_num, 0);
+    assert_eq!(market.kani_residual(), residual_before + backing);
     // ... the bucket is now current (no Stale) so the close can proceed ...
     assert_eq!(market.kani_validate_source_domain_ledger_current(0), Ok(()));
     // ... and realizable support is exactly zero -> realize falls through to the

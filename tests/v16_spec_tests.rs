@@ -1966,6 +1966,96 @@ fn v16_public_backing_principal_deposit_and_withdraw_move_vault_and_source_state
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+#[test]
+fn v16_full_refresh_expires_lapsed_source_without_poisoning_later_support() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 25);
+    let stale_num = BOUND_SCALE;
+    let current_num = 2 * BOUND_SCALE;
+    let total_num = stale_num + current_num;
+    let stale_market_id = markets[0].engine.asset.market_id;
+    let current_market_id = markets[1].engine.asset.market_id;
+
+    header.current_slot = V16PodU64::new(20);
+    header.vault = V16PodU128::new(3);
+    header.pnl_pos_tot = V16PodU128::new(3);
+    header.pnl_pos_bound_tot = V16PodU128::new(3);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_num);
+    header.source_claim_bound_total_num = V16PodU128::new(total_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(total_num);
+    account_header.pnl = V16PodI128::new(3);
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = stale_market_id;
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(stale_num);
+    account_header.source_domains[1].domain = V16PodU32::new(2);
+    account_header.source_domains[1].source_claim_market_id = current_market_id;
+    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(current_num);
+
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: stale_num,
+            exact_positive_claim_num: stale_num,
+            fresh_reserved_backing_num: stale_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: stale_market_id.get(),
+        fresh_unliened_backing_num: stale_num,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: current_num,
+            exact_positive_claim_num: current_num,
+            fresh_reserved_backing_num: current_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: current_market_id.get(),
+        fresh_unliened_backing_num: current_num,
+        expiry_slot: 30,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    let cert = market
+        .full_account_refresh_not_atomic(&mut account)
+        .unwrap();
+
+    assert_eq!(cert.certified_equity, 2);
+    assert_eq!(
+        market.markets[0].engine.backing_long.status,
+        BackingBucketStatusV16::Expired as u8
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .credit_rate_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .source_credit_long
+            .credit_rate_num
+            .get(),
+        CREDIT_RATE_SCALE
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
 #[cfg(feature = "fuzz")]
 #[test]
 fn v16_public_backing_principal_withdraw_rejects_if_claims_would_be_underbacked() {
