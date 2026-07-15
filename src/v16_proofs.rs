@@ -8166,6 +8166,543 @@ fn closure_asset_one_short_expired_source_close_is_live_conservative_and_local()
     prove_expired_source_close_is_live_and_local::<1, false>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+const RESOLVED_REFINEMENT_JUNIOR_ACCOUNT_TAG: u8 = 0xA1;
+
+#[cfg(all(kani, feature = "closure"))]
+const RESOLVED_REFINEMENT_BACKED_ACCOUNT_TAG: u8 = 0xB1;
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_refinement_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(account.source_claim_bound_sum_num()?, 0);
+
+    let tag = account.header.provenance_header.portfolio_account_id[0];
+    if tag == RESOLVED_REFINEMENT_JUNIOR_ACCOUNT_TAG {
+        let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
+        assert!(receipt.present);
+        assert_eq!(receipt.prior_bound_contribution_num, 2 * BOUND_SCALE);
+        assert_eq!(receipt.live_released_face_at_receipt, 0);
+        assert_eq!(receipt.terminal_positive_claim_face, 2);
+        assert!((1..=2).contains(&receipt.paid_effective));
+        assert_eq!(receipt.finalized, receipt.paid_effective == 2);
+        assert_eq!(market.header.vault.get(), 12 - receipt.paid_effective);
+    } else {
+        assert_eq!(tag, RESOLVED_REFINEMENT_BACKED_ACCOUNT_TAG);
+        assert!(account
+            .header
+            .resolved_payout_receipt
+            .try_to_runtime()?
+            .is_empty());
+        assert_eq!(market.header.vault.get(), 11);
+    }
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_refinement_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(
+        decode_market_mode(market.header.mode)?,
+        MarketModeV16::Resolved
+    );
+    assert!((10..=11).contains(&market.header.vault.get()));
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.insurance.get(), 10);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(market.header.risk_epoch.get(), 4);
+    assert_eq!(market.header.payout_snapshot_captured, 1);
+    assert_eq!(market.header.payout_snapshot.get(), 2);
+    assert!((3..=4).contains(&market.header.payout_snapshot_pnl_pos_tot.get()));
+    let ledger = market.header.resolved_payout_ledger.try_to_runtime()?;
+    assert_eq!(ledger.snapshot_residual, 2);
+    assert_eq!(ledger.terminal_claim_exact_receipts_num, 2 * BOUND_SCALE);
+    assert_eq!(ledger.terminal_claim_bound_unreceipted_num, 0);
+    assert_eq!(ledger.current_payout_rate_num, 2 * BOUND_SCALE);
+    assert_eq!(ledger.current_payout_rate_den, 2 * BOUND_SCALE);
+    assert_eq!(ledger.snapshot_slot, 2);
+    assert!(!ledger.payout_halted && !ledger.finalized);
+    Ok(())
+}
+
+// Exact public terminal top-up contract already proved over symbolic receipt
+// values by closure_resolved_payout_topup_is_capped_conservative_and_terminal.
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_refinement_public_topup_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<u128> {
+    assert_eq!(market.header.vault.get(), 11);
+    assert_eq!(market.header.insurance.get(), 10);
+    let ledger = market.header.resolved_payout_ledger.try_to_runtime()?;
+    assert_eq!(ledger.snapshot_residual, 2);
+    assert_eq!(ledger.terminal_claim_exact_receipts_num, 2 * BOUND_SCALE);
+    assert_eq!(ledger.terminal_claim_bound_unreceipted_num, 0);
+    assert_eq!(ledger.current_payout_rate_num, 2 * BOUND_SCALE);
+    assert_eq!(ledger.current_payout_rate_den, 2 * BOUND_SCALE);
+    let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
+    assert!(receipt.present && !receipt.finalized);
+    assert_eq!(receipt.terminal_positive_claim_face, 2);
+    assert_eq!(receipt.paid_effective, 1);
+
+    market.header.vault = V16PodU128::new(10);
+    account.header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            paid_effective: 2,
+            finalized: true,
+            ..receipt
+        });
+    Ok(1)
+}
+
+// Refinement is the liveness bridge between lazy receipts and later terminal
+// realization. For every bounded ledger shape, removing any nonzero portion of
+// the unreceipted bound must be value-neutral, exact, and rate-monotone.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn closure_resolved_unreceipted_refinement_is_exact_value_neutral_and_monotone() {
+    let exact_raw: u8 = kani::any();
+    let unreceipted_raw: u8 = kani::any();
+    let decrease_raw: u8 = kani::any();
+    let snapshot_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&exact_raw));
+    kani::assume((1..=8).contains(&unreceipted_raw));
+    kani::assume((1..=unreceipted_raw).contains(&decrease_raw));
+    kani::assume((1..=16).contains(&snapshot_raw));
+    let exact_num = exact_raw as u128 * BOUND_SCALE;
+    let unreceipted_num = unreceipted_raw as u128 * BOUND_SCALE;
+    let decrease_num = decrease_raw as u128 * BOUND_SCALE;
+    let snapshot = snapshot_raw as u128;
+    let total_before = exact_num + unreceipted_num;
+    let total_after = total_before - decrease_num;
+    let rate_before_num = (snapshot * BOUND_SCALE).min(total_before);
+    let rate_after_num = (snapshot * BOUND_SCALE).min(total_after);
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.resolved_slot = header.current_slot;
+    header.vault = V16PodU128::new(10 + snapshot);
+    header.pnl_pos_tot = V16PodU128::new(unreceipted_raw as u128);
+    header.pnl_pos_bound_tot = V16PodU128::new(unreceipted_raw as u128);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(unreceipted_num);
+    header.payout_snapshot = V16PodU128::new(snapshot);
+    header.payout_snapshot_pnl_pos_tot =
+        V16PodU128::new(exact_raw as u128 + unreceipted_raw as u128);
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: snapshot,
+            terminal_claim_exact_receipts_num: exact_num,
+            terminal_claim_bound_unreceipted_num: unreceipted_num,
+            current_payout_rate_num: rate_before_num,
+            current_payout_rate_den: total_before,
+            snapshot_slot: header.current_slot.get(),
+            payout_halted: false,
+            finalized: false,
+        });
+    let header_before = header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+
+    market
+        .refine_resolved_unreceipted_bound_not_atomic(decrease_num)
+        .unwrap();
+
+    let expected_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+        snapshot_residual: snapshot,
+        terminal_claim_exact_receipts_num: exact_num,
+        terminal_claim_bound_unreceipted_num: unreceipted_num - decrease_num,
+        current_payout_rate_num: rate_after_num,
+        current_payout_rate_den: total_after,
+        snapshot_slot: header_before.current_slot.get(),
+        payout_halted: false,
+        finalized: false,
+    });
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_ledger = expected_ledger;
+    let ledger = market
+        .header
+        .resolved_payout_ledger
+        .try_to_runtime()
+        .unwrap();
+
+    kani::cover!(
+        decrease_raw == unreceipted_raw
+            && rate_after_num * total_before > rate_before_num * total_after,
+        "full late-face refinement strictly improves a diluted payout rate"
+    );
+    kani::cover!(
+        decrease_raw < unreceipted_raw
+            && rate_after_num * total_before == rate_before_num * total_after,
+        "partial refinement can preserve an already capped full payout rate"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert_eq!(ledger.terminal_claim_exact_receipts_num, exact_num);
+    assert_eq!(
+        ledger.terminal_claim_bound_unreceipted_num,
+        unreceipted_num - decrease_num
+    );
+    assert!(rate_after_num * total_before >= rate_before_num * total_after);
+    assert_eq!(market.residual(), residual_before);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[1],
+        &market.markets[1].engine
+    ));
+}
+
+// A junior winner may capture a diluted receipt before a source-backed winner
+// realizes. The later public close must refine the burned source face out of the
+// unreceipted denominator, preserve the snapshot, and let the first winner drain
+// exactly the remaining junior atom without touching insurance or another domain.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_late_source_realization_refines_first_winner<
+    const ASSET: usize,
+    const SOURCE_LONG: bool,
+>() {
+    assert!(ASSET < 2);
+    let backed = 2u128;
+    let backed_num = backed * BOUND_SCALE;
+    let source_side = if SOURCE_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let domain = ASSET * 2 + encode_side(source_side) as usize;
+    let (mut header, mut markets, account_template) = two_asset_kf_mapping_fixture();
+
+    let mut junior_header = account_template;
+    let mut junior_provenance = junior_header.provenance_header;
+    junior_provenance.portfolio_account_id[0] = RESOLVED_REFINEMENT_JUNIOR_ACCOUNT_TAG;
+    junior_header
+        .init_empty_in_place(junior_provenance)
+        .unwrap();
+    junior_header.last_fee_slot = header.current_slot;
+    junior_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 2 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 2,
+            paid_effective: 1,
+            finalized: false,
+        });
+
+    let mut backed_header = account_template;
+    let mut backed_provenance = backed_header.provenance_header;
+    backed_provenance.portfolio_account_id[0] = RESOLVED_REFINEMENT_BACKED_ACCOUNT_TAG;
+    backed_header
+        .init_empty_in_place(backed_provenance)
+        .unwrap();
+    backed_header.pnl = V16PodI128::new(backed as i128);
+    backed_header.last_fee_slot = header.current_slot;
+    backed_header.source_domains[0].domain = V16PodU32::new(domain as u32);
+    backed_header.source_domains[0].source_claim_market_id = markets[ASSET].engine.asset.market_id;
+    backed_header.source_domains[0].source_claim_bound_num = V16PodU128::new(backed_num);
+
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.resolved_slot = header.current_slot;
+    header.vault = V16PodU128::new(11 + backed);
+    header.pnl_pos_tot = V16PodU128::new(backed);
+    header.pnl_pos_bound_tot = V16PodU128::new(backed);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(backed_num);
+    header.source_claim_bound_total_num = V16PodU128::new(backed_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(backed_num);
+    header.payout_snapshot = V16PodU128::new(2);
+    header.payout_snapshot_pnl_pos_tot = V16PodU128::new(2 + backed);
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: 2,
+            terminal_claim_exact_receipts_num: 2 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: backed_num,
+            current_payout_rate_num: 2 * BOUND_SCALE,
+            current_payout_rate_den: (2 + backed) * BOUND_SCALE,
+            snapshot_slot: header.current_slot.get(),
+            payout_halted: false,
+            finalized: false,
+        });
+
+    let source_before = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: backed_num,
+        exact_positive_claim_num: backed_num,
+        fresh_reserved_backing_num: backed_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let bucket_before = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets[ASSET].engine.asset.market_id.get(),
+        fresh_unliened_backing_num: backed_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    match source_side {
+        SideV16::Long => {
+            markets[ASSET].engine.source_credit_long = source_before;
+            markets[ASSET].engine.backing_long = bucket_before;
+        }
+        SideV16::Short => {
+            markets[ASSET].engine.source_credit_short = source_before;
+            markets[ASSET].engine.backing_short = bucket_before;
+        }
+    }
+
+    let header_before = header;
+    let junior_before = junior_header;
+    let backed_before = backed_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut expected_markets = markets_before;
+    let consumed_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        spent_backing_num: backed_num,
+        provider_receivable_num: backed_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 2,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let consumed_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets[ASSET].engine.asset.market_id.get(),
+        consumed_liened_backing_num: backed_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    match source_side {
+        SideV16::Long => {
+            expected_markets[ASSET].source_credit_long = consumed_source;
+            expected_markets[ASSET].backing_long = consumed_bucket;
+        }
+        SideV16::Short => {
+            expected_markets[ASSET].source_credit_short = consumed_source;
+            expected_markets[ASSET].backing_short = consumed_bucket;
+        }
+    }
+
+    let terminal_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+        snapshot_residual: 2,
+        terminal_claim_exact_receipts_num: 2 * BOUND_SCALE,
+        terminal_claim_bound_unreceipted_num: 0,
+        current_payout_rate_num: 2 * BOUND_SCALE,
+        current_payout_rate_den: 2 * BOUND_SCALE,
+        snapshot_slot: header.current_slot.get(),
+        payout_halted: false,
+        finalized: false,
+    });
+    let mut expected_after_backed = header_before;
+    expected_after_backed.vault = V16PodU128::new(11);
+    expected_after_backed.pnl_pos_tot = V16PodU128::new(0);
+    expected_after_backed.pnl_pos_bound_tot = V16PodU128::new(0);
+    expected_after_backed.pnl_pos_bound_tot_num = V16PodU128::new(0);
+    expected_after_backed.source_claim_bound_total_num = V16PodU128::new(0);
+    expected_after_backed.source_fresh_backing_total_num = V16PodU128::new(0);
+    expected_after_backed.risk_epoch = V16PodU64::new(4);
+    expected_after_backed.resolved_payout_ledger = terminal_ledger;
+    let mut expected_backed = backed_before;
+    expected_backed.pnl = V16PodI128::new(0);
+    expected_backed.source_domains[0] = PortfolioSourceDomainV16Account::default();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut junior = PortfolioV16ViewMut::new(&mut junior_header);
+    let mut backed_account = PortfolioV16ViewMut::new(&mut backed_header);
+    let backed_outcome = market
+        .close_resolved_account_not_atomic(&mut backed_account, 0)
+        .unwrap();
+
+    assert_eq!(
+        backed_outcome,
+        ResolvedCloseOutcomeV16::Closed { payout: backed }
+    );
+    assert!(kani_eq_portfolio_account_v16_account(
+        &junior_before,
+        junior.header
+    ));
+    assert_eq!(market.header.vault.get(), 11);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.insurance.get(), 10);
+    assert_eq!(market.header.payout_snapshot, header_before.payout_snapshot);
+    assert_eq!(
+        market.header.payout_snapshot_pnl_pos_tot,
+        header_before.payout_snapshot_pnl_pos_tot
+    );
+    assert_eq!(market.header.resolved_payout_ledger, terminal_ledger);
+    assert_eq!(backed_account.header.pnl.get(), 0);
+    assert_eq!(backed_account.header.capital.get(), 0);
+    assert_eq!(
+        backed_account
+            .as_view()
+            .source_claim_bound_sum_num()
+            .unwrap(),
+        0
+    );
+    assert_eq!(market.residual(), residual_before);
+
+    let topup = market
+        .claim_resolved_payout_topup_not_atomic(&mut junior)
+        .unwrap();
+    let mut expected_final = expected_after_backed;
+    expected_final.vault = V16PodU128::new(10);
+    let mut expected_junior = junior_before;
+    expected_junior.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 2 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 2,
+            paid_effective: 2,
+            finalized: true,
+        });
+
+    kani::cover!(
+        topup == 1,
+        "late multi-atom source realization unlocks the first winner's terminal topup"
+    );
+    assert_eq!(topup, 1);
+    assert_eq!(1 + backed + topup, 2 + backed);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_final,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_junior,
+        junior.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_backed,
+        backed_account.header
+    ));
+    assert_resolved_source_close_market_frames(&expected_markets, &market);
+    assert_eq!(market.residual(), 0);
+    assert_eq!(market.header.vault, market.header.insurance);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    resolved_source_close_compact_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_refinement_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_refinement_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    resolved_source_close_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::sync_account_fee_to_slot_not_atomic,
+    resolved_source_close_zero_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    resolved_source_close_nonnegative_principal_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::detach_solvent_active_legs_for_resolved_close,
+    resolved_source_close_empty_detach_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_source_realizable_support,
+    resolved_source_close_full_support_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::convert_released_pnl_to_capital_core_not_atomic,
+    resolved_source_close_conversion_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::claim_resolved_payout_topup_not_atomic,
+    resolved_refinement_public_topup_stub
+)]
+fn closure_asset_zero_long_late_source_realization_refines_first_winner() {
+    prove_late_source_realization_refines_first_winner::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    resolved_source_close_compact_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_refinement_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_refinement_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    resolved_source_close_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::sync_account_fee_to_slot_not_atomic,
+    resolved_source_close_zero_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    resolved_source_close_nonnegative_principal_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::detach_solvent_active_legs_for_resolved_close,
+    resolved_source_close_empty_detach_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_source_realizable_support,
+    resolved_source_close_full_support_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::convert_released_pnl_to_capital_core_not_atomic,
+    resolved_source_close_conversion_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::claim_resolved_payout_topup_not_atomic,
+    resolved_refinement_public_topup_stub
+)]
+fn closure_asset_one_short_late_source_realization_refines_first_winner() {
+    prove_late_source_realization_refines_first_winner::<1, false>();
+}
+
 // The source-backed conversion proofs above establish the maximum capital that
 // can be realized from a claim. This companion theorem proves the external leg:
 // for every nonzero valid withdrawal amount and capital balance, the public API
