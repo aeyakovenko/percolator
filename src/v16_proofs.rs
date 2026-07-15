@@ -13321,6 +13321,354 @@ fn closure_asset_one_short_full_rebalance_mutation_is_local() {
     prove_rebalance_mutation_is_value_neutral_and_asset_local::<1, false, true>();
 }
 
+// Wrapper-used public risk reduction must remain live after an unrelated
+// bankruptcy raises HMax. A healthy account fully closes its selected leg,
+// moves no value, cannot touch the other asset, and becomes a flat senior-
+// capital account covered by the public HMax withdrawal theorem.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_public_hmax_rebalance_reaches_flat_exit<const ASSET: usize, const LONG: bool>() {
+    assert!(ASSET < 2);
+    let capital_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&capital_raw));
+    let capital = u128::from(capital_raw);
+    let side = if LONG { SideV16::Long } else { SideV16::Short };
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.bankruptcy_hlock_active = 1;
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(10 + capital);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
+    account_header.capital = V16PodU128::new(capital);
+
+    let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    asset.slot_last = header.current_slot.get();
+    asset.oi_eff_long_q = 2 * POS_SCALE;
+    asset.oi_eff_short_q = 2 * POS_SCALE;
+    asset.stored_pos_count_long = 2;
+    asset.stored_pos_count_short = 2;
+    asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.loss_weight_sum_short = 2 * POS_SCALE;
+    markets[ASSET].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: if LONG {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        },
+        a_basis: ADL_ONE,
+        k_snap: if LONG { asset.k_long } else { asset.k_short },
+        f_snap: if LONG {
+            asset.f_long_num
+        } else {
+            asset.f_short_num
+        },
+        epoch_snap: if LONG {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        loss_weight: POS_SCALE,
+        b_snap: if LONG {
+            asset.b_long_num
+        } else {
+            asset.b_short_num
+        },
+        b_epoch_snap: if LONG {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        ..PortfolioLegV16::EMPTY
+    };
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
+
+    let header_before = header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let account_before = account_header;
+    let other = 1 - ASSET;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market
+        .rebalance_reduce_position_not_atomic(
+            &mut account,
+            RebalanceRequestV16 {
+                asset_index: ASSET,
+                reduce_q: POS_SCALE,
+            },
+        )
+        .unwrap();
+
+    kani::cover!(
+        market.header.bankruptcy_hlock_active == 1
+            && outcome.reduced_q == POS_SCALE
+            && active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)),
+        "public HMax rebalance reaches a flat senior-capital exit state"
+    );
+    assert_eq!(outcome.reduced_q, POS_SCALE);
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(
+        market.header.resolved_payout_blocker_count.get(),
+        header_before.resolved_payout_blocker_count.get() - 1
+    );
+    assert_eq!(market.residual(), residual_before);
+    assert_eq!(account.header.capital.get(), account_before.capital.get());
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(
+        account.header.legs[0],
+        PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY)
+    );
+    assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
+    assert_eq!(account.as_view().source_claim_bound_sum_num().unwrap(), 0);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[other],
+        &market.markets[other].engine
+    ));
+
+    let selected = market.asset_state(ASSET).unwrap();
+    assert_eq!(selected.oi_eff_long_q, POS_SCALE);
+    assert_eq!(selected.oi_eff_short_q, POS_SCALE);
+    match side {
+        SideV16::Long => {
+            assert_eq!(selected.stored_pos_count_long, 1);
+            assert_eq!(selected.stored_pos_count_short, 2);
+            assert_eq!(selected.loss_weight_sum_long, POS_SCALE);
+            assert_eq!(selected.loss_weight_sum_short, 2 * POS_SCALE);
+            assert_eq!(selected.a_short, ADL_ONE / 2);
+        }
+        SideV16::Short => {
+            assert_eq!(selected.stored_pos_count_short, 1);
+            assert_eq!(selected.stored_pos_count_long, 2);
+            assert_eq!(selected.loss_weight_sum_short, POS_SCALE);
+            assert_eq!(selected.loss_weight_sum_long, 2 * POS_SCALE);
+            assert_eq!(selected.a_long, ADL_ONE / 2);
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn public_hmax_current_side_effects_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    b_delta_budget: u128,
+) -> V16Result<PermissionlessProgressOutcomeV16> {
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert_eq!(
+        b_delta_budget,
+        market.header.config.public_b_chunk_atoms.get()
+    );
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.stale_state, 0);
+    assert_eq!(account.header.b_stale_state, 0);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    assert_eq!(
+        account.header.source_domains[0],
+        PortfolioSourceDomainV16Account::default()
+    );
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && !leg.stale && !leg.b_stale);
+    let asset = market.asset_state(leg.asset_index as usize)?;
+    assert_eq!(asset.slot_last, market.header.current_slot.get());
+    assert_eq!(
+        leg.k_snap,
+        if leg.side == SideV16::Long {
+            asset.k_long
+        } else {
+            asset.k_short
+        }
+    );
+    assert_eq!(
+        leg.f_snap,
+        if leg.side == SideV16::Long {
+            asset.f_long_num
+        } else {
+            asset.f_short_num
+        }
+    );
+    assert_eq!(
+        leg.b_snap,
+        if leg.side == SideV16::Long {
+            asset.b_long_num
+        } else {
+            asset.b_short_num
+        }
+    );
+    Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn public_hmax_full_reduce_position_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    asset_index: usize,
+    close_q: u128,
+) -> V16Result<()> {
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert_eq!(close_q, POS_SCALE);
+    assert!(account.header.capital.get() > 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(
+        account.header.close_progress,
+        CloseProgressLedgerV16Account::default()
+    );
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && !leg.stale && !leg.b_stale);
+    assert_eq!(leg.asset_index as usize, asset_index);
+    assert_eq!(leg.basis_pos_q.unsigned_abs(), POS_SCALE);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    assert!(!market.has_pending_domain_loss_barrier(asset_index, leg.side)?);
+
+    let asset = V16Core::kernel_clear_leg(leg, market.asset_state(asset_index)?)?;
+    account.header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    account.header.active_bitmap = V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new);
+    account.header.health_cert.valid = 0;
+    market.set_asset_state(asset_index, asset)?;
+
+    let mut asset = market.asset_state(asset_index)?;
+    match leg.side {
+        SideV16::Long => {
+            assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+            assert_eq!(asset.oi_eff_short_q, 2 * POS_SCALE);
+            asset.oi_eff_short_q = POS_SCALE;
+            asset.a_short = ADL_ONE / 2;
+        }
+        SideV16::Short => {
+            assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+            assert_eq!(asset.oi_eff_long_q, 2 * POS_SCALE);
+            asset.oi_eff_long_q = POS_SCALE;
+            asset.a_long = ADL_ONE / 2;
+        }
+    }
+    market.set_asset_state(asset_index, asset)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn public_hmax_rebalance_certify_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    price_override: Option<(usize, u64)>,
+) -> V16Result<HealthCertV16> {
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert!(price_override.is_none());
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.stale_state, 0);
+    assert_eq!(account.header.b_stale_state, 0);
+    let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+    let active = !active_bitmap_is_empty(bitmap);
+    assert_eq!(active_bitmap_count_ones(bitmap), u32::from(active));
+    let cert = HealthCertV16 {
+        certified_equity: account.header.capital.get() as i128,
+        certified_initial_req: u128::from(active),
+        certified_maintenance_req: u128::from(active),
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: u128::from(active),
+        cert_oracle_epoch: market.header.oracle_epoch.get(),
+        cert_funding_epoch: market.header.funding_epoch.get(),
+        cert_risk_epoch: market.header.risk_epoch.get(),
+        cert_asset_set_epoch: market.header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        valid: true,
+    };
+    account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+    Ok(cert)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    public_hmax_full_reduce_position_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    public_hmax_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    public_hmax_rebalance_certify_stub
+)]
+fn closure_public_hmax_asset_zero_long_rebalance_reaches_flat_exit() {
+    prove_public_hmax_rebalance_reaches_flat_exit::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    public_hmax_full_reduce_position_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    public_hmax_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    public_hmax_rebalance_certify_stub
+)]
+fn closure_public_hmax_asset_zero_short_rebalance_reaches_flat_exit() {
+    prove_public_hmax_rebalance_reaches_flat_exit::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    public_hmax_full_reduce_position_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    public_hmax_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    public_hmax_rebalance_certify_stub
+)]
+fn closure_public_hmax_asset_one_long_rebalance_reaches_flat_exit() {
+    prove_public_hmax_rebalance_reaches_flat_exit::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    public_hmax_full_reduce_position_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    public_hmax_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    public_hmax_rebalance_certify_stub
+)]
+fn closure_public_hmax_asset_one_short_rebalance_reaches_flat_exit() {
+    prove_public_hmax_rebalance_reaches_flat_exit::<1, false>();
+}
+
 // Permissionless liveness over the wrapper-used auto-crank route. An expired
 // outstanding close is terminally actionable without an oracle observation:
 // the production classifier must select recovery, dispatch it in one call, and
