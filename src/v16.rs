@@ -4824,6 +4824,9 @@ pub struct AutoCrankObservationV16 {
 pub struct AutoCrankWorkV16<'a> {
     pub now_slot: u64,
     pub observations: &'a [AutoCrankObservationV16],
+    /// The trusted wrapper already authenticated and applied its bounded market-accrual stage in
+    /// this transaction. The selected account action must not accrue a second segment.
+    pub observations_preaccrued: bool,
     pub resolved_close_fee_rate_per_slot: u128,
 }
 
@@ -11528,6 +11531,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         request: PermissionlessCrankRequestV16,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.permissionless_crank_impl_not_atomic(account, request, false)
+    }
+
+    fn permissionless_crank_impl_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        request: PermissionlessCrankRequestV16,
+        skip_post_action_accrual: bool,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.validate_unconfigured_market_tail()?;
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live
             && !matches!(request.action, PermissionlessCrankActionV16::Recover(_))
@@ -11575,6 +11587,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return self.declare_permissionless_recovery(reason);
             }
         };
+        if skip_post_action_accrual {
+            self.validate_shape_audit_scan()?;
+            return Ok(PermissionlessProgressOutcomeV16::AccountCurrent);
+        }
         self.accrue_asset_to_not_atomic(
             request.asset_index,
             request.now_slot,
@@ -11730,12 +11746,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///    keeper has fresh data for — plus the `resolved_close_fee_rate_per_slot`.
     /// 2. Authenticate clock/slot + each observation against the oracle.
     /// 3. Build `AutoCrankWorkV16 { now_slot, observations,
-    ///    resolved_close_fee_rate_per_slot }` and call this ONCE (one ix = one
-    ///    step; never loop to a fixed point — CU).
+    ///    observations_preaccrued, resolved_close_fee_rate_per_slot }` and call
+    ///    this ONCE (one ix = one step; never loop to a fixed point — CU). Set
+    ///    `observations_preaccrued` only when the wrapper already applied the
+    ///    authenticated bounded market-accrual stage in the same transaction.
     /// 4. The engine classifies the account, selects the highest-priority step AND
     ///    its asset (self-selected — the caller never chooses action or asset),
     ///    matches the observation that step needs, derives the liquidation fee from
-    ///    CONFIG (never the caller), and dispatches one bounded primitive.
+    ///    CONFIG (never the caller), and dispatches one bounded primitive. A
+    ///    pre-accrued call dispatches the account primitive without accruing a
+    ///    second market segment.
     /// 5. On `Ok(result)`, mirror any wrapper-owned token/custody movement keyed off
     ///    `result.selected` (the `AutoCrankPlanV16`): refresh / settle-B move no
     ///    custody; liquidate / close-resolved may. `NoAction` => nothing was needed.
@@ -11789,7 +11809,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                           obs: AutoCrankObservationV16,
                           action: PermissionlessCrankActionV16|
          -> V16Result<PermissionlessProgressOutcomeV16> {
-            me.permissionless_crank_not_atomic(
+            me.permissionless_crank_impl_not_atomic(
                 account,
                 PermissionlessCrankRequestV16 {
                     now_slot: work.now_slot,
@@ -11798,6 +11818,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     funding_rate_e9: obs.funding_rate_e9,
                     action,
                 },
+                work.observations_preaccrued,
             )
         };
 

@@ -3042,6 +3042,7 @@ fn v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean() {
     let work = AutoCrankWorkV16 {
         now_slot: 5,
         observations: &obs,
+        observations_preaccrued: false,
         resolved_close_fee_rate_per_slot: 0,
     };
 
@@ -3073,6 +3074,80 @@ fn v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean() {
 
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_auto_crank_preaccrued_observation_does_not_apply_a_second_segment() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 22);
+    let mut short_header = account_fixture(1, 23);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, 300)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, 200, 0, true)
+            .unwrap();
+    }
+
+    let asset_before = markets[0].engine.asset;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let obs = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: 200,
+        funding_rate_e9: 0,
+    }];
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut long,
+            AutoCrankWorkV16 {
+                now_slot: 2,
+                observations: &obs,
+                observations_preaccrued: true,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+
+    assert!(matches!(
+        result.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(0)
+        }
+    ));
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+    );
+    assert_eq!(
+        market.markets[0].engine.asset, asset_before,
+        "pre-accrued auto-crank dispatches the account action without consuming another segment"
+    );
+    assert!(
+        !market
+            .build_actionable_summary(&long.as_view())
+            .unwrap()
+            .stale,
+        "the selected refresh still makes the account certificate current"
+    );
 }
 
 // ROADMAP 3C step 4 / NB2 finite-multi-step liveness via the self-classifying
@@ -3142,6 +3217,7 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
     let work = AutoCrankWorkV16 {
         now_slot: 10,
         observations: &obs,
+        observations_preaccrued: false,
         resolved_close_fee_rate_per_slot: 0,
     };
 
@@ -3252,6 +3328,7 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
     let work = AutoCrankWorkV16 {
         now_slot: 10,
         observations: &[],
+        observations_preaccrued: false,
         resolved_close_fee_rate_per_slot: 0,
     };
     let result = market
@@ -3326,6 +3403,7 @@ fn v16_auto_crank_declares_recovery_for_expired_live_close() {
     let work = AutoCrankWorkV16 {
         now_slot: 10,
         observations: &[],
+        observations_preaccrued: false,
         resolved_close_fee_rate_per_slot: 0,
     };
     let vault_before = market.header.vault;
@@ -3439,6 +3517,7 @@ fn v16_auto_crank_settles_b_stale_leg() {
     let work = AutoCrankWorkV16 {
         now_slot: 10,
         observations: &[],
+        observations_preaccrued: false,
         resolved_close_fee_rate_per_slot: 0,
     };
     let r = market
@@ -3483,6 +3562,7 @@ fn v16_auto_crank_missing_observation_is_clean_nonprogress_no_mutation() {
     let work = AutoCrankWorkV16 {
         now_slot: 5,
         observations: &[],
+        observations_preaccrued: false,
         resolved_close_fee_rate_per_slot: 0,
     };
     let r = market.permissionless_auto_crank_not_atomic(&mut account, work);
@@ -3533,6 +3613,7 @@ fn assert_observation_independent(
             AutoCrankWorkV16 {
                 now_slot,
                 observations,
+                observations_preaccrued: false,
                 resolved_close_fee_rate_per_slot: 0,
             },
         )

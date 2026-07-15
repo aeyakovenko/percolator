@@ -1314,6 +1314,8 @@ If full B settlement is too large, partial settlement is allowed. While `B_remai
 
 For an exposed asset with `raw_oracle_target_price != effective_price`, a positive accrual segment MUST NOT successfully consume elapsed time when the submitted effective price is unchanged. If cap quantization admits no representable price atom, accrual MUST return `NonProgress` before mutation so transaction rollback preserves the elapsed segment for a later target-directed move. Repeated permissionless calls MUST NOT reset `slot_last` while leaving the lagged effective price unchanged.
 
+If the wrapper authenticates and applies the bounded market-accrual stage before calling `permissionless_auto_crank_not_atomic`, it MUST set `observations_preaccrued`. In that mode the engine dispatches the selected current-state account action without applying a second accrual segment. The wrapper MUST set the flag only after successful pre-accrual in the same transaction and MUST propagate every engine error so SVM rollback covers all not-atomic mutations.
+
 Before any accrual/effective-price/K/F write is usable by a favorable action:
 1. affected source-domain claim-bound buckets MUST be recomputed conservatively;
 2. affected backing freshness buckets MUST be applied;
