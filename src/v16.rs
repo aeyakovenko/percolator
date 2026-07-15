@@ -12163,18 +12163,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_spent != 0 || short_spent != 0
         };
 
+        // K may advance on an unexposed asset; with every position counter empty it has no claimant.
         if slot.pending_domain_loss_barrier_long.get() != 0
             || slot.pending_domain_loss_barrier_short.get() != 0
             || asset.mode_long != SideModeV16::Normal
             || asset.mode_short != SideModeV16::Normal
             || !((asset.a_long == ADL_ONE && asset.a_short == ADL_ONE)
                 || (asset.a_long == 0 && asset.a_short == 0))
-            || asset.k_long != 0
-            || asset.k_short != 0
             || asset.f_long_num != 0
             || asset.f_short_num != 0
-            || asset.k_epoch_start_long != 0
-            || asset.k_epoch_start_short != 0
             || asset.f_epoch_start_long_num != 0
             || asset.f_epoch_start_short_num != 0
             || asset.b_long_num != 0

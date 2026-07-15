@@ -1395,6 +1395,50 @@ fn v16_public_force_asset_recovery_freezes_mark_and_is_idempotent() {
 }
 
 #[test]
+fn v16_price_moved_empty_asset_remains_retireable() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .set_asset_raw_oracle_target_not_atomic(1, 101)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(1, 3, 101, 0, false)
+            .unwrap();
+    }
+
+    let accrued = markets[1].engine.asset.try_to_runtime().unwrap();
+    assert_ne!(accrued.k_long, 0, "control: empty-asset accrual moved K");
+    assert_ne!(accrued.k_short, 0, "control: empty-asset accrual moved K");
+    assert_eq!(accrued.oi_eff_long_q, 0);
+    assert_eq!(accrued.oi_eff_short_q, 0);
+    assert_eq!(accrued.stored_pos_count_long, 0);
+    assert_eq!(accrued.stored_pos_count_short, 0);
+
+    let old_market_id = accrued.market_id;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.retire_empty_asset_not_atomic(1, 4).unwrap();
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(1, 102, 5)
+        .unwrap();
+    let restarted = market.markets[1].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(restarted.lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(restarted.market_id, old_market_id);
+    assert_eq!(restarted.k_long, 0);
+    assert_eq!(restarted.k_short, 0);
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset() {
     let (mut header, mut markets) = market_fixture(2, 100);
     {
