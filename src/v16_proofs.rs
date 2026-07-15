@@ -10955,10 +10955,12 @@ fn closure_asset_one_short_late_source_realization_refines_first_winner() {
 
 // The source-backed conversion proofs above establish the maximum capital that
 // can be realized from a claim. This companion theorem proves the external leg:
-// for every nonzero valid withdrawal amount and capital balance, the public API
-// removes exactly that amount from account capital, C_tot, and V, and cannot
-// mutate either market slot. Together, conversion backing is the hard upper
-// bound on quote atoms that can leave the vault through this route.
+// even after a bankruptcy has raised the global HMax latch, every nonzero valid
+// withdrawal from a flat account removes exactly that amount from account
+// capital, C_tot, and V, preserves the latch, and cannot mutate either market
+// slot. Thus HMax blocks junior positive-PnL use without freezing senior capital,
+// and conversion backing remains the hard upper bound on quote atoms that can
+// leave the vault through this route.
 #[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
 #[kani::unwind(96)]
@@ -10970,7 +10972,7 @@ fn closure_asset_one_short_late_source_realization_refines_first_winner() {
     MarketGroupV16ViewMut::settle_negative_pnl_from_principal_core_not_atomic,
     zero_pnl_principal_settlement_stub
 )]
-fn closure_flat_public_withdrawal_is_conservative_and_asset_local() {
+fn closure_bankruptcy_hlock_does_not_block_flat_public_withdrawal() {
     let capital = kani::any::<u128>();
     let amount = kani::any::<u128>();
     kani::assume(capital > 0 && capital <= MAX_VAULT_TVL - 10);
@@ -10980,6 +10982,7 @@ fn closure_flat_public_withdrawal_is_conservative_and_asset_local() {
     account_header
         .init_empty_in_place(account_header.provenance_header)
         .unwrap();
+    header.bankruptcy_hlock_active = 1;
     header.c_tot = V16PodU128::new(capital);
     header.vault = V16PodU128::new(10 + capital);
     account_header.capital = V16PodU128::new(capital);
@@ -10998,6 +11001,7 @@ fn closure_flat_public_withdrawal_is_conservative_and_asset_local() {
 
     kani::cover!(amount == capital, "full capital withdrawal is reachable");
     kani::cover!(amount < capital, "partial capital withdrawal is reachable");
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
     assert_eq!(
         (10 + capital) - market.header.vault.get(),
         amount,
