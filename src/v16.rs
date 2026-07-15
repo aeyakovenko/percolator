@@ -2855,6 +2855,21 @@ impl V16Core {
         Ok((reservation, source))
     }
 
+    #[inline(always)]
+    // Credit is spendable in whole atoms within one domain; fractional credit
+    // from independent domains must never be pooled by an account health check.
+    fn source_credit_atoms_from_claim_num(
+        claim_num: u128,
+        credit_rate_num: u128,
+    ) -> V16Result<u128> {
+        let credited_num = U256::from_u128(claim_num)
+            .checked_mul(U256::from_u128(credit_rate_num))
+            .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(credited_num / BOUND_SCALE)
+    }
+
     fn source_credit_state_realizable_support_for_face(
         state: SourceCreditStateV16,
         face_claim: u128,
@@ -2862,12 +2877,11 @@ impl V16Core {
         if face_claim == 0 || state.positive_claim_bound_num == 0 {
             return Ok(0);
         }
-        let credited_num = U256::from_u128(Self::bound_num_from_amount(face_claim)?)
-            .checked_mul(U256::from_u128(state.credit_rate_num))
-            .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-            .and_then(|v| v.try_into_u128())
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        Ok((credited_num / BOUND_SCALE)
+        let credited_atoms = Self::source_credit_atoms_from_claim_num(
+            Self::bound_num_from_amount(face_claim)?,
+            state.credit_rate_num,
+        )?;
+        Ok(credited_atoms
             .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
     }
 
@@ -8857,7 +8871,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         let mut remaining_num = V16Core::bound_num_from_amount(face_claim)?;
-        let mut support_num = U256::ZERO;
+        let mut support = 0u128;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining_num != 0 {
             let source = account.source_domains()[slot];
@@ -8902,8 +8916,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 )
                 .min(remaining_num);
             if valid_lien_effective_num != 0 {
-                support_num = support_num
-                    .checked_add(U256::from_u128(valid_lien_effective_num))
+                support = support
+                    .checked_add(valid_lien_effective_num / BOUND_SCALE)
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 remaining_num -= valid_lien_effective_num;
             }
@@ -8917,21 +8931,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let rate = self
                     .source_credit_if_current(d)?
                     .map_or(0, |source| source.credit_rate_num);
-                let credited_num = U256::from_u128(claim_num)
-                    .checked_mul(U256::from_u128(rate))
-                    .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                support_num = support_num
-                    .checked_add(credited_num)
+                let credited_atoms = V16Core::source_credit_atoms_from_claim_num(claim_num, rate)?;
+                support = support
+                    .checked_add(credited_atoms)
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 remaining_num -= claim_num;
             }
             slot += 1;
         }
-        support_num
-            .checked_div(U256::from_u128(BOUND_SCALE))
-            .and_then(|v| v.try_into_u128())
-            .ok_or(V16Error::ArithmeticOverflow)
+        Ok(support)
     }
 
     fn account_unliened_source_realizable_support(
@@ -8943,7 +8951,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         let mut remaining_num = V16Core::bound_num_from_amount(face_claim)?;
-        let mut support_num = U256::ZERO;
+        let mut support = 0u128;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining_num != 0 {
             let source = account.source_domains()[slot];
@@ -8960,21 +8968,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let rate = self
                     .source_credit_if_current(d)?
                     .map_or(0, |source| source.credit_rate_num);
-                let credited_num = U256::from_u128(claim_num)
-                    .checked_mul(U256::from_u128(rate))
-                    .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                support_num = support_num
-                    .checked_add(credited_num)
+                let credited_atoms = V16Core::source_credit_atoms_from_claim_num(claim_num, rate)?;
+                support = support
+                    .checked_add(credited_atoms)
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 remaining_num -= claim_num;
             }
             slot += 1;
         }
-        support_num
-            .checked_div(U256::from_u128(BOUND_SCALE))
-            .and_then(|v| v.try_into_u128())
-            .ok_or(V16Error::ArithmeticOverflow)
+        Ok(support)
     }
 
     fn source_credit_available_backing_num(&self, domain: usize) -> V16Result<u128> {

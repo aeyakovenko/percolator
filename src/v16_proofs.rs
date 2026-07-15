@@ -8759,6 +8759,119 @@ fn closure_lapsed_source_cannot_poison_current_domain_support() {
     assert_eq!(support, current_atoms);
 }
 
+// Soft health credit must be realizable by the same domain-local, atom-aligned
+// source-credit machinery used by liens and conversion. Fractional support
+// from unrelated domains cannot be pooled into a whole health atom when no
+// individual domain can fund that atom; otherwise maintenance can certify
+// equity that settlement must reject.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_soft_health_never_exceeds_settlement_quality_domain_support() {
+    let face_a_raw: u8 = kani::any();
+    let face_b_raw: u8 = kani::any();
+    let backing_a_raw: u8 = kani::any();
+    let backing_b_raw: u8 = kani::any();
+    kani::assume((1..=3).contains(&face_a_raw));
+    kani::assume((1..=3).contains(&face_b_raw));
+    kani::assume((1..=4).contains(&backing_a_raw));
+    kani::assume((1..=4).contains(&backing_b_raw));
+
+    let face_a = face_a_raw as u128;
+    let face_b = face_b_raw as u128;
+    let backing_a = backing_a_raw as u128;
+    let backing_b = backing_b_raw as u128;
+    let domain_claim_num = 4 * BOUND_SCALE;
+    let source_a = SourceCreditStateV16 {
+        positive_claim_bound_num: domain_claim_num,
+        exact_positive_claim_num: domain_claim_num,
+        fresh_reserved_backing_num: backing_a * BOUND_SCALE,
+        credit_rate_num: backing_a * (CREDIT_RATE_SCALE / 4),
+        ..SourceCreditStateV16::EMPTY
+    };
+    let source_b = SourceCreditStateV16 {
+        positive_claim_bound_num: domain_claim_num,
+        exact_positive_claim_num: domain_claim_num,
+        fresh_reserved_backing_num: backing_b * BOUND_SCALE,
+        credit_rate_num: backing_b * (CREDIT_RATE_SCALE / 4),
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.current_slot = V16PodU64::new(20);
+    header.vault = V16PodU128::new(32);
+    header.pnl_pos_tot = V16PodU128::new(8);
+    header.pnl_pos_bound_tot = V16PodU128::new(8);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(8 * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(8 * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new((backing_a + backing_b) * BOUND_SCALE);
+    account_header.pnl = V16PodI128::new((face_a + face_b) as i128);
+
+    let market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(&source_a);
+    markets[0].engine.source_credit_short = SourceCreditStateV16Account::from_runtime(&source_b);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_a * BOUND_SCALE,
+        expiry_slot: 30,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_b * BOUND_SCALE,
+        expiry_slot: 30,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(face_a * BOUND_SCALE);
+    account_header.source_domains[1].domain = V16PodU32::new(1);
+    account_header.source_domains[1].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(face_b * BOUND_SCALE);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let source_sum =
+        MarketGroupV16ViewMut::<u64>::account_source_claim_bound_sum_num(&account).unwrap();
+    assert_eq!(source_sum, (face_a + face_b) * BOUND_SCALE);
+    assert_eq!(
+        V16Core::validate_positive_pnl_source_attribution(account.header.pnl.get(), source_sum),
+        Ok(())
+    );
+    let account_support = market
+        .account_source_realizable_support(&account, face_a + face_b)
+        .unwrap();
+    let support_a =
+        V16Core::source_credit_state_realizable_support_for_face(source_a, face_a).unwrap();
+    let support_b =
+        V16Core::source_credit_state_realizable_support_for_face(source_b, face_b).unwrap();
+    let domain_support = support_a + support_b;
+    kani::cover!(
+        domain_support == 0,
+        "independent domains each carry only sub-atom settlement support"
+    );
+    kani::cover!(
+        domain_support > 0 && domain_support < face_a + face_b,
+        "independent domains provide a partial settlement haircut"
+    );
+    kani::cover!(
+        domain_support == face_a + face_b,
+        "independent domains fully support both claim faces"
+    );
+    kani::cover!(
+        backing_a != backing_b,
+        "independent domains use asymmetric credit rates"
+    );
+    assert_eq!(account_support, domain_support);
+}
+
 // Mutable account touch reconciles lapsed counterparty backing before any
 // favorable or settlement calculation. Expiry is domain-local: independently
 // funded insurance in the same domain and all state in a later asset survive.
