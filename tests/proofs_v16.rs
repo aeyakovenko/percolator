@@ -15656,12 +15656,10 @@ fn proof_v16_validator_sound_pnl_aggregates() {
 // vault within the TVL cap (U1) and a nonzero market-id counter (U10). Only the
 // non-division-coupled fields are made symbolic.
 //
-// U8 (pnl_pos_bound_tot_num >= pnl_pos*BOUND_SCALE) is INTRACTABLE as a Kani
-// soundness lemma: making pnl_pos_bound_tot_num symbolic forces validate_shape's
-// internal amount_from_bound_num (u128 division by BOUND_SCALE) to bit-blast the
-// division circuit (timed out at 900s — the same wide-arithmetic wall the
-// complex bodies hit). U8 is deferred to reference-model fuzz (Phase 6):
-// bound_num/amount conformance over a stated domain, NOT a Kani lemma.
+// A fully unconstrained U8 numerator remains intractable because validate_shape's
+// u128 division bit-blasts.  The bounded symbolic production-validator theorem
+// below proves U8 over canonical quotient+dust numerators; reference-model fuzz
+// retains the full-width conversion coverage.
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -15682,6 +15680,60 @@ fn proof_v16_validator_sound_bound_and_config() {
     let h = &market.header;
     assert!(h.vault.get() <= MAX_VAULT_TVL); // U1
     assert!(h.next_market_id.get() != 0); // U10
+}
+
+// ROADMAP Phase 1 (Pillar F soundness, U8): bounded symbolic production-
+// validator theorem for the scaled positive-PnL bound.  Every canonical
+// numerator in this domain is quotient*BOUND_SCALE + dust, including nonzero
+// dust; validate_shape accepts it iff the stored atom bound matches the ceil
+// conversion and the scaled numerator covers positive PnL. This is stronger
+// than assuming an Ok exit: it also proves under-bounded states are rejected,
+// and mutation-checks both guards without asking CBMC to divide an
+// unconstrained u128 numerator.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_validator_scaled_pnl_bound_is_sound_and_complete() {
+    let pnl_raw: u8 = kani::any();
+    let stored_bound_raw: u8 = kani::any();
+    let whole_raw: u8 = kani::any();
+    let dust_raw: u8 = kani::any();
+    let pnl = pnl_raw as u128;
+    let stored_bound = stored_bound_raw as u128;
+    let whole = whole_raw as u128;
+    let dust = dust_raw as u128;
+    let bound_num = whole * BOUND_SCALE + dust;
+    let derived_bound = whole + u128::from(dust > 0);
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(stored_bound);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(bound_num);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let accepted = market.validate_shape() == Ok(());
+    let scaled_coverage = bound_num >= pnl * BOUND_SCALE;
+    let expected = stored_bound == derived_bound && stored_bound >= pnl && scaled_coverage;
+    kani::cover!(
+        accepted && pnl > 0 && stored_bound > pnl && dust > 0,
+        "valid over-collateralized bound with nonzero numerator dust is accepted"
+    );
+    kani::cover!(
+        !accepted && stored_bound == derived_bound && pnl > stored_bound,
+        "under-bounded positive PnL is rejected"
+    );
+    kani::cover!(
+        !accepted && stored_bound >= pnl && stored_bound != derived_bound,
+        "stored-bound and scaled-numerator mismatch is rejected"
+    );
+    kani::cover!(
+        !accepted && stored_bound == derived_bound && stored_bound == pnl && !scaled_coverage,
+        "ceil-equal atom bound cannot hide a scaled-numerator shortfall"
+    );
+
+    assert_eq!(accepted, expected);
+    if accepted {
+        assert!(bound_num >= pnl * BOUND_SCALE);
+    }
 }
 
 // ROADMAP Phase 1 (Pillar F soundness, U19): validate_with_market's Ok-exit

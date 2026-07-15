@@ -145,9 +145,9 @@ proptest! {
     }
 }
 
-// ---- U8 bound-num conversion conformance (roadmap Phase 6; deferred from the
-// Kani U8 soundness lemma, which is intractable — symbolic bound_num bit-blasts
-// validate_shape's u128 ceil-division). Independent native reference. ----
+// ---- U8 full-width bound-num conversion conformance (roadmap Phase 6). Kani
+// proves the production validator over bounded canonical quotient+dust inputs;
+// unconstrained u128 ceil-division remains native-reference territory. ----
 
 // reference: bound_num_from_amount(a) == a * BOUND_SCALE (Err on overflow)
 fn ref_bound_num_from_amount(a: u128) -> Result<u128, ()> {
