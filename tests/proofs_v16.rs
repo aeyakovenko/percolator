@@ -163,6 +163,45 @@ fn one_market_direct_view_fixture() -> (
     (header, markets, PortfolioAccountV16Account::default())
 }
 
+fn two_market_direct_view_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+) {
+    // Constructor-equivalent state avoids re-exploring the independently
+    // proven activation state machines in higher-level proofs.
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.last_asset_activation_slot = V16PodU64::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.current_slot = V16PodU64::new(2);
+    header.asset_set_epoch = V16PodU64::new(2);
+    header.risk_epoch = V16PodU64::new(2);
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let mut asset_index = 0usize;
+    while asset_index < 2 {
+        let mut asset = AssetStateV16::default();
+        asset.market_id = asset_index as u64 + 1;
+        asset.lifecycle = AssetLifecycleV16::Active;
+        asset.raw_oracle_target_price = 100;
+        asset.effective_price = 100;
+        asset.fund_px_last = 100;
+        asset.slot_last = asset_index as u64 + 1;
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        asset_index += 1;
+    }
+    let account = empty_account_fixture(market_group_id, 2);
+    (header, markets, account)
+}
+
 fn empty_recovery_slot_for_market(
     market_id: u64,
     price: u64,
@@ -1341,6 +1380,79 @@ fn proof_v16_view_deposit_preserves_c_tot_vault_capital_sum() {
     assert_eq!(market.kani_residual(), residual_before);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
+// The full account preflight used by deposit must accept a persisted claim on
+// a nonzero asset. The independent nonzero deposit frame above proves the value
+// transition after this preflight, while the native regression composes both.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_full_account_validation_accepts_nonzero_asset_source_claim() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+
+    let claim = claim_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+    let capital = 1u128;
+    let other_capital = 2u128;
+    let insurance = 3u128;
+    let surplus = 4u128;
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    let c_tot = capital + other_capital;
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(c_tot + insurance + claim + surplus);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+
+    // Domain 3 is asset 1's short source; asset 0 is deliberately unrelated.
+    let domain = 3usize;
+    let market_id = markets[1].engine.asset.market_id.get();
+    markets[1].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.health_cert.valid = 0;
+    account_header.source_domains[0].domain = V16PodU32::new(domain as u32);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let market = MarketGroupV16View::new(&header, &markets);
+    let account = PortfolioV16View::new(&account_header);
+
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market), Ok(()));
+
+    kani::cover!(
+        claim > 1 && capital > 0 && other_capital > 0 && surplus > 0,
+        "full validation accepts a nontrivial nonzero-asset claim and unrelated value"
+    );
+    assert_eq!(account.kani_source_domain_slot(domain), Ok(Some(0)));
+    assert_eq!(
+        account
+            .kani_source_domain(domain)
+            .unwrap()
+            .source_claim_bound_num
+            .get(),
+        claim_num
+    );
 }
 
 #[kani::proof]
