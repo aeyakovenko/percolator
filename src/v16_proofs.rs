@@ -7496,6 +7496,421 @@ fn closure_asset_one_short_resolved_source_close_is_conservative_and_local() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn resolved_insurance_source_close_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(
+        account.header.last_fee_slot.get(),
+        market.header.resolved_slot.get()
+    );
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(account.source_claim_bound_sum_num()?, 0);
+    assert!(account
+        .header
+        .resolved_payout_receipt
+        .try_to_runtime()?
+        .is_empty());
+    assert_eq!(market.header.vault.get(), 8);
+    assert_eq!(market.header.insurance.get(), 8);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_insurance_source_close_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(
+        decode_market_mode(market.header.mode)?,
+        MarketModeV16::Resolved
+    );
+    assert_eq!(market.header.vault.get(), 8);
+    assert_eq!(market.header.insurance.get(), 8);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        6
+    );
+    assert_eq!(market.header.risk_epoch.get(), 4);
+    assert_eq!(market.header.payout_snapshot_captured, 0);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_insurance_source_full_support_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+    face_claim: u128,
+) -> V16Result<u128> {
+    assert_eq!(face_claim, 2);
+    let source = account.header.source_domains[0];
+    assert!(source.is_occupied());
+    assert_eq!(source.source_claim_bound_num.get(), 2 * BOUND_SCALE);
+    let domain = source.domain.get() as usize;
+    let state = market.source_credit_for_domain(domain)?;
+    let reservation = market.insurance_reservation_for_domain(domain)?;
+    assert_eq!(state.positive_claim_bound_num, 2 * BOUND_SCALE);
+    assert_eq!(state.exact_positive_claim_num, 2 * BOUND_SCALE);
+    assert_eq!(state.fresh_reserved_backing_num, 0);
+    assert_eq!(state.insurance_credit_reserved_num, 2 * BOUND_SCALE);
+    assert_eq!(state.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(reservation.insurance_credit_reserved_num, 2 * BOUND_SCALE);
+    assert_eq!(reservation.valid_liened_insurance_num, 0);
+    assert_eq!(reservation.impaired_liened_insurance_num, 0);
+    assert_eq!(reservation.consumed_insurance_num, 0);
+    assert_eq!(market.domain_insurance_budget_remaining(domain)?, 2);
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        2
+    );
+    Ok(2)
+}
+
+// Exact post-state of the independently proved insurance-backed public
+// conversion harnesses. Keeping this seam explicit proves that resolved close
+// invokes the same funded conversion before its external payout.
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_insurance_source_close_conversion_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<u128> {
+    let claim = account.header.pnl.get() as u128;
+    assert_eq!(claim, 2);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(market.header.vault.get(), 10);
+    assert_eq!(market.header.insurance.get(), 10);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        2
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        8
+    );
+    assert_eq!(market.header.risk_epoch.get(), 2);
+    let source = account.header.source_domains[0];
+    assert!(source.is_occupied());
+    let domain = source.domain.get() as usize;
+    let (asset_index, side) = market.domain_asset_side(domain)?;
+    let claim_num = claim * BOUND_SCALE;
+    assert_eq!(source.source_claim_bound_num.get(), claim_num);
+    let source_state = market.source_credit_for_domain(domain)?;
+    let reservation = market.insurance_reservation_for_domain(domain)?;
+    assert_eq!(source_state.positive_claim_bound_num, claim_num);
+    assert_eq!(source_state.exact_positive_claim_num, claim_num);
+    assert_eq!(source_state.insurance_credit_reserved_num, claim_num);
+    assert_eq!(source_state.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(reservation.insurance_credit_reserved_num, claim_num);
+    let spent = match side {
+        SideV16::Long => market.markets[asset_index]
+            .engine
+            .insurance_domain_spent_long
+            .get(),
+        SideV16::Short => market.markets[asset_index]
+            .engine
+            .insurance_domain_spent_short
+            .get(),
+    };
+    assert_eq!(spent, 0);
+
+    let consumed_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 2,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let consumed_reservation =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            consumed_insurance_num: claim_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    match side {
+        SideV16::Long => {
+            market.markets[asset_index].engine.source_credit_long = consumed_source;
+            market.markets[asset_index]
+                .engine
+                .insurance_reservation_long = consumed_reservation;
+            market.markets[asset_index]
+                .engine
+                .insurance_domain_spent_long = V16PodU128::new(claim);
+        }
+        SideV16::Short => {
+            market.markets[asset_index].engine.source_credit_short = consumed_source;
+            market.markets[asset_index]
+                .engine
+                .insurance_reservation_short = consumed_reservation;
+            market.markets[asset_index]
+                .engine
+                .insurance_domain_spent_short = V16PodU128::new(claim);
+        }
+    }
+    market.header.insurance = V16PodU128::new(8);
+    market.header.c_tot = V16PodU128::new(claim);
+    market.header.pnl_pos_tot = V16PodU128::new(0);
+    market.header.pnl_pos_bound_tot = V16PodU128::new(0);
+    market.header.pnl_pos_bound_tot_num = V16PodU128::new(0);
+    market.header.source_claim_bound_total_num = V16PodU128::new(0);
+    market.header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(0);
+    market.header.insurance_domain_budget_remaining_total = V16PodU128::new(6);
+    market.header.risk_epoch = V16PodU64::new(4);
+    account.header.pnl = V16PodI128::new(0);
+    account.header.capital = V16PodU128::new(claim);
+    account.header.source_domains[0] = PortfolioSourceDomainV16Account::default();
+    account.header.health_cert.valid = 0;
+    Ok(claim)
+}
+
+// Terminal insurance realization is funded twice in sequence but never twice
+// in accounting: I -> C_tot consumes only the selected domain reservation, then
+// C_tot -> external quote pays the winner. Residual and other domains stay flat.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_resolved_insurance_source_close_is_local<const ASSET: usize, const SOURCE_LONG: bool>() {
+    assert!(ASSET < 2);
+    let claim = 2u128;
+    let claim_num = claim * BOUND_SCALE;
+    let source_side = if SOURCE_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let domain = ASSET * 2 + encode_side(source_side) as usize;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.resolved_slot = header.current_slot;
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(claim);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(8);
+    let mut market_index = 0usize;
+    while market_index < 2 {
+        markets[market_index].engine.insurance_domain_budget_long = V16PodU128::new(claim);
+        markets[market_index].engine.insurance_domain_budget_short = V16PodU128::new(claim);
+        market_index += 1;
+    }
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.last_fee_slot = header.resolved_slot;
+    account_header.source_domains[0].domain = V16PodU32::new(domain as u32);
+    account_header.source_domains[0].source_claim_market_id = markets[ASSET].engine.asset.market_id;
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let initial_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        insurance_credit_reserved_num: claim_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let initial_reservation =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: claim_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    match source_side {
+        SideV16::Long => {
+            markets[ASSET].engine.source_credit_long = initial_source;
+            markets[ASSET].engine.insurance_reservation_long = initial_reservation;
+        }
+        SideV16::Short => {
+            markets[ASSET].engine.source_credit_short = initial_source;
+            markets[ASSET].engine.insurance_reservation_short = initial_reservation;
+        }
+    }
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(8);
+    expected_header.insurance = V16PodU128::new(8);
+    expected_header.pnl_pos_tot = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(0);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(0);
+    expected_header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(0);
+    expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(6);
+    expected_header.risk_epoch = V16PodU64::new(4);
+
+    let consumed_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 2,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let consumed_reservation =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            consumed_insurance_num: claim_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    let mut expected_markets = markets_before;
+    match source_side {
+        SideV16::Long => {
+            expected_markets[ASSET].source_credit_long = consumed_source;
+            expected_markets[ASSET].insurance_reservation_long = consumed_reservation;
+            expected_markets[ASSET].insurance_domain_spent_long = V16PodU128::new(claim);
+        }
+        SideV16::Short => {
+            expected_markets[ASSET].source_credit_short = consumed_source;
+            expected_markets[ASSET].insurance_reservation_short = consumed_reservation;
+            expected_markets[ASSET].insurance_domain_spent_short = V16PodU128::new(claim);
+        }
+    }
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.source_domains[0] = PortfolioSourceDomainV16Account::default();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .unwrap();
+
+    kani::cover!(
+        outcome == ResolvedCloseOutcomeV16::Closed { payout: claim },
+        "terminal insurance realization reaches an exact funded payout"
+    );
+    assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: claim });
+    assert_resolved_source_close_header_frame(&expected_header, market.header);
+    assert_resolved_source_close_account_frame(&expected_account, account.header);
+    assert_resolved_source_close_market_frames(&expected_markets, &market);
+    assert_eq!(market.residual(), residual_before);
+    assert_eq!(market.header.vault, market.header.insurance);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    resolved_source_close_flow_validate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    resolved_source_close_compact_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_insurance_source_close_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_insurance_source_close_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    resolved_source_close_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::sync_account_fee_to_slot_not_atomic,
+    resolved_source_close_zero_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    resolved_source_close_nonnegative_principal_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::detach_solvent_active_legs_for_resolved_close,
+    resolved_source_close_empty_detach_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_source_realizable_support,
+    resolved_insurance_source_full_support_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::convert_released_pnl_to_capital_core_not_atomic,
+    resolved_insurance_source_close_conversion_stub
+)]
+fn closure_asset_zero_long_resolved_insurance_source_close_is_conservative_and_local() {
+    prove_resolved_insurance_source_close_is_local::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    resolved_source_close_flow_validate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    resolved_source_close_compact_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_insurance_source_close_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_insurance_source_close_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    resolved_source_close_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::sync_account_fee_to_slot_not_atomic,
+    resolved_source_close_zero_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    resolved_source_close_nonnegative_principal_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::detach_solvent_active_legs_for_resolved_close,
+    resolved_source_close_empty_detach_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_source_realizable_support,
+    resolved_insurance_source_full_support_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::convert_released_pnl_to_capital_core_not_atomic,
+    resolved_insurance_source_close_conversion_stub
+)]
+fn closure_asset_one_short_resolved_insurance_source_close_is_conservative_and_local() {
+    prove_resolved_insurance_source_close_is_local::<1, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn resolved_liened_source_close_market_validation_stub<'a: 'a, T>(
     market: &MarketGroupV16ViewMut<'a, T>,
 ) -> V16Result<()> {
