@@ -9186,6 +9186,42 @@ fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation(
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_lagged_target_zero_delta_cannot_consume_accrual_segment() {
+    let target_delta_raw: u8 = kani::any();
+    kani::assume(target_delta_raw > 0);
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.raw_oracle_target_price = asset
+        .effective_price
+        .checked_add(target_delta_raw as u64)
+        .unwrap();
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let header_before = header;
+    let market_before = markets[0];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.accrue_asset_to_not_atomic(0, 2, asset.effective_price, 0, true);
+
+    kani::cover!(
+        target_delta_raw > 1,
+        "lagged-target proof covers a nontrivial target distance"
+    );
+    assert_eq!(result, Err(V16Error::NonProgress));
+    assert_eq!(market.header.current_slot, header_before.current_slot);
+    assert_eq!(market.header.slot_last, header_before.slot_last);
+    assert_eq!(market.header.oracle_epoch, header_before.oracle_epoch);
+    assert_eq!(market.header.funding_epoch, header_before.funding_epoch);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(market.markets[0].engine.asset, market_before.engine.asset);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     let now_slot_raw: u8 = kani::any();
     let price_delta_raw: u8 = kani::any();

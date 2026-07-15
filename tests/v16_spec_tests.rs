@@ -1318,6 +1318,51 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
 }
 
 #[test]
+fn v16_lagged_oracle_target_rejects_zero_delta_slot_consumption() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 221);
+    let mut short_header = account_fixture(1, 222);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, 200)
+            .unwrap();
+    }
+
+    let header_before = header;
+    let slot_before = markets[0];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.accrue_asset_to_not_atomic(0, 2, 100, 0, true);
+
+    assert_eq!(result, Err(V16Error::NonProgress));
+    assert_eq!(market.header, &header_before);
+    assert_eq!(market.markets[0], slot_before);
+
+    let progressed = market
+        .accrue_asset_to_not_atomic(0, 2, 101, 0, true)
+        .unwrap();
+    assert_eq!(progressed.dt, 1);
+    assert!(progressed.price_move_active);
+    assert_eq!(market.markets[0].engine.asset.effective_price.get(), 101);
+}
+
+#[test]
 fn v16_public_empty_asset_oracle_anchor_reset_rejects_any_group_position_state() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut other_asset = markets[1].engine.asset.try_to_runtime().unwrap();

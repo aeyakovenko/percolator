@@ -11395,6 +11395,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             dt_total
         };
+        let exposed = old.oi_eff_long_q != 0 || old.oi_eff_short_q != 0;
+        if segment_dt != 0
+            && exposed
+            && old.raw_oracle_target_price != old.effective_price
+            && effective_price == old.effective_price
+        {
+            // A percentage cap can round below one price atom. Consuming the segment anyway lets
+            // a permissionless caller reset dt every slot and pin a live market away from its
+            // committed oracle target forever. Preserve the elapsed segment until the caller can
+            // submit a representable target-directed price move.
+            return Err(V16Error::NonProgress);
+        }
         let activity = V16Core::accrual_activity_for_asset_segment(
             old,
             segment_dt,
