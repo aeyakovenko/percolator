@@ -10160,6 +10160,130 @@ fn closure_soft_health_never_exceeds_settlement_quality_domain_support() {
     assert_eq!(account_support, domain_support);
 }
 
+// Account-validator/health composition over the constructor-valid market shape
+// covered by proof_v16_full_account_validation_accepts_nonzero_asset_source_claim:
+// partially attributed positive PnL cannot enter a committed account, while a
+// fully backed source claim contributes exactly the supported PnL and never more
+// than its face. This closes the seam used by refresh, margin, liquidation,
+// conversion, and withdrawal preflight without repeating the full market scan.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, two_leg_refresh_config_stub)]
+fn closure_attributed_account_validation_and_health_reject_unfunded_positive_credit() {
+    let pnl_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&pnl_raw));
+    kani::assume((1..=8).contains(&claim_raw));
+    kani::assume((1..=8).contains(&capital_raw));
+
+    let pnl = pnl_raw as u128;
+    let claim = claim_raw as u128;
+    let capital = capital_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+    let global_bound = pnl.max(claim);
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(11 + capital + claim);
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(global_bound);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(global_bound * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(pnl as i128);
+
+    let domain = 3usize;
+    let market_id = markets[1].engine.asset.market_id.get();
+    markets[1].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    account_header.source_domains[0].domain = V16PodU32::new(domain as u32);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let validation = account.validate_with_market(&market.as_view());
+
+    kani::cover!(
+        claim < pnl && validation == Err(V16Error::InvalidLeg),
+        "partially attributed positive PnL is rejected"
+    );
+    kani::cover!(
+        claim >= pnl && validation.is_ok(),
+        "fully attributed positive PnL is accepted"
+    );
+
+    if claim < pnl {
+        assert_eq!(validation, Err(V16Error::InvalidLeg));
+    }
+    assert_eq!(validation.is_ok(), claim >= pnl);
+    if validation.is_ok() {
+        let equity = market.account_haircut_equity(&account).unwrap();
+        assert_eq!(equity, (capital + pnl) as i128);
+        assert!(equity <= (capital + claim.min(pnl)) as i128);
+    }
+}
+
+// A valid account may carry positive PnL before a source is attributable, but
+// health must treat it as unsupported. This prevents permissionless refresh,
+// margin, liquidation, conversion, or withdrawal from spending an unfunded win.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, two_leg_refresh_config_stub)]
+fn closure_unattributed_positive_pnl_has_zero_health_credit() {
+    let pnl_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&pnl_raw));
+    kani::assume((1..=8).contains(&capital_raw));
+
+    let pnl = u128::from(pnl_raw);
+    let capital = u128::from(capital_raw);
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(11 + capital);
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(pnl * BOUND_SCALE);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(pnl as i128);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    let equity = market.account_haircut_equity(&account).unwrap();
+    kani::cover!(
+        pnl != capital,
+        "unsupported PnL differs from funded capital"
+    );
+    assert_eq!(equity, capital as i128);
+    assert!(equity < (capital + pnl) as i128);
+}
+
 // Mutable account touch reconciles lapsed counterparty backing before any
 // favorable or settlement calculation. Expiry is domain-local: independently
 // funded insurance in the same domain and all state in a later asset survive.
