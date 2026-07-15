@@ -202,10 +202,11 @@ fn contract_check_prepare_counterparty_lien_release_delta() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
-#[kani::proof_for_contract(V16Core::prepare_counterparty_lien_terminal_release_delta)]
+#[kani::proof_for_contract(V16Core::prepare_counterparty_lien_terminal_cleanup_delta)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn contract_check_prepare_counterparty_lien_terminal_release_delta() {
+fn contract_check_prepare_counterparty_lien_terminal_cleanup_delta() {
+    let impaired: bool = kani::any();
     let bucket = BackingBucketV16 {
         market_id: kani::any(),
         fresh_unliened_backing_num: kani::any(),
@@ -213,7 +214,11 @@ fn contract_check_prepare_counterparty_lien_terminal_release_delta() {
         consumed_liened_backing_num: kani::any(),
         impaired_liened_backing_num: kani::any(),
         expiry_slot: kani::any(),
-        status: BackingBucketStatusV16::Fresh,
+        status: if impaired {
+            BackingBucketStatusV16::Impaired
+        } else {
+            BackingBucketStatusV16::Fresh
+        },
         utilization_fee_earnings: kani::any(),
     };
     let source = SourceCreditStateV16 {
@@ -233,7 +238,7 @@ fn contract_check_prepare_counterparty_lien_terminal_release_delta() {
     let amount: u128 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(bucket.fresh_unliened_backing_num < 1u128 << 96);
-    let _ = V16Core::prepare_counterparty_lien_terminal_release_delta(bucket, source, amount);
+    let _ = V16Core::prepare_counterparty_lien_terminal_cleanup_delta(bucket, source, amount);
 }
 
 #[cfg(all(kani, feature = "contracts"))]
@@ -1137,12 +1142,12 @@ fn closure_ledger_inv_prepare_counterparty_lien_release_delta() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn closure_ledger_inv_prepare_counterparty_lien_terminal_release_delta() {
+fn closure_ledger_inv_prepare_counterparty_lien_terminal_cleanup_delta() {
     let (b, s, r) = kani_any_ledger_triple();
     let amount: u128 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
-    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_terminal_release_delta(b, s, amount) {
+    if let Ok((b2, s2)) = V16Core::prepare_counterparty_lien_terminal_cleanup_delta(b, s, amount) {
         // Reservation untouched by counterparty deltas.
         assert!(kani_ledger_inv(&b2, &s2, &r));
     }
@@ -1348,13 +1353,13 @@ fn closure_bucket_status_machine_prepare_counterparty_lien_release_delta() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn closure_bucket_status_machine_prepare_counterparty_lien_terminal_release_delta() {
+fn closure_bucket_status_machine_prepare_counterparty_lien_terminal_cleanup_delta() {
     let (b, s, r) = kani_any_ledger_triple();
     let amount: u128 = kani::any();
     kani::assume(amount < 1u128 << 96);
     kani::assume(kani_ledger_inv(&b, &s, &r));
     kani::assume(V16Core::validate_backing_bucket_static(b) == Ok(()));
-    if let Ok((b2, _s2)) = V16Core::prepare_counterparty_lien_terminal_release_delta(b, s, amount) {
+    if let Ok((b2, _s2)) = V16Core::prepare_counterparty_lien_terminal_cleanup_delta(b, s, amount) {
         assert_eq!(V16Core::validate_backing_bucket_static(b2), Ok(()));
     }
 }
@@ -8572,6 +8577,253 @@ fn closure_asset_zero_long_full_lien_resolved_source_close_is_conservative_and_l
 )]
 fn closure_asset_one_short_partial_lien_resolved_source_close_is_conservative_and_local() {
     prove_liened_resolved_counterparty_source_close_is_local::<1, false, false>();
+}
+
+// Expiry moves every counterparty lien in the domain from aggregate valid to
+// aggregate impaired without loading its owning portfolios. An untouched
+// portfolio therefore persists its old account-local lien labels until its
+// next bounded touch. Those stale labels must not remain favorable credit;
+// independently valid insurance in the same account must remain usable.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_expired_counterparty_lien_cannot_remain_favorable_account_credit() {
+    let counterparty_atoms_raw: u8 = kani::any();
+    let insurance_atoms_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&counterparty_atoms_raw));
+    kani::assume(insurance_atoms_raw <= 8);
+    let counterparty_atoms = counterparty_atoms_raw as u128;
+    let insurance_atoms = insurance_atoms_raw as u128;
+    let total_atoms = counterparty_atoms + insurance_atoms;
+    let counterparty_num = counterparty_atoms * BOUND_SCALE;
+    let insurance_num = insurance_atoms * BOUND_SCALE;
+    let total_num = total_atoms * BOUND_SCALE;
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    let market_id = markets[0].engine.asset.market_id;
+    header.current_slot = V16PodU64::new(20);
+    account_header.pnl = V16PodI128::new(total_atoms as i128);
+    let account_source = &mut account_header.source_domains[0];
+    account_source.domain = V16PodU32::new(0);
+    account_source.source_claim_market_id = market_id;
+    account_source.source_claim_bound_num = V16PodU128::new(total_num);
+    account_source.source_claim_liened_num = V16PodU128::new(total_num);
+    account_source.source_claim_counterparty_liened_num = V16PodU128::new(counterparty_num);
+    account_source.source_claim_insurance_liened_num = V16PodU128::new(insurance_num);
+    account_source.source_lien_effective_reserved = V16PodU128::new(total_atoms);
+    account_source.source_lien_counterparty_backing_num = V16PodU128::new(counterparty_num);
+    account_source.source_lien_insurance_backing_num = V16PodU128::new(insurance_num);
+
+    // Exact aggregate state after expiry: counterparty backing is impaired;
+    // the independently funded insurance lien remains valid.
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: total_num,
+            exact_positive_claim_num: total_num,
+            impaired_liened_backing_num: counterparty_num,
+            insurance_credit_reserved_num: insurance_num,
+            valid_liened_insurance_num: insurance_num,
+            credit_rate_num: 0,
+            credit_epoch: 1,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: market_id.get(),
+        impaired_liened_backing_num: counterparty_num,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Impaired,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: insurance_num,
+            valid_liened_insurance_num: insurance_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    let support = market
+        .account_source_realizable_support(&account, total_atoms)
+        .unwrap();
+
+    kani::cover!(
+        insurance_atoms == 0,
+        "expired counterparty-only lien has no favorable support"
+    );
+    kani::cover!(
+        insurance_atoms > 0,
+        "mixed lien retains only independently valid insurance support"
+    );
+    assert_eq!(support, insurance_atoms);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_expired_counterparty_cleanup_shape_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(
+        decode_market_mode(market.header.mode)?,
+        MarketModeV16::Resolved
+    );
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.insurance.get(), 10);
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    let source = market.source_credit_for_domain(0)?;
+    let bucket = market.backing_bucket_for_domain(0)?;
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num, 0);
+    assert_eq!(
+        source.impaired_liened_backing_num,
+        bucket.impaired_liened_backing_num
+    );
+    assert_eq!(source.credit_rate_num, 0);
+    assert_eq!(source.credit_epoch, 2);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+    assert_eq!(
+        bucket.status,
+        if bucket.impaired_liened_backing_num == 0 {
+            BackingBucketStatusV16::Expired
+        } else {
+            BackingBucketStatusV16::Impaired
+        }
+    );
+    Ok(())
+}
+
+// Domain-wide expiry cannot load every portfolio. When the next resolved
+// winner is touched, terminal cleanup must remove only that account's already
+// impaired counterparty lien, preserve other accounts' impaired aggregates,
+// and make progress without moving any quote-token stock.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_expired_counterparty_cleanup_shape_stub
+)]
+fn closure_resolved_touch_clears_only_own_expired_counterparty_lien() {
+    let other_present: bool = kani::any();
+    let own_atoms = 2u128;
+    let other_atoms = if other_present { 3 } else { 0 };
+    let total_atoms = own_atoms + other_atoms;
+    let own_num = own_atoms * BOUND_SCALE;
+    let other_num = other_atoms * BOUND_SCALE;
+    let total_num = total_atoms * BOUND_SCALE;
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    let market_id = markets[0].engine.asset.market_id;
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.resolved_slot = header.current_slot;
+    header.vault = V16PodU128::new(10 + total_atoms);
+    header.pnl_pos_tot = V16PodU128::new(total_atoms);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_atoms);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_num);
+    header.source_claim_bound_total_num = V16PodU128::new(total_num);
+    account_header.pnl = V16PodI128::new(own_atoms as i128);
+    account_header.last_fee_slot = header.resolved_slot;
+    let account_source = &mut account_header.source_domains[0];
+    account_source.domain = V16PodU32::new(0);
+    account_source.source_claim_market_id = market_id;
+    account_source.source_claim_bound_num = V16PodU128::new(own_num);
+    account_source.source_claim_liened_num = V16PodU128::new(own_num);
+    account_source.source_claim_counterparty_liened_num = V16PodU128::new(own_num);
+    account_source.source_lien_effective_reserved = V16PodU128::new(own_atoms);
+    account_source.source_lien_counterparty_backing_num = V16PodU128::new(own_num);
+
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: total_num,
+            exact_positive_claim_num: total_num,
+            impaired_liened_backing_num: total_num,
+            credit_rate_num: 0,
+            credit_epoch: 1,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: market_id.get(),
+        impaired_liened_backing_num: total_num,
+        expiry_slot: 1,
+        status: BackingBucketStatusV16::Impaired,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let header_before = header;
+    let selected_before = markets[0].engine;
+    let unrelated_before = markets[1].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .release_account_source_credit_lien_for_domain_not_atomic(&mut account, 0)
+        .unwrap();
+
+    kani::cover!(
+        !other_present,
+        "last expired lien is terminally dematerialized"
+    );
+    kani::cover!(
+        other_present,
+        "one account cleanup preserves another account's impaired lien"
+    );
+    assert_eq!(account.header.pnl.get(), own_atoms as i128);
+    let source = account.header.source_domains[0];
+    assert_eq!(source.source_claim_bound_num.get(), own_num);
+    assert_eq!(source.source_claim_liened_num.get(), 0);
+    assert_eq!(source.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(source.source_lien_effective_reserved.get(), 0);
+    assert_eq!(source.source_lien_counterparty_backing_num.get(), 0);
+
+    let aggregate = market.source_credit_for_domain(0).unwrap();
+    let bucket = market.backing_bucket_for_domain(0).unwrap();
+    assert_eq!(aggregate.impaired_liened_backing_num, other_num);
+    assert_eq!(bucket.impaired_liened_backing_num, other_num);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(
+        market.header.risk_epoch.get(),
+        header_before.risk_epoch.get() + 1
+    );
+    assert_eq!(market.residual(), residual_before);
+
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &unrelated_before,
+        &market.markets[1].engine
+    ));
+    assert!(kani_eq_asset_state_v16_account(
+        &selected_before.asset,
+        &market.markets[0].engine.asset
+    ));
+    assert!(kani_eq_source_credit_state_v16_account(
+        &selected_before.source_credit_short,
+        &market.markets[0].engine.source_credit_short
+    ));
+    assert!(kani_eq_backing_bucket_v16_account(
+        &selected_before.backing_short,
+        &market.markets[0].engine.backing_short
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &selected_before.insurance_reservation_long,
+        &market.markets[0].engine.insurance_reservation_long
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &selected_before.insurance_reservation_short,
+        &market.markets[0].engine.insurance_reservation_short
+    ));
 }
 
 #[cfg(all(kani, feature = "closure"))]

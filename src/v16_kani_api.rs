@@ -662,12 +662,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::prepare_counterparty_lien_consume_delta(bucket, source, amount)
     }
 
-    pub fn kani_prepare_counterparty_lien_terminal_release_delta(
+    pub fn kani_prepare_counterparty_lien_terminal_cleanup_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
         amount: u128,
     ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
-        V16Core::prepare_counterparty_lien_terminal_release_delta(bucket, source, amount)
+        V16Core::prepare_counterparty_lien_terminal_cleanup_delta(bucket, source, amount)
     }
 
     pub fn kani_prepare_counterparty_backing_add_delta(

@@ -7761,7 +7761,7 @@ fn proof_v16_resolved_winddown_releases_liened_source_claim() {
     };
 
     let (bucket_after, source_after) =
-        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_release_delta(
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_cleanup_delta(
             backing_bucket,
             source_credit,
             amount,
@@ -7780,55 +7780,66 @@ fn proof_v16_resolved_winddown_releases_liened_source_claim() {
     assert_eq!(source_after.provider_receivable_num, 0);
 }
 
-// The terminal counterparty-lien release must also ignore bucket status/expiry:
-// returning liened backing is a wind-down operation, not a fresh lending action.
-// If this regresses to the Live release helper, a resolved market can deadlock
-// after a bucket expires.
+// Domain-wide expiry cannot load every owning account. Terminal cleanup of one
+// subsequently touched account removes only its impaired audit share; it must
+// not recreate fresh backing or erase another account's impairment.
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn proof_v16_resolved_winddown_releases_expired_liened_source_claim() {
-    let units_raw: u8 = kani::any();
-    let status_is_expired: bool = kani::any();
-    kani::assume(units_raw > 0);
-    let amount = (units_raw as u128) * BOUND_SCALE;
+fn proof_v16_resolved_winddown_cleans_only_touched_impaired_counterparty_lien() {
+    let amount_units_raw: u8 = kani::any();
+    let other_units_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&amount_units_raw));
+    kani::assume(other_units_raw <= 8);
+    let amount = amount_units_raw as u128 * BOUND_SCALE;
+    let other = other_units_raw as u128 * BOUND_SCALE;
+    let total = amount + other;
 
     let backing_bucket = BackingBucketV16 {
         market_id: 1,
-        valid_liened_backing_num: amount,
+        impaired_liened_backing_num: total,
         expiry_slot: 1,
-        status: if status_is_expired {
-            BackingBucketStatusV16::Expired
-        } else {
-            BackingBucketStatusV16::Fresh
-        },
+        status: BackingBucketStatusV16::Impaired,
         ..BackingBucketV16::EMPTY
     };
     let source_credit = SourceCreditStateV16 {
-        fresh_reserved_backing_num: amount,
-        valid_liened_backing_num: amount,
-        positive_claim_bound_num: amount,
-        exact_positive_claim_num: amount,
-        credit_rate_num: CREDIT_RATE_SCALE,
+        impaired_liened_backing_num: total,
+        positive_claim_bound_num: total,
+        exact_positive_claim_num: total,
+        credit_rate_num: 0,
         ..SourceCreditStateV16::EMPTY
     };
 
     let (bucket_after, source_after) =
-        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_release_delta(
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_cleanup_delta(
             backing_bucket,
             source_credit,
             amount,
         )
         .unwrap();
     kani::cover!(
-        status_is_expired && units_raw > 4,
-        "terminal wind-down releases wide expired-status counterparty lien"
+        other_units_raw == 0 && amount_units_raw > 4,
+        "terminal cleanup removes the final wide impaired lien"
+    );
+    kani::cover!(
+        other_units_raw > 0 && amount_units_raw > 4,
+        "terminal cleanup preserves another account's impaired lien"
     );
     assert_eq!(bucket_after.valid_liened_backing_num, 0);
-    assert_eq!(bucket_after.fresh_unliened_backing_num, amount);
+    assert_eq!(bucket_after.fresh_unliened_backing_num, 0);
     assert_eq!(bucket_after.consumed_liened_backing_num, 0);
+    assert_eq!(bucket_after.impaired_liened_backing_num, other);
+    assert_eq!(
+        bucket_after.status,
+        if other == 0 {
+            BackingBucketStatusV16::Expired
+        } else {
+            BackingBucketStatusV16::Impaired
+        }
+    );
     assert_eq!(source_after.valid_liened_backing_num, 0);
-    assert_eq!(source_after.fresh_reserved_backing_num, amount);
+    assert_eq!(source_after.fresh_reserved_backing_num, 0);
+    assert_eq!(source_after.impaired_liened_backing_num, other);
     assert_eq!(source_after.spent_backing_num, 0);
     assert_eq!(source_after.provider_receivable_num, 0);
 }

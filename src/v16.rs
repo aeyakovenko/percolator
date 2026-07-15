@@ -2496,26 +2496,35 @@ impl V16Core {
         Ok((bucket, source))
     }
 
-    // Expiry-agnostic counterparty lien release for terminal (Resolved) wind-down.
-    // Identical to prepare_counterparty_lien_release_delta but WITHOUT the lending-time
-    // freshness guard (Fresh status / expiry_slot > current_slot): unwinding returns
-    // liened backing to the provider's unliened pool, it is not re-lending, so a
-    // time-expired bucket must not block it. Without this, a market that resolves past a
-    // backing bucket's expiry re-introduces the Finding-A close deadlock.
-    // Contract layer: the TERMINAL release performs the identical relabel as
-    // the Live release but is expiry/status-agnostic (Finding-C semantics).
+    // Terminal counterparty-lien cleanup is account-local even though expiry is
+    // domain-wide. A lapsed Fresh lien is unpledged before expiry; an already
+    // Impaired lien only removes this account's impaired audit share because
+    // expiry already forfeited its principal.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
         Ok((b, s)) => (amount == 0 && *b == bucket && *s == source)
-            || (b.valid_liened_backing_num == bucket.valid_liened_backing_num.wrapping_sub(amount)
+            || (bucket.status == BackingBucketStatusV16::Fresh
+                && b.valid_liened_backing_num == bucket.valid_liened_backing_num.wrapping_sub(amount)
                 && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num.wrapping_add(amount)
+                && b.impaired_liened_backing_num == bucket.impaired_liened_backing_num
                 && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num
                 && s.valid_liened_backing_num == source.valid_liened_backing_num.wrapping_sub(amount)
+                && s.impaired_liened_backing_num == source.impaired_liened_backing_num
+                && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
+                && s.spent_backing_num == source.spent_backing_num
+                && s.provider_receivable_num == source.provider_receivable_num)
+            || (bucket.status == BackingBucketStatusV16::Impaired
+                && b.valid_liened_backing_num == bucket.valid_liened_backing_num
+                && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num
+                && b.impaired_liened_backing_num == bucket.impaired_liened_backing_num.wrapping_sub(amount)
+                && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num
+                && s.valid_liened_backing_num == source.valid_liened_backing_num
+                && s.impaired_liened_backing_num == source.impaired_liened_backing_num.wrapping_sub(amount)
                 && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
                 && s.spent_backing_num == source.spent_backing_num
                 && s.provider_receivable_num == source.provider_receivable_num),
         Err(_) => true,
     }))]
-    fn prepare_counterparty_lien_terminal_release_delta(
+    fn prepare_counterparty_lien_terminal_cleanup_delta(
         mut bucket: BackingBucketV16,
         mut source: SourceCreditStateV16,
         amount: u128,
@@ -2523,15 +2532,34 @@ impl V16Core {
         if amount == 0 {
             return Ok((bucket, source));
         }
-        if bucket.valid_liened_backing_num < amount || source.valid_liened_backing_num < amount {
-            return Err(V16Error::CounterUnderflow);
+        match bucket.status {
+            BackingBucketStatusV16::Fresh => {
+                if bucket.valid_liened_backing_num < amount
+                    || source.valid_liened_backing_num < amount
+                {
+                    return Err(V16Error::CounterUnderflow);
+                }
+                bucket.valid_liened_backing_num -= amount;
+                bucket.fresh_unliened_backing_num = bucket
+                    .fresh_unliened_backing_num
+                    .checked_add(amount)
+                    .ok_or(V16Error::CounterOverflow)?;
+                source.valid_liened_backing_num -= amount;
+            }
+            BackingBucketStatusV16::Impaired => {
+                if bucket.impaired_liened_backing_num < amount
+                    || source.impaired_liened_backing_num < amount
+                {
+                    return Err(V16Error::CounterUnderflow);
+                }
+                bucket.impaired_liened_backing_num -= amount;
+                source.impaired_liened_backing_num -= amount;
+                if bucket.impaired_liened_backing_num == 0 {
+                    bucket.status = BackingBucketStatusV16::Expired;
+                }
+            }
+            _ => return Err(V16Error::CounterUnderflow),
         }
-        bucket.valid_liened_backing_num -= amount;
-        bucket.fresh_unliened_backing_num = bucket
-            .fresh_unliened_backing_num
-            .checked_add(amount)
-            .ok_or(V16Error::CounterOverflow)?;
-        source.valid_liened_backing_num -= amount;
         Ok((bucket, source))
     }
 
@@ -7881,12 +7909,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    // Expiry-agnostic counterparty lien release for terminal (Resolved) wind-down; see
-    // prepare_counterparty_lien_terminal_release_delta. Mirrors
-    // release_source_credit_lien_from_counterparty_not_atomic but does not gate on
-    // bucket freshness/expiry, so a market that resolves past a bucket's expiry can
-    // still release the lien and wind the winner down.
-    fn release_source_credit_lien_from_counterparty_terminal_not_atomic(
+    // Terminal cleanup accepts either a lapsed Fresh lien or the account's
+    // share of a domain-wide Impaired aggregate.
+    fn cleanup_source_credit_lien_from_counterparty_terminal_not_atomic(
         &mut self,
         domain: usize,
         amount: u128,
@@ -7895,7 +7920,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if amount == 0 {
             return Ok(());
         }
-        let (bucket, source) = V16Core::prepare_counterparty_lien_terminal_release_delta(
+        let (bucket, source) = V16Core::prepare_counterparty_lien_terminal_cleanup_delta(
             self.backing_bucket_for_domain(domain)?,
             self.source_credit_for_domain(domain)?,
             amount,
@@ -8601,10 +8626,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(effective)
     }
 
-    // Release one domain's counterparty/insurance source-credit lien (returning the
-    // reserved backing) and clear the account's per-domain lien fields. Mirrors the
-    // per-domain body of release_account_source_credit_liens_if_unneeded_not_atomic
-    // but with no mode gate, for use during terminal (Resolved) wind-down.
+    // Clear one domain's terminal source-credit lien. Valid backing is
+    // unpledged; already-impaired backing only drops this account's audit share.
     fn release_account_source_credit_lien_for_domain_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -8618,9 +8641,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .source_lien_insurance_backing_num
             .get();
         if counterparty_backing != 0 {
-            // Expiry-agnostic: terminal wind-down returns backing, so a time-expired
-            // bucket must not block the release (Finding C).
-            self.release_source_credit_lien_from_counterparty_terminal_not_atomic(
+            // Terminal wind-down either unpledges still-fresh backing or removes
+            // this account's share of an already-impaired aggregate.
+            self.cleanup_source_credit_lien_from_counterparty_terminal_not_atomic(
                 d,
                 counterparty_backing,
             )?;
@@ -8793,11 +8816,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if locked > source.source_claim_bound_num.get() {
                 return Err(V16Error::InvalidLeg);
             }
-            let valid_lien_effective_num = source
-                .source_lien_effective_reserved
-                .get()
-                .checked_mul(BOUND_SCALE)
+            let counterparty_backing_num = source.source_lien_counterparty_backing_num.get();
+            let current_counterparty_backing_num = if counterparty_backing_num == 0 {
+                0
+            } else {
+                let bucket = self.backing_bucket_for_domain(d)?;
+                if bucket.status == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot > self.header.current_slot.get()
+                {
+                    counterparty_backing_num
+                } else {
+                    0
+                }
+            };
+            let valid_lien_effective_num = current_counterparty_backing_num
+                .checked_add(source.source_lien_insurance_backing_num.get())
                 .ok_or(V16Error::ArithmeticOverflow)?
+                .min(
+                    source
+                        .source_lien_effective_reserved
+                        .get()
+                        .checked_mul(BOUND_SCALE)
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                )
                 .min(remaining_num);
             if valid_lien_effective_num != 0 {
                 support_num = support_num
