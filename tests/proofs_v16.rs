@@ -7158,6 +7158,10 @@ fn proof_v16_retire_nonempty_asset_rejects() {
 fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let with_senior_balances: bool = kani::any();
     let retire_slot_raw: u8 = kani::any();
+    let b_long_raw: u8 = kani::any();
+    let b_short_raw: u8 = kani::any();
+    let b_epoch_long_raw: u8 = kani::any();
+    let b_epoch_short_raw: u8 = kani::any();
     kani::assume((1..=10).contains(&retire_slot_raw));
     let c_tot = if with_senior_balances { 7 } else { 0 };
     let insurance = if with_senior_balances { 3 } else { 0 };
@@ -7166,6 +7170,12 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     header.vault = V16PodU128::new(c_tot + insurance);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
+    let mut historical_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    historical_asset.b_long_num = b_long_raw as u128;
+    historical_asset.b_short_num = b_short_raw as u128;
+    historical_asset.b_epoch_start_long_num = b_epoch_long_raw as u128;
+    historical_asset.b_epoch_start_short_num = b_epoch_short_raw as u128;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&historical_asset);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -7182,8 +7192,16 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
         retire_slot > 1 && with_senior_balances && asset.lifecycle == AssetLifecycleV16::Retired,
         "empty asset can retire without moving nonzero senior balances"
     );
+    kani::cover!(
+        b_long_raw != 0 && b_short_raw != 0 && b_epoch_long_raw != 0 && b_epoch_short_raw != 0,
+        "discharged current and prior-epoch B history cannot strand an empty asset"
+    );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
     assert_eq!(asset.retired_slot, retire_slot);
+    assert_eq!(asset.b_long_num, b_long_raw as u128);
+    assert_eq!(asset.b_short_num, b_short_raw as u128);
+    assert_eq!(asset.b_epoch_start_long_num, b_epoch_long_raw as u128);
+    assert_eq!(asset.b_epoch_start_short_num, b_epoch_short_raw as u128);
     assert_eq!(market.header.current_slot.get(), retire_slot);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);

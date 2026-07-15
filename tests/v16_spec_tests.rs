@@ -1433,6 +1433,49 @@ fn v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset() {
 }
 
 #[test]
+fn v16_retire_and_restart_empty_asset_after_discharged_social_loss_history() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let old_market_id = markets[0].engine.asset.market_id.get();
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.b_long_num = 11;
+    asset.b_short_num = 13;
+    asset.b_epoch_start_long_num = 17;
+    asset.b_epoch_start_short_num = 19;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.retire_empty_asset_not_atomic(0, 3).unwrap();
+    let retired = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(retired.lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(retired.b_long_num, 11);
+    assert_eq!(retired.b_short_num, 13);
+    assert_eq!(retired.b_epoch_start_long_num, 17);
+    assert_eq!(retired.b_epoch_start_short_num, 19);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(0, 100, 4)
+        .unwrap();
+    let restarted = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(restarted.lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(restarted.market_id, old_market_id);
+    assert_eq!(restarted.b_long_num, 0);
+    assert_eq!(restarted.b_short_num, 0);
+    assert_eq!(restarted.b_epoch_start_long_num, 0);
+    assert_eq!(restarted.b_epoch_start_short_num, 0);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
     let (mut header, mut markets) = market_fixture(2, 100);
     {

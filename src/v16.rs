@@ -12121,6 +12121,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_spent != 0 || short_spent != 0
         };
 
+        // B indices are already-charged social-loss history, not outstanding liabilities. Once all
+        // position, stale, obligation, weight, remainder/dust, explicit-loss, barrier, source,
+        // backing, and reservation state below is empty, no account can still settle either the
+        // current or epoch-start B anchor. A restart changes market_id and canonicalizes the slot.
         if slot.pending_domain_loss_barrier_long.get() != 0
             || slot.pending_domain_loss_barrier_short.get() != 0
             || asset.mode_long != SideModeV16::Normal
@@ -12135,10 +12139,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.k_epoch_start_short != 0
             || asset.f_epoch_start_long_num != 0
             || asset.f_epoch_start_short_num != 0
-            || asset.b_long_num != 0
-            || asset.b_short_num != 0
-            || asset.b_epoch_start_long_num != 0
-            || asset.b_epoch_start_short_num != 0
             || asset.oi_eff_long_q != 0
             || asset.oi_eff_short_q != 0
             || asset.stored_pos_count_long != 0
