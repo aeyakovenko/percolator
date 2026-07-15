@@ -13831,6 +13831,396 @@ fn closure_public_hmax_drain_only_asset_one_short_rebalance_reaches_flat_exit() 
     prove_public_hmax_rebalance_reaches_flat_exit::<1, false, true>();
 }
 
+// Owner cure-and-cancel is the terminal escape from a fresh close barrier. The
+// public route must apply the external deposit only after refresh, fund capital
+// and V in lockstep, release exactly the selected domain, and remain available
+// under HMax without touching another asset.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_public_cure_and_cancel_is_value_conservative_and_domain_local<
+    const ASSET: usize,
+    const LONG_DOMAIN: bool,
+>() {
+    assert!(ASSET < 2);
+    let loss = u128::from(kani::any::<u8>());
+    let extra = u128::from(kani::any::<u8>());
+    let surplus = u128::from(kani::any::<u8>());
+    kani::assume((1..=4).contains(&loss));
+    kani::assume(extra <= 2 && surplus <= 3);
+    let deposit = loss + extra;
+    let domain_side = if LONG_DOMAIN {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.bankruptcy_hlock_active = 1;
+    header.vault = V16PodU128::new(10 + surplus);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            close_id: 1,
+            asset_index: ASSET as u32,
+            market_id: markets[ASSET].engine.asset.market_id.get(),
+            domain_side,
+            gross_loss_at_close_start: loss,
+            drift_reference_slot: header.current_slot.get(),
+            max_close_slot: header.current_slot.get() + 10,
+            residual_remaining: loss,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    match domain_side {
+        SideV16::Long => markets[ASSET].engine.pending_domain_loss_barrier_long = V16PodU64::new(1),
+        SideV16::Short => {
+            markets[ASSET].engine.pending_domain_loss_barrier_short = V16PodU64::new(1)
+        }
+    }
+
+    let header_before = header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let account_before = account_header;
+    let other = 1 - ASSET;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .cure_and_cancel_close_not_atomic(&mut account, deposit)
+        .unwrap();
+
+    kani::cover!(extra == 0, "exactly funded public cure commits");
+    kani::cover!(
+        extra > 0 && surplus > 0,
+        "overfunded public cure preserves unrelated junior surplus"
+    );
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert_eq!(
+        market.header.vault.get(),
+        header_before.vault.get() + deposit
+    );
+    assert_eq!(
+        market.header.c_tot.get(),
+        header_before.c_tot.get() + deposit
+    );
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(market.header.resolved_payout_blocker_count.get(), 0);
+    assert_eq!(market.residual(), residual_before);
+    assert_eq!(account.header.capital.get(), deposit);
+    assert_eq!(account.header.pnl, account_before.pnl);
+    assert_eq!(account.header.cancel_deposit_escrow.get(), 0);
+    let close = account.header.close_progress.try_to_runtime().unwrap();
+    assert!(!close.active && close.canceled && !close.finalized);
+    assert_eq!(close.residual_remaining, loss);
+    assert!(!account.header.health_cert.try_to_runtime().unwrap().valid);
+    let selected = market.markets[ASSET].engine_slot();
+    assert_eq!(
+        match domain_side {
+            SideV16::Long => selected.pending_domain_loss_barrier_long.get(),
+            SideV16::Short => selected.pending_domain_loss_barrier_short.get(),
+        },
+        0
+    );
+    assert_eq!(
+        match domain_side {
+            SideV16::Long => selected.pending_domain_loss_barrier_short.get(),
+            SideV16::Short => selected.pending_domain_loss_barrier_long.get(),
+        },
+        0
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[other],
+        &market.markets[other].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioLegV16Account::try_to_runtime,
+    two_leg_refresh_leg_decode_stub
+)]
+fn closure_public_asset_zero_long_domain_cure_is_conservative_and_local() {
+    prove_public_cure_and_cancel_is_value_conservative_and_domain_local::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioLegV16Account::try_to_runtime,
+    two_leg_refresh_leg_decode_stub
+)]
+fn closure_public_asset_zero_short_domain_cure_is_conservative_and_local() {
+    prove_public_cure_and_cancel_is_value_conservative_and_domain_local::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioLegV16Account::try_to_runtime,
+    two_leg_refresh_leg_decode_stub
+)]
+fn closure_public_asset_one_long_domain_cure_is_conservative_and_local() {
+    prove_public_cure_and_cancel_is_value_conservative_and_domain_local::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioLegV16Account::try_to_runtime,
+    two_leg_refresh_leg_decode_stub
+)]
+fn closure_public_asset_one_short_domain_cure_is_conservative_and_local() {
+    prove_public_cure_and_cancel_is_value_conservative_and_domain_local::<1, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn exact_cure_frame_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(
+        account.header.active_bitmap,
+        V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new)
+    );
+    assert_eq!(
+        account.header.source_domains[0],
+        PortfolioSourceDomainV16Account::default()
+    );
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn exact_cure_frame_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    Ok(())
+}
+
+// Exact mutation-frame complement to the four public-route proofs above. The
+// public proofs execute refresh and this production seam together; these proofs
+// leave refresh to closure_full_refresh_aggregates_two_assets_without_value_or_domain_drift
+// and the read-only validators to those four fully audited routes, so it can
+// assert every persisted field after the cure across both assets and domain
+// sides within the per-harness budget. Fixed asset/side harnesses avoid four
+// large cover queries in one solver instance and a Kani 0.66 false
+// counterexample in the symbolic SideV16 branch; cure amounts remain symbolic.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_close_cure_core_has_exact_conservative_two_asset_frame<
+    const ASSET: usize,
+    const LONG_DOMAIN: bool,
+>() {
+    assert!(ASSET < 2);
+    let asset_index = ASSET;
+    let domain_side = if LONG_DOMAIN {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let loss = u128::from(kani::any::<u8>());
+    let extra = u128::from(kani::any::<u8>());
+    kani::assume((1..=4).contains(&loss));
+    kani::assume(extra <= 2);
+    let deposit = loss + extra;
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    markets[0].wrapper = 11;
+    markets[1].wrapper = 22;
+    header.bankruptcy_hlock_active = 1;
+    header.vault = V16PodU128::new(13);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    let close = CloseProgressLedgerV16 {
+        active: true,
+        close_id: 1,
+        asset_index: asset_index as u32,
+        market_id: markets[asset_index].engine.asset.market_id.get(),
+        domain_side,
+        gross_loss_at_close_start: loss,
+        drift_reference_slot: header.current_slot.get(),
+        max_close_slot: header.current_slot.get() + 10,
+        residual_remaining: loss,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&close);
+    match domain_side {
+        SideV16::Long => {
+            markets[asset_index].engine.pending_domain_loss_barrier_long = V16PodU64::new(1)
+        }
+        SideV16::Short => {
+            markets[asset_index]
+                .engine
+                .pending_domain_loss_barrier_short = V16PodU64::new(1)
+        }
+    }
+    let cert = HealthCertV16 {
+        certified_equity: -(loss as i128),
+        certified_liq_deficit: loss,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    account_header.health_cert = HealthCertV16Account::from_runtime(&cert);
+
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let residual_before = header_before
+        .vault
+        .get()
+        .checked_sub(header_before.c_tot.get() + header_before.insurance.get())
+        .unwrap();
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(header_before.vault.get() + deposit);
+    expected_header.c_tot = V16PodU128::new(header_before.c_tot.get() + deposit);
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(0);
+    let mut expected_markets = [markets_before[0].engine, markets_before[1].engine];
+    match domain_side {
+        SideV16::Long => {
+            expected_markets[asset_index].pending_domain_loss_barrier_long = V16PodU64::new(0)
+        }
+        SideV16::Short => {
+            expected_markets[asset_index].pending_domain_loss_barrier_short = V16PodU64::new(0)
+        }
+    }
+    let mut expected_account = account_before;
+    expected_account.capital = V16PodU128::new(deposit);
+    expected_account.cancel_deposit_escrow = V16PodU128::new(0);
+    expected_account.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: false,
+            canceled: true,
+            ..close
+        });
+    let mut invalidated_cert = cert;
+    invalidated_cert.valid = false;
+    expected_account.health_cert = HealthCertV16Account::from_runtime(&invalidated_cert);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .cure_and_cancel_close_with_cert_not_atomic(&mut account, deposit, cert)
+        .unwrap();
+
+    kani::cover!(
+        extra == 0,
+        "exactly funded cure reaches the exact persisted frame"
+    );
+    kani::cover!(
+        extra > 0,
+        "overfunded cure reaches the exact persisted frame"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+    assert_eq!(market.residual(), residual_before);
+    assert_eq!(
+        market.header.vault.get() - header_before.vault.get(),
+        market.header.c_tot.get() - header_before.c_tot.get()
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    exact_cure_frame_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    exact_cure_frame_market_validation_stub
+)]
+fn closure_asset_zero_long_close_cure_core_has_exact_conservative_two_asset_frame() {
+    prove_close_cure_core_has_exact_conservative_two_asset_frame::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    exact_cure_frame_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    exact_cure_frame_market_validation_stub
+)]
+fn closure_asset_zero_short_close_cure_core_has_exact_conservative_two_asset_frame() {
+    prove_close_cure_core_has_exact_conservative_two_asset_frame::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    exact_cure_frame_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    exact_cure_frame_market_validation_stub
+)]
+fn closure_asset_one_long_close_cure_core_has_exact_conservative_two_asset_frame() {
+    prove_close_cure_core_has_exact_conservative_two_asset_frame::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    exact_cure_frame_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    exact_cure_frame_market_validation_stub
+)]
+fn closure_asset_one_short_close_cure_core_has_exact_conservative_two_asset_frame() {
+    prove_close_cure_core_has_exact_conservative_two_asset_frame::<1, false>();
+}
+
 // Permissionless liveness over the wrapper-used auto-crank route. An expired
 // outstanding close is terminally actionable without an oracle observation:
 // the production classifier must select recovery, dispatch it in one call, and
