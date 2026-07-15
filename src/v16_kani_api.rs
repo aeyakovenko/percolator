@@ -846,7 +846,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &PortfolioV16View<'_>,
     ) -> V16Result<bool> {
         Ok(Self::account_has_source_claims(account)?
-            && self.account_has_active_source_claim_exposure(account)?)
+            && !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)))
     }
 
     pub fn kani_preflight_convert_released_pnl_to_capital(

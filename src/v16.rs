@@ -8702,8 +8702,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(effective)
     }
 
-    // Clear one domain's terminal source-credit lien. Valid backing is
-    // unpledged; already-impaired backing only drops this account's audit share.
+    // Clear one domain's source-credit lien after its dependent risk is gone.
+    // Valid backing is unpledged; already-impaired backing only drops this
+    // account's audit share. Terminal wind-down uses the same transition.
     fn release_account_source_credit_lien_for_domain_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -8741,6 +8742,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(0);
         account.reset_source_domain_slot_if_empty(slot);
         Ok(())
+    }
+
+    fn release_account_source_credit_liens_after_risk_reversal_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        let mut released_effective = 0u128;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() && source.source_claim_liened_num.get() != 0 {
+                let d = source.domain.get() as usize;
+                released_effective = released_effective
+                    .checked_add(source.source_lien_effective_reserved.get())
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.release_account_source_credit_lien_for_domain_not_atomic(account, d)?;
+            }
+            slot += 1;
+        }
+        if released_effective != 0 {
+            account.compact_source_domains();
+            account.header.health_cert.valid = 0;
+        }
+        Ok(released_effective)
     }
 
     fn burn_account_source_claim_bound_num(
@@ -12508,39 +12536,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn account_has_active_exposure_for_source_domain(
-        &self,
-        account: &PortfolioV16View<'_>,
-        domain: usize,
-    ) -> V16Result<bool> {
-        let (asset_index, source_side) = self.domain_asset_side(domain)?;
-        let leg = Self::active_leg_for_asset(account, asset_index)?;
-        Ok(leg.active && opposite_side(leg.side) == source_side)
-    }
-
-    fn account_has_active_source_claim_exposure(
-        &self,
-        account: &PortfolioV16View<'_>,
-    ) -> V16Result<bool> {
-        let mut slot = 0usize;
-        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = account.source_domains()[slot];
-            if source.has_default_sparse_tag() && !source.is_occupied() {
-                break;
-            }
-            if source.is_occupied() && source.source_claim_bound_num.get() != 0 {
-                let d = source.domain.get() as usize;
-                if self.domain_asset_side(d).is_ok()
-                    && self.account_has_active_exposure_for_source_domain(account, d)?
-                {
-                    return Ok(true);
-                }
-            }
-            slot += 1;
-        }
-        Ok(false)
-    }
-
     fn pending_domain_loss_barrier_count(
         &self,
         asset_index: usize,
@@ -14810,12 +14805,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         self.expire_lapsed_source_backing_for_account_not_atomic(&account.as_view())?;
-        if Self::account_has_source_claims(&account.as_view())?
-            && self.account_has_active_source_claim_exposure(&account.as_view())?
+        let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
+        if has_source_claims
+            && !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
         {
             return Err(V16Error::LockActive);
         }
-        let converted = if Self::account_has_source_claims(&account.as_view())? {
+        if has_source_claims {
+            self.release_account_source_credit_liens_after_risk_reversal_not_atomic(account)?;
+        }
+        let converted = if has_source_claims {
             self.account_source_realizable_support(&account.as_view(), released)?
         } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
             0
@@ -14826,7 +14825,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         let vault_before = self.header.vault.get();
-        let consumption = if Self::account_has_source_claims(&account.as_view())? {
+        let consumption = if has_source_claims {
             self.create_and_consume_account_source_credit_for_effective_not_atomic(
                 account, converted,
             )?
@@ -14922,49 +14921,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
 
-        let mut released_effective = 0u128;
-        let mut slot = 0usize;
-        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source_snapshot = account.header.source_domains[slot];
-            if source_snapshot.has_default_sparse_tag() && !source_snapshot.is_occupied() {
-                break;
-            }
-            if !source_snapshot.is_occupied() {
-                slot += 1;
-                continue;
-            }
-            let d = source_snapshot.domain.get() as usize;
-            self.domain_asset_side(d)?;
-            let effective = source_snapshot.source_lien_effective_reserved.get();
-            let counterparty_backing = source_snapshot.source_lien_counterparty_backing_num.get();
-            let insurance_backing = source_snapshot.source_lien_insurance_backing_num.get();
-            if counterparty_backing != 0 {
-                self.release_source_credit_lien_from_counterparty_not_atomic(
-                    d,
-                    counterparty_backing,
-                )?;
-            }
-            if insurance_backing != 0 {
-                self.release_source_credit_lien_from_insurance_not_atomic(d, insurance_backing)?;
-            }
-            if effective != 0 {
-                released_effective = released_effective
-                    .checked_add(effective)
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                let source = &mut account.header.source_domains[slot];
-                source.source_claim_liened_num = V16PodU128::new(0);
-                source.source_claim_counterparty_liened_num = V16PodU128::new(0);
-                source.source_claim_insurance_liened_num = V16PodU128::new(0);
-                source.source_lien_effective_reserved = V16PodU128::new(0);
-                source.source_lien_counterparty_backing_num = V16PodU128::new(0);
-                source.source_lien_insurance_backing_num = V16PodU128::new(0);
-                source.source_lien_fee_last_slot = V16PodU64::new(0);
-                account.reset_source_domain_slot_if_empty(slot);
-            }
-            slot += 1;
-        }
-        account.compact_source_domains();
-        account.header.health_cert.valid = 0;
+        let released_effective =
+            self.release_account_source_credit_liens_after_risk_reversal_not_atomic(account)?;
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()?;
         Ok(released_effective)

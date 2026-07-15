@@ -6741,6 +6741,513 @@ fn closure_asset_one_short_insurance_backed_conversion_is_local() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn prove_reversed_risk_lien_remains_fully_realizable_and_asset_local<
+    const INSURANCE_BACKED: bool,
+    const FULL_LIEN: bool,
+>() {
+    let claim = 2u128;
+    let lien = if FULL_LIEN { claim } else { 1 };
+    let claim_num = claim * BOUND_SCALE;
+    let lien_num = lien * BOUND_SCALE;
+    let domain = 0usize;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+
+    header.vault = V16PodU128::new(if INSURANCE_BACKED { 10 } else { 10 + claim });
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    if INSURANCE_BACKED {
+        header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(claim);
+        header.insurance_domain_budget_remaining_total = V16PodU128::new(8);
+        for market in &mut markets {
+            market.engine.insurance_domain_budget_long = V16PodU128::new(claim);
+            market.engine.insurance_domain_budget_short = V16PodU128::new(claim);
+        }
+    } else {
+        header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    }
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: claim as i128,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+    });
+    let account_source = &mut account_header.source_domains[0];
+    account_source.domain = V16PodU32::new(domain as u32);
+    account_source.source_claim_market_id = markets[0].engine.asset.market_id;
+    account_source.source_claim_bound_num = V16PodU128::new(claim_num);
+    account_source.source_claim_liened_num = V16PodU128::new(lien_num);
+    account_source.source_lien_effective_reserved = V16PodU128::new(lien);
+    if INSURANCE_BACKED {
+        account_source.source_claim_insurance_liened_num = V16PodU128::new(lien_num);
+        account_source.source_lien_insurance_backing_num = V16PodU128::new(lien_num);
+    } else {
+        account_source.source_claim_counterparty_liened_num = V16PodU128::new(lien_num);
+        account_source.source_lien_counterparty_backing_num = V16PodU128::new(lien_num);
+        account_source.source_lien_fee_last_slot = header.current_slot;
+    }
+
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: if INSURANCE_BACKED { 0 } else { claim_num },
+            valid_liened_backing_num: if INSURANCE_BACKED { 0 } else { lien_num },
+            insurance_credit_reserved_num: if INSURANCE_BACKED { claim_num } else { 0 },
+            valid_liened_insurance_num: if INSURANCE_BACKED { lien_num } else { 0 },
+            credit_rate_num: (claim_num - lien_num) * CREDIT_RATE_SCALE / claim_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    if INSURANCE_BACKED {
+        markets[0].engine.insurance_reservation_long =
+            InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+                insurance_credit_reserved_num: claim_num,
+                valid_liened_insurance_num: lien_num,
+                ..InsuranceCreditReservationV16::EMPTY
+            });
+    } else {
+        markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: markets[0].engine.asset.market_id.get(),
+            fresh_unliened_backing_num: claim_num - lien_num,
+            valid_liened_backing_num: lien_num,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+    }
+
+    let mut expected_header = header;
+    expected_header.c_tot = V16PodU128::new(claim);
+    expected_header.pnl_pos_tot = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(0);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(0);
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(0);
+    expected_header.risk_epoch = V16PodU64::new(header.risk_epoch.get() + 3);
+    if INSURANCE_BACKED {
+        expected_header.insurance = V16PodU128::new(10 - claim);
+        expected_header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(0);
+        expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(8 - claim);
+    }
+
+    let mut expected_markets = [markets[0].engine, markets[1].engine];
+    let consumed_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        spent_backing_num: if INSURANCE_BACKED { 0 } else { claim_num },
+        provider_receivable_num: if INSURANCE_BACKED { 0 } else { claim_num },
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 3,
+        ..SourceCreditStateV16::EMPTY
+    });
+    expected_markets[0].source_credit_long = consumed_source;
+    if INSURANCE_BACKED {
+        expected_markets[0].insurance_reservation_long =
+            InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+                consumed_insurance_num: claim_num,
+                ..InsuranceCreditReservationV16::EMPTY
+            });
+        expected_markets[0].insurance_domain_spent_long = V16PodU128::new(claim);
+    } else {
+        expected_markets[0].backing_long =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                market_id: markets[0].engine.asset.market_id.get(),
+                consumed_liened_backing_num: claim_num,
+                expiry_slot: 10,
+                status: BackingBucketStatusV16::Expired,
+                ..BackingBucketV16::EMPTY
+            });
+    }
+
+    let mut expected_account = account_header;
+    expected_account.capital = V16PodU128::new(claim);
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.health_cert.valid = 0;
+    expected_account.source_domains[0] = PortfolioSourceDomainV16Account::default();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let converted = market.convert_released_pnl_to_capital_not_atomic(&mut account);
+
+    kani::cover!(
+        converted == Ok(claim),
+        "liened claim is fully realized after dependent risk is gone"
+    );
+    assert_eq!(converted, Ok(claim));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.residual(), residual_before);
+}
+
+// Once the position that required a Risk lien is gone, the frozen spec permits
+// that lien to be unpledged and requires the released PnL to remain realizable.
+// These theorems cover partial/full liens and both backing sources through the
+// public conversion route, including exact stock conservation and asset frame.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_reversed_risk_partial_counterparty_lien_is_realizable_and_asset_local() {
+    prove_reversed_risk_lien_remains_fully_realizable_and_asset_local::<false, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_reversed_risk_full_counterparty_lien_is_realizable_and_asset_local() {
+    prove_reversed_risk_lien_remains_fully_realizable_and_asset_local::<false, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_reversed_risk_partial_insurance_lien_is_realizable_and_asset_local() {
+    prove_reversed_risk_lien_remains_fully_realizable_and_asset_local::<true, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(TokenValueFlowProofV16::validate, conversion_flow_validate_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_reversed_risk_full_insurance_lien_is_realizable_and_asset_local() {
+    prove_reversed_risk_lien_remains_fully_realizable_and_asset_local::<true, true>();
+}
+
+// Source-credit liens are account-wide: they do not retain the leg that
+// required them. Therefore any remaining active leg must keep every such lien
+// locked. These compositions cover both assets and both sides, including the
+// same-side and cross-asset cases the domain-local predicate cannot identify,
+// and require the public conversion route to be a pure rejection over a
+// symbolic claim range.
+#[cfg(all(kani, feature = "closure"))]
+fn current_source_backing_expiry_noop_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<()> {
+    let source = account.source_domains()[0];
+    assert!(source.is_occupied());
+    assert_eq!(source.domain.get(), 0);
+    let bucket = market.markets[0].engine.backing_long.try_to_runtime()?;
+    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+    assert!(bucket.expiry_slot > market.header.current_slot.get());
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn current_active_conversion_preflight_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<()> {
+    assert_eq!(decode_market_mode(market.header.mode)?, MarketModeV16::Live);
+    assert_eq!(market.header.payout_snapshot_captured, 0);
+    let cert = account.header.health_cert.try_to_runtime()?;
+    assert!(cert.valid);
+    assert_eq!(cert.cert_oracle_epoch, market.header.oracle_epoch.get());
+    assert_eq!(cert.cert_funding_epoch, market.header.funding_epoch.get());
+    assert_eq!(cert.cert_risk_epoch, market.header.risk_epoch.get());
+    assert_eq!(
+        cert.cert_asset_set_epoch,
+        market.header.asset_set_epoch.get()
+    );
+    assert_eq!(
+        cert.active_bitmap_at_cert,
+        account.header.active_bitmap.map(V16PodU64::get)
+    );
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn prove_active_risk_blocks_source_lien_realization_without_mutation<
+    const ACTIVE_ASSET: usize,
+    const ACTIVE_LONG: bool,
+>() {
+    assert!(ACTIVE_ASSET < 2);
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let claim = claim_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+    let lien_num = BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+
+    header.vault = V16PodU128::new(10 + claim);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            valid_liened_backing_num: lien_num,
+            credit_rate_num: (claim_num - lien_num) * CREDIT_RATE_SCALE / claim_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets[0].engine.asset.market_id.get(),
+        fresh_unliened_backing_num: claim_num - lien_num,
+        valid_liened_backing_num: lien_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    let active_side = if ACTIVE_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let active_market = markets[ACTIVE_ASSET].engine.asset.try_to_runtime().unwrap();
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: ACTIVE_ASSET as u32,
+        market_id: active_market.market_id,
+        side: active_side,
+        basis_pos_q: if ACTIVE_LONG {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        },
+        a_basis: ADL_ONE,
+        epoch_snap: match active_side {
+            SideV16::Long => active_market.epoch_long,
+            SideV16::Short => active_market.epoch_short,
+        },
+        loss_weight: POS_SCALE,
+        b_epoch_snap: match active_side {
+            SideV16::Long => active_market.epoch_long,
+            SideV16::Short => active_market.epoch_short,
+        },
+        ..PortfolioLegV16::EMPTY
+    });
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: claim as i128,
+        certified_initial_req: 1,
+        certified_maintenance_req: 1,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 1,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        valid: true,
+    });
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: markets[0].engine.asset.market_id,
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_liened_num: V16PodU128::new(lien_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(lien_num),
+        source_lien_effective_reserved: V16PodU128::new(1),
+        source_lien_counterparty_backing_num: V16PodU128::new(lien_num),
+        source_lien_fee_last_slot: header.current_slot,
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let expected_header = header;
+    let expected_markets = [markets[0].engine, markets[1].engine];
+    let expected_account = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.convert_released_pnl_to_capital_not_atomic(&mut account);
+
+    kani::cover!(
+        claim_raw > 1 && result == Err(V16Error::LockActive),
+        "nontrivial active-risk source claim is rejected before mutation"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(market.header.vault, expected_header.vault);
+    assert_eq!(market.header.insurance, expected_header.insurance);
+    assert_eq!(market.header.c_tot, expected_header.c_tot);
+    assert_eq!(market.header.pnl_pos_tot, expected_header.pnl_pos_tot);
+    assert_eq!(
+        market.header.pnl_pos_bound_tot_num,
+        expected_header.pnl_pos_bound_tot_num
+    );
+    assert_eq!(
+        market.header.source_claim_bound_total_num,
+        expected_header.source_claim_bound_total_num
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num,
+        expected_header.source_fresh_backing_total_num
+    );
+    assert_eq!(market.header.risk_epoch, expected_header.risk_epoch);
+    assert_eq!(account.header.capital, expected_account.capital);
+    assert_eq!(account.header.pnl, expected_account.pnl);
+    assert_eq!(account.header.reserved_pnl, expected_account.reserved_pnl);
+    assert_eq!(account.header.active_bitmap, expected_account.active_bitmap);
+    assert!(kani_eq_portfolio_leg_v16_account(
+        &expected_account.legs[0],
+        &account.header.legs[0]
+    ));
+    assert!(kani_eq_portfolio_source_domain_v16_account(
+        &expected_account.source_domains[0],
+        &account.header.source_domains[0]
+    ));
+    assert!(kani_eq_health_cert_v16_account(
+        &expected_account.health_cert,
+        &account.header.health_cert
+    ));
+    assert!(kani_eq_asset_state_v16_account(
+        &expected_markets[0].asset,
+        &market.markets[0].engine.asset
+    ));
+    assert!(kani_eq_source_credit_state_v16_account(
+        &expected_markets[0].source_credit_long,
+        &market.markets[0].engine.source_credit_long
+    ));
+    assert!(kani_eq_backing_bucket_v16_account(
+        &expected_markets[0].backing_long,
+        &market.markets[0].engine.backing_long
+    ));
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long,
+        expected_markets[0].insurance_domain_spent_long
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::preflight_convert_released_pnl_to_capital,
+    current_active_conversion_preflight_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::expire_lapsed_source_backing_for_account_not_atomic,
+    current_source_backing_expiry_noop_stub
+)]
+fn closure_same_asset_same_side_risk_blocks_source_lien_realization() {
+    prove_active_risk_blocks_source_lien_realization_without_mutation::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::preflight_convert_released_pnl_to_capital,
+    current_active_conversion_preflight_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::expire_lapsed_source_backing_for_account_not_atomic,
+    current_source_backing_expiry_noop_stub
+)]
+fn closure_same_asset_opposite_side_risk_blocks_source_lien_realization() {
+    prove_active_risk_blocks_source_lien_realization_without_mutation::<0, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::preflight_convert_released_pnl_to_capital,
+    current_active_conversion_preflight_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::expire_lapsed_source_backing_for_account_not_atomic,
+    current_source_backing_expiry_noop_stub
+)]
+fn closure_cross_asset_long_risk_blocks_source_lien_realization() {
+    prove_active_risk_blocks_source_lien_realization_without_mutation::<1, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::preflight_convert_released_pnl_to_capital,
+    current_active_conversion_preflight_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::expire_lapsed_source_backing_for_account_not_atomic,
+    current_source_backing_expiry_noop_stub
+)]
+fn closure_cross_asset_short_risk_blocks_source_lien_realization() {
+    prove_active_risk_blocks_source_lien_realization_without_mutation::<1, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn resolved_source_close_flow_validate_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
     if proof.external_quote_out == 0 {
         return conversion_flow_validate_stub(proof);
