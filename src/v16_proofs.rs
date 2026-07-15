@@ -7826,6 +7826,346 @@ fn closure_asset_one_short_partial_lien_resolved_source_close_is_conservative_an
     prove_liened_resolved_counterparty_source_close_is_local::<1, false, false>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_expired_source_close_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert!(account.header.provenance_header.market_group_id == market.header.market_group_id);
+    assert!(account.header.owner == account.header.provenance_header.owner);
+    assert!(account.header.capital.get() == 0);
+    assert!(account.header.reserved_pnl.get() == 0);
+    assert!(account.header.fee_credits.get() == 0);
+    assert!(account.header.last_fee_slot.get() == market.header.resolved_slot.get());
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    let pnl = account.header.pnl.get();
+    assert!(pnl == 0 || pnl == 2);
+    assert!(market.header.vault.get() == if pnl == 0 { 10 } else { 11 });
+    assert!(market.header.pnl_pos_tot.get() == pnl as u128);
+    assert!(market.header.pnl_pos_bound_tot_num.get() == pnl as u128 * BOUND_SCALE);
+    assert!(account.source_claim_bound_sum_num()? == pnl as u128 * BOUND_SCALE);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_expired_source_close_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert!(market.markets.len() == 2);
+    assert!(decode_market_mode(market.header.mode)? == MarketModeV16::Resolved);
+    assert!(market.header.vault.get() == 10);
+    assert!(market.header.c_tot.get() == 0);
+    assert!(market.header.insurance.get() == 10);
+    assert!(market.header.pnl_pos_tot.get() == 0);
+    assert!(market.header.pnl_pos_bound_tot.get() == 0);
+    assert!(market.header.pnl_pos_bound_tot_num.get() == 0);
+    assert!(market.header.source_claim_bound_total_num.get() == 0);
+    assert!(market.header.source_fresh_backing_total_num.get() == 0);
+    assert!(market.header.risk_epoch.get() == 4);
+    assert!(market.header.payout_snapshot.get() == 1);
+    assert!(market.header.payout_snapshot_pnl_pos_tot.get() == 2);
+    assert!(market.header.payout_snapshot_captured == 1);
+    Ok(())
+}
+
+// Exact one-atom instance of the symbolic public-expiry theorem in
+// tests/proofs_v16.rs. It is value-neutral and forfeits only the selected
+// domain's lapsed backing into the junior residual pool.
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_expired_source_close_expiry_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    domain: usize,
+    now_slot: u64,
+) -> V16Result<()> {
+    assert!(now_slot == 20);
+    assert!(market.header.current_slot.get() == now_slot);
+    assert!(market.header.source_fresh_backing_total_num.get() == BOUND_SCALE);
+    assert!(market.header.risk_epoch.get() == 2);
+    let (asset_index, side) = market.domain_asset_side(domain)?;
+    let source = market.source_credit_for_domain(domain)?;
+    let bucket = market.backing_bucket_for_domain(domain)?;
+    assert!(source.positive_claim_bound_num == 2 * BOUND_SCALE);
+    assert!(source.exact_positive_claim_num == 2 * BOUND_SCALE);
+    assert!(source.fresh_reserved_backing_num == BOUND_SCALE);
+    assert!(source.credit_rate_num == CREDIT_RATE_SCALE / 2);
+    assert!(source.credit_epoch == 0);
+    assert!(bucket.status == BackingBucketStatusV16::Fresh);
+    assert!(bucket.expiry_slot == 5);
+    assert!(bucket.fresh_unliened_backing_num == BOUND_SCALE);
+    let expired_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: 2 * BOUND_SCALE,
+        exact_positive_claim_num: 2 * BOUND_SCALE,
+        credit_rate_num: 0,
+        credit_epoch: 1,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let expired_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: bucket.market_id,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    match side {
+        SideV16::Long => {
+            market.markets[asset_index].engine.source_credit_long = expired_source;
+            market.markets[asset_index].engine.backing_long = expired_bucket;
+        }
+        SideV16::Short => {
+            market.markets[asset_index].engine.source_credit_short = expired_source;
+            market.markets[asset_index].engine.backing_short = expired_bucket;
+        }
+    }
+    market.header.source_fresh_backing_total_num = V16PodU128::new(0);
+    market.header.risk_epoch = V16PodU64::new(3);
+    Ok(())
+}
+
+// Exact post-expiry support consequence proved independently by
+// proof_v16_expired_backing_yields_zero_realizable_support_after_expiry.
+#[cfg(all(kani, feature = "closure"))]
+fn resolved_expired_source_zero_support_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+    face_claim: u128,
+) -> V16Result<u128> {
+    assert!(face_claim == 2);
+    let source = account.header.source_domains[0];
+    assert!(source.is_occupied());
+    assert!(source.source_claim_bound_num.get() == 2 * BOUND_SCALE);
+    let domain = source.domain.get() as usize;
+    let state = market.source_credit_for_domain(domain)?;
+    let bucket = market.backing_bucket_for_domain(domain)?;
+    assert!(state.positive_claim_bound_num == 2 * BOUND_SCALE);
+    assert!(state.exact_positive_claim_num == 2 * BOUND_SCALE);
+    assert!(state.fresh_reserved_backing_num == 0);
+    assert!(state.credit_rate_num == 0);
+    assert!(state.credit_epoch == 1);
+    assert!(bucket.status == BackingBucketStatusV16::Expired);
+    assert!(bucket.fresh_unliened_backing_num == 0);
+    Ok(0)
+}
+
+// Expired backing must not dead-lock a winner or remain senior after expiry.
+// The public close expires only the selected domain, pays the one-atom junior
+// pool against a two-atom face, and leaves every unrelated domain untouched.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_expired_source_close_is_live_and_local<const ASSET: usize, const SOURCE_LONG: bool>() {
+    assert!(ASSET < 2);
+    let claim = 2u128;
+    let backing = 1u128;
+    let claim_num = claim * BOUND_SCALE;
+    let source_side = if SOURCE_LONG {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let domain = ASSET * 2 + encode_side(source_side) as usize;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.mode = encode_market_mode(MarketModeV16::Resolved);
+    header.current_slot = V16PodU64::new(20);
+    header.resolved_slot = V16PodU64::new(20);
+    header.vault = V16PodU128::new(10 + backing);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(BOUND_SCALE);
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.last_fee_slot = header.resolved_slot;
+    account_header.source_domains[0].domain = V16PodU32::new(domain as u32);
+    account_header.source_domains[0].source_claim_market_id = markets[ASSET].engine.asset.market_id;
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let initial_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE / 2,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let initial_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets[ASSET].engine.asset.market_id.get(),
+        fresh_unliened_backing_num: BOUND_SCALE,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    match source_side {
+        SideV16::Long => {
+            markets[ASSET].engine.source_credit_long = initial_source;
+            markets[ASSET].engine.backing_long = initial_bucket;
+        }
+        SideV16::Short => {
+            markets[ASSET].engine.source_credit_short = initial_source;
+            markets[ASSET].engine.backing_short = initial_bucket;
+        }
+    }
+
+    let header_before = header;
+    let account_before = account_header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(10);
+    expected_header.pnl_pos_tot = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(0);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(0);
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(0);
+    expected_header.risk_epoch = V16PodU64::new(4);
+    expected_header.payout_snapshot = V16PodU128::new(backing);
+    expected_header.payout_snapshot_pnl_pos_tot = V16PodU128::new(claim);
+    expected_header.payout_snapshot_captured = 1;
+    expected_header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: backing,
+            terminal_claim_exact_receipts_num: claim_num,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: backing * BOUND_SCALE,
+            current_payout_rate_den: claim_num,
+            snapshot_slot: 20,
+            payout_halted: false,
+            finalized: false,
+        });
+
+    let final_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 2,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let final_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets[ASSET].engine.asset.market_id.get(),
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    let mut expected_markets = markets_before;
+    match source_side {
+        SideV16::Long => {
+            expected_markets[ASSET].source_credit_long = final_source;
+            expected_markets[ASSET].backing_long = final_bucket;
+        }
+        SideV16::Short => {
+            expected_markets[ASSET].source_credit_short = final_source;
+            expected_markets[ASSET].backing_short = final_bucket;
+        }
+    }
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.source_domains[0] = PortfolioSourceDomainV16Account::default();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .unwrap();
+
+    kani::cover!(
+        outcome == ResolvedCloseOutcomeV16::Closed { payout: backing },
+        "expired backing reaches a haircut payout and terminal close"
+    );
+    assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: backing });
+    assert_resolved_source_close_header_frame(&expected_header, market.header);
+    assert_resolved_source_close_account_frame(&expected_account, account.header);
+    assert_resolved_source_close_market_frames(&expected_markets, &market);
+    assert_eq!(market.residual(), residual_before);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    resolved_source_close_compact_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_expired_source_close_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_expired_source_close_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    resolved_source_close_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::sync_account_fee_to_slot_not_atomic,
+    resolved_source_close_zero_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    resolved_source_close_nonnegative_principal_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::detach_solvent_active_legs_for_resolved_close,
+    resolved_source_close_empty_detach_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::expire_source_backing_bucket_not_atomic,
+    resolved_expired_source_close_expiry_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_source_realizable_support,
+    resolved_expired_source_zero_support_stub
+)]
+fn closure_asset_zero_long_expired_source_close_is_live_conservative_and_local() {
+    prove_expired_source_close_is_live_and_local::<0, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    resolved_source_close_compact_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    resolved_expired_source_close_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    resolved_expired_source_close_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    resolved_source_close_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::sync_account_fee_to_slot_not_atomic,
+    resolved_source_close_zero_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    resolved_source_close_nonnegative_principal_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::detach_solvent_active_legs_for_resolved_close,
+    resolved_source_close_empty_detach_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::expire_source_backing_bucket_not_atomic,
+    resolved_expired_source_close_expiry_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_source_realizable_support,
+    resolved_expired_source_zero_support_stub
+)]
+fn closure_asset_one_short_expired_source_close_is_live_conservative_and_local() {
+    prove_expired_source_close_is_live_and_local::<1, false>();
+}
+
 // The source-backed conversion proofs above establish the maximum capital that
 // can be realized from a claim. This companion theorem proves the external leg:
 // for every nonzero valid withdrawal amount and capital balance, the public API
