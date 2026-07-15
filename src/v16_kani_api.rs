@@ -727,12 +727,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    pub fn kani_prepare_insurance_lien_terminal_release_delta(
+    pub fn kani_prepare_impaired_insurance_lien_terminal_release_delta(
         reservation: InsuranceCreditReservationV16,
         source: SourceCreditStateV16,
         amount: u128,
     ) -> V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)> {
-        V16Core::prepare_insurance_lien_terminal_release_delta(reservation, source, amount)
+        V16Core::prepare_impaired_insurance_lien_terminal_release_delta(reservation, source, amount)
     }
 
     pub fn kani_create_initial_margin_source_lien_if_needed(

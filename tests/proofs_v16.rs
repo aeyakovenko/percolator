@@ -39,6 +39,7 @@ use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
     kani_eq_portfolio_account_v16_account,
 };
+use percolator::wide_math::U256;
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
@@ -7832,29 +7833,28 @@ fn proof_v16_resolved_winddown_releases_expired_liened_source_claim() {
     assert_eq!(source_after.provider_receivable_num, 0);
 }
 
-// Terminal wind-down must also clear insurance-backed liens that were impaired
-// before resolution. The Live release helper intentionally only releases valid
-// liens; terminal cleanup needs to remove the impaired counter and the reserved
-// insurance backing, otherwise the source domain/asset slot can never become
-// empty again.
+// Terminal wind-down of one impaired account must clear only that account's
+// impaired aggregate. Other users' valid liens share the domain reservation and
+// must remain funded and releasable.
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn proof_v16_resolved_winddown_releases_impaired_insurance_lien() {
-    let units_raw: u8 = kani::any();
-    let impaired_case: bool = kani::any();
-    kani::assume(units_raw > 0);
-    let amount = (units_raw as u128) * BOUND_SCALE;
-    let valid = if impaired_case { 0 } else { amount };
-    let impaired = amount - valid;
+fn proof_v16_resolved_impaired_winddown_preserves_other_valid_insurance_liens() {
+    let valid_units_raw: u8 = kani::any();
+    let impaired_units_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&valid_units_raw));
+    kani::assume((1..=8).contains(&impaired_units_raw));
+    let valid = valid_units_raw as u128 * BOUND_SCALE;
+    let impaired = impaired_units_raw as u128 * BOUND_SCALE;
+    let reserved = valid + impaired;
     let reservation = InsuranceCreditReservationV16 {
-        insurance_credit_reserved_num: amount,
+        insurance_credit_reserved_num: reserved,
         valid_liened_insurance_num: valid,
         impaired_liened_insurance_num: impaired,
         ..InsuranceCreditReservationV16::EMPTY
     };
     let source = SourceCreditStateV16 {
-        insurance_credit_reserved_num: amount,
+        insurance_credit_reserved_num: reserved,
         valid_liened_insurance_num: valid,
         impaired_liened_insurance_num: impaired,
         credit_rate_num: CREDIT_RATE_SCALE,
@@ -7862,29 +7862,24 @@ fn proof_v16_resolved_winddown_releases_impaired_insurance_lien() {
     };
 
     let (reservation_after, source_after) =
-        MarketGroupV16ViewMut::<u64>::kani_prepare_insurance_lien_terminal_release_delta(
+        MarketGroupV16ViewMut::<u64>::kani_prepare_impaired_insurance_lien_terminal_release_delta(
             reservation,
             source,
-            amount,
+            impaired,
         )
         .unwrap();
 
     kani::cover!(
-        impaired_case && units_raw > 4,
-        "terminal wind-down releases wide impaired insurance lien"
+        valid_units_raw > 4 && impaired_units_raw > 4,
+        "mixed domain preserves a wide valid lien while clearing a wide impaired lien"
     );
-    kani::cover!(
-        !impaired_case && units_raw > 4,
-        "terminal wind-down still releases wide valid insurance lien"
-    );
-    assert_eq!(reservation_after.insurance_credit_reserved_num, 0);
-    assert_eq!(reservation_after.valid_liened_insurance_num, 0);
+    assert_eq!(reservation_after.insurance_credit_reserved_num, valid);
+    assert_eq!(reservation_after.valid_liened_insurance_num, valid);
     assert_eq!(reservation_after.impaired_liened_insurance_num, 0);
     assert_eq!(reservation_after.consumed_insurance_num, 0);
-    assert_eq!(source_after.insurance_credit_reserved_num, 0);
-    assert_eq!(source_after.valid_liened_insurance_num, 0);
+    assert_eq!(source_after.insurance_credit_reserved_num, valid);
+    assert_eq!(source_after.valid_liened_insurance_num, valid);
     assert_eq!(source_after.impaired_liened_insurance_num, 0);
-    assert_eq!(source_after, SourceCreditStateV16::EMPTY);
 }
 
 #[kani::proof]
@@ -7970,7 +7965,7 @@ fn proof_v16_final_impaired_source_claim_burn_clears_account_occupancy_counters(
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
-fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_invalid() {
+fn proof_v16_impaired_insurance_lien_terminal_release_is_exact_and_rejects_invalid() {
     let amount_units_raw: u8 = kani::any();
     let reservation_reserved_raw: u8 = kani::any();
     let reservation_valid_raw: u8 = kani::any();
@@ -8013,20 +8008,18 @@ fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_inv
         ..SourceCreditStateV16::EMPTY
     };
 
-    let result = MarketGroupV16ViewMut::<u64>::kani_prepare_insurance_lien_terminal_release_delta(
-        reservation,
-        source,
-        amount,
-    );
-    let valid_release = amount.min(reservation_valid);
-    let impaired_release = amount - valid_release;
+    let result =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_impaired_insurance_lien_terminal_release_delta(
+            reservation,
+            source,
+            amount,
+        );
     let expected_ok = amount == 0
         || (!force_unaligned
             && reservation_reserved >= amount
             && source_reserved >= amount
-            && source_valid >= valid_release
-            && reservation_impaired >= impaired_release
-            && source_impaired >= impaired_release);
+            && reservation_impaired >= amount
+            && source_impaired >= amount);
 
     kani::cover!(amount == 0, "terminal insurance release covers zero no-op");
     kani::cover!(
@@ -8042,27 +8035,21 @@ fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_inv
             && amount > 0
             && reservation_reserved >= amount
             && source_reserved >= amount
-            && source_valid < valid_release,
-        "terminal insurance release rejects insufficient source valid lien"
+            && reservation_impaired < amount,
+        "terminal insurance release rejects insufficient impaired reservation"
     );
     kani::cover!(
         !force_unaligned
             && amount > 0
-            && valid_release < amount
-            && reservation_impaired < impaired_release,
-        "terminal insurance release rejects insufficient impaired reservation"
+            && reservation_reserved >= amount
+            && source_reserved >= amount
+            && reservation_impaired >= amount
+            && source_impaired < amount,
+        "terminal insurance release rejects insufficient impaired source aggregate"
     );
     kani::cover!(
-        expected_ok && amount > 0 && valid_release == amount && reservation_reserved > amount,
-        "terminal insurance release covers valid-only partial release"
-    );
-    kani::cover!(
-        expected_ok && amount > 0 && valid_release > 0 && valid_release < amount,
-        "terminal insurance release covers mixed valid and impaired release"
-    );
-    kani::cover!(
-        expected_ok && amount > 0 && valid_release == 0,
-        "terminal insurance release covers impaired-only release"
+        expected_ok && amount > 0 && reservation_valid > 0 && reservation_impaired > amount,
+        "terminal impaired release preserves valid liens and remaining impaired liens"
     );
 
     assert_eq!(result.is_ok(), expected_ok);
@@ -8074,23 +8061,20 @@ fn proof_v16_insurance_lien_terminal_release_delta_handles_mixed_and_rejects_inv
         );
         assert_eq!(
             next_reservation.valid_liened_insurance_num,
-            reservation_valid - valid_release
+            reservation_valid
         );
         assert_eq!(
             next_reservation.impaired_liened_insurance_num,
-            reservation_impaired - impaired_release
+            reservation_impaired - amount
         );
         assert_eq!(
             next_source.insurance_credit_reserved_num,
             source_reserved - amount
         );
-        assert_eq!(
-            next_source.valid_liened_insurance_num,
-            source_valid - valid_release
-        );
+        assert_eq!(next_source.valid_liened_insurance_num, source_valid);
         assert_eq!(
             next_source.impaired_liened_insurance_num,
-            source_impaired - impaired_release
+            source_impaired - amount
         );
     } else if force_unaligned && amount > 0 {
         assert_eq!(result, Err(V16Error::InvalidConfig));
@@ -11885,9 +11869,62 @@ fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() 
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+fn insurance_lien_release_div_rem_stub(num: U256, den: U256) -> (U256, U256) {
+    assert_eq!(num.hi(), 0);
+    assert_eq!(den.hi(), 0);
+    assert_ne!(den.lo(), 0);
+    (
+        U256::from_u128(num.lo() / den.lo()),
+        U256::from_u128(num.lo() % den.lo()),
+    )
+}
+
+fn insurance_lien_release_shape_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> Result<(), V16Error> {
+    let atoms = market.header.vault.get();
+    let amount = atoms * BOUND_SCALE;
+    assert_eq!(market.markets.len(), 1);
+    assert_eq!(market.header.insurance.get(), atoms);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        atoms
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        atoms
+    );
+    let slot = &market.markets[0].engine;
+    assert_eq!(slot.insurance_domain_budget_long.get(), atoms);
+    assert_eq!(slot.insurance_domain_spent_long.get(), 0);
+    let reservation = slot.insurance_reservation_long.try_to_runtime()?;
+    let source = slot.source_credit_long.try_to_runtime()?;
+    assert_eq!(reservation.insurance_credit_reserved_num, amount);
+    assert_eq!(reservation.valid_liened_insurance_num, 0);
+    assert_eq!(reservation.impaired_liened_insurance_num, 0);
+    assert_eq!(source.insurance_credit_reserved_num, amount);
+    assert_eq!(source.valid_liened_insurance_num, 0);
+    assert_eq!(source.impaired_liened_insurance_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(source.credit_epoch, 1);
+    Ok(())
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+#[kani::stub(
+    percolator::wide_math::div_rem_u256,
+    insurance_lien_release_div_rem_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    insurance_lien_release_shape_stub
+)]
 fn proof_v16_public_insurance_lien_release_restores_reserved_credit_without_value_movement() {
     let atoms_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&atoms_raw));

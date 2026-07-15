@@ -2721,7 +2721,6 @@ impl V16Core {
         Ok((reservation, source))
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     // Contract layer: insurance lien release un-encumbers reserved credit —
     // exact mirror of creation; reservation total and backing-side untouched.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)>| match result {
@@ -2753,30 +2752,20 @@ impl V16Core {
         Ok((reservation, source))
     }
 
-    // Contract layer: the TERMINAL insurance release un-RESERVES the full
-    // amount (unlike the Live release, which keeps the reservation), splitting
-    // the lien release valid-first-then-impaired on both ledgers in lockstep.
-    // (First contract draft claimed Live semantics; the contract check's
-    // counterexample exposed the wind-down difference.)
+    // Terminal impaired-claim cleanup unreserves only impaired backing. Valid
+    // liens may belong to other accounts sharing this domain reservation and
+    // must remain funded.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)>| match result {
         Ok((r, s)) => (amount == 0 && *r == reservation && *s == source)
-            || {
-                let vr = if reservation.valid_liened_insurance_num < amount {
-                    reservation.valid_liened_insurance_num
-                } else {
-                    amount
-                };
-                let ir = amount.wrapping_sub(vr);
-                r.valid_liened_insurance_num == reservation.valid_liened_insurance_num.wrapping_sub(vr)
-                    && r.impaired_liened_insurance_num == reservation.impaired_liened_insurance_num.wrapping_sub(ir)
-                    && r.insurance_credit_reserved_num == reservation.insurance_credit_reserved_num.wrapping_sub(amount)
-                    && s.valid_liened_insurance_num == source.valid_liened_insurance_num.wrapping_sub(vr)
-                    && s.impaired_liened_insurance_num == source.impaired_liened_insurance_num.wrapping_sub(ir)
-                    && s.insurance_credit_reserved_num == source.insurance_credit_reserved_num.wrapping_sub(amount)
-            },
+            || (r.valid_liened_insurance_num == reservation.valid_liened_insurance_num
+                && r.impaired_liened_insurance_num == reservation.impaired_liened_insurance_num.wrapping_sub(amount)
+                && r.insurance_credit_reserved_num == reservation.insurance_credit_reserved_num.wrapping_sub(amount)
+                && s.valid_liened_insurance_num == source.valid_liened_insurance_num
+                && s.impaired_liened_insurance_num == source.impaired_liened_insurance_num.wrapping_sub(amount)
+                && s.insurance_credit_reserved_num == source.insurance_credit_reserved_num.wrapping_sub(amount)),
         Err(_) => true,
     }))]
-    fn prepare_insurance_lien_terminal_release_delta(
+    fn prepare_impaired_insurance_lien_terminal_release_delta(
         mut reservation: InsuranceCreditReservationV16,
         mut source: SourceCreditStateV16,
         amount: u128,
@@ -2787,25 +2776,13 @@ impl V16Core {
         Self::validate_bound_num_atom_aligned(amount)?;
         if reservation.insurance_credit_reserved_num < amount
             || source.insurance_credit_reserved_num < amount
+            || reservation.impaired_liened_insurance_num < amount
+            || source.impaired_liened_insurance_num < amount
         {
             return Err(V16Error::CounterUnderflow);
         }
-        let valid_release = amount.min(reservation.valid_liened_insurance_num);
-        if source.valid_liened_insurance_num < valid_release {
-            return Err(V16Error::CounterUnderflow);
-        }
-        let impaired_release = amount
-            .checked_sub(valid_release)
-            .ok_or(V16Error::CounterUnderflow)?;
-        if reservation.impaired_liened_insurance_num < impaired_release
-            || source.impaired_liened_insurance_num < impaired_release
-        {
-            return Err(V16Error::CounterUnderflow);
-        }
-        reservation.valid_liened_insurance_num -= valid_release;
-        source.valid_liened_insurance_num -= valid_release;
-        reservation.impaired_liened_insurance_num -= impaired_release;
-        source.impaired_liened_insurance_num -= impaired_release;
+        reservation.impaired_liened_insurance_num -= amount;
+        source.impaired_liened_insurance_num -= amount;
         reservation.insurance_credit_reserved_num -= amount;
         source.insurance_credit_reserved_num -= amount;
         Ok((reservation, source))
@@ -8132,6 +8109,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         domain: usize,
         amount: u128,
     ) -> V16Result<()> {
+        self.release_valid_source_credit_lien_from_insurance_not_atomic(domain, amount)
+    }
+
+    fn release_valid_source_credit_lien_from_insurance_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
         if amount == 0 {
             return Ok(());
@@ -8158,7 +8143,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    fn release_source_credit_lien_from_insurance_terminal_not_atomic(
+    fn release_impaired_source_credit_lien_from_insurance_terminal_not_atomic(
         &mut self,
         domain: usize,
         amount: u128,
@@ -8167,11 +8152,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if amount == 0 {
             return Ok(());
         }
-        let (reservation, source) = V16Core::prepare_insurance_lien_terminal_release_delta(
-            self.insurance_reservation_for_domain(domain)?,
-            self.source_credit_for_domain(domain)?,
-            amount,
-        )?;
+        let (reservation, source) =
+            V16Core::prepare_impaired_insurance_lien_terminal_release_delta(
+                self.insurance_reservation_for_domain(domain)?,
+                self.source_credit_for_domain(domain)?,
+                amount,
+            )?;
         let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
             source,
             self.header.risk_epoch.get(),
@@ -8640,10 +8626,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             )?;
         }
         if insurance_backing != 0 {
-            self.release_source_credit_lien_from_insurance_terminal_not_atomic(
-                d,
-                insurance_backing,
-            )?;
+            // A valid lien only encumbers the funded reservation. Terminal
+            // realization must retain that reservation for the conversion that
+            // immediately follows; impaired-claim burn unreserves separately.
+            self.release_valid_source_credit_lien_from_insurance_not_atomic(d, insurance_backing)?;
         }
         let source = &mut account.header.source_domains[slot];
         source.source_claim_liened_num = V16PodU128::new(0);
@@ -8734,7 +8720,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     {
                         let impaired_insurance_backing =
                             V16Core::bound_num_from_amount(impaired_effective_burn)?;
-                        self.release_source_credit_lien_from_insurance_terminal_not_atomic(
+                        self.release_impaired_source_credit_lien_from_insurance_terminal_not_atomic(
                             d,
                             impaired_insurance_backing,
                         )?;
