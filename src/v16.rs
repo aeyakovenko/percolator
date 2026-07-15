@@ -170,9 +170,9 @@ pub fn v16_domain_pair_for_asset_index(asset_index: usize) -> V16Result<(usize, 
 /// dispatch hard-requires a caller-supplied oracle observation: there is no active
 /// account leg from which to choose a committed asset, so it must accrue a NEW
 /// price. `RefreshAccount { asset_index: Some(_) }` and EVERY other plan are
-/// dispatchable from committed on-chain state alone — `SettleBChunk` ignores
-/// price, `Liquidate` reads the current health cert, `DeclareRecovery` /
-/// `CloseResolved` / `NoAction` take no price — so a keeper holding no fresh
+/// dispatchable from committed on-chain state alone — `AdvanceRecoveryClose`
+/// and `SettleBChunk` ignore price, `Liquidate` reads the current health cert,
+/// `DeclareRecovery` / `CloseResolved` / `NoAction` take no price — so a keeper holding no fresh
 /// observation can still drive the account forward (no liveness stall). A wrapper
 /// may call this to decide whether it must source an oracle observation before
 /// cranking.
@@ -187,7 +187,8 @@ pub fn v16_domain_pair_for_asset_index(asset_index: usize) -> V16Result<(usize, 
 pub fn auto_crank_plan_requires_caller_observation(plan: &AutoCrankPlanV16) -> bool {
     match plan {
         AutoCrankPlanV16::RefreshAccount { asset_index } => asset_index.is_none(),
-        AutoCrankPlanV16::SettleBChunk { .. }
+        AutoCrankPlanV16::AdvanceRecoveryClose { .. }
+        | AutoCrankPlanV16::SettleBChunk { .. }
         | AutoCrankPlanV16::Liquidate { .. }
         | AutoCrankPlanV16::DeclareRecovery { .. }
         | AutoCrankPlanV16::CloseResolved
@@ -1537,30 +1538,33 @@ impl V16Core {
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
     /// the action nor the asset). PROVES: TOTALITY (an actionable account yields a
     /// non-NoAction plan), PRIORITY DETERMINISM (the documented order: recovery >
-    /// resolved-close > b-stale settle > liquidate > refresh), and SELECTED-ASSET
-    /// fidelity (SettleBChunk/Liquidate carry exactly the provided engine-selected
-    /// slot). `pending_close` is classifier-unreachable (build_actionable_summary
-    /// never sets it — a leg-bearing pending close is liquidatable; see the
-    /// AdvanceClose note), so it is required absent here. Pure.
-    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(!summary.pending_close))]
+    /// resolved-close > recovery-close > b-stale settle > liquidate > refresh),
+    /// and SELECTED-ASSET fidelity (every asset-scoped plan carries exactly the
+    /// provided engine-selected slot). Pure.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|r: &AutoCrankPlanV16| {
         let recovery = summary.expired_close || summary.recovery_eligible;
         match r {
             AutoCrankPlanV16::NoAction => !summary.is_actionable(),
             AutoCrankPlanV16::DeclareRecovery { reason } => recovery && *reason == recovery_reason,
             AutoCrankPlanV16::CloseResolved => !recovery && summary.resolved_winner,
+            AutoCrankPlanV16::AdvanceRecoveryClose { asset_index } =>
+                !recovery && !summary.resolved_winner && summary.pending_close
+                    && *asset_index == pending_close_slot,
             AutoCrankPlanV16::SettleBChunk { asset_index } =>
-                !recovery && !summary.resolved_winner && summary.b_stale && *asset_index == b_stale_slot,
+                !recovery && !summary.resolved_winner && !summary.pending_close
+                    && summary.b_stale && *asset_index == b_stale_slot,
             AutoCrankPlanV16::Liquidate { asset_index } =>
-                !recovery && !summary.resolved_winner && !summary.b_stale && summary.liquidatable
-                    && *asset_index == liq_slot,
+                !recovery && !summary.resolved_winner && !summary.pending_close
+                    && !summary.b_stale && summary.liquidatable && *asset_index == liq_slot,
             AutoCrankPlanV16::RefreshAccount { asset_index } =>
-                !recovery && !summary.resolved_winner && !summary.b_stale && !summary.liquidatable
-                    && summary.stale && *asset_index == refresh_asset,
+                !recovery && !summary.resolved_winner && !summary.pending_close
+                    && !summary.b_stale && !summary.liquidatable && summary.stale
+                    && *asset_index == refresh_asset,
         }
     }))]
     pub(crate) fn select_auto_crank_plan(
         summary: ActionableSummaryV16,
+        pending_close_slot: usize,
         b_stale_slot: usize,
         liq_slot: usize,
         refresh_asset: Option<usize>,
@@ -1572,6 +1576,10 @@ impl V16Core {
             }
         } else if summary.resolved_winner {
             AutoCrankPlanV16::CloseResolved
+        } else if summary.pending_close {
+            AutoCrankPlanV16::AdvanceRecoveryClose {
+                asset_index: pending_close_slot,
+            }
         } else if summary.b_stale {
             AutoCrankPlanV16::SettleBChunk {
                 asset_index: b_stale_slot,
@@ -4836,6 +4844,9 @@ pub enum AutoCrankPlanV16 {
     RefreshAccount {
         asset_index: Option<usize>,
     },
+    AdvanceRecoveryClose {
+        asset_index: usize,
+    },
     SettleBChunk {
         asset_index: usize,
     },
@@ -5483,6 +5494,7 @@ pub enum BResidualStepV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionlessCrankActionV16 {
     Refresh,
+    AdvanceRecoveryClose { asset_index: usize },
     SettleB { asset_index: usize },
     Liquidate(LiquidationRequestV16),
     Recover(PermissionlessRecoveryReasonV16),
@@ -11542,6 +11554,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 touches_accrued_asset
             }
+            PermissionlessCrankActionV16::AdvanceRecoveryClose { asset_index } => {
+                let (outcome, _) =
+                    self.advance_asset_local_recovery_close_not_atomic(account, asset_index)?;
+                return Ok(PermissionlessProgressOutcomeV16::ResidualBooked(outcome));
+            }
             PermissionlessCrankActionV16::SettleB { asset_index } => {
                 let out = self.settle_account_b_chunk(
                     account,
@@ -11579,8 +11596,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// GATED so every flag that can be set has a currently-valid dispatch target:
     ///   stale            — Live, health cert not current (kernel_cert_is_current==false)
     ///   b_stale          — Live, some active leg flagged b-stale (has_b_stale_leg)
-    ///   pending_close    — Live, a close-progress ledger is active
-    ///   expired_close    — Live, that ledger is past its max-close slot
+    ///   pending_close    — Live, outstanding close on a frozen Recovery asset
+    ///   expired_close    — Live, expired close not safely isolated to Recovery asset
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
     ///   recovery_eligible— Resolved, unattributed-insolvent negative-PnL recovery
     ///   resolved_winner  — Resolved, positive PnL, resolved payout ready
@@ -11613,26 +11630,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
         // actionable close work. The `active` flag can linger past that.
         let close_outstanding = ledger.active && ledger.residual_remaining > 0;
+        let recovery_asset_close = if close_outstanding {
+            self.close_progress_is_asset_local_recovery(ledger)?
+        } else {
+            false
+        };
         let stale = live && !cert_current;
         let b_stale = live && Self::has_b_stale_leg(account)?;
-        // pending_close is NOT proactively classified: the close-ledger residual is
-        // booked ONLY inside the liquidation/resolved path that owns it
-        // (book_bankruptcy_residual_chunk_for_account_core) — settle_account_b_chunk
-        // does not touch it, so an AdvanceClose->SettleB dispatch would not advance
-        // the ledger. An outstanding Live close with a leg is liquidatable (the
-        // residual is an open deficit), so the Liquidate continuation books the
-        // residual chunk; the leg-less / expired cases are handled by expired_close
-        // -> recovery or are the documented backstopped A3 route. AdvanceClose is
-        // therefore classifier-unreachable (the proven selector still admits it).
-        let pending_close = false;
-        // Expired outstanding close -> terminal recovery (Recover needs no leg).
-        let expired_close =
-            live && close_outstanding && self.header.current_slot.get() > ledger.max_close_slot;
+        // Once an asset is in Recovery its mark is frozen. A ledger already opened
+        // by the owner therefore has a stable loss snapshot and can be advanced one
+        // public B chunk at a time without promoting an untrusted asset to global
+        // market Recovery. Other expired ledgers retain the terminal fallback.
+        let pending_close = live && close_outstanding && recovery_asset_close;
+        let expired_close = live
+            && close_outstanding
+            && !recovery_asset_close
+            && self.header.current_slot.get() > ledger.max_close_slot;
         // liquidatable requires a current certified deficit AND actual open risk:
         // a stale cert can still report a deficit after the position was already
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
-        let liquidatable = live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
+        let liquidatable = live
+            && !pending_close
+            && cert_current
+            && cert.certified_liq_deficit != 0
+            && has_open_risk;
         // Permissionless recovery (declare_permissionless_recovery) is a LIVE-mode
         // action — it rejects Resolved mode with LockActive. The proactive Live
         // recovery condition the auto-crank declares is an EXPIRED outstanding
@@ -11709,8 +11731,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// THE SINGLE PUBLIC PERMISSIONLESS CRANK (engine.md): the only crank the
     /// wrapper should call — order-insensitive and engine-selected, built for a
     /// swarm of opportunistic keepers whose transactions land out of order. The
-    /// per-action primitives (refresh / settle-B / liquidate / recover /
-    /// close-resolved) are internal dispatch targets, not wrapper entrypoints.
+    /// per-action primitives (refresh / recovery-close / settle-B / liquidate /
+    /// recover / close-resolved) are internal dispatch targets, not wrapper
+    /// entrypoints.
     ///
     /// Calling convention (wrapper side):
     /// 1. Decode a public auto-crank instruction carrying a bounded set of oracle
@@ -11738,6 +11761,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<AutoCrankResultV16> {
         let summary = self.build_actionable_summary(&account.as_view())?;
         let (b_stale_asset, active_asset) = Self::auto_crank_selected_assets(&account.as_view())?;
+        let pending_close_asset = if summary.pending_close {
+            account.header.close_progress.asset_index.get() as usize
+        } else {
+            0
+        };
         let recovery_reason = if summary.expired_close {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {
@@ -11747,6 +11775,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // engine-selected asset). refresh accrues the first active leg's asset.
         let plan = V16Core::select_auto_crank_plan(
             summary,
+            pending_close_asset,
             b_stale_asset.unwrap_or(0),
             active_asset.unwrap_or(0),
             active_asset,
@@ -11812,6 +11841,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     ai,
                     obs,
                     PermissionlessCrankActionV16::Refresh,
+                )?)
+            }
+            AutoCrankPlanV16::AdvanceRecoveryClose { asset_index } => {
+                AutoCrankOutcomeV16::Progressed(self.permissionless_crank_not_atomic(
+                    account,
+                    PermissionlessCrankRequestV16 {
+                        now_slot: work.now_slot,
+                        asset_index,
+                        effective_price: 0,
+                        funding_rate_e9: 0,
+                        action: PermissionlessCrankActionV16::AdvanceRecoveryClose { asset_index },
+                    },
                 )?)
             }
             AutoCrankPlanV16::SettleBChunk { asset_index } => {
@@ -13083,12 +13124,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_account_audit_scan(&account.as_view())
     }
 
+    fn close_progress_is_asset_local_recovery(
+        &self,
+        ledger: CloseProgressLedgerV16,
+    ) -> V16Result<bool> {
+        let asset_index = ledger.asset_index as usize;
+        self.validate_configured_asset_index(asset_index)?;
+        let asset = self.asset_state(asset_index)?;
+        if asset.market_id != ledger.market_id {
+            return Err(V16Error::InvalidLeg);
+        }
+        Ok(asset.lifecycle == AssetLifecycleV16::Recovery)
+    }
+
     fn ensure_close_progress_not_expired(
         &mut self,
         ledger: CloseProgressLedgerV16,
     ) -> V16Result<()> {
         if ledger.active && self.header.current_slot.get() > ledger.max_close_slot {
-            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+                || self.close_progress_is_asset_local_recovery(ledger)?
+            {
                 return Ok(());
             }
             self.declare_permissionless_recovery(
@@ -13112,7 +13168,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && Self::active_leg_slot_for_asset(account, asset_index)?.is_some()
             && self.header.current_slot.get() > ledger.drift_reference_slot
         {
-            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+                || self.close_progress_is_asset_local_recovery(ledger)?
+            {
                 return Ok(());
             }
             self.declare_permissionless_recovery(
@@ -13372,6 +13430,64 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             outcome.explicit_loss,
         )?;
         Ok(outcome)
+    }
+
+    fn advance_asset_local_recovery_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<(BResidualBookingOutcomeV16, bool)> {
+        account.validate_with_market(&self.as_view())?;
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        if !ledger.active
+            || ledger.finalized
+            || ledger.residual_remaining == 0
+            || ledger.asset_index as usize != asset_index
+            || !self.close_progress_is_asset_local_recovery(ledger)?
+        {
+            return Err(V16Error::LockActive);
+        }
+        let leg = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
+        if !leg.active || ledger.domain_side != opposite_side(leg.side) {
+            return Err(V16Error::InvalidLeg);
+        }
+        if account.header.pnl.get() >= 0
+            || account.header.pnl.get().unsigned_abs() != ledger.residual_remaining
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+
+        let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
+            account,
+            asset_index,
+            leg.side,
+            ledger.residual_remaining,
+        )?;
+        let cleared = outcome
+            .booked_loss
+            .checked_add(outcome.explicit_loss)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .min(ledger.residual_remaining);
+        if cleared == 0 {
+            return Err(V16Error::NonProgress);
+        }
+        let cleared_i128 = i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let new_pnl = account
+            .header
+            .pnl
+            .get()
+            .checked_add(cleared_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        self.set_account_pnl(account, new_pnl)?;
+
+        let ledger_after = account.header.close_progress.try_to_runtime()?;
+        let detached = ledger_after.residual_remaining == 0 && new_pnl == 0;
+        if detached {
+            self.clear_leg(account, asset_index)?;
+        }
+        self.validate_shape()?;
+        account.validate_with_market(&self.as_view())?;
+        Ok((outcome, detached))
     }
 
     fn begin_full_drain_reset_inner(&mut self, asset_index: usize, side: SideV16) -> V16Result<()> {
@@ -15684,6 +15800,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         if !self.leg_is_dead_for_forfeit(asset_index, leg.side)? {
             return Err(V16Error::LockActive);
+        }
+
+        let existing_close = account.header.close_progress.try_to_runtime()?;
+        if existing_close.has_pending_residual() {
+            let (booking, detached) =
+                self.advance_asset_local_recovery_close_not_atomic(account, asset_index)?;
+            return Ok(DeadLegForfeitOutcomeV16 {
+                detached,
+                positive_pnl_forfeited: 0,
+                loss_settled: 0,
+                support_consumed: 0,
+                junior_face_burned: 0,
+                principal_used: 0,
+                insurance_used: 0,
+                residual_booked: booking.booked_loss,
+                explicit_loss: booking.explicit_loss,
+            });
         }
 
         let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;

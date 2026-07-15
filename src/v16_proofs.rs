@@ -2746,14 +2746,14 @@ fn contract_check_first_actionable_slot() {
 }
 
 // ENGINE.MD plan selector: totality (actionable -> non-NoAction), priority
-// determinism (recovery > resolved > b-stale > liquidate > refresh), and
-// selected-asset fidelity (SettleBChunk/Liquidate carry the engine-selected
-// slot). pending_close is classifier-unreachable (required absent).
+// determinism (recovery > resolved > recovery-close > b-stale > liquidate >
+// refresh), and selected-asset fidelity for every asset-scoped continuation.
 #[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::select_auto_crank_plan)]
 #[kani::solver(cadical)]
 fn contract_check_select_auto_crank_plan() {
     let summary: ActionableSummaryV16 = kani::any();
+    let pending_close_slot: usize = kani::any();
     let b_stale_slot: usize = kani::any();
     let liq_slot: usize = kani::any();
     let refresh_asset: Option<usize> = if kani::any() {
@@ -2764,6 +2764,7 @@ fn contract_check_select_auto_crank_plan() {
     let recovery_reason: PermissionlessRecoveryReasonV16 = kani::any();
     let _ = V16Core::select_auto_crank_plan(
         summary,
+        pending_close_slot,
         b_stale_slot,
         liq_slot,
         refresh_asset,

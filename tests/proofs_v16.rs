@@ -8844,6 +8844,50 @@ fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_expired_frozen_asset_close_remains_asset_local() {
+    let max_slot_raw: u8 = kani::any();
+    let overrun_raw: u8 = kani::any();
+    kani::assume(max_slot_raw > 0);
+    kani::assume(overrun_raw > 0);
+    let max_slot = max_slot_raw as u64;
+    let current_slot = max_slot + overrun_raw as u64;
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.current_slot = V16PodU64::new(current_slot);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let header_before = header;
+    let asset_before = markets[0].engine.asset;
+    let ledger = CloseProgressLedgerV16 {
+        active: true,
+        finalized: false,
+        close_id: 1,
+        asset_index: 0,
+        market_id: asset.market_id,
+        domain_side: SideV16::Long,
+        gross_loss_at_close_start: 1,
+        drift_reference_slot: 0,
+        max_close_slot: max_slot,
+        residual_remaining: 1,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.kani_ensure_close_progress_not_expired(ledger);
+
+    kani::cover!(
+        overrun_raw > 1 && result == Ok(()),
+        "expired close on a frozen Recovery asset remains locally progressable"
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(market.header.mode, 0);
+    assert_eq!(*market.header, header_before);
+    assert_eq!(market.markets[0].engine.asset, asset_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     let gross_raw: u8 = kani::any();
     let drift_raw: u8 = kani::any();
@@ -15253,7 +15297,7 @@ fn proof_v16_validator_sound_account_reserves() {
 // asset refresh and every other plan are dispatchable from committed state.
 // Pinning this truth table means a future arm that gates committed-state progress
 // on an observation contradicts a machine-checked theorem. Exhaustive over the
-// six AutoCrankPlanV16 variants; the spec matrix ties the predicate to the real
+// seven AutoCrankPlanV16 variants; the spec matrix ties the predicate to the real
 // dispatch for each reachable class.
 #[kani::proof]
 fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
@@ -15269,6 +15313,9 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
         asset_index: None
     }));
     // No other plan does — committed on-chain state suffices.
+    assert!(!needs_obs(&AutoCrankPlanV16::AdvanceRecoveryClose {
+        asset_index: i
+    }));
     assert!(!needs_obs(&AutoCrankPlanV16::SettleBChunk {
         asset_index: i
     }));

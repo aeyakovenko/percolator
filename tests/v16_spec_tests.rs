@@ -3304,6 +3304,130 @@ fn v16_auto_crank_declares_recovery_for_expired_live_close() {
     market.validate_shape().unwrap();
 }
 
+fn asset_local_recovery_close_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+) {
+    let (market_id, _, _) = ids();
+    let mut config = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    config.public_b_chunk_atoms = 1;
+    config.max_bankrupt_close_lifetime_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, config, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    let mut long_header = account_fixture(1, 210);
+    let mut short_header = account_fixture(1, 211);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 10).unwrap();
+        market.deposit_not_atomic(&mut short, 2).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE / 50),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, 200, 0, true)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 3, 300, 0, true)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        assert_eq!(short.header.capital.get(), 0);
+        assert_eq!(short.header.pnl.get(), -2);
+
+        market.force_asset_recovery_not_atomic(0, 3).unwrap();
+        let first = market
+            .forfeit_recovery_leg_not_atomic(&mut short, 0, 1)
+            .unwrap();
+        assert!(!first.detached);
+        assert_eq!(first.residual_booked, 1);
+        assert_eq!(short.header.pnl.get(), -1);
+        assert_eq!(
+            short
+                .header
+                .close_progress
+                .try_to_runtime()
+                .unwrap()
+                .residual_remaining,
+            1
+        );
+    }
+
+    header.current_slot = V16PodU64::new(10);
+    (header, markets, short_header)
+}
+
+#[test]
+fn v16_auto_crank_advances_expired_asset_local_recovery_close() {
+    // The frozen asset makes slot drift harmless. Even after the ledger deadline,
+    // auto-crank must select the asset-local continuation rather than global Recovery.
+    let (mut header, mut markets, mut short_header) = asset_local_recovery_close_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let summary = market.build_actionable_summary(&short.as_view()).unwrap();
+    assert!(summary.pending_close);
+    assert!(!summary.expired_close);
+
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut short,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::AdvanceRecoveryClose { asset_index: 0 }
+    );
+    assert!(matches!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::ResidualBooked(
+            outcome
+        )) if outcome.booked_loss == 1 && outcome.remaining_after == 0
+    ));
+    assert_eq!(market.header.mode, 0, "market must remain Live");
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(short.header.active_bitmap[0].get(), 0);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_owner_forfeit_reuses_expired_asset_local_close_ledger() {
+    let (mut header, mut markets, mut short_header) = asset_local_recovery_close_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    let result = market
+        .forfeit_recovery_leg_not_atomic(&mut short, 0, 1)
+        .unwrap();
+
+    assert!(result.detached);
+    assert_eq!(result.residual_booked, 1);
+    assert_eq!(market.header.mode, 0);
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(short.header.active_bitmap[0].get(), 0);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
 // ROADMAP 3C step 4 — resolved_winner classification (selector routes it to
 // CloseResolved). KEY regression guard: resolved_winner must NOT gate on
 // payout_snapshot_captured — close_resolved captures the snapshot LAZILY (it is
@@ -3587,6 +3711,17 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         AutoCrankPlanV16::RefreshAccount {
             asset_index: Some(0),
         },
+        false,
+    );
+
+    // --- A3 pending close on a frozen Recovery asset: one residual chunk is
+    // selected from the ledger and needs no oracle observation.
+    assert_observation_independent(
+        "asset_local_pending_close",
+        asset_local_recovery_close_fixture,
+        0,
+        10,
+        AutoCrankPlanV16::AdvanceRecoveryClose { asset_index: 0 },
         false,
     );
 

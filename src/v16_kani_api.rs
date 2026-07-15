@@ -1683,9 +1683,9 @@ pub enum ResolvedCloseStepV16 {
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgressContinuationV16 {
-    DeclareRecovery, // A4 expired close / A6 recovery-eligible: terminal recovery
+    DeclareRecovery, // A4 expired non-isolated close / A6 recovery-eligible
     CloseResolved,   // A7 resolved winner: terminal realization
-    AdvanceClose,    // A3 pending close residual: close-ledger rank step
+    AdvanceClose,    // A3 frozen recovery-asset residual: close-ledger rank step
     SettleBChunk,    // A2 b-stale leg: B-advance rank step
     Liquidate,       // A5 liquidatable: risk-reduction
     RefreshAccount,  // A1 stale account: protective accrual segment
