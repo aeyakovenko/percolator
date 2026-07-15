@@ -17023,6 +17023,131 @@ fn two_leg_refresh_scalar_preflight_stub<'a: 'a, T>(
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn positive_source_refresh_scalar_preflight_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<()> {
+    assert!(account.header.provenance_header.market_group_id == market.header.market_group_id);
+    assert!(account.header.owner == account.header.provenance_header.owner);
+    assert!(account.header.provenance_header.version.get() == V16_ACCOUNT_VERSION);
+    assert_eq!(
+        account.header.provenance_header.layout_discriminator.get(),
+        V16_LAYOUT_DISCRIMINATOR
+    );
+    assert!((1..=8).contains(&account.header.pnl.get()));
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(
+        account.header.close_progress,
+        CloseProgressLedgerV16Account::default()
+    );
+    assert_eq!(
+        account.header.resolved_payout_receipt,
+        ResolvedPayoutReceiptV16Account::default()
+    );
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn positive_source_refresh_shape_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(market.header.config.max_market_slots.get(), 2);
+    assert_eq!(market.markets.len(), 2);
+    let source = account.source_domains()[0];
+    assert!(source.is_occupied());
+    assert_eq!(source.domain.get(), 3);
+    assert_eq!(
+        source.source_claim_market_id,
+        market.markets[1].engine.asset.market_id
+    );
+    assert_eq!(
+        source.source_claim_bound_num,
+        market.markets[1]
+            .engine
+            .source_credit_short
+            .positive_claim_bound_num
+    );
+    assert_eq!(source.source_claim_liened_num.get(), 0);
+    assert_eq!(source.source_claim_impaired_num.get(), 0);
+    assert_eq!(source.source_lien_effective_reserved.get(), 0);
+    assert_eq!(source.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(source.source_lien_insurance_backing_num.get(), 0);
+    assert!(account.source_domains()[1].is_sparse_tail_default());
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn positive_pnl_principal_settlement_noop_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<u128> {
+    assert!((1..=8).contains(&account.header.pnl.get()));
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn current_domain_three_backing_expiry_noop_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<()> {
+    let source = account.source_domains()[0];
+    assert!(source.is_occupied());
+    assert_eq!(source.domain.get(), 3);
+    let bucket = market.markets[1].engine.backing_short.try_to_runtime()?;
+    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+    assert!(bucket.expiry_slot > market.header.current_slot.get());
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn unliened_source_refresh_fee_noop_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<u128> {
+    let source = account.header.source_domains[0];
+    assert!(source.is_occupied());
+    assert_eq!(source.domain.get(), 3);
+    assert_eq!(source.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(source.source_lien_insurance_backing_num.get(), 0);
+    assert_eq!(source.source_lien_fee_last_slot.get(), 0);
+    assert!(account.header.source_domains[1].is_sparse_tail_default());
+    let bucket = market.markets[1].engine.backing_short.try_to_runtime()?;
+    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+    assert_eq!(bucket.expiry_slot, 10);
+    assert_eq!(market.header.current_slot.get(), 2);
+    let source_credit = market.markets[1]
+        .engine
+        .source_credit_short
+        .try_to_runtime()?;
+    V16Core::validate_source_domain_ledger_parts(
+        market.markets[1].engine.asset.market_id.get(),
+        source_credit,
+        bucket,
+        market.markets[1]
+            .engine
+            .insurance_reservation_short
+            .try_to_runtime()?,
+    )?;
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn prevalidated_current_source_credit_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    domain: usize,
+) -> V16Result<Option<SourceCreditStateV16>> {
+    assert_eq!(domain, 3);
+    Ok(Some(
+        market.markets[1]
+            .engine
+            .source_credit_short
+            .try_to_runtime()?,
+    ))
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn two_leg_refresh_leg_decode_stub(encoded: &PortfolioLegV16Account) -> V16Result<PortfolioLegV16> {
     if encoded.active == 0 {
         assert!(encoded.asset_index.get() == 0);
@@ -17400,6 +17525,127 @@ fn closure_full_refresh_aggregates_two_assets_without_value_or_domain_drift() {
         ));
         asset_index += 1;
     }
+}
+
+// Full refresh is the certificate authority trusted by trade and liquidation.
+// For an exactly attributed positive claim, symbolic PnL and backing must produce
+// a certificate bounded by both claim face and realizable domain backing. The
+// preceding validator/health theorem proves under-attribution rejection and that
+// over-attribution is conservative; equality is therefore the strongest accepted
+// boundary for catching over-credit. The separate two-active-asset theorem above
+// proves the refresh frame and requirement aggregation.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, two_leg_refresh_config_stub)]
+#[kani::stub(
+    PortfolioLegV16Account::try_to_runtime,
+    two_leg_refresh_leg_decode_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_account_scalar_preflight,
+    positive_source_refresh_scalar_preflight_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_source_credit_shape_with_market,
+    positive_source_refresh_shape_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::expire_lapsed_source_backing_for_account_not_atomic,
+    current_domain_three_backing_expiry_noop_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_core_not_atomic,
+    positive_pnl_principal_settlement_noop_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::collect_account_backing_utilization_fees_not_atomic,
+    unliened_source_refresh_fee_noop_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_credit_if_current,
+    prevalidated_current_source_credit_stub
+)]
+fn closure_full_refresh_never_certifies_more_than_domain_realizable_backing() {
+    let pnl_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&pnl_raw));
+    kani::assume((1..=8).contains(&backing_raw));
+
+    let pnl = u128::from(pnl_raw);
+    let claim = pnl;
+    let backing = u128::from(backing_raw);
+    let capital = 8u128;
+    let claim_num = claim * BOUND_SCALE;
+    let backing_num = backing * BOUND_SCALE;
+    let credit_rate_num = (backing * CREDIT_RATE_SCALE / claim).min(CREDIT_RATE_SCALE);
+    let global_bound = pnl;
+    let (mut header, fixture_markets, mut account_header) = two_asset_kf_mapping_fixture();
+    let mut markets = [
+        Market::new(0u8, fixture_markets[0].engine),
+        Market::new(0u8, fixture_markets[1].engine),
+    ];
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(11 + capital + backing);
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(global_bound);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(global_bound * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(pnl as i128);
+
+    let domain = 3usize;
+    let market_id = markets[1].engine.asset.market_id.get();
+    markets[1].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    account_header.source_domains[0].domain = V16PodU32::new(domain as u32);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let cert = market
+        .full_account_refresh_not_atomic(&mut account)
+        .unwrap();
+    let support = u128::try_from(cert.certified_equity).unwrap() - capital;
+    kani::cover!(
+        backing >= claim && support == pnl,
+        "fully backed source certifies its complete PnL face"
+    );
+    kani::cover!(
+        backing < claim && support > 0 && support < pnl,
+        "underbacked source certifies a strict partial haircut"
+    );
+    assert!(cert.valid);
+    assert_eq!(cert.certified_initial_req, 0);
+    assert_eq!(cert.certified_maintenance_req, 0);
+    assert_eq!(cert.certified_liq_deficit, 0);
+    assert_eq!(cert.certified_worst_case_loss, 0);
+    assert!(support <= pnl);
+    assert!(support <= backing);
+    if backing >= claim {
+        assert_eq!(support, pnl);
+    }
+    assert_eq!(account.header.health_cert.try_to_runtime(), Ok(cert));
 }
 
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
