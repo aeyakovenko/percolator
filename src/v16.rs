@@ -8018,7 +8018,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     fn consume_source_credit_lien_from_counterparty_core_not_atomic(
         &mut self,
         domain: usize,
@@ -8282,6 +8281,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         domain: usize,
         amount: u128,
     ) -> V16Result<()> {
+        self.consume_source_credit_lien_from_insurance_core_not_atomic(domain, amount)?;
+        self.validate_shape()
+    }
+
+    fn consume_source_credit_lien_from_insurance_core_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
         if amount == 0 {
             return Ok(());
@@ -8322,7 +8330,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.insurance = V16PodU128::new(next_insurance);
         self.set_domain_insurance_spent_core(domain, next_domain_spent)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
-        self.validate_shape()
+        Ok(())
     }
 
     #[cfg(any(kani, feature = "fuzz"))]
@@ -8769,6 +8777,216 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.header.health_cert.valid = 0;
         }
         Ok(released_effective)
+    }
+
+    fn account_valid_source_lien_effective(account: &PortfolioV16View<'_>) -> V16Result<u128> {
+        let mut effective = 0u128;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let backing_num = source
+                    .source_lien_counterparty_backing_num
+                    .get()
+                    .checked_add(source.source_lien_insurance_backing_num.get())
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                let source_effective = source.source_lien_effective_reserved.get();
+                let effective_num = V16Core::bound_num_from_amount(source_effective)?;
+                if backing_num != effective_num
+                    || source.source_claim_liened_num.get() < effective_num
+                {
+                    return Err(V16Error::InvalidLeg);
+                }
+                effective = effective
+                    .checked_add(source_effective)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+            }
+            slot += 1;
+        }
+        Ok(effective)
+    }
+
+    fn account_source_lien_tranche_consume_delta(
+        face_num: u128,
+        backing_num: u128,
+        max_effective: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        if backing_num == 0 || max_effective == 0 {
+            return Ok((0, 0, 0));
+        }
+        V16Core::validate_bound_num_atom_aligned(backing_num)?;
+        if face_num < backing_num {
+            return Err(V16Error::InvalidLeg);
+        }
+        let available_effective = V16Core::amount_from_bound_num(backing_num)?;
+        let consumed_effective = available_effective.min(max_effective);
+        let consumed_backing_num = V16Core::bound_num_from_amount(consumed_effective)?;
+        let consumed_face_num = if consumed_backing_num == backing_num {
+            face_num
+        } else {
+            wide_mul_div_floor_u128(face_num, consumed_backing_num, backing_num)
+        };
+        if consumed_face_num < consumed_backing_num || consumed_face_num > face_num {
+            return Err(V16Error::InvalidLeg);
+        }
+        Ok((consumed_face_num, consumed_backing_num, consumed_effective))
+    }
+
+    fn consume_existing_account_source_credit_for_effective_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        effective_credit: u128,
+    ) -> V16Result<SourceCreditConsumptionV16> {
+        if effective_credit == 0 {
+            return Ok(SourceCreditConsumptionV16 {
+                face_burn: 0,
+                counterparty_credit_consumed: 0,
+                insurance_credit_consumed: 0,
+            });
+        }
+        let mut remaining = effective_credit;
+        let mut face_burn_num = 0u128;
+        let mut counterparty_credit_consumed = 0u128;
+        let mut insurance_credit_consumed = 0u128;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining != 0 {
+            let mut source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if !source.is_occupied() || source.source_lien_effective_reserved.get() == 0 {
+                slot += 1;
+                continue;
+            }
+            let domain = source.domain.get() as usize;
+            self.validate_source_domain_ledger_current(domain)?;
+            if source.source_lien_counterparty_backing_num.get() != 0
+                && source.source_lien_fee_last_slot.get() < self.header.current_slot.get()
+            {
+                self.collect_account_backing_utilization_fee_for_domain_not_atomic(
+                    account, domain,
+                )?;
+                source = account.header.source_domains[slot];
+            }
+
+            let counterparty_backing_before = source.source_lien_counterparty_backing_num.get();
+            let (counterparty_face, counterparty_backing, counterparty_effective) =
+                Self::account_source_lien_tranche_consume_delta(
+                    source.source_claim_counterparty_liened_num.get(),
+                    counterparty_backing_before,
+                    remaining,
+                )?;
+            remaining = remaining
+                .checked_sub(counterparty_effective)
+                .ok_or(V16Error::CounterUnderflow)?;
+            let (insurance_face, insurance_backing, insurance_effective) =
+                Self::account_source_lien_tranche_consume_delta(
+                    source.source_claim_insurance_liened_num.get(),
+                    source.source_lien_insurance_backing_num.get(),
+                    remaining,
+                )?;
+            remaining = remaining
+                .checked_sub(insurance_effective)
+                .ok_or(V16Error::CounterUnderflow)?;
+            if counterparty_backing != 0 {
+                self.consume_source_credit_lien_from_counterparty_core_not_atomic(
+                    domain,
+                    counterparty_backing,
+                )?;
+            }
+            if insurance_backing != 0 {
+                self.consume_source_credit_lien_from_insurance_core_not_atomic(
+                    domain,
+                    insurance_backing,
+                )?;
+            }
+
+            let consumed_face = counterparty_face
+                .checked_add(insurance_face)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let consumed_effective = counterparty_effective
+                .checked_add(insurance_effective)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let live_fee = source.source_lien_capital_at_risk_fee_revenue.get();
+            let consumed_fee = if counterparty_backing == 0 {
+                0
+            } else if counterparty_backing == counterparty_backing_before {
+                live_fee
+            } else {
+                wide_mul_div_floor_u128(live_fee, counterparty_backing, counterparty_backing_before)
+            };
+            let source = &mut account.header.source_domains[slot];
+            source.source_claim_liened_num = V16PodU128::new(
+                source
+                    .source_claim_liened_num
+                    .get()
+                    .checked_sub(consumed_face)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            );
+            source.source_claim_counterparty_liened_num = V16PodU128::new(
+                source
+                    .source_claim_counterparty_liened_num
+                    .get()
+                    .checked_sub(counterparty_face)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            );
+            source.source_claim_insurance_liened_num = V16PodU128::new(
+                source
+                    .source_claim_insurance_liened_num
+                    .get()
+                    .checked_sub(insurance_face)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            );
+            source.source_lien_effective_reserved = V16PodU128::new(
+                source
+                    .source_lien_effective_reserved
+                    .get()
+                    .checked_sub(consumed_effective)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            );
+            source.source_lien_counterparty_backing_num = V16PodU128::new(
+                counterparty_backing_before
+                    .checked_sub(counterparty_backing)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            );
+            source.source_lien_insurance_backing_num = V16PodU128::new(
+                source
+                    .source_lien_insurance_backing_num
+                    .get()
+                    .checked_sub(insurance_backing)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            );
+            source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(
+                live_fee
+                    .checked_sub(consumed_fee)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            );
+            if source.source_lien_counterparty_backing_num.get() == 0 {
+                source.source_lien_fee_last_slot = V16PodU64::new(0);
+            }
+            face_burn_num = face_burn_num
+                .checked_add(consumed_face)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            counterparty_credit_consumed = counterparty_credit_consumed
+                .checked_add(counterparty_effective)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            insurance_credit_consumed = insurance_credit_consumed
+                .checked_add(insurance_effective)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            slot += 1;
+        }
+        if remaining != 0 {
+            return Err(V16Error::LockActive);
+        }
+        account.header.health_cert.valid = 0;
+        Ok(SourceCreditConsumptionV16 {
+            face_burn: V16Core::amount_from_bound_num(face_burn_num)?,
+            counterparty_credit_consumed,
+            insurance_credit_consumed,
+        })
     }
 
     fn burn_account_source_claim_bound_num(
@@ -10384,7 +10602,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             });
         }
         let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
-        let effective_available = if has_source_claims {
+        let existing_lien_available = if has_source_claims {
+            Self::account_valid_source_lien_effective(&account.as_view())?
+        } else {
+            0
+        };
+        let fresh_effective_available = if has_source_claims {
             self.account_unliened_source_realizable_support(&account.as_view(), old_positive_face)?
         } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
             0
@@ -10395,17 +10618,42 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.junior_claim_bound(),
             )?
         };
-        let support_consumed = effective_available.min(loss_abs);
+        let existing_support = existing_lien_available.min(loss_abs);
+        let fresh_support = fresh_effective_available.min(
+            loss_abs
+                .checked_sub(existing_support)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        let support_consumed = existing_support
+            .checked_add(fresh_support)
+            .ok_or(V16Error::ArithmeticOverflow)?;
         let remaining_loss = loss_abs
             .checked_sub(support_consumed)
             .ok_or(V16Error::ArithmeticOverflow)?;
         let mut junior_face_burned = if has_source_claims {
-            self.create_and_consume_account_source_credit_for_effective_not_atomic(
+            // Keep the still-pledged face excluded while fresh support is
+            // selected, then consume the already-reserved lien backing.
+            let fresh = if fresh_support == 0 {
+                SourceCreditConsumptionV16 {
+                    face_burn: 0,
+                    counterparty_credit_consumed: 0,
+                    insurance_credit_consumed: 0,
+                }
+            } else {
+                self.create_and_consume_account_source_credit_for_effective_not_atomic(
+                    account,
+                    fresh_support,
+                )?
+            };
+            let existing = self.consume_existing_account_source_credit_for_effective_not_atomic(
                 account,
-                support_consumed,
-            )?
-            .face_burn
-            .min(old_positive_face)
+                existing_support,
+            )?;
+            fresh
+                .face_burn
+                .checked_add(existing.face_burn)
+                .ok_or(V16Error::ArithmeticOverflow)?
+                .min(old_positive_face)
         } else if support_consumed == 0 {
             0
         } else {

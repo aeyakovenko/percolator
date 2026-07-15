@@ -2265,6 +2265,24 @@ fn negative_two_scaled_adl_delta_stub(
     }
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn negative_one_scaled_adl_delta_stub(
+    abs_basis_q: u128,
+    a_basis: u128,
+    then: i128,
+    now: i128,
+) -> Option<i128> {
+    assert_eq!(abs_basis_q, POS_SCALE);
+    assert_eq!(a_basis, ADL_ONE);
+    if then == now {
+        Some(0)
+    } else {
+        assert_eq!(then, 0);
+        assert_eq!(now, -(ADL_ONE as i128));
+        Some(-1)
+    }
+}
+
 // Exact on the four calls reachable from the two-leg cross-asset fixture:
 // aligned +/-2 K deltas and zero F deltas. The generic arithmetic remains
 // independently full-domain proven in proofs_v16_arithmetic.rs.
@@ -2738,6 +2756,366 @@ fn closure_asset_one_long_profit_maps_only_to_short_source_domain() {
 )]
 fn closure_asset_one_short_profit_maps_only_to_long_source_domain() {
     prove_positive_kf_source_mapping::<1, false>();
+}
+
+// A lien created for cross-margin is account-wide, so a later adverse K/F
+// settlement on another asset must consume its funded support instead of
+// dead-locking while trying to burn the liened source face. Otherwise every
+// trade/crank that first settles the leg is permanently blocked.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_adverse_kf_consumes_cross_asset_existing_lien<
+    const PARTIAL: bool,
+    const INSURANCE_BACKED: bool,
+>() {
+    let claim = if PARTIAL { 4u128 } else { 2u128 };
+    let lien = if PARTIAL { 2u128 } else { 1u128 };
+    let claim_num = claim * BOUND_SCALE;
+    let lien_num = lien * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    let mut risk_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    risk_asset.k_long = -(ADL_ONE as i128);
+    risk_asset.k_short = ADL_ONE as i128;
+    risk_asset.oi_eff_long_q = POS_SCALE;
+    risk_asset.oi_eff_short_q = POS_SCALE;
+    risk_asset.stored_pos_count_long = 1;
+    risk_asset.stored_pos_count_short = 1;
+    risk_asset.loss_weight_sum_long = POS_SCALE;
+    risk_asset.loss_weight_sum_short = POS_SCALE;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&risk_asset);
+
+    header.vault = V16PodU128::new(if INSURANCE_BACKED { 20 } else { 10 + claim });
+    if INSURANCE_BACKED {
+        header.insurance = V16PodU128::new(20);
+        header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(claim);
+        header.insurance_domain_budget_remaining_total = V16PodU128::new(4 * claim);
+        for market in &mut markets {
+            market.engine.insurance_domain_budget_long = V16PodU128::new(claim);
+            market.engine.insurance_domain_budget_short = V16PodU128::new(claim);
+        }
+    } else {
+        header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    }
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: if INSURANCE_BACKED { 0 } else { claim_num },
+            valid_liened_backing_num: if INSURANCE_BACKED { 0 } else { lien_num },
+            insurance_credit_reserved_num: if INSURANCE_BACKED { claim_num } else { 0 },
+            valid_liened_insurance_num: if INSURANCE_BACKED { lien_num } else { 0 },
+            credit_rate_num: (claim - lien) * CREDIT_RATE_SCALE / claim,
+            credit_epoch: header.risk_epoch.get(),
+            ..SourceCreditStateV16::EMPTY
+        });
+    if INSURANCE_BACKED {
+        markets[0].engine.insurance_reservation_long =
+            InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+                insurance_credit_reserved_num: claim_num,
+                valid_liened_insurance_num: lien_num,
+                ..InsuranceCreditReservationV16::EMPTY
+            });
+    } else {
+        markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: markets[0].engine.asset.market_id.get(),
+            fresh_unliened_backing_num: claim_num - lien_num,
+            valid_liened_backing_num: lien_num,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+    }
+
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: risk_asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        epoch_snap: risk_asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_epoch_snap: risk_asset.epoch_long,
+        ..PortfolioLegV16::EMPTY
+    });
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: markets[0].engine.asset.market_id,
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_liened_num: V16PodU128::new(lien_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(if INSURANCE_BACKED {
+            0
+        } else {
+            lien_num
+        }),
+        source_claim_insurance_liened_num: V16PodU128::new(if INSURANCE_BACKED {
+            lien_num
+        } else {
+            0
+        }),
+        source_lien_effective_reserved: V16PodU128::new(lien),
+        source_lien_counterparty_backing_num: V16PodU128::new(if INSURANCE_BACKED {
+            0
+        } else {
+            lien_num
+        }),
+        source_lien_insurance_backing_num: V16PodU128::new(if INSURANCE_BACKED {
+            lien_num
+        } else {
+            0
+        }),
+        source_lien_fee_last_slot: if INSURANCE_BACKED {
+            V16PodU64::new(0)
+        } else {
+            header.current_slot
+        },
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let header_before = header;
+    let source_market_before = markets[0].engine;
+    let risk_market_before = markets[1].engine;
+    let account_before = account_header;
+
+    let mut expected_header = header_before;
+    expected_header.pnl_pos_tot = V16PodU128::new(claim - 1);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(claim - 1);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num - BOUND_SCALE);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(claim_num - BOUND_SCALE);
+    if INSURANCE_BACKED {
+        expected_header.insurance = V16PodU128::new(header_before.insurance.get() - 1);
+        expected_header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(claim - 1);
+        expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(4 * claim - 1);
+    } else {
+        expected_header.source_fresh_backing_total_num = V16PodU128::new(claim_num - BOUND_SCALE);
+    }
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 2);
+
+    let mut expected_source_market = source_market_before;
+    expected_source_market.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num - BOUND_SCALE,
+            exact_positive_claim_num: claim_num - BOUND_SCALE,
+            fresh_reserved_backing_num: if INSURANCE_BACKED {
+                0
+            } else {
+                claim_num - BOUND_SCALE
+            },
+            valid_liened_backing_num: if INSURANCE_BACKED {
+                0
+            } else {
+                lien_num - BOUND_SCALE
+            },
+            spent_backing_num: if INSURANCE_BACKED { 0 } else { BOUND_SCALE },
+            provider_receivable_num: if INSURANCE_BACKED { 0 } else { BOUND_SCALE },
+            insurance_credit_reserved_num: if INSURANCE_BACKED {
+                claim_num - BOUND_SCALE
+            } else {
+                0
+            },
+            valid_liened_insurance_num: if INSURANCE_BACKED {
+                lien_num - BOUND_SCALE
+            } else {
+                0
+            },
+            credit_rate_num: (claim - lien) * CREDIT_RATE_SCALE / (claim - 1),
+            credit_epoch: header_before.risk_epoch.get() + 2,
+            ..SourceCreditStateV16::EMPTY
+        });
+    if INSURANCE_BACKED {
+        expected_source_market.insurance_reservation_long =
+            InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+                insurance_credit_reserved_num: claim_num - BOUND_SCALE,
+                valid_liened_insurance_num: lien_num - BOUND_SCALE,
+                consumed_insurance_num: BOUND_SCALE,
+                ..InsuranceCreditReservationV16::EMPTY
+            });
+        expected_source_market.insurance_domain_spent_long = V16PodU128::new(1);
+    } else {
+        expected_source_market.backing_long =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                market_id: source_market_before.asset.market_id.get(),
+                fresh_unliened_backing_num: claim_num - lien_num,
+                valid_liened_backing_num: lien_num - BOUND_SCALE,
+                consumed_liened_backing_num: BOUND_SCALE,
+                expiry_slot: 10,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            });
+    }
+
+    let mut expected_source_domain = account_before.source_domains[0];
+    expected_source_domain.source_claim_bound_num = V16PodU128::new(claim_num - BOUND_SCALE);
+    expected_source_domain.source_claim_liened_num = V16PodU128::new(lien_num - BOUND_SCALE);
+    expected_source_domain.source_claim_counterparty_liened_num =
+        V16PodU128::new(if INSURANCE_BACKED {
+            0
+        } else {
+            lien_num - BOUND_SCALE
+        });
+    expected_source_domain.source_claim_insurance_liened_num =
+        V16PodU128::new(if INSURANCE_BACKED {
+            lien_num - BOUND_SCALE
+        } else {
+            0
+        });
+    expected_source_domain.source_lien_effective_reserved = V16PodU128::new(lien - 1);
+    expected_source_domain.source_lien_counterparty_backing_num =
+        V16PodU128::new(if INSURANCE_BACKED {
+            0
+        } else {
+            lien_num - BOUND_SCALE
+        });
+    expected_source_domain.source_lien_insurance_backing_num =
+        V16PodU128::new(if INSURANCE_BACKED {
+            lien_num - BOUND_SCALE
+        } else {
+            0
+        });
+    expected_source_domain.source_lien_fee_last_slot = if PARTIAL && !INSURANCE_BACKED {
+        header_before.current_slot
+    } else {
+        V16PodU64::new(0)
+    };
+    let mut expected_leg = account_before.legs[0].try_to_runtime().unwrap();
+    expected_leg.k_snap = -(ADL_ONE as i128);
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new((claim - 1) as i128);
+    expected_account.source_domains[0] = expected_source_domain;
+    expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&expected_leg);
+    expected_account.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.residual();
+    let result = market.settle_leg_kf_effects_at_slot(&mut account, 0);
+
+    kani::cover!(
+        result == Ok(())
+            && account.header.pnl.get() == (claim - 1) as i128
+            && market.residual() == residual_before + 1,
+        "funded cross-asset lien makes exact adverse K/F progress"
+    );
+    assert_eq!(result, Ok(()));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_source_market,
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &risk_market_before,
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.residual(), residual_before + 1);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, negative_one_scaled_adl_delta_stub)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_adverse_kf_consumes_cross_asset_counterparty_lien_without_deadlock() {
+    prove_adverse_kf_consumes_cross_asset_existing_lien::<false, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, negative_one_scaled_adl_delta_stub)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_adverse_kf_partially_consumes_cross_asset_counterparty_lien_exactly() {
+    prove_adverse_kf_consumes_cross_asset_existing_lien::<true, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, negative_one_scaled_adl_delta_stub)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_adverse_kf_consumes_cross_asset_insurance_lien_without_domain_leakage() {
+    prove_adverse_kf_consumes_cross_asset_existing_lien::<false, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, negative_one_scaled_adl_delta_stub)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_adverse_kf_partially_consumes_cross_asset_insurance_lien_exactly() {
+    prove_adverse_kf_consumes_cross_asset_existing_lien::<true, true>();
+}
+
+// The production partial-consumption kernel must conserve both the funded
+// backing and its conservatively larger face claim for every bounded ratio.
+// Eighth-atom face granularity exercises non-aligned pro-rata rounding while
+// backing remains quote-atom aligned as required by the persisted schema.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_source_lien_tranche_partial_consume_conserves_face_and_backing() {
+    let backing_atoms_raw: u8 = kani::any();
+    let face_eighths_raw: u8 = kani::any();
+    let max_effective_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&backing_atoms_raw));
+    kani::assume((1..=8).contains(&max_effective_raw));
+    let backing_eighths = backing_atoms_raw * 8;
+    kani::assume(face_eighths_raw >= backing_eighths && face_eighths_raw <= 8 * 8);
+
+    let backing_num = backing_atoms_raw as u128 * BOUND_SCALE;
+    let face_num = face_eighths_raw as u128 * (BOUND_SCALE / 8);
+    let max_effective = max_effective_raw as u128;
+    let (consumed_face, consumed_backing, consumed_effective) =
+        MarketGroupV16ViewMut::<u64>::account_source_lien_tranche_consume_delta(
+            face_num,
+            backing_num,
+            max_effective,
+        )
+        .unwrap();
+    let remaining_face = face_num - consumed_face;
+    let remaining_backing = backing_num - consumed_backing;
+    let expected_effective = (backing_atoms_raw as u128).min(max_effective);
+    let ratio_product = face_num * consumed_backing;
+
+    kani::cover!(
+        consumed_backing < backing_num && face_num > backing_num,
+        "partial haircut tranche with nontrivial face ratio is reachable"
+    );
+    kani::cover!(
+        consumed_backing == backing_num,
+        "full tranche consumption is reachable"
+    );
+    assert_eq!(consumed_effective, expected_effective);
+    assert_eq!(consumed_backing, consumed_effective * BOUND_SCALE);
+    assert!(consumed_face >= consumed_backing);
+    assert!(consumed_face <= face_num);
+    assert!(remaining_face >= remaining_backing);
+    assert_eq!(remaining_face + consumed_face, face_num);
+    assert_eq!(remaining_backing + consumed_backing, backing_num);
+    if consumed_backing == backing_num {
+        assert_eq!(consumed_face, face_num);
+    } else {
+        assert!(consumed_face * backing_num <= ratio_product);
+        assert!((consumed_face + 1) * backing_num > ratio_product);
+    }
 }
 
 // A losing K/F leg must crystallize its account capital into fresh backing for
