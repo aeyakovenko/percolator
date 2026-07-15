@@ -7158,11 +7158,21 @@ fn proof_v16_retire_nonempty_asset_rejects() {
 fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let with_senior_balances: bool = kani::any();
     let retire_slot_raw: u8 = kani::any();
+    let funding_raw: i8 = kani::any();
+    let epoch_funding_raw: i8 = kani::any();
     kani::assume((1..=10).contains(&retire_slot_raw));
+    kani::assume(funding_raw != 0);
+    kani::assume(epoch_funding_raw != 0);
     let c_tot = if with_senior_balances { 7 } else { 0 };
     let insurance = if with_senior_balances { 3 } else { 0 };
     let retire_slot = retire_slot_raw as u64;
     let (mut header, mut markets, _) = one_market_view_fixture();
+    let mut inert_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    inert_asset.f_long_num = funding_raw as i128;
+    inert_asset.f_short_num = -(funding_raw as i128);
+    inert_asset.f_epoch_start_long_num = epoch_funding_raw as i128;
+    inert_asset.f_epoch_start_short_num = -(epoch_funding_raw as i128);
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&inert_asset);
     header.vault = V16PodU128::new(c_tot + insurance);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
@@ -7179,8 +7189,12 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        retire_slot > 1 && with_senior_balances && asset.lifecycle == AssetLifecycleV16::Retired,
-        "empty asset can retire without moving nonzero senior balances"
+        retire_slot > 1
+            && with_senior_balances
+            && asset.lifecycle == AssetLifecycleV16::Retired
+            && asset.f_long_num != 0
+            && asset.f_epoch_start_long_num != 0,
+        "empty asset with inert funding history can retire without moving senior balances"
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
     assert_eq!(asset.retired_slot, retire_slot);
@@ -7188,6 +7202,16 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(asset.f_long_num, inert_asset.f_long_num);
+    assert_eq!(asset.f_short_num, inert_asset.f_short_num);
+    assert_eq!(
+        asset.f_epoch_start_long_num,
+        inert_asset.f_epoch_start_long_num
+    );
+    assert_eq!(
+        asset.f_epoch_start_short_num,
+        inert_asset.f_epoch_start_short_num
+    );
     assert_eq!(
         market.header.asset_set_epoch.get(),
         asset_set_epoch_before + 1

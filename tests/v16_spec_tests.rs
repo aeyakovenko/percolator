@@ -1395,6 +1395,102 @@ fn v16_public_force_asset_recovery_freezes_mark_and_is_idempotent() {
 }
 
 #[test]
+fn v16_funded_then_flat_asset_remains_retireable() {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 124);
+    let mut short_header = account_fixture(1, 125);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: 1,
+                    exec_price: FUNDING_COUNTER_PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: -1,
+                    exec_price: FUNDING_COUNTER_PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    let backing_amounts = [
+        markets[0]
+            .engine
+            .backing_long
+            .try_to_runtime()
+            .unwrap()
+            .fresh_unliened_backing_num,
+        markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .fresh_unliened_backing_num,
+    ];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    for (domain, backing_num) in backing_amounts.into_iter().enumerate() {
+        assert_eq!(backing_num % BOUND_SCALE, 0);
+        let amount = backing_num / BOUND_SCALE;
+        if amount != 0 {
+            market
+                .withdraw_fresh_counterparty_backing_not_atomic(domain, amount)
+                .unwrap();
+        }
+    }
+
+    let flat = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(flat.k_long, 0);
+    assert_eq!(flat.k_short, 0);
+    assert_ne!(flat.f_long_num, 0, "control: funding history advanced");
+    assert_ne!(flat.f_short_num, 0, "control: funding history advanced");
+    assert_eq!(flat.oi_eff_long_q, 0);
+    assert_eq!(flat.oi_eff_short_q, 0);
+    assert_eq!(flat.stored_pos_count_long, 0);
+    assert_eq!(flat.stored_pos_count_short, 0);
+    assert_eq!(flat.stale_account_count_long, 0);
+    assert_eq!(flat.stale_account_count_short, 0);
+    assert_eq!(flat.pending_obligation_count_long, 0);
+    assert_eq!(flat.pending_obligation_count_short, 0);
+    assert_eq!(flat.loss_weight_sum_long, 0);
+    assert_eq!(flat.loss_weight_sum_short, 0);
+    let old_market_id = flat.market_id;
+
+    market.retire_empty_asset_not_atomic(0, 3).unwrap();
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(0, FUNDING_COUNTER_PRICE, 4)
+        .unwrap();
+    let restarted = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_ne!(restarted.market_id, old_market_id);
+    assert_eq!(restarted.f_long_num, 0);
+    assert_eq!(restarted.f_short_num, 0);
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset() {
     let (mut header, mut markets) = market_fixture(2, 100);
     {

@@ -12121,6 +12121,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_spent != 0 || short_spent != 0
         };
 
+        // Funding indices are settlement history, not liabilities. Once the position, stale,
+        // obligation, loss, source, backing, and reservation checks below are all empty, no account
+        // can still claim either the current or epoch-start F anchors. Restart canonicalizes them.
         if slot.pending_domain_loss_barrier_long.get() != 0
             || slot.pending_domain_loss_barrier_short.get() != 0
             || asset.mode_long != SideModeV16::Normal
@@ -12129,12 +12132,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 || (asset.a_long == 0 && asset.a_short == 0))
             || asset.k_long != 0
             || asset.k_short != 0
-            || asset.f_long_num != 0
-            || asset.f_short_num != 0
             || asset.k_epoch_start_long != 0
             || asset.k_epoch_start_short != 0
-            || asset.f_epoch_start_long_num != 0
-            || asset.f_epoch_start_short_num != 0
             || asset.b_long_num != 0
             || asset.b_short_num != 0
             || asset.b_epoch_start_long_num != 0
