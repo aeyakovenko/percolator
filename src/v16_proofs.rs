@@ -13321,12 +13321,81 @@ fn closure_asset_one_short_full_rebalance_mutation_is_local() {
     prove_rebalance_mutation_is_value_neutral_and_asset_local::<1, false, true>();
 }
 
-// Wrapper-used public risk reduction must remain live after an unrelated
-// bankruptcy raises HMax. A healthy account fully closes its selected leg,
-// moves no value, cannot touch the other asset, and becomes a flat senior-
-// capital account covered by the public HMax withdrawal theorem.
+// Asset-0 governance can force either asset into DrainOnly, but that transition
+// is lifecycle-local: it moves no value, preserves the other slot byte-for-byte,
+// and changes only the selected lifecycle plus the two certificate epochs.
 #[cfg(all(kani, feature = "closure"))]
-fn prove_public_hmax_rebalance_reaches_flat_exit<const ASSET: usize, const LONG: bool>() {
+fn prove_mark_asset_drain_only_is_cross_asset_local<const ASSET: usize>() {
+    assert!(ASSET < 2);
+    let capital = u128::from(kani::any::<u8>());
+    let surplus = u128::from(kani::any::<u8>());
+    kani::assume(capital <= 8 && surplus <= 4);
+
+    let (mut header, mut markets, _) = two_asset_kf_mapping_fixture();
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(10 + capital + surplus);
+    let header_before = header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let other = 1 - ASSET;
+
+    let mut expected_header = header_before;
+    expected_header.asset_set_epoch = V16PodU64::new(header_before.asset_set_epoch.get() + 1);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
+    let mut expected_selected = markets_before[ASSET];
+    let mut selected_asset = expected_selected.asset.try_to_runtime().unwrap();
+    selected_asset.lifecycle = AssetLifecycleV16::DrainOnly;
+    expected_selected.asset = AssetStateV16Account::from_runtime(&selected_asset);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    market.mark_asset_drain_only_not_atomic(ASSET).unwrap();
+
+    kani::cover!(
+        capital > 0 && surplus > 0,
+        "DrainOnly preserves nonzero senior capital and junior surplus"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[other],
+        &market.markets[other].engine
+    ));
+    assert_eq!(market.residual(), residual_before);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_mark_asset_zero_drain_only_is_cross_asset_local() {
+    prove_mark_asset_drain_only_is_cross_asset_local::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_mark_asset_one_drain_only_is_cross_asset_local() {
+    prove_mark_asset_drain_only_is_cross_asset_local::<1>();
+}
+
+// Wrapper-used public risk reduction must remain live after an unrelated
+// bankruptcy raises HMax, including after the selected asset enters DrainOnly.
+// A healthy account fully closes its selected leg, moves no value, cannot touch
+// the other asset, and becomes a flat senior-capital account covered by the
+// public HMax withdrawal theorem.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_public_hmax_rebalance_reaches_flat_exit<
+    const ASSET: usize,
+    const LONG: bool,
+    const DRAIN_ONLY: bool,
+>() {
     assert!(ASSET < 2);
     let capital_raw: u8 = kani::any();
     kani::assume((1..=8).contains(&capital_raw));
@@ -13344,6 +13413,11 @@ fn prove_public_hmax_rebalance_reaches_flat_exit<const ASSET: usize, const LONG:
     account_header.capital = V16PodU128::new(capital);
 
     let mut asset = markets[ASSET].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = if DRAIN_ONLY {
+        AssetLifecycleV16::DrainOnly
+    } else {
+        AssetLifecycleV16::Active
+    };
     asset.slot_last = header.current_slot.get();
     asset.oi_eff_long_q = 2 * POS_SCALE;
     asset.oi_eff_short_q = 2 * POS_SCALE;
@@ -13442,6 +13516,14 @@ fn prove_public_hmax_rebalance_reaches_flat_exit<const ASSET: usize, const LONG:
     ));
 
     let selected = market.asset_state(ASSET).unwrap();
+    assert_eq!(
+        selected.lifecycle,
+        if DRAIN_ONLY {
+            AssetLifecycleV16::DrainOnly
+        } else {
+            AssetLifecycleV16::Active
+        }
+    );
     assert_eq!(selected.oi_eff_long_q, POS_SCALE);
     assert_eq!(selected.oi_eff_short_q, POS_SCALE);
     match side {
@@ -13606,7 +13688,7 @@ fn public_hmax_rebalance_certify_stub<'a: 'a, T>(
     public_hmax_rebalance_certify_stub
 )]
 fn closure_public_hmax_asset_zero_long_rebalance_reaches_flat_exit() {
-    prove_public_hmax_rebalance_reaches_flat_exit::<0, true>();
+    prove_public_hmax_rebalance_reaches_flat_exit::<0, true, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -13626,7 +13708,7 @@ fn closure_public_hmax_asset_zero_long_rebalance_reaches_flat_exit() {
     public_hmax_rebalance_certify_stub
 )]
 fn closure_public_hmax_asset_zero_short_rebalance_reaches_flat_exit() {
-    prove_public_hmax_rebalance_reaches_flat_exit::<0, false>();
+    prove_public_hmax_rebalance_reaches_flat_exit::<0, false, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -13646,7 +13728,7 @@ fn closure_public_hmax_asset_zero_short_rebalance_reaches_flat_exit() {
     public_hmax_rebalance_certify_stub
 )]
 fn closure_public_hmax_asset_one_long_rebalance_reaches_flat_exit() {
-    prove_public_hmax_rebalance_reaches_flat_exit::<1, true>();
+    prove_public_hmax_rebalance_reaches_flat_exit::<1, true, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -13666,7 +13748,87 @@ fn closure_public_hmax_asset_one_long_rebalance_reaches_flat_exit() {
     public_hmax_rebalance_certify_stub
 )]
 fn closure_public_hmax_asset_one_short_rebalance_reaches_flat_exit() {
-    prove_public_hmax_rebalance_reaches_flat_exit::<1, false>();
+    prove_public_hmax_rebalance_reaches_flat_exit::<1, false, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    public_hmax_full_reduce_position_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    public_hmax_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    public_hmax_rebalance_certify_stub
+)]
+fn closure_public_hmax_drain_only_asset_zero_long_rebalance_reaches_flat_exit() {
+    prove_public_hmax_rebalance_reaches_flat_exit::<0, true, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    public_hmax_full_reduce_position_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    public_hmax_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    public_hmax_rebalance_certify_stub
+)]
+fn closure_public_hmax_drain_only_asset_zero_short_rebalance_reaches_flat_exit() {
+    prove_public_hmax_rebalance_reaches_flat_exit::<0, false, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    public_hmax_full_reduce_position_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    public_hmax_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    public_hmax_rebalance_certify_stub
+)]
+fn closure_public_hmax_drain_only_asset_one_long_rebalance_reaches_flat_exit() {
+    prove_public_hmax_rebalance_reaches_flat_exit::<1, true, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    public_hmax_full_reduce_position_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    public_hmax_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    public_hmax_rebalance_certify_stub
+)]
+fn closure_public_hmax_drain_only_asset_one_short_rebalance_reaches_flat_exit() {
+    prove_public_hmax_rebalance_reaches_flat_exit::<1, false, true>();
 }
 
 // Permissionless liveness over the wrapper-used auto-crank route. An expired
