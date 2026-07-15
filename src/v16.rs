@@ -13261,15 +13261,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             dust_carry
         };
         if exit_loss_charge != 0 {
-            let charge =
-                i128::try_from(exit_loss_charge).map_err(|_| V16Error::ArithmeticOverflow)?;
-            let new_pnl = account
-                .header
-                .pnl
-                .get()
-                .checked_sub(charge)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            self.set_account_pnl(account, new_pnl)?;
+            self.apply_haircut_bounded_close_loss_to_pnl(account, exit_loss_charge)?;
         }
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);

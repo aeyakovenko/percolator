@@ -37,8 +37,8 @@ The proof suite is a decomposition over production v16 code, not one monolithic
 - **Account-local safety:** provenance, active bitmap shape, stale/B-stale
   gates, margin gates, close state, and payout receipts are checked before
   favorable actions can commit. Source-credit liens remain locked while any
-  account risk is active, fund adverse K/F and B loss without settlement
-  deadlock, and remain realizable after that risk is fully reversed.
+  account risk is active, fund adverse K/F, B loss, and dust-bearing final exits
+  without settlement deadlock, and remain realizable after risk is reversed.
 - **Bounded progress:** crank, close, recovery, B-settlement, and payout progress
   are decomposed into bounded production kernels and public-route tests. A
   non-progressing path must either leave state unchanged or route to a terminal
@@ -63,7 +63,7 @@ Source-checkable counts in this checkout:
 | --- | ---: |
 | Plain Kani proofs in `tests/proofs_v16.rs` | 248 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 11 |
-| Plain Kani proofs in `src/v16_proofs.rs` | 192 |
+| Plain Kani proofs in `src/v16_proofs.rs` | 193 |
 | Function-contract proofs in `src/v16_proofs.rs` | 54 |
 | Production `kernel_*` helpers in `src/v16.rs` | 21 |
 | Public `*_not_atomic` engine APIs in `src/v16.rs` | 54 |

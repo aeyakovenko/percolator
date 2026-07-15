@@ -13373,13 +13373,12 @@ fn one_atom_liened_b_chunk_stub<'a: 'a, T>(
     })
 }
 
-// Composition seam for B settlement. Exact counterparty/insurance source-lien
+// Funded-loss composition seam. Exact counterparty/insurance source-lien
 // consumption is proved through the same production helper by the four adverse
-// K/F whole-state theorems. This seam proves that the B body routes its exact
-// loss through that helper while the claim is fully pledged; direct PnL burn
-// cannot satisfy these preconditions and was the original deadlock.
+// K/F whole-state theorems. Callers must route the exact loss through this seam
+// while the claim is fully pledged; direct PnL burn cannot satisfy it.
 #[cfg(all(kani, feature = "closure"))]
-fn funded_b_loss_application_stub<'a: 'a, T>(
+fn funded_one_atom_loss_application_stub<'a: 'a, T>(
     market: &mut MarketGroupV16ViewMut<'a, T>,
     account: &mut PortfolioV16ViewMut<'_>,
     loss_abs: u128,
@@ -13406,6 +13405,51 @@ fn funded_b_loss_application_stub<'a: 'a, T>(
         support_consumed: 1,
         junior_face_burned: 1,
     })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn install_fully_liened_cross_asset_claim(
+    header: &mut MarketGroupV16HeaderAccount,
+    markets: &mut [Market<u64>; 2],
+    account: &mut PortfolioAccountV16Account,
+    claim: u128,
+) {
+    let claim_num = claim * BOUND_SCALE;
+    header.vault = V16PodU128::new(10 + claim);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            valid_liened_backing_num: claim_num,
+            credit_rate_num: 0,
+            credit_epoch: header.risk_epoch.get(),
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets[0].engine.asset.market_id.get(),
+        valid_liened_backing_num: claim_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    account.pnl = V16PodI128::new(claim as i128);
+    account.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: markets[0].engine.asset.market_id,
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_liened_num: V16PodU128::new(claim_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(claim_num),
+        source_lien_effective_reserved: V16PodU128::new(claim),
+        source_lien_counterparty_backing_num: V16PodU128::new(claim_num),
+        source_lien_fee_last_slot: header.current_slot,
+        ..PortfolioSourceDomainV16Account::default()
+    };
 }
 
 // Auto-crank selection seam. Any classifier/selector regression reaches the
@@ -13588,57 +13632,19 @@ fn prove_b_stale_settlement_advances_selected_asset<const ASSET: usize>() {
 )]
 #[kani::stub(
     MarketGroupV16ViewMut::apply_haircut_bounded_close_loss_to_pnl,
-    funded_b_loss_application_stub
+    funded_one_atom_loss_application_stub
 )]
 #[kani::stub(
     MarketGroupV16ViewMut::has_b_stale_leg,
     selected_leg_is_no_longer_b_stale_stub
 )]
 fn closure_b_settlement_routes_liened_loss_through_funded_support() {
-    const SOURCE_ASSET: usize = 0;
     const RISK_ASSET: usize = 1;
     let claim = 2u128;
-    let claim_num = claim * BOUND_SCALE;
     let (mut header, mut markets, mut account_header, risk_leg, delta_b) =
         b_stale_transition_fixture::<RISK_ASSET>();
     kani::assume(risk_leg.side == SideV16::Long);
-
-    header.vault = V16PodU128::new(10 + claim);
-    header.pnl_pos_tot = V16PodU128::new(claim);
-    header.pnl_pos_bound_tot = V16PodU128::new(claim);
-    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
-    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
-    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
-    markets[SOURCE_ASSET].engine.source_credit_long =
-        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
-            positive_claim_bound_num: claim_num,
-            exact_positive_claim_num: claim_num,
-            fresh_reserved_backing_num: claim_num,
-            valid_liened_backing_num: claim_num,
-            credit_rate_num: 0,
-            credit_epoch: header.risk_epoch.get(),
-            ..SourceCreditStateV16::EMPTY
-        });
-    markets[SOURCE_ASSET].engine.backing_long =
-        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
-            market_id: markets[SOURCE_ASSET].engine.asset.market_id.get(),
-            valid_liened_backing_num: claim_num,
-            expiry_slot: 10,
-            status: BackingBucketStatusV16::Fresh,
-            ..BackingBucketV16::EMPTY
-        });
-    account_header.pnl = V16PodI128::new(claim as i128);
-    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
-        domain: V16PodU32::new(0),
-        source_claim_market_id: markets[SOURCE_ASSET].engine.asset.market_id,
-        source_claim_bound_num: V16PodU128::new(claim_num),
-        source_claim_liened_num: V16PodU128::new(claim_num),
-        source_claim_counterparty_liened_num: V16PodU128::new(claim_num),
-        source_lien_effective_reserved: V16PodU128::new(claim),
-        source_lien_counterparty_backing_num: V16PodU128::new(claim_num),
-        source_lien_fee_last_slot: header.current_slot,
-        ..PortfolioSourceDomainV16Account::default()
-    };
+    install_fully_liened_cross_asset_claim(&mut header, &mut markets, &mut account_header, claim);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -13665,6 +13671,153 @@ fn closure_b_settlement_routes_liened_loss_through_funded_support() {
     let settled_leg = account.header.legs[0].try_to_runtime().unwrap();
     assert_eq!(settled_leg.b_snap, delta_b);
     assert!(!settled_leg.b_stale);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn clear_last_long_leg_with_dust_stub(
+    leg: PortfolioLegV16,
+    mut asset: AssetStateV16,
+) -> V16Result<AssetStateV16> {
+    assert_eq!(leg.side, SideV16::Long);
+    assert_eq!(leg.b_rem, 1);
+    assert_eq!(asset.social_loss_dust_long_num, SOCIAL_LOSS_DEN - 1);
+    assert_eq!(asset.stored_pos_count_long, 1);
+    assert_eq!(asset.oi_eff_long_q, POS_SCALE);
+    assert_eq!(asset.loss_weight_sum_long, POS_SCALE);
+    asset.social_loss_dust_long_num = 0;
+    asset.stored_pos_count_long = 0;
+    asset.oi_eff_long_q = 0;
+    asset.loss_weight_sum_long = 0;
+    Ok(asset)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn cleared_side_cannot_rebook_dust_stub(
+    asset: &mut AssetStateV16,
+    side: SideV16,
+    engine_chunk: u128,
+    residual_remaining: u128,
+) -> V16Result<Option<BResidualBookingOutcomeV16>> {
+    assert_eq!(side, SideV16::Long);
+    assert_eq!(engine_chunk, 1);
+    assert_eq!(residual_remaining, 1);
+    assert_eq!(asset.loss_weight_sum_long, 0);
+    Ok(None)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn selected_clear_leg_slot_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'_>,
+    asset_index: usize,
+) -> V16Result<usize> {
+    let _ = core::marker::PhantomData::<(&'a (), T)>;
+    assert_eq!(asset_index, 1);
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && leg.asset_index as usize == asset_index);
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn current_clear_kf_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    leg: PortfolioLegV16,
+) -> V16Result<(i128, i128)> {
+    assert_eq!(asset_index, 1);
+    Ok((leg.k_snap, leg.f_snap))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn current_clear_b_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    leg: PortfolioLegV16,
+) -> V16Result<u128> {
+    assert_eq!(asset_index, 1);
+    Ok(leg.b_snap)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn no_clear_domain_barrier_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    side: SideV16,
+) -> V16Result<bool> {
+    assert_eq!(asset_index, 1);
+    assert_eq!(side, SideV16::Long);
+    Ok(false)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn cleared_asset_writeback_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    asset: AssetStateV16,
+) -> V16Result<()> {
+    assert_eq!(asset_index, 1);
+    assert_eq!(asset.stored_pos_count_long, 0);
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.loss_weight_sum_long, 0);
+    market.markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    Ok(())
+}
+
+// Clearing the final position is risk-reducing permissionless progress. A
+// canonical fractional-dust carry assigned to that exiting account must use
+// its funded source lien; direct claim burn deadlocks when all face is pledged.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::require_active_leg_slot_for_asset,
+    selected_clear_leg_slot_stub
+)]
+#[kani::stub(MarketGroupV16ViewMut::kf_target_for_leg, current_clear_kf_stub)]
+#[kani::stub(MarketGroupV16ViewMut::b_target_for_leg, current_clear_b_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::has_pending_domain_loss_barrier,
+    no_clear_domain_barrier_stub
+)]
+#[kani::stub(V16Core::kernel_clear_leg, clear_last_long_leg_with_dust_stub)]
+#[kani::stub(
+    V16Core::apply_bankruptcy_residual_chunk_to_loss_side,
+    cleared_side_cannot_rebook_dust_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::apply_haircut_bounded_close_loss_to_pnl,
+    funded_one_atom_loss_application_stub
+)]
+#[kani::stub(MarketGroupV16ViewMut::set_asset_state, cleared_asset_writeback_stub)]
+fn closure_clear_leg_dust_carry_cannot_deadlock_on_source_lien() {
+    const RISK_ASSET: usize = 1;
+    let claim = 2u128;
+    let (mut header, mut markets, mut account_header, mut leg, delta_b) =
+        b_stale_transition_fixture::<RISK_ASSET>();
+    kani::assume(leg.side == SideV16::Long);
+
+    header.b_stale_account_count = V16PodU64::new(0);
+    account_header.b_stale_state = 0;
+    leg.b_snap = delta_b;
+    leg.b_rem = 1;
+    leg.b_stale = false;
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&leg);
+    let mut risk_asset = markets[RISK_ASSET].engine.asset.try_to_runtime().unwrap();
+    risk_asset.social_loss_dust_long_num = SOCIAL_LOSS_DEN - 1;
+    markets[RISK_ASSET].engine.asset = AssetStateV16Account::from_runtime(&risk_asset);
+    install_fully_liened_cross_asset_claim(&mut header, &mut markets, &mut account_header, claim);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.clear_leg(&mut account, RISK_ASSET);
+
+    kani::cover!(
+        result == Ok(())
+            && account.header.pnl.get() == claim as i128 - 1
+            && account.header.active_bitmap[0].get() == 0,
+        "a funded dust carry cannot block the final risk-reducing clear"
+    );
+    assert_eq!(result, Ok(()));
 }
 
 // Wrapper-used auto-crank selection composition. The persisted b-stale leg must
