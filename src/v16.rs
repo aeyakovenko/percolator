@@ -761,6 +761,62 @@ impl V16Core {
         ))
     }
 
+    /// PRODUCTION KERNEL: partition a liened-face burn across counterparty then
+    /// insurance support without overlap or omission.
+    fn source_lien_face_burn_partition(
+        counterparty_face_num: u128,
+        insurance_face_num: u128,
+        face_burn_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        let total_face_num = counterparty_face_num
+            .checked_add(insurance_face_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if face_burn_num > total_face_num {
+            return Err(V16Error::CounterUnderflow);
+        }
+        let counterparty_face_burn = face_burn_num.min(counterparty_face_num);
+        let insurance_face_burn = face_burn_num
+            .checked_sub(counterparty_face_burn)
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((counterparty_face_burn, insurance_face_burn))
+    }
+
+    /// Compose the face partition with the minimum source-local backing release
+    /// needed to keep each remaining lien bounded by its remaining face.
+    fn source_lien_face_burn_plan(
+        counterparty_face_num: u128,
+        insurance_face_num: u128,
+        counterparty_backing_num: u128,
+        insurance_backing_num: u128,
+        face_burn_num: u128,
+    ) -> V16Result<(u128, u128, u128, u128, u128)> {
+        let (counterparty_face_burn, insurance_face_burn) = Self::source_lien_face_burn_partition(
+            counterparty_face_num,
+            insurance_face_num,
+            face_burn_num,
+        )?;
+        let counterparty_backing_release = Self::source_lien_backing_release_for_face_burn(
+            counterparty_face_num,
+            counterparty_backing_num,
+            counterparty_face_burn,
+        )?;
+        let insurance_backing_release = Self::source_lien_backing_release_for_face_burn(
+            insurance_face_num,
+            insurance_backing_num,
+            insurance_face_burn,
+        )?;
+        let backing_release_num = counterparty_backing_release
+            .checked_add(insurance_backing_release)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((
+            counterparty_face_burn,
+            insurance_face_burn,
+            counterparty_backing_release,
+            insurance_backing_release,
+            backing_release_num,
+        ))
+    }
+
     #[inline]
     fn validate_bound_num_atom_aligned(bound_num: u128) -> V16Result<()> {
         if bound_num == 0 {
@@ -8663,24 +8719,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if face_burn_num > source_before.source_claim_liened_num.get() {
             return Err(V16Error::CounterUnderflow);
         }
-        let counterparty_face_burn =
-            face_burn_num.min(source_before.source_claim_counterparty_liened_num.get());
-        let insurance_face_burn = face_burn_num
-            .checked_sub(counterparty_face_burn)
-            .ok_or(V16Error::CounterUnderflow)?;
-        if insurance_face_burn > source_before.source_claim_insurance_liened_num.get() {
-            return Err(V16Error::CounterUnderflow);
-        }
-
-        let counterparty_backing_release = V16Core::source_lien_backing_release_for_face_burn(
-            source_before.source_claim_counterparty_liened_num.get(),
-            source_before.source_lien_counterparty_backing_num.get(),
+        let (
             counterparty_face_burn,
-        )?;
-        let insurance_backing_release = V16Core::source_lien_backing_release_for_face_burn(
-            source_before.source_claim_insurance_liened_num.get(),
-            source_before.source_lien_insurance_backing_num.get(),
             insurance_face_burn,
+            counterparty_backing_release,
+            insurance_backing_release,
+            backing_release_num,
+        ) = V16Core::source_lien_face_burn_plan(
+            source_before.source_claim_counterparty_liened_num.get(),
+            source_before.source_claim_insurance_liened_num.get(),
+            source_before.source_lien_counterparty_backing_num.get(),
+            source_before.source_lien_insurance_backing_num.get(),
+            face_burn_num,
         )?;
 
         if counterparty_backing_release != 0 {
@@ -8705,9 +8755,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
 
-        let backing_release_num = counterparty_backing_release
-            .checked_add(insurance_backing_release)
-            .ok_or(V16Error::ArithmeticOverflow)?;
         let effective_release = backing_release_num / BOUND_SCALE;
         let counterparty_backing_after = source_before
             .source_lien_counterparty_backing_num
