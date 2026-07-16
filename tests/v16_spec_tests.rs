@@ -118,6 +118,129 @@ fn open_one_lot_pair(
         .unwrap();
 }
 
+fn funding_cadence_fixture() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.max_abs_funding_e9_per_slot = 100;
+    cfg.max_accrual_dt_slots = 10;
+    cfg.min_funding_lifetime_slots = 10;
+    cfg.max_price_move_bps_per_slot = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, FUNDING_COUNTER_PRICE, 1)
+        .unwrap();
+    (header, markets)
+}
+
+fn funding_after_cadence(fragmented: bool) -> (i128, i128, u64, u128, u128, u128) {
+    let (mut header, mut markets) = funding_cadence_fixture();
+    let mut long_header = account_fixture(1, 122);
+    let mut short_header = account_fixture(1, 123);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_one_lot_pair(&mut market, &mut long, &mut short);
+
+    if fragmented {
+        for slot in 2..=11 {
+            market
+                .accrue_asset_to_not_atomic(0, slot, FUNDING_COUNTER_PRICE, 100, true)
+                .unwrap();
+            market.full_account_refresh_not_atomic(&mut long).unwrap();
+        }
+    } else {
+        market
+            .accrue_asset_to_not_atomic(0, 11, FUNDING_COUNTER_PRICE, 100, true)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+    }
+
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    let leg = long.header.legs[0].try_to_runtime().unwrap();
+    (
+        asset.f_long_num,
+        asset.f_short_num,
+        market.header.funding_epoch.get(),
+        long.header.capital.get(),
+        leg.f_rem_num,
+        long.header.funding_long_paid_atoms_total.get(),
+    )
+}
+
+#[test]
+fn v16_funding_accrual_is_invariant_to_permissionless_crank_cadence() {
+    let delayed = funding_after_cadence(false);
+    let fragmented = funding_after_cadence(true);
+
+    assert_ne!(delayed.0, 0, "ten-slot control must accrue funding");
+    assert_eq!(fragmented.0, delayed.0);
+    assert_eq!(fragmented.1, delayed.1);
+    assert_eq!(fragmented.3, delayed.3);
+    assert_eq!(fragmented.4, delayed.4);
+    assert_eq!(fragmented.5, delayed.5);
+    assert_eq!(delayed.3, 9_999_999);
+    assert_eq!(delayed.4, 0);
+    assert_eq!(delayed.5, 1);
+}
+
+fn fractional_price_loss_after_cadence(fragmented: bool) -> (u128, i128, u128) {
+    const FRACTIONAL_LOT_Q: i128 = POS_SCALE as i128 / 1_000;
+
+    let (mut header, mut markets) = funding_cadence_fixture();
+    let mut long_header = account_fixture(1, 124);
+    let mut short_header = account_fixture(1, 125);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 10_000_000).unwrap();
+    market.deposit_not_atomic(&mut short, 10_000_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: FRACTIONAL_LOT_Q,
+                exec_price: FUNDING_COUNTER_PRICE,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    if fragmented {
+        for slot in 2..=11 {
+            let price = FUNDING_COUNTER_PRICE + (slot - 1) * 100;
+            market
+                .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+                .unwrap();
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+        }
+    } else {
+        market
+            .accrue_asset_to_not_atomic(0, 11, FUNDING_COUNTER_PRICE + 1_000, 0, true)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+    }
+
+    let leg = short.header.legs[0].try_to_runtime().unwrap();
+    (
+        short.header.capital.get(),
+        short.header.pnl.get(),
+        leg.k_rem_num,
+    )
+}
+
+#[test]
+fn v16_fractional_k_settlement_is_invariant_to_permissionless_refresh_cadence() {
+    let delayed = fractional_price_loss_after_cadence(false);
+    let fragmented = fractional_price_loss_after_cadence(true);
+
+    assert_eq!(fragmented, delayed);
+    assert_eq!(delayed.0, 9_999_999);
+    assert_eq!(delayed.2, 0);
+}
+
 #[test]
 fn v16_public_fund_validator_accepts_nontrivial_exact_solvency_profile() {
     let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 1, 10);
@@ -736,6 +859,8 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: SURVIVOR_Q,
         b_snap: asset.b_long_num,
@@ -755,6 +880,8 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         a_basis: ADL_ONE,
         k_snap: asset.k_short,
         f_snap: asset.f_short_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         epoch_snap: asset.epoch_short,
         loss_weight: MATCHED_Q,
         b_snap: asset.b_short_num,
@@ -1601,6 +1728,8 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
         b_snap: 0,
@@ -2108,6 +2237,8 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset.b_long_num,
@@ -2176,6 +2307,8 @@ fn v16_liquidation_engine_selects_full_close_and_allows_dust_min_fee() {
             a_basis: ADL_ONE,
             k_snap: asset.k_long,
             f_snap: asset.f_long_num,
+            k_rem_num: 0,
+            f_rem_num: 0,
             epoch_snap: asset.epoch_long,
             loss_weight: POSITION_Q,
             b_snap: asset.b_long_num,
@@ -2258,6 +2391,8 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POSITION_Q,
         b_snap: asset.b_long_num,
@@ -2333,6 +2468,8 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset0.b_long_num,
@@ -3076,6 +3213,8 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset0.b_long_num,
@@ -3183,6 +3322,8 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset.b_long_num,
@@ -3372,6 +3513,8 @@ fn v16_auto_crank_settles_b_stale_leg() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        k_rem_num: 0,
+        f_rem_num: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset0.b_long_num,
@@ -3616,6 +3759,8 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 a_basis: ADL_ONE,
                 k_snap: asset0.k_long,
                 f_snap: asset0.f_long_num,
+                k_rem_num: 0,
+                f_rem_num: 0,
                 epoch_snap: asset0.epoch_long,
                 loss_weight: POS_SCALE,
                 b_snap: asset0.b_long_num,
@@ -3664,6 +3809,8 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 a_basis: ADL_ONE,
                 k_snap: asset.k_long,
                 f_snap: asset.f_long_num,
+                k_rem_num: 0,
+                f_rem_num: 0,
                 epoch_snap: asset.epoch_long,
                 loss_weight: POS_SCALE,
                 b_snap: asset.b_long_num,

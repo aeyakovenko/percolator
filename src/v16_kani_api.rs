@@ -1350,6 +1350,8 @@ pub fn kani_eq_portfolio_leg_v16_account(
         && a.a_basis.get() == b.a_basis.get()
         && a.k_snap.get() == b.k_snap.get()
         && a.f_snap.get() == b.f_snap.get()
+        && a.k_rem_num.get() == b.k_rem_num.get()
+        && a.f_rem_num.get() == b.f_rem_num.get()
         && a.epoch_snap.get() == b.epoch_snap.get()
         && a.loss_weight.get() == b.loss_weight.get()
         && a.b_snap.get() == b.b_snap.get()

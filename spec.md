@@ -1300,9 +1300,25 @@ B_target = current B_side_num if current epoch else B_epoch_start_side_num under
 num = b_rem + loss_weight * ΔB
 B_loss = floor(num / SOCIAL_LOSS_DEN)
 b_rem_new = num % SOCIAL_LOSS_DEN
-KF_pnl_delta = exact signed-floor A/K/F settlement
+KF_den = a_basis * POS_SCALE
+K_num = k_rem_num + abs(basis_pos_q) * (K_target - k_snap)
+F_num = f_rem_num + abs(basis_pos_q) * (F_target - f_snap)
+K_pnl_delta = floor(K_num / KF_den)
+F_pnl_delta = floor(F_num / KF_den)
+k_rem_num_new = K_num - K_pnl_delta * KF_den
+f_rem_num_new = F_num - F_pnl_delta * KF_den
+KF_pnl_delta = K_pnl_delta + F_pnl_delta
 net_pnl_delta = KF_pnl_delta - B_loss
 ```
+
+The K/F remainders are persistent Euclidean remainders in `[0, KF_den)`.
+Consequently, for an unchanged leg basis and epoch, partitioning one K/F interval
+across any number of permissionless refreshes MUST produce the same cumulative
+integer PnL and final remainder as settling the interval once. A caller MUST NOT
+be able to magnify a fractional loss or erase a fractional gain/funding charge by
+choosing refresh or crank cadence. Same-side resize preserves these remainders;
+final leg clear may assign the remaining sub-atom fraction against that closing
+account exactly once.
 
 If full B settlement is too large, partial settlement is allowed. While `B_remaining > 0`, no user-favorable action may continue.
 
@@ -1311,6 +1327,13 @@ If full B settlement is too large, partial settlement is allowed. While `B_remai
 -------------------------------------------------------------------------------
 
 `accrue_asset_to(asset, now_slot, effective_price, funding_rate)` requires Active/DrainOnly live mode, authenticated time, valid price, and bounded funding rate. Domain locks do not block K/F/price/time accrual. Accrual MUST NOT mutate B, A, OI, weights, staged residuals, staged insurance, ADL, pending barriers, pending obligations, or exposure-clear state for a locked domain unless held by the close/recovery path.
+
+Funding-index precision is applied before settlement rounding. Because
+`ADL_ONE % FUNDING_DEN == 0`, each segment computes
+`funding_rate_e9 * dt * effective_price * (ADL_ONE / FUNDING_DEN)` exactly;
+it MUST NOT first floor by `FUNDING_DEN`. Splitting the same constant-rate,
+constant-price interval across permissionless accruals therefore cannot erase
+funding.
 
 Before any accrual/effective-price/K/F write is usable by a favorable action:
 1. affected source-domain claim-bound buckets MUST be recomputed conservatively;
