@@ -6498,6 +6498,125 @@ fn proof_v16_counterparty_backing_expiry_reclassifies_principal_and_impairs_lien
     );
 }
 
+// Permissionless expiry liveness over every lapsed/future ordering in the
+// Kani-sized source-domain roster. The theorem drives the exact production
+// first-lapsed scan and expiry transition, proving a strict one-obligation rank
+// decrease while future and unrelated domains remain untouched.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_live_source_backing_expiry_is_bounded_complete_and_isolated() {
+    assert_eq!(PORTFOLIO_SOURCE_DOMAIN_CAP, 4);
+    let roster_len: u8 = kani::any();
+    let lapsed_mask: u8 = kani::any();
+    let future_mask: u8 = kani::any();
+    kani::assume(roster_len as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    let roster_mask = (1u8 << roster_len) - 1;
+    kani::assume(lapsed_mask & !roster_mask == 0);
+    kani::assume(future_mask & !roster_mask == 0);
+    kani::assume(lapsed_mask & future_mask == 0);
+
+    let now_slot = 10u64;
+    let mut remaining = lapsed_mask;
+    let mut calls = 0usize;
+    while calls <= PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let rank_before = remaining.count_ones();
+        let mut expected = None;
+        let mut domain = 0usize;
+        while domain < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if expected.is_none() && remaining & (1u8 << domain) != 0 {
+                expected = Some(domain);
+            }
+            domain += 1;
+        }
+
+        let mut selected = None;
+        let mut stopped = false;
+        domain = 0;
+        while domain < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if !stopped {
+                let bit = 1u8 << domain;
+                let occupied = domain < roster_len as usize;
+                let sparse_tail = domain == roster_len as usize;
+                let fresh = remaining & bit != 0 || future_mask & bit != 0;
+                let bucket_status = if fresh {
+                    BackingBucketStatusV16::Fresh
+                } else {
+                    BackingBucketStatusV16::Empty
+                };
+                let expiry_slot = if remaining & bit != 0 {
+                    now_slot
+                } else {
+                    now_slot + 1
+                };
+                (selected, stopped) =
+                    MarketGroupV16ViewMut::<u64>::kani_lapsed_source_backing_scan_step(
+                        selected,
+                        sparse_tail,
+                        occupied,
+                        domain,
+                        bucket_status,
+                        expiry_slot,
+                        now_slot,
+                    );
+            }
+            domain += 1;
+        }
+        assert_eq!(selected, expected);
+
+        if let Some(selected_domain) = selected {
+            let selected_bit = 1u8 << selected_domain;
+            assert!(remaining & selected_bit != 0);
+            assert!(future_mask & selected_bit == 0);
+            remaining &= !selected_bit;
+            assert_eq!(remaining.count_ones() + 1, rank_before);
+            let bucket = BackingBucketV16 {
+                market_id: 1,
+                fresh_unliened_backing_num: BOUND_SCALE,
+                expiry_slot: now_slot,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            };
+            let source = SourceCreditStateV16 {
+                fresh_reserved_backing_num: BOUND_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            };
+            let (expired, source_after) =
+                MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+                    bucket, source, now_slot,
+                )
+                .unwrap();
+            assert_eq!(expired.status, BackingBucketStatusV16::Expired);
+            assert_eq!(expired.fresh_unliened_backing_num, 0);
+            assert_eq!(source_after.fresh_reserved_backing_num, 0);
+        } else {
+            assert_eq!(rank_before, 0);
+        }
+        calls += 1;
+    }
+
+    assert_eq!(remaining, 0);
+
+    kani::cover!(lapsed_mask == 0, "clean roster is a no-op");
+    kani::cover!(
+        lapsed_mask.count_ones() == 1,
+        "single lapsed domain progresses"
+    );
+    kani::cover!(
+        lapsed_mask.count_ones() > 1,
+        "multiple lapsed domains drain"
+    );
+    kani::cover!(
+        lapsed_mask & 1 == 0 && lapsed_mask != 0,
+        "scan skips an earlier non-lapsed domain"
+    );
+    kani::cover!(future_mask != 0, "future backing remains isolated");
+    kani::cover!(
+        (roster_len as usize) < PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "compact sparse tail terminates the scan"
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]

@@ -2527,6 +2527,28 @@ impl V16Core {
         Ok((bucket, source))
     }
 
+    /// PRODUCTION KERNEL: one step of the compact source-domain expiry scan.
+    /// The first sparse-tail entry terminates the scan; otherwise the first
+    /// occupied lapsed Fresh bucket is selected and terminates the scan.
+    fn kernel_lapsed_source_backing_scan_step(
+        selected: Option<usize>,
+        sparse_tail: bool,
+        occupied: bool,
+        domain: usize,
+        bucket_status: BackingBucketStatusV16,
+        expiry_slot: u64,
+        current_slot: u64,
+    ) -> (Option<usize>, bool) {
+        if selected.is_some() || sparse_tail {
+            return (selected, true);
+        }
+        if occupied && bucket_status == BackingBucketStatusV16::Fresh && expiry_slot <= current_slot
+        {
+            return (Some(domain), true);
+        }
+        (None, false)
+    }
+
     #[cfg(any(kani, feature = "fuzz"))]
     // Contract layer: lien release is the un-pledge relabel — valid liened
     // returns to fresh unliened atom-for-atom, fresh_reserved and all stock
@@ -7870,30 +7892,51 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.refresh_source_credit_domain_after_mutation(domain)
     }
 
+    fn first_lapsed_source_backing_for_account(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<Option<usize>> {
+        let current_slot = self.header.current_slot.get();
+        let mut selected = None;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            let occupied = source.is_occupied();
+            let sparse_tail = source.has_default_sparse_tag() && !occupied;
+            let (domain, bucket_status, expiry_slot) = if occupied {
+                let domain = source.domain.get() as usize;
+                let bucket = self.backing_bucket_for_domain(domain)?;
+                (domain, bucket.status, bucket.expiry_slot)
+            } else {
+                (0, BackingBucketStatusV16::Empty, 0)
+            };
+            let (next_selected, stop) = V16Core::kernel_lapsed_source_backing_scan_step(
+                selected,
+                sparse_tail,
+                occupied,
+                domain,
+                bucket_status,
+                expiry_slot,
+                current_slot,
+            );
+            selected = next_selected;
+            if stop {
+                break;
+            }
+            slot += 1;
+        }
+        Ok(selected)
+    }
+
     fn expire_first_lapsed_source_backing_for_account_not_atomic(
         &mut self,
         account: &PortfolioV16View<'_>,
     ) -> V16Result<Option<usize>> {
-        let current_slot = self.header.current_slot.get();
-        let mut slot = 0usize;
-        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = account.header.source_domains[slot];
-            if source.has_default_sparse_tag() && !source.is_occupied() {
-                break;
-            }
-            if source.is_occupied() {
-                let domain = source.domain.get() as usize;
-                let bucket = self.backing_bucket_for_domain(domain)?;
-                if bucket.status == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot <= current_slot
-                {
-                    self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
-                    return Ok(Some(domain));
-                }
-            }
-            slot += 1;
-        }
-        Ok(None)
+        let Some(domain) = self.first_lapsed_source_backing_for_account(account)? else {
+            return Ok(None);
+        };
+        self.expire_source_backing_bucket_not_atomic(domain, self.header.current_slot.get())?;
+        Ok(Some(domain))
     }
 
     #[cfg(any(kani, feature = "fuzz"))]
