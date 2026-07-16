@@ -18,15 +18,15 @@ use percolator::v16::{
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
@@ -8844,45 +8844,58 @@ fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v16_expired_frozen_asset_close_remains_asset_local() {
-    let max_slot_raw: u8 = kani::any();
-    let overrun_raw: u8 = kani::any();
-    kani::assume(max_slot_raw > 0);
-    kani::assume(overrun_raw > 0);
-    let max_slot = max_slot_raw as u64;
-    let current_slot = max_slot + overrun_raw as u64;
-    let (mut header, mut markets, _) = one_market_view_fixture();
-    header.current_slot = V16PodU64::new(current_slot);
-    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
-    asset.lifecycle = AssetLifecycleV16::Recovery;
-    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
-    let header_before = header;
-    let asset_before = markets[0].engine.asset;
-    let ledger = CloseProgressLedgerV16 {
-        active: true,
-        finalized: false,
-        close_id: 1,
-        asset_index: 0,
-        market_id: asset.market_id,
-        domain_side: SideV16::Long,
-        gross_loss_at_close_start: 1,
-        drift_reference_slot: 0,
-        max_close_slot: max_slot,
-        residual_remaining: 1,
-        ..CloseProgressLedgerV16::EMPTY
-    };
+fn proof_v16_expired_frozen_asset_close_routing_is_local_and_fail_closed() {
+    let close_active: bool = kani::any();
+    let residual_raw: u8 = kani::any();
+    let deadline_expired: bool = kani::any();
+    let asset_local_recovery: bool = kani::any();
+    let stale: bool = kani::any();
+    let b_stale: bool = kani::any();
+    let liquidatable: bool = kani::any();
+    let residual = residual_raw as u128;
+    let outstanding = close_active && residual != 0;
 
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let result = market.kani_ensure_close_progress_not_expired(ledger);
+    let plan = percolator::v16::kani_close_progress_auto_crank_plan(
+        close_active,
+        residual,
+        deadline_expired,
+        asset_local_recovery,
+        stale,
+        b_stale,
+        liquidatable,
+    );
 
     kani::cover!(
-        overrun_raw > 1 && result == Ok(()),
-        "expired close on a frozen Recovery asset remains locally progressable"
+        outstanding && deadline_expired && asset_local_recovery && stale && b_stale && liquidatable,
+        "asset-local close wins every overlapping ordinary continuation"
     );
-    assert_eq!(result, Ok(()));
-    assert_eq!(market.header.mode, 0);
-    assert_eq!(*market.header, header_before);
-    assert_eq!(market.markets[0].engine.asset, asset_before);
+    kani::cover!(
+        outstanding && deadline_expired && !asset_local_recovery,
+        "expired drifting close fails closed to global recovery"
+    );
+    kani::cover!(
+        outstanding && !deadline_expired && !asset_local_recovery && stale,
+        "nonexpired ordinary close does not invent global recovery"
+    );
+
+    if outstanding && asset_local_recovery {
+        assert_eq!(
+            plan,
+            AutoCrankPlanV16::AdvanceRecoveryClose { asset_index: 7 }
+        );
+    }
+    if outstanding && deadline_expired && !asset_local_recovery {
+        assert_eq!(
+            plan,
+            AutoCrankPlanV16::DeclareRecovery {
+                reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            }
+        );
+    }
+    assert!(
+        !matches!(plan, AutoCrankPlanV16::DeclareRecovery { .. })
+            || (outstanding && deadline_expired && !asset_local_recovery)
+    );
 }
 
 #[kani::proof]

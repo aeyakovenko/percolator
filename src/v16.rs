@@ -1533,6 +1533,18 @@ impl V16Core {
         None
     }
 
+    /// A close may force market-wide recovery only while it is outstanding,
+    /// expired, nonterminal, and not already isolated to a frozen Recovery
+    /// asset. Classification and dispatch share this O(1) decision.
+    fn kernel_close_requires_global_recovery(
+        close_outstanding: bool,
+        deadline_expired: bool,
+        market_terminal: bool,
+        asset_local_recovery: bool,
+    ) -> bool {
+        close_outstanding && deadline_expired && !market_terminal && !asset_local_recovery
+    }
+
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
     /// summary and the ENGINE-selected assets, choose the single highest-priority
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
@@ -11641,11 +11653,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // by the owner therefore has a stable loss snapshot and can be advanced one
         // public B chunk at a time without promoting an untrusted asset to global
         // market Recovery. Other expired ledgers retain the terminal fallback.
+        let deadline_expired = self.header.current_slot.get() > ledger.max_close_slot;
         let pending_close = live && close_outstanding && recovery_asset_close;
         let expired_close = live
-            && close_outstanding
-            && !recovery_asset_close
-            && self.header.current_slot.get() > ledger.max_close_slot;
+            && V16Core::kernel_close_requires_global_recovery(
+                close_outstanding,
+                deadline_expired,
+                resolved,
+                recovery_asset_close,
+            );
         // liquidatable requires a current certified deficit AND actual open risk:
         // a stale cert can still report a deficit after the position was already
         // closed, but with no active leg there is nothing to liquidate (the real
@@ -13142,9 +13158,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ledger: CloseProgressLedgerV16,
     ) -> V16Result<()> {
         if ledger.active && self.header.current_slot.get() > ledger.max_close_slot {
-            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
-                || self.close_progress_is_asset_local_recovery(ledger)?
-            {
+            let terminal = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved;
+            if terminal {
+                return Ok(());
+            }
+            let asset_local_recovery = self.close_progress_is_asset_local_recovery(ledger)?;
+            if !V16Core::kernel_close_requires_global_recovery(
+                true,
+                true,
+                false,
+                asset_local_recovery,
+            ) {
                 return Ok(());
             }
             self.declare_permissionless_recovery(
@@ -16584,6 +16608,44 @@ pub fn kani_trade_fee_atoms_per_side(
 ) -> V16Result<u128> {
     let fee_notional = trade_fee_notional_ceil(size_q, exec_price)?;
     checked_fee_bps(fee_notional, fee_bps)
+}
+
+/// Proof seam for the production close classifier and auto-crank selector. It
+/// keeps the full state-space theorem scalar while exercising the exact O(1)
+/// decision and priority kernel used by the public crank.
+#[cfg(kani)]
+pub fn kani_close_progress_auto_crank_plan(
+    close_active: bool,
+    residual_remaining: u128,
+    deadline_expired: bool,
+    asset_local_recovery: bool,
+    stale: bool,
+    b_stale: bool,
+    liquidatable: bool,
+) -> AutoCrankPlanV16 {
+    let close_outstanding = close_active && residual_remaining != 0;
+    let summary = ActionableSummaryV16 {
+        stale,
+        b_stale,
+        pending_close: close_outstanding && asset_local_recovery,
+        expired_close: V16Core::kernel_close_requires_global_recovery(
+            close_outstanding,
+            deadline_expired,
+            false,
+            asset_local_recovery,
+        ),
+        liquidatable,
+        recovery_eligible: false,
+        resolved_winner: false,
+    };
+    V16Core::select_auto_crank_plan(
+        summary,
+        7,
+        11,
+        13,
+        Some(13),
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    )
 }
 
 fn checked_i128_mul(a: i128, b: i128) -> V16Result<i128> {
