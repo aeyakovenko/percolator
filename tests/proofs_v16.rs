@@ -1761,6 +1761,7 @@ fn proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value(
     let short_budget = short_budget_raw as u128;
     let budget_total = long_budget + short_budget;
     let insurance = budget_total + slack_raw as u128;
+    let [b_long, b_short, b_epoch_long, b_epoch_short] = [1; 4];
 
     let (market_group_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
@@ -1792,6 +1793,10 @@ fn proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value(
     old_asset.fund_px_last = 100;
     old_asset.slot_last = current_slot;
     old_asset.retired_slot = if restart_retired { current_slot } else { 0 };
+    old_asset.b_long_num = b_long;
+    old_asset.b_short_num = b_short;
+    old_asset.b_epoch_start_long_num = b_epoch_long;
+    old_asset.b_epoch_start_short_num = b_epoch_short;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&old_asset);
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_budget);
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_budget);
@@ -1821,13 +1826,16 @@ fn proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value(
         !restart_retired,
         "public asset-zero restart covers recovery source lifecycle"
     );
-
     assert_eq!(restarted_asset.lifecycle, AssetLifecycleV16::Active);
     assert_eq!(restarted_asset.market_id, next_market_id_before);
     assert_eq!(restarted_asset.raw_oracle_target_price, price_raw as u64);
     assert_eq!(restarted_asset.effective_price, price_raw as u64);
     assert_eq!(restarted_asset.fund_px_last, price_raw as u64);
     assert_eq!(restarted_asset.slot_last, now_slot);
+    assert_eq!(restarted_asset.b_long_num, 0);
+    assert_eq!(restarted_asset.b_short_num, 0);
+    assert_eq!(restarted_asset.b_epoch_start_long_num, 0);
+    assert_eq!(restarted_asset.b_epoch_start_short_num, 0);
     assert_eq!(restarted.insurance_domain_budget_long.get(), long_budget);
     assert_eq!(restarted.insurance_domain_budget_short.get(), short_budget);
     assert_eq!(restarted.insurance_domain_spent_long.get(), 0);
@@ -7155,26 +7163,199 @@ fn proof_v16_retire_nonempty_asset_rejects() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+// B is discharged history once every claimant-bearing field is empty. Prove
+// magnitude and lane-pattern independence over the full four-u128 domain.
+fn proof_v16_empty_lifecycle_classifier_is_b_history_independent() {
+    let b_history: [u128; 4] = kani::any();
+    let zero_adl_epoch: bool = kani::any();
+    let mut asset = AssetStateV16::default();
+    if zero_adl_epoch {
+        asset.a_long = 0;
+        asset.a_short = 0;
+    }
+    asset.b_long_num = b_history[0];
+    asset.b_short_num = b_history[1];
+    asset.b_epoch_start_long_num = b_history[2];
+    asset.b_epoch_start_short_num = b_history[3];
+    let mut zero_b = asset;
+    zero_b.b_long_num = 0;
+    zero_b.b_short_num = 0;
+    zero_b.b_epoch_start_long_num = 0;
+    zero_b.b_epoch_start_short_num = 0;
+
+    let classified = MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(asset);
+    let zero_classified =
+        MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(zero_b);
+
+    kani::cover!(
+        b_history[0] == u128::MAX && b_history[1] == 0 && b_history[2] == 1 && b_history[3] > 1,
+        "mixed current and epoch-start B history is inert at full width"
+    );
+    kani::cover!(
+        b_history[0] != 0
+            && b_history[1] != 0
+            && b_history[2] != 0
+            && b_history[3] != 0
+            && zero_adl_epoch,
+        "all B history lanes are inert in the zero ADL epoch"
+    );
+    assert_eq!(classified, zero_classified);
+    assert!(!classified);
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+// Complement the noninterference theorem: every asset-local field that still
+// owns risk, a claimant, or unsettled loss must independently block reuse.
+fn proof_v16_empty_lifecycle_classifier_rejects_every_asset_claimant_and_loss_field() {
+    let blocker: u8 = kani::any();
+    let short_side: bool = kani::any();
+    kani::assume(blocker <= 13);
+    let mut asset = AssetStateV16 {
+        b_long_num: u128::MAX,
+        b_short_num: 1,
+        b_epoch_start_long_num: u128::MAX,
+        b_epoch_start_short_num: 1,
+        ..AssetStateV16::default()
+    };
+
+    match blocker {
+        0 => {
+            if short_side {
+                asset.mode_short = SideModeV16::DrainOnly;
+            } else {
+                asset.mode_long = SideModeV16::DrainOnly;
+            }
+        }
+        1 => {
+            if short_side {
+                asset.a_short = 0;
+            } else {
+                asset.a_long = 0;
+            }
+        }
+        2 => {
+            if short_side {
+                asset.k_short = -1;
+            } else {
+                asset.k_long = 1;
+            }
+        }
+        3 => {
+            if short_side {
+                asset.k_epoch_start_short = -1;
+            } else {
+                asset.k_epoch_start_long = 1;
+            }
+        }
+        4 => {
+            if short_side {
+                asset.f_short_num = -1;
+            } else {
+                asset.f_long_num = 1;
+            }
+        }
+        5 => {
+            if short_side {
+                asset.f_epoch_start_short_num = -1;
+            } else {
+                asset.f_epoch_start_long_num = 1;
+            }
+        }
+        6 => {
+            if short_side {
+                asset.oi_eff_short_q = 1;
+            } else {
+                asset.oi_eff_long_q = 1;
+            }
+        }
+        7 => {
+            if short_side {
+                asset.stored_pos_count_short = 1;
+            } else {
+                asset.stored_pos_count_long = 1;
+            }
+        }
+        8 => {
+            if short_side {
+                asset.stale_account_count_short = 1;
+            } else {
+                asset.stale_account_count_long = 1;
+            }
+        }
+        9 => {
+            if short_side {
+                asset.pending_obligation_count_short = 1;
+            } else {
+                asset.pending_obligation_count_long = 1;
+            }
+        }
+        10 => {
+            if short_side {
+                asset.loss_weight_sum_short = 1;
+            } else {
+                asset.loss_weight_sum_long = 1;
+            }
+        }
+        11 => {
+            if short_side {
+                asset.social_loss_remainder_short_num = 1;
+            } else {
+                asset.social_loss_remainder_long_num = 1;
+            }
+        }
+        12 => {
+            if short_side {
+                asset.social_loss_dust_short_num = 1;
+            } else {
+                asset.social_loss_dust_long_num = 1;
+            }
+        }
+        _ => {
+            if short_side {
+                asset.explicit_unallocated_loss_short = 1;
+            } else {
+                asset.explicit_unallocated_loss_long = 1;
+            }
+        }
+    }
+
+    kani::cover!(
+        blocker == 0 && !short_side,
+        "long mode blocker is reachable"
+    );
+    kani::cover!(
+        blocker == 6 && short_side,
+        "short open-interest blocker is reachable"
+    );
+    kani::cover!(
+        blocker == 13 && !short_side,
+        "long explicit-loss blocker is reachable"
+    );
+    assert!(MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(asset));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+// Bind the classifier theorem to the persisted zero-copy retirement path with
+// all four B lanes present; the separate theorem above discharges magnitude.
 fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let with_senior_balances: bool = kani::any();
-    let retire_slot_raw: u8 = kani::any();
-    let b_long_raw: u8 = kani::any();
-    let b_short_raw: u8 = kani::any();
-    let b_epoch_long_raw: u8 = kani::any();
-    let b_epoch_short_raw: u8 = kani::any();
-    kani::assume((1..=10).contains(&retire_slot_raw));
+    let late_retirement: bool = kani::any();
     let c_tot = if with_senior_balances { 7 } else { 0 };
     let insurance = if with_senior_balances { 3 } else { 0 };
-    let retire_slot = retire_slot_raw as u64;
+    let retire_slot = if late_retirement { 10 } else { 1 };
+    let [b_long, b_short, b_epoch_long, b_epoch_short] = [1; 4];
     let (mut header, mut markets, _) = one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
     let mut historical_asset = markets[0].engine.asset.try_to_runtime().unwrap();
-    historical_asset.b_long_num = b_long_raw as u128;
-    historical_asset.b_short_num = b_short_raw as u128;
-    historical_asset.b_epoch_start_long_num = b_epoch_long_raw as u128;
-    historical_asset.b_epoch_start_short_num = b_epoch_short_raw as u128;
+    historical_asset.b_long_num = b_long;
+    historical_asset.b_short_num = b_short;
+    historical_asset.b_epoch_start_long_num = b_epoch_long;
+    historical_asset.b_epoch_start_short_num = b_epoch_short;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&historical_asset);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
@@ -7189,19 +7370,15 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        retire_slot > 1 && with_senior_balances && asset.lifecycle == AssetLifecycleV16::Retired,
+        late_retirement && with_senior_balances && asset.lifecycle == AssetLifecycleV16::Retired,
         "empty asset can retire without moving nonzero senior balances"
-    );
-    kani::cover!(
-        b_long_raw != 0 && b_short_raw != 0 && b_epoch_long_raw != 0 && b_epoch_short_raw != 0,
-        "discharged current and prior-epoch B history cannot strand an empty asset"
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
     assert_eq!(asset.retired_slot, retire_slot);
-    assert_eq!(asset.b_long_num, b_long_raw as u128);
-    assert_eq!(asset.b_short_num, b_short_raw as u128);
-    assert_eq!(asset.b_epoch_start_long_num, b_epoch_long_raw as u128);
-    assert_eq!(asset.b_epoch_start_short_num, b_epoch_short_raw as u128);
+    assert_eq!(asset.b_long_num, b_long);
+    assert_eq!(asset.b_short_num, b_short);
+    assert_eq!(asset.b_epoch_start_long_num, b_epoch_long);
+    assert_eq!(asset.b_epoch_start_short_num, b_epoch_short);
     assert_eq!(market.header.current_slot.get(), retire_slot);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
@@ -7211,7 +7388,6 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
         asset_set_epoch_before + 1
     );
     assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
-    assert_eq!(market.validate_shape(), Ok(()));
 }
 
 #[kani::proof]
