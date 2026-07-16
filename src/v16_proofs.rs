@@ -5236,6 +5236,140 @@ fn closure_trade_lien_reservation_caps_other_account_realizable_support() {
     assert!(second_support_after <= second_claim);
 }
 
+// Any successful reservation of shared source capacity must invalidate every
+// certificate issued before that reservation. This composes the production
+// counterparty/insurance encumbrance deltas, source-rate recomputation, and the
+// favorable-action certificate gate over arbitrary prior use and reserve size.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_shared_source_reservation_stales_prior_favorable_certificates() {
+    let claim_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let prior_raw: u8 = kani::any();
+    let reserve_raw: u8 = kani::any();
+    let risk_epoch_raw: u8 = kani::any();
+    let insurance_backed: bool = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume(backing_raw <= claim_raw);
+    kani::assume(prior_raw < backing_raw);
+    kani::assume((1..=backing_raw - prior_raw).contains(&reserve_raw));
+    kani::assume(risk_epoch_raw < u8::MAX);
+
+    let claim = u128::from(claim_raw);
+    let backing = u128::from(backing_raw);
+    let prior = u128::from(prior_raw);
+    let reserve = u128::from(reserve_raw);
+    let claim_num = claim * BOUND_SCALE;
+    let backing_num = backing * BOUND_SCALE;
+    let prior_num = prior * BOUND_SCALE;
+    let reserve_num = reserve * BOUND_SCALE;
+    let risk_epoch = u64::from(risk_epoch_raw);
+
+    let mut source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: if insurance_backed { 0 } else { backing_num },
+        valid_liened_backing_num: if insurance_backed { 0 } else { prior_num },
+        insurance_credit_reserved_num: if insurance_backed { backing_num } else { 0 },
+        valid_liened_insurance_num: if insurance_backed { prior_num } else { 0 },
+        ..SourceCreditStateV16::EMPTY
+    };
+    source.credit_rate_num = V16Core::expected_source_credit_rate_num_for_state(source).unwrap();
+    let support_before =
+        V16Core::source_credit_state_realizable_support_for_face(source, claim).unwrap();
+    let available_before = V16Core::available_backing_num_for_source_credit_state(source).unwrap();
+    kani::assume(support_before > 0);
+
+    let cert = HealthCertV16 {
+        certified_equity: support_before as i128,
+        certified_initial_req: support_before,
+        certified_maintenance_req: support_before,
+        certified_worst_case_loss: support_before,
+        cert_oracle_epoch: 3,
+        cert_funding_epoch: 4,
+        cert_risk_epoch: risk_epoch,
+        cert_asset_set_epoch: 5,
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    assert!(V16Core::kernel_cert_is_current(
+        cert,
+        3,
+        4,
+        risk_epoch,
+        5,
+        V16_EMPTY_ACTIVE_BITMAP,
+    ));
+
+    let source = if insurance_backed {
+        let reservation = InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: backing_num,
+            valid_liened_insurance_num: prior_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        };
+        V16Core::prepare_insurance_lien_create_delta(reservation, source, reserve_num)
+            .unwrap()
+            .1
+    } else {
+        let bucket = BackingBucketV16 {
+            market_id: 1,
+            fresh_unliened_backing_num: backing_num - prior_num,
+            valid_liened_backing_num: prior_num,
+            expiry_slot: 2,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        };
+        V16Core::prepare_counterparty_lien_create_delta(bucket, source, 1, reserve_num)
+            .unwrap()
+            .1
+    };
+    let (source_after, next_risk_epoch) =
+        V16Core::prepare_source_credit_domain_recompute_for_epoch(source, risk_epoch).unwrap();
+    let support_after =
+        V16Core::source_credit_state_realizable_support_for_face(source_after, claim).unwrap();
+    let available_after =
+        V16Core::available_backing_num_for_source_credit_state(source_after).unwrap();
+
+    kani::cover!(
+        !insurance_backed && prior > 0 && reserve < backing - prior,
+        "counterparty capacity is reserved after prior cross-account use"
+    );
+    kani::cover!(
+        insurance_backed && prior > 0 && reserve < backing - prior,
+        "insurance capacity is reserved after prior cross-account use"
+    );
+    kani::cover!(
+        reserve == backing - prior,
+        "a reservation may exhaust all remaining shared source capacity"
+    );
+    kani::cover!(
+        backing < claim && support_after < support_before,
+        "an underbacked source loses favorable support after reservation"
+    );
+    kani::cover!(
+        support_before > 1 && support_after > 0,
+        "a multi-atom favorable certificate is invalidated before total exhaustion"
+    );
+    assert_eq!(available_before, (backing - prior) * BOUND_SCALE);
+    assert_eq!(available_after, available_before - reserve_num);
+    assert!(support_after <= support_before);
+    assert_eq!(source_after.credit_epoch, source.credit_epoch + 1);
+    assert_eq!(next_risk_epoch, risk_epoch + 1);
+    assert!(!V16Core::kernel_cert_is_current(
+        cert,
+        3,
+        4,
+        next_risk_epoch,
+        5,
+        V16_EMPTY_ACTIVE_BITMAP,
+    ));
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn repeated_lien_trade_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
     if state == SourceCreditStateV16::EMPTY {
