@@ -451,6 +451,13 @@ impl MarketGroupV16HeaderAccount {
     ) -> V16Result<()> {
         self.validate_dynamic_market_slot_shape_at(slot_index, slot)
     }
+
+    pub fn kani_clear_attributed_bankruptcy_asset_for_reuse(
+        &mut self,
+        slot: &mut EngineAssetSlotV16Account,
+    ) -> V16Result<()> {
+        self.clear_attributed_bankruptcy_asset_for_reuse(slot)
+    }
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
@@ -871,6 +878,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.bankruptcy_hlock_is_only_unrelated_to_account(account)
     }
 
+    pub fn kani_mark_attributed_bankruptcy_hlock(&mut self, asset_index: usize) -> V16Result<()> {
+        self.mark_attributed_bankruptcy_hlock(asset_index)
+    }
+
     pub fn kani_can_ignore_unrelated_loss_stale_for_trade(
         &self,
         long_account: &PortfolioV16View<'_>,
@@ -1186,6 +1197,7 @@ pub fn kani_eq_market_group_v16_header_account(
         && a.funding_epoch.get() == b.funding_epoch.get()
         && a.slot_last.get() == b.slot_last.get()
         && a.current_slot.get() == b.current_slot.get()
+        && a.bankruptcy_hlock_asset_count.get() == b.bankruptcy_hlock_asset_count.get()
         && a.bankruptcy_hlock_active == b.bankruptcy_hlock_active
         && a.threshold_stress_active == b.threshold_stress_active
         && a.loss_stale_active == b.loss_stale_active
@@ -1299,6 +1311,7 @@ pub fn kani_eq_engine_asset_slot_v16_account(
         && a.insurance_domain_spent_short.get() == b.insurance_domain_spent_short.get()
         && a.pending_domain_loss_barrier_long.get() == b.pending_domain_loss_barrier_long.get()
         && a.pending_domain_loss_barrier_short.get() == b.pending_domain_loss_barrier_short.get()
+        && a.bankruptcy_hlock_active == b.bankruptcy_hlock_active
         && kani_eq_source_credit_state_v16_account(&a.source_credit_long, &b.source_credit_long)
         && kani_eq_source_credit_state_v16_account(&a.source_credit_short, &b.source_credit_short)
         && kani_eq_backing_bucket_v16_account(&a.backing_long, &b.backing_long)

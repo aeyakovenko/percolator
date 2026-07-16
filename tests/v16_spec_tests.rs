@@ -1342,7 +1342,6 @@ fn v16_public_empty_asset_oracle_anchor_reset_is_value_neutral() {
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
-
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market
         .reset_empty_asset_oracle_anchor_not_atomic(0, 123, 10)
@@ -1408,6 +1407,9 @@ fn v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset() {
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
+    header.bankruptcy_hlock_active = 2;
+    header.bankruptcy_hlock_asset_count = V16PodU32::new(1);
+    markets[1].engine.bankruptcy_hlock_active = 1;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     market
@@ -1429,6 +1431,9 @@ fn v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset() {
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.bankruptcy_hlock_active, 0);
+    assert_eq!(market.header.bankruptcy_hlock_asset_count.get(), 0);
+    assert_eq!(market.markets[1].engine.bankruptcy_hlock_active, 0);
     market.validate_shape().unwrap();
 }
 
@@ -2842,7 +2847,9 @@ fn source_backed_conversion_hlock_fixture() -> (
 fn v16_unrelated_bankruptcy_hlock_does_not_freeze_source_backed_conversion() {
     let (mut header, mut markets, mut account, claim) = source_backed_conversion_hlock_fixture();
     header.bankruptcy_hlock_active = 2;
-    markets[1].engine.asset.mode_long = SideModeV16::ResetPending as u8;
+    header.bankruptcy_hlock_asset_count = V16PodU32::new(1);
+    markets[1].engine.bankruptcy_hlock_active = 1;
+    markets[0].engine.asset.mode_long = SideModeV16::DrainOnly as u8;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account_view = PortfolioV16ViewMut::new(&mut account);
@@ -2864,7 +2871,8 @@ fn v16_related_or_unattributed_bankruptcy_hlock_still_blocks_conversion() {
         let (mut header, mut markets, mut account, _) = source_backed_conversion_hlock_fixture();
         header.bankruptcy_hlock_active = if related { 2 } else { 1 };
         if related {
-            markets[0].engine.asset.mode_long = SideModeV16::ResetPending as u8;
+            header.bankruptcy_hlock_asset_count = V16PodU32::new(1);
+            markets[0].engine.bankruptcy_hlock_active = 1;
         }
 
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);

@@ -2,10 +2,11 @@
 
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
-    backing_domain_fee_split_for_lien_delta_num, bankruptcy_hlock_to_wire,
-    kani_active_bitmap_set as active_bitmap_set, kani_add_open_interest_for_new_position,
-    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
-    kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
+    backing_domain_fee_split_for_lien_delta_num, bankruptcy_asset_slot_has_lock_state,
+    bankruptcy_hlock_to_wire, kani_active_bitmap_set as active_bitmap_set,
+    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
+    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
+    kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
@@ -79,11 +80,7 @@ fn one_market_view_fixture() -> (
     (header, markets, account_header)
 }
 
-fn two_market_view_fixture() -> (
-    MarketGroupV16HeaderAccount,
-    [Market<u64>; 2],
-    PortfolioAccountV16Account,
-) {
+fn two_market_only_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 2]) {
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
@@ -96,6 +93,16 @@ fn two_market_view_fixture() -> (
         view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
         view.activate_empty_market_not_atomic(1, 100, 2).unwrap();
     }
+    (header, markets)
+}
+
+fn two_market_view_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+) {
+    let (header, markets) = two_market_only_fixture();
+    let (market_id, _, _) = ids();
     let account_header = empty_account_fixture(market_id, 2);
     (header, markets, account_header)
 }
@@ -3543,36 +3550,288 @@ fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate(
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_bankruptcy_hlock_attribution_is_asset_local_and_fail_closed() {
-    let related_lock: bool = kani::any();
-    let unrelated_lock: bool = kani::any();
-    let fully_attributed: bool = kani::any();
+    let wire: u8 = kani::any();
+    let lock_0: bool = kani::any();
+    let lock_1: bool = kani::any();
+    let leg_0: bool = kani::any();
+    let leg_1: bool = kani::any();
+    let source_0: bool = kani::any();
+    let source_1: bool = kani::any();
+    let close_ref: u8 = kani::any();
+    kani::assume(wire <= 2);
+    kani::assume(close_ref <= 2);
+    kani::assume(wire != 0 || (!lock_0 && !lock_1));
+    kani::assume(wire != 2 || lock_0 || lock_1);
+
     let (mut header, mut markets, mut account_header) = two_market_view_fixture();
-    header.bankruptcy_hlock_active = bankruptcy_hlock_to_wire(true, fully_attributed);
-    account_header.source_domains[0].domain = V16PodU32::new(0);
-    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
-    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(1);
-    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(related_lock as u128);
-    markets[1].engine.insurance_domain_spent_long = V16PodU128::new(unrelated_lock as u128);
+    header.bankruptcy_hlock_active = wire;
+    header.bankruptcy_hlock_asset_count = V16PodU32::new(lock_0 as u32 + lock_1 as u32);
+    markets[0].engine.bankruptcy_hlock_active = lock_0 as u8;
+    markets[1].engine.bankruptcy_hlock_active = lock_1 as u8;
+
+    let assets = [
+        markets[0].engine.asset.try_to_runtime().unwrap(),
+        markets[1].engine.asset.try_to_runtime().unwrap(),
+    ];
+    for (slot, active) in [leg_0, leg_1].into_iter().enumerate() {
+        if active {
+            let asset = assets[slot];
+            account_header.legs[slot] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+                active: true,
+                asset_index: slot as u32,
+                market_id: asset.market_id,
+                side: SideV16::Long,
+                basis_pos_q: POS_SCALE as i128,
+                a_basis: ADL_ONE,
+                k_snap: asset.k_long,
+                f_snap: asset.f_long_num,
+                epoch_snap: asset.epoch_long,
+                loss_weight: POS_SCALE,
+                b_snap: asset.b_long_num,
+                b_rem: 0,
+                b_epoch_snap: asset.epoch_long,
+                b_stale: false,
+                stale: false,
+            });
+            let word = slot / 64;
+            account_header.active_bitmap[word] =
+                V16PodU64::new(account_header.active_bitmap[word].get() | (1u64 << (slot % 64)));
+        }
+    }
+    let mut source_slot = 0usize;
+    for (asset_index, active) in [source_0, source_1].into_iter().enumerate() {
+        if active {
+            account_header.source_domains[source_slot].domain =
+                V16PodU32::new((asset_index * 2) as u32);
+            account_header.source_domains[source_slot].source_claim_market_id =
+                V16PodU64::new(assets[asset_index].market_id);
+            account_header.source_domains[source_slot].source_claim_bound_num = V16PodU128::new(1);
+            source_slot += 1;
+        }
+    }
+    if close_ref != 0 {
+        let asset_index = (close_ref - 1) as usize;
+        account_header.close_progress =
+            CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+                active: true,
+                close_id: 1,
+                asset_index: asset_index as u32,
+                market_id: assets[asset_index].market_id,
+                domain_side: SideV16::Long,
+                gross_loss_at_close_start: 1,
+                residual_remaining: 1,
+                ..CloseProgressLedgerV16::EMPTY
+            });
+    }
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let account = PortfolioV16View::new(&account_header);
     let only_unrelated = market
-        .kani_bankruptcy_hlock_is_only_unrelated_to_account(&account.as_view())
+        .kani_bankruptcy_hlock_is_only_unrelated_to_account(&account)
         .unwrap();
 
+    let references_0 = leg_0 || source_0 || close_ref == 1;
+    let references_1 = leg_1 || source_1 || close_ref == 2;
+    let references_locked_asset = (lock_0 && references_0) || (lock_1 && references_1);
+    let expected = wire == 2 && !references_locked_asset;
+
     kani::cover!(
-        fully_attributed && unrelated_lock && only_unrelated,
-        "an attributed unrelated bankruptcy h-lock does not freeze the account"
+        wire == 2 && lock_1 && references_0 && !references_1 && only_unrelated,
+        "an attributed bankruptcy on another asset does not freeze this account"
     );
     kani::cover!(
-        related_lock && !only_unrelated,
-        "a related bankruptcy h-lock remains fail-closed"
+        wire == 2 && lock_0 && leg_0 && !only_unrelated,
+        "an active leg on the bankrupt asset remains fail-closed"
     );
     kani::cover!(
-        !fully_attributed && !only_unrelated,
+        wire == 2 && lock_0 && source_0 && !only_unrelated,
+        "a source claim on the bankrupt asset remains fail-closed"
+    );
+    kani::cover!(
+        wire == 2 && lock_0 && close_ref == 1 && !only_unrelated,
+        "an active close on the bankrupt asset remains fail-closed"
+    );
+    kani::cover!(
+        wire == 1 && !only_unrelated,
         "an unattributed global bankruptcy h-lock remains fail-closed"
     );
-    assert_eq!(only_unrelated, fully_attributed && !related_lock);
+    kani::cover!(
+        wire == 0 && !only_unrelated,
+        "an inactive lock is not ignored"
+    );
+    assert_eq!(only_unrelated, expected);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_bankruptcy_asset_lock_is_durable_not_inferred_from_transient_state() {
+    let durable_lock: bool = kani::any();
+    let transient_mask: u8 = kani::any();
+    kani::assume(transient_mask <= 0x3f);
+    let mut slot = EngineAssetSlotV16Account::empty_for_market(1);
+    let mut asset = AssetStateV16 {
+        market_id: 1,
+        lifecycle: AssetLifecycleV16::Active,
+        ..AssetStateV16::default()
+    };
+    if transient_mask & 1 != 0 {
+        asset.mode_long = SideModeV16::DrainOnly;
+    }
+    if transient_mask & 2 != 0 {
+        asset.b_long_num = 1;
+    }
+    if transient_mask & 4 != 0 {
+        asset.social_loss_remainder_long_num = 1;
+    }
+    if transient_mask & 8 != 0 {
+        asset.explicit_unallocated_loss_long = 1;
+    }
+    if transient_mask & 16 != 0 {
+        slot.insurance_domain_spent_long = V16PodU128::new(1);
+    }
+    if transient_mask & 32 != 0 {
+        slot.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    }
+    slot.asset = AssetStateV16Account::from_runtime(&asset);
+    slot.bankruptcy_hlock_active = durable_lock as u8;
+
+    let result = bankruptcy_asset_slot_has_lock_state(&slot).unwrap();
+    kani::cover!(
+        !durable_lock && transient_mask != 0 && !result,
+        "ordinary transient asset state never fabricates bankruptcy attribution"
+    );
+    kani::cover!(
+        durable_lock && transient_mask == 0 && result,
+        "bankruptcy attribution survives after transient state clears"
+    );
+    assert_eq!(result, durable_lock);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_mark_attributed_bankruptcy_is_exact_durable_and_idempotent() {
+    let lock_0: bool = kani::any();
+    let lock_1: bool = kani::any();
+    let prior_unattributed: bool = kani::any();
+    let target: bool = kani::any();
+    let (mut header, mut markets) = two_market_only_fixture();
+    let count_before = lock_0 as u32 + lock_1 as u32;
+    header.bankruptcy_hlock_asset_count = V16PodU32::new(count_before);
+    header.bankruptcy_hlock_active = if prior_unattributed {
+        bankruptcy_hlock_to_wire(true, false)
+    } else {
+        bankruptcy_hlock_to_wire(count_before != 0, true)
+    };
+    markets[0].engine.bankruptcy_hlock_active = lock_0 as u8;
+    markets[1].engine.bankruptcy_hlock_active = lock_1 as u8;
+    let target_index = target as usize;
+    let target_was_locked = [lock_0, lock_1][target_index];
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .kani_mark_attributed_bankruptcy_hlock(target_index)
+            .unwrap();
+    }
+    let expected_count = count_before + u32::from(!target_was_locked);
+    assert_eq!(header.bankruptcy_hlock_asset_count.get(), expected_count);
+    assert_eq!(
+        header.bankruptcy_hlock_active,
+        if prior_unattributed { 1 } else { 2 }
+    );
+    assert_eq!(markets[target_index].engine.bankruptcy_hlock_active, 1);
+    assert_eq!(
+        markets[1 - target_index].engine.bankruptcy_hlock_active,
+        [lock_0, lock_1][1 - target_index] as u8
+    );
+
+    let header_after_first = header;
+    let markets_after_first = markets;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .kani_mark_attributed_bankruptcy_hlock(target_index)
+            .unwrap();
+    }
+    kani::cover!(
+        !target_was_locked && count_before != 0 && !prior_unattributed,
+        "a new affected asset extends an attributed lock exactly once"
+    );
+    kani::cover!(
+        target_was_locked,
+        "repeated bankruptcy attribution is idempotent"
+    );
+    kani::cover!(
+        prior_unattributed,
+        "an unattributed event remains globally fail-closed"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &header,
+        &header_after_first
+    ));
+    for i in 0..2 {
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &markets[i].engine,
+            &markets_after_first[i].engine
+        ));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_bankruptcy_asset_reuse_clears_exactly_one_attribution() {
+    let target_locked: bool = kani::any();
+    let other_locked: bool = kani::any();
+    let prior_unattributed: bool = kani::any();
+    let mut header = MarketGroupV16HeaderAccount::default();
+    let count_before = target_locked as u32 + other_locked as u32;
+    header.bankruptcy_hlock_asset_count = V16PodU32::new(count_before);
+    header.bankruptcy_hlock_active = if prior_unattributed {
+        bankruptcy_hlock_to_wire(true, false)
+    } else {
+        bankruptcy_hlock_to_wire(count_before != 0, true)
+    };
+    let mut slot = EngineAssetSlotV16Account::empty_for_market(1);
+    slot.bankruptcy_hlock_active = target_locked as u8;
+
+    header
+        .kani_clear_attributed_bankruptcy_asset_for_reuse(&mut slot)
+        .unwrap();
+    let expected_count = count_before - u32::from(target_locked);
+    let expected_wire = if prior_unattributed {
+        1
+    } else if other_locked {
+        2
+    } else {
+        0
+    };
+    kani::cover!(
+        target_locked && !other_locked && !prior_unattributed,
+        "reusing the final attributed asset releases the global lock"
+    );
+    kani::cover!(
+        target_locked && other_locked && !prior_unattributed,
+        "reusing one asset preserves another asset's lock"
+    );
+    kani::cover!(
+        target_locked && prior_unattributed,
+        "reusing an attributed asset never clears an unattributed event"
+    );
+    assert_eq!(slot.bankruptcy_hlock_active, 0);
+    assert_eq!(header.bankruptcy_hlock_asset_count.get(), expected_count);
+    assert_eq!(header.bankruptcy_hlock_active, expected_wire);
+
+    let header_after_first = header;
+    header
+        .kani_clear_attributed_bankruptcy_asset_for_reuse(&mut slot)
+        .unwrap();
+    assert!(kani_eq_market_group_v16_header_account(
+        &header,
+        &header_after_first
+    ));
 }
 
 #[kani::proof]
