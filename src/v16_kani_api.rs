@@ -840,6 +840,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_asset_has_empty_lifecycle_blocker(asset: AssetStateV16) -> bool {
+        Self::asset_has_empty_lifecycle_blocker(asset)
+    }
+
     pub fn kani_canonical_retired_asset_slot(
         old_asset: AssetStateV16,
     ) -> EngineAssetSlotV16Account {

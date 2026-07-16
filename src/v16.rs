@@ -12124,6 +12124,38 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         canonical_slot
     }
 
+    #[inline(always)]
+    fn asset_has_empty_lifecycle_blocker(asset: AssetStateV16) -> bool {
+        asset.mode_long != SideModeV16::Normal
+            || asset.mode_short != SideModeV16::Normal
+            || !((asset.a_long == ADL_ONE && asset.a_short == ADL_ONE)
+                || (asset.a_long == 0 && asset.a_short == 0))
+            || asset.f_long_num != 0
+            || asset.f_short_num != 0
+            || asset.f_epoch_start_long_num != 0
+            || asset.f_epoch_start_short_num != 0
+            || asset.b_long_num != 0
+            || asset.b_short_num != 0
+            || asset.b_epoch_start_long_num != 0
+            || asset.b_epoch_start_short_num != 0
+            || asset.oi_eff_long_q != 0
+            || asset.oi_eff_short_q != 0
+            || asset.stored_pos_count_long != 0
+            || asset.stored_pos_count_short != 0
+            || asset.stale_account_count_long != 0
+            || asset.stale_account_count_short != 0
+            || asset.pending_obligation_count_long != 0
+            || asset.pending_obligation_count_short != 0
+            || asset.loss_weight_sum_long != 0
+            || asset.loss_weight_sum_short != 0
+            || asset.social_loss_remainder_long_num != 0
+            || asset.social_loss_remainder_short_num != 0
+            || asset.social_loss_dust_long_num != 0
+            || asset.social_loss_dust_short_num != 0
+            || asset.explicit_unallocated_loss_long != 0
+            || asset.explicit_unallocated_loss_short != 0
+    }
+
     fn require_asset_live_reducible(&self, asset_index: usize) -> V16Result<()> {
         let asset = self.asset_state(asset_index)?;
         match asset.lifecycle {
@@ -12166,34 +12198,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // K may advance on an unexposed asset; with every position counter empty it has no claimant.
         if slot.pending_domain_loss_barrier_long.get() != 0
             || slot.pending_domain_loss_barrier_short.get() != 0
-            || asset.mode_long != SideModeV16::Normal
-            || asset.mode_short != SideModeV16::Normal
-            || !((asset.a_long == ADL_ONE && asset.a_short == ADL_ONE)
-                || (asset.a_long == 0 && asset.a_short == 0))
-            || asset.f_long_num != 0
-            || asset.f_short_num != 0
-            || asset.f_epoch_start_long_num != 0
-            || asset.f_epoch_start_short_num != 0
-            || asset.b_long_num != 0
-            || asset.b_short_num != 0
-            || asset.b_epoch_start_long_num != 0
-            || asset.b_epoch_start_short_num != 0
-            || asset.oi_eff_long_q != 0
-            || asset.oi_eff_short_q != 0
-            || asset.stored_pos_count_long != 0
-            || asset.stored_pos_count_short != 0
-            || asset.stale_account_count_long != 0
-            || asset.stale_account_count_short != 0
-            || asset.pending_obligation_count_long != 0
-            || asset.pending_obligation_count_short != 0
-            || asset.loss_weight_sum_long != 0
-            || asset.loss_weight_sum_short != 0
-            || asset.social_loss_remainder_long_num != 0
-            || asset.social_loss_remainder_short_num != 0
-            || asset.social_loss_dust_long_num != 0
-            || asset.social_loss_dust_short_num != 0
-            || asset.explicit_unallocated_loss_long != 0
-            || asset.explicit_unallocated_loss_short != 0
+            || Self::asset_has_empty_lifecycle_blocker(asset)
             || spent_blocks_empty
             || !long_source.is_empty_amount_shape()
             || !short_source.is_empty_amount_shape()
