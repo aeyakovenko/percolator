@@ -7232,6 +7232,334 @@ fn closure_liquidation_reward_then_fee_split_preserves_prior_insurance_capacity(
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn maintenance_composition_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert!(account.header.capital.get() <= market.header.c_tot.get());
+    let mut slot = 0usize;
+    while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert!(!account.header.source_domains[slot].is_occupied());
+        slot += 1;
+    }
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn maintenance_composition_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert_eq!(decode_market_mode(market.header.mode)?, MarketModeV16::Live);
+    assert_eq!(
+        market.header.vault.get(),
+        market.header.c_tot.get() + market.header.insurance.get()
+    );
+    let budget_total = market
+        .markets
+        .iter()
+        .map(|slot| {
+            slot.engine.insurance_domain_budget_long.get()
+                - slot.engine.insurance_domain_spent_long.get()
+                + slot.engine.insurance_domain_budget_short.get()
+                - slot.engine.insurance_domain_spent_short.get()
+        })
+        .sum::<u128>();
+    assert_eq!(
+        budget_total,
+        market.header.insurance_domain_budget_remaining_total.get()
+    );
+    assert!(budget_total <= market.header.insurance.get());
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn maintenance_composition_flow_validation_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
+    let account_debit = proof.debits[TokenValueClassV16::AccountCapital as usize];
+    let insurance_debit = proof.debits[TokenValueClassV16::InsuranceCapital as usize];
+    let account_credit = proof.credits[TokenValueClassV16::AccountCapital as usize];
+    let insurance_credit = proof.credits[TokenValueClassV16::InsuranceCapital as usize];
+    let mut expected_debits = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+    let mut expected_credits = [0u128; V16_TOKEN_VALUE_CLASS_COUNT];
+    if account_debit != 0 {
+        assert_eq!(insurance_debit, 0);
+        assert_eq!(account_credit, 0);
+        assert_eq!(insurance_credit, account_debit);
+        expected_debits[TokenValueClassV16::AccountCapital as usize] = account_debit;
+        expected_credits[TokenValueClassV16::InsuranceCapital as usize] = account_debit;
+    } else {
+        assert_ne!(insurance_debit, 0);
+        assert_eq!(insurance_credit, 0);
+        assert_eq!(account_credit, insurance_debit);
+        expected_debits[TokenValueClassV16::InsuranceCapital as usize] = insurance_debit;
+        expected_credits[TokenValueClassV16::AccountCapital as usize] = insurance_debit;
+    }
+    let mut class = 0usize;
+    while class < V16_TOKEN_VALUE_CLASS_COUNT {
+        assert_eq!(proof.debits[class], expected_debits[class]);
+        assert_eq!(proof.credits[class], expected_credits[class]);
+        class += 1;
+    }
+    assert_eq!(proof.external_quote_in, 0);
+    assert_eq!(proof.external_quote_out, 0);
+    assert_eq!(proof.vault_before, proof.vault_after);
+    Ok(())
+}
+
+// Compose the exact public route used by permissionless maintenance sync:
+// charge one flat account, optionally reward either that account or a distinct
+// cranker, then budget the retained fee to asset zero. The final unbudgeted
+// insurance is exactly the prior surplus, so the caller cannot capture old or
+// domain-reserved insurance through either reward variant.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_maintenance_sync_reward_and_budget_preserve_prior_insurance<const SELF_REWARD: bool>() {
+    let target_capital_raw: u8 = kani::any();
+    let cranker_capital_raw: u8 = kani::any();
+    let fee_rate_raw: u8 = kani::any();
+    let dt_raw: u8 = kani::any();
+    let reward_raw: u8 = kani::any();
+    let prior_unbudgeted_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&target_capital_raw));
+    kani::assume((1..=8).contains(&cranker_capital_raw));
+    kani::assume((1..=4).contains(&fee_rate_raw));
+    kani::assume((1..=4).contains(&dt_raw));
+    kani::assume(prior_unbudgeted_raw <= 8);
+
+    let target_capital = u128::from(target_capital_raw);
+    let cranker_capital = u128::from(cranker_capital_raw);
+    let requested = u128::from(fee_rate_raw) * u128::from(dt_raw);
+    let charged = requested.min(target_capital);
+    let reward = u128::from(reward_raw);
+    kani::assume(reward <= charged);
+    let retained = charged - reward;
+    let prior_unbudgeted = u128::from(prior_unbudgeted_raw);
+
+    let (mut header, mut markets, mut target_header) = two_asset_kf_mapping_fixture();
+    target_header
+        .init_empty_in_place(target_header.provenance_header)
+        .unwrap();
+    let cranker_provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        header.market_group_id,
+        [12; 32],
+        [13; 32],
+    ));
+    let mut cranker_header = PortfolioAccountV16Account::default();
+    cranker_header
+        .init_empty_in_place(cranker_provenance)
+        .unwrap();
+    let prior_budget_total = header.insurance_domain_budget_remaining_total.get();
+    let initial_cranker_capital = if SELF_REWARD { 0 } else { cranker_capital };
+    let initial_c_tot = target_capital + initial_cranker_capital;
+    let initial_insurance = prior_budget_total + prior_unbudgeted;
+    header.c_tot = V16PodU128::new(initial_c_tot);
+    header.insurance = V16PodU128::new(initial_insurance);
+    header.vault = V16PodU128::new(initial_c_tot + initial_insurance);
+    header.materialized_portfolio_count = V16PodU64::new(if SELF_REWARD { 1 } else { 2 });
+    header.resolved_payout_blocker_count = header.materialized_portfolio_count;
+    target_header.capital = V16PodU128::new(target_capital);
+    cranker_header.capital = V16PodU128::new(initial_cranker_capital);
+    let target_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: target_capital as i128,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+    target_header.health_cert = target_cert;
+    cranker_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: initial_cranker_capital as i128,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let header_before = header;
+    let markets_before = markets;
+    let target_before = target_header;
+    let cranker_before = cranker_header;
+    let mut expected_header = header_before;
+    expected_header.c_tot = V16PodU128::new(initial_c_tot - charged + reward);
+    expected_header.insurance = V16PodU128::new(initial_insurance + charged - reward);
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(prior_budget_total + retained);
+    let mut expected_markets = markets_before;
+    expected_markets[0].engine.insurance_domain_budget_long = V16PodU128::new(
+        expected_markets[0]
+            .engine
+            .insurance_domain_budget_long
+            .get()
+            + retained / 2,
+    );
+    expected_markets[0].engine.insurance_domain_budget_short = V16PodU128::new(
+        expected_markets[0]
+            .engine
+            .insurance_domain_budget_short
+            .get()
+            + retained
+            - retained / 2,
+    );
+    let mut expected_target = target_before;
+    expected_target.capital =
+        V16PodU128::new(target_capital - charged + if SELF_REWARD { reward } else { 0 });
+    expected_target.last_fee_slot = V16PodU64::new(u64::from(dt_raw));
+    expected_target.health_cert.valid = 0;
+    let mut expected_cranker = cranker_before;
+    if !SELF_REWARD && reward != 0 {
+        expected_cranker.capital = V16PodU128::new(initial_cranker_capital + reward);
+        expected_cranker.health_cert.valid = 0;
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut target = PortfolioV16ViewMut::new(&mut target_header);
+    let mut cranker = PortfolioV16ViewMut::new(&mut cranker_header);
+    let actual_charged = market
+        .sync_account_fee_to_slot_not_atomic(
+            &mut target,
+            u64::from(dt_raw),
+            u128::from(fee_rate_raw),
+        )
+        .unwrap();
+    if reward != 0 {
+        if SELF_REWARD {
+            market
+                .credit_account_from_insurance_not_atomic(&mut target, reward)
+                .unwrap();
+        } else {
+            market
+                .credit_account_from_insurance_not_atomic(&mut cranker, reward)
+                .unwrap();
+        }
+    }
+    let retained_long = retained / 2;
+    let retained_short = retained - retained_long;
+    if retained_long != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(0, retained_long)
+            .unwrap();
+    }
+    if retained_short != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(1, retained_short)
+            .unwrap();
+    }
+
+    kani::cover!(
+        charged < requested,
+        "maintenance collection is capped by target capital"
+    );
+    kani::cover!(
+        charged == requested && reward == 0,
+        "full requested fee is retained without a reward"
+    );
+    kani::cover!(
+        reward > 0 && reward < charged && prior_unbudgeted > 0,
+        "partial reward cannot consume prior unbudgeted insurance"
+    );
+    kani::cover!(
+        reward == charged,
+        "full reward returns only the newly collected fee"
+    );
+
+    assert_eq!(actual_charged, charged);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_target,
+        target.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_cranker,
+        cranker.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0].engine,
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1].engine,
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.residual(), residual_before);
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        prior_unbudgeted
+    );
+    assert_eq!(
+        market.header.c_tot.get() + market.header.insurance.get(),
+        header_before.c_tot.get() + header_before.insurance.get()
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    maintenance_composition_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    maintenance_composition_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    maintenance_composition_flow_validation_stub
+)]
+fn closure_maintenance_sync_self_reward_preserves_prior_insurance_capacity() {
+    prove_maintenance_sync_reward_and_budget_preserve_prior_insurance::<true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    maintenance_composition_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    maintenance_composition_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    maintenance_composition_flow_validation_stub
+)]
+fn closure_maintenance_sync_external_reward_preserves_prior_insurance_capacity() {
+    prove_maintenance_sync_reward_and_budget_preserve_prior_insurance::<false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn small_source_grant_bound_num_stub(amount: u128) -> V16Result<u128> {
     assert!(amount <= 8);
     Ok(amount * BOUND_SCALE)
