@@ -1153,6 +1153,79 @@ fn closure_ledger_inv_prepare_counterparty_lien_terminal_cleanup_delta() {
     }
 }
 
+// Expiry impairs the domain aggregate once, after which account-local touches
+// remove disjoint audit shares. Arbitrary two-account shares must be cleanable
+// in either order, reach the terminal Expired state, and reject over-cleanup.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_two_account_impaired_lien_cleanup_is_order_independent_and_complete() {
+    let a_raw: u8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let a_first: bool = kani::any();
+    kani::assume((1..=8).contains(&a_raw));
+    kani::assume((1..=8).contains(&b_raw));
+
+    let a = u128::from(a_raw) * BOUND_SCALE;
+    let b = u128::from(b_raw) * BOUND_SCALE;
+    let total = a + b;
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        impaired_liened_backing_num: total,
+        expiry_slot: 1,
+        status: BackingBucketStatusV16::Impaired,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: total,
+        exact_positive_claim_num: total,
+        impaired_liened_backing_num: total,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let reservation = InsuranceCreditReservationV16::EMPTY;
+    assert!(kani_ledger_inv(&bucket, &source, &reservation));
+
+    let (first, second) = if a_first { (a, b) } else { (b, a) };
+    let (bucket_after_first, source_after_first) =
+        V16Core::prepare_counterparty_lien_terminal_cleanup_delta(bucket, source, first).unwrap();
+    kani::cover!(a_first && a < b, "the smaller account cleans up first");
+    kani::cover!(a_first && a > b, "the larger account cleans up first");
+    kani::cover!(!a_first && a != b, "the opposite caller order is reachable");
+    assert_eq!(bucket_after_first.impaired_liened_backing_num, second);
+    assert_eq!(source_after_first.impaired_liened_backing_num, second);
+    assert_eq!(bucket_after_first.status, BackingBucketStatusV16::Impaired);
+    assert!(kani_ledger_inv(
+        &bucket_after_first,
+        &source_after_first,
+        &reservation
+    ));
+
+    let (bucket_after_second, source_after_second) =
+        V16Core::prepare_counterparty_lien_terminal_cleanup_delta(
+            bucket_after_first,
+            source_after_first,
+            second,
+        )
+        .unwrap();
+    assert_eq!(bucket_after_second.impaired_liened_backing_num, 0);
+    assert_eq!(source_after_second.impaired_liened_backing_num, 0);
+    assert_eq!(bucket_after_second.status, BackingBucketStatusV16::Expired);
+    assert!(kani_ledger_inv(
+        &bucket_after_second,
+        &source_after_second,
+        &reservation
+    ));
+    assert_eq!(
+        V16Core::prepare_counterparty_lien_terminal_cleanup_delta(
+            bucket_after_second,
+            source_after_second,
+            BOUND_SCALE,
+        ),
+        Err(V16Error::CounterUnderflow)
+    );
+}
+
 #[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
 #[kani::unwind(8)]
