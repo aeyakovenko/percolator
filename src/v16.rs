@@ -1532,6 +1532,25 @@ impl V16Core {
         None
     }
 
+    /// Ordinary refresh accrual and liquidation may target only a live or
+    /// draining asset. Recovery legs remain exit obligations, but selecting one
+    /// for an ordinary action would deterministically fail.
+    fn kernel_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> bool {
+        matches!(
+            lifecycle,
+            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+        )
+    }
+
+    fn kernel_auto_crank_liquidatable(
+        live: bool,
+        cert_current: bool,
+        certified_liq_deficit: u128,
+        dispatchable_asset: Option<usize>,
+    ) -> bool {
+        live && cert_current && certified_liq_deficit != 0 && dispatchable_asset.is_some()
+    }
+
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
     /// summary and the ENGINE-selected assets, choose the single highest-priority
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
@@ -11607,8 +11626,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         );
         let ledger = account.header.close_progress.try_to_runtime()?;
 
-        let has_open_risk =
-            !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
+        let (_, dispatchable_active_asset) = self.auto_crank_selected_assets(account)?;
         // A close ledger with residual_remaining==0 is already fully booked/covered
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
         // actionable close work. The `active` flag can linger past that.
@@ -11632,7 +11650,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // a stale cert can still report a deficit after the position was already
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
-        let liquidatable = live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
+        let liquidatable = V16Core::kernel_auto_crank_liquidatable(
+            live,
+            cert_current,
+            cert.certified_liq_deficit,
+            dispatchable_active_asset,
+        );
         // Permissionless recovery (declare_permissionless_recovery) is a LIVE-mode
         // action — it rejects Resolved mode with LockActive. The proactive Live
         // recovery condition the auto-crank declares is an EXPIRED outstanding
@@ -11695,10 +11718,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let active = active_bitmap_get(bitmap, slot) && leg.active;
             if active {
                 let lifecycle = self.asset_state(leg.asset_index as usize)?.lifecycle;
-                reducible_flags[slot] = matches!(
-                    lifecycle,
-                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
-                );
+                reducible_flags[slot] =
+                    V16Core::kernel_auto_crank_lifecycle_dispatchable(lifecycle);
             }
             b_stale_flags[slot] = active && leg.b_stale;
             slot += 1;

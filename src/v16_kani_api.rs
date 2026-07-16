@@ -9,6 +9,44 @@
 use super::*;
 use crate::wide_math::U256;
 
+pub fn kani_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> bool {
+    V16Core::kernel_auto_crank_lifecycle_dispatchable(lifecycle)
+}
+
+pub fn kani_auto_crank_liquidatable(
+    live: bool,
+    cert_current: bool,
+    certified_liq_deficit: u128,
+    dispatchable_asset: Option<usize>,
+) -> bool {
+    V16Core::kernel_auto_crank_liquidatable(
+        live,
+        cert_current,
+        certified_liq_deficit,
+        dispatchable_asset,
+    )
+}
+
+pub fn kani_first_actionable_slot(flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N]) -> Option<usize> {
+    V16Core::first_actionable_slot(flags)
+}
+
+pub fn kani_select_auto_crank_plan(
+    summary: ActionableSummaryV16,
+    b_stale_slot: usize,
+    liq_slot: usize,
+    refresh_asset: Option<usize>,
+    recovery_reason: PermissionlessRecoveryReasonV16,
+) -> AutoCrankPlanV16 {
+    V16Core::select_auto_crank_plan(
+        summary,
+        b_stale_slot,
+        liq_slot,
+        refresh_asset,
+        recovery_reason,
+    )
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,
