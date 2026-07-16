@@ -3150,6 +3150,73 @@ fn v16_auto_crank_preaccrued_observation_does_not_apply_a_second_segment() {
     );
 }
 
+#[test]
+fn v16_auto_crank_missing_selected_observation_refreshes_without_accruing_asset() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 24);
+    let mut counterparty_header = account_fixture(2, 25);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        open_one_lot_pair(&mut market, &mut account, &mut counterparty);
+        market
+            .full_account_refresh_not_atomic(&mut account)
+            .unwrap();
+
+        // Move an unrelated asset to stale the account certificate. The selected
+        // asset remains asset 0, for which this crank carries no observation.
+        market
+            .set_asset_raw_oracle_target_not_atomic(1, 200)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(1, 2, 200, 0, false)
+            .unwrap();
+        assert!(
+            market
+                .build_actionable_summary(&account.as_view())
+                .unwrap()
+                .stale
+        );
+    }
+
+    let selected_asset_before = markets[0].engine.asset;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 2,
+                observations: &[],
+                observations_preaccrued: false,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("committed-state refresh must remain permissionless");
+
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(0)
+        }
+    );
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+    );
+    assert_eq!(
+        market.markets[0].engine.asset, selected_asset_before,
+        "an absent observation may refresh the account but must not consume the asset's accrual slot"
+    );
+    assert!(
+        !market
+            .build_actionable_summary(&account.as_view())
+            .unwrap()
+            .stale
+    );
+}
+
 // ROADMAP 3C step 4 / NB2 finite-multi-step liveness via the self-classifying
 // crank: an uncertified, underwater account must be driven to a de-risked fixed
 // point by repeated auto-cranks — the classifier ESCALATES (stale -> refresh,
@@ -3326,7 +3393,7 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
     );
 
     let work = AutoCrankWorkV16 {
-        now_slot: 10,
+        now_slot: 12,
         observations: &[],
         observations_preaccrued: false,
         resolved_close_fee_rate_per_slot: 0,
@@ -3347,6 +3414,16 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
         account.header.active_bitmap[0].get(),
         0,
         "liquidation must close the selected position"
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .slot_last,
+        10,
+        "observation-free liquidation must not consume a later market-accrual slot"
     );
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
@@ -3573,11 +3650,12 @@ fn v16_auto_crank_missing_observation_is_clean_nonprogress_no_mutation() {
 }
 
 // REALIZABILITY MATRIX — closes the no-DoS dispatch seam that hid the b-stale /
-// committed-state-liquidation stall. The faithful invariant is OBSERVATION-
-// INDEPENDENCE: for a plan that `auto_crank_plan_requires_caller_observation`
-// reports as NOT requiring one, the single public crank must return the SAME
-// outcome whether or not an observation is supplied (the observation is redundant
-// — the plan is realizable from committed state). For the one form that DOES
+// committed-state-liquidation stall. For a plan that
+// `auto_crank_plan_requires_caller_observation` reports as NOT requiring one, the
+// single public crank must select and complete the SAME account action whether or
+// not an observation is supplied. A supplied observation may additionally
+// authorize market accrual, so full post-state equality is intentionally not the
+// invariant. For the one form that DOES
 // require one (RefreshAccount with no active asset), the empty-observation call
 // cleanly stalls (NonProgress) while supplying the observation progresses. This
 // both guards liveness AND ties the pure predicate to the REAL dispatch per class,
@@ -3585,7 +3663,7 @@ fn v16_auto_crank_missing_observation_is_clean_nonprogress_no_mutation() {
 // still return a genuine economic terminal (e.g. RecoveryRequired) — that is fine,
 // because it returns the SAME terminal with or without the observation; the bug
 // was an outcome that DIFFERED on the observation.
-fn assert_observation_independent(
+fn assert_account_action_realizable_without_observation(
     label: &str,
     build: impl Fn() -> (
         MarketGroupV16HeaderAccount,
@@ -3669,7 +3747,7 @@ fn assert_observation_independent(
 fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
     // --- A1 stale with no active asset: fallback refresh has no committed asset
     // to use, so it still needs a caller observation.
-    assert_observation_independent(
+    assert_account_action_realizable_without_observation(
         "stale_empty_account",
         || {
             let (mut header, mut markets) = market_fixture(1, 100);
@@ -3690,7 +3768,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
     // --- A1 stale with an active asset: refresh is realizable from committed
     // state. This is the no-DoS case for stale multi-asset accounts whose first
     // active asset does not have a fresh oracle observation available.
-    assert_observation_independent(
+    assert_account_action_realizable_without_observation(
         "stale_active_asset",
         || {
             let (mut header, mut markets) = market_fixture(1, 100);
@@ -3717,7 +3795,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
     );
 
     // --- A2 b_stale: SettleBChunk ignores price -> observation REDUNDANT.
-    assert_observation_independent(
+    assert_account_action_realizable_without_observation(
         "b_stale",
         || {
             let (mut header, mut markets) = market_fixture(1, 100);
@@ -3760,7 +3838,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
     );
 
     // --- A5 liquidatable: Liquidate reads the current cert -> observation REDUNDANT.
-    assert_observation_independent(
+    assert_account_action_realizable_without_observation(
         "liquidatable",
         || {
             let (mut header, mut markets) = market_fixture(1, 100);
@@ -3815,7 +3893,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
     );
 
     // --- A4 expired_close: DeclareRecovery needs no price -> observation REDUNDANT.
-    assert_observation_independent(
+    assert_account_action_realizable_without_observation(
         "expired_close",
         || {
             use percolator::{CloseProgressLedgerV16, CloseProgressLedgerV16Account};
@@ -3857,7 +3935,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
     // --- A7 resolved_winner: CloseResolved needs no price -> observation REDUNDANT.
     // (Previously only its CLASSIFICATION was tested; the empty-observation DISPATCH
     // — including a legitimate RecoveryRequired terminal — was uncovered.)
-    assert_observation_independent(
+    assert_account_action_realizable_without_observation(
         "resolved_winner",
         || {
             let (mut header, mut markets) = market_fixture(1, 100);

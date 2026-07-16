@@ -11755,7 +11755,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///    matches the observation that step needs, derives the liquidation fee from
     ///    CONFIG (never the caller), and dispatches one bounded primitive. A
     ///    pre-accrued call dispatches the account primitive without accruing a
-    ///    second market segment.
+    ///    second market segment. When the matching observation is absent, a step
+    ///    realizable from committed state may still update the account but cannot
+    ///    advance the selected asset's accrual segment.
     /// 5. On `Ok(result)`, mirror any wrapper-owned token/custody movement keyed off
     ///    `result.selected` (the `AutoCrankPlanV16`): refresh / settle-B move no
     ///    custody; liquidate / close-resolved may. `NoAction` => nothing was needed.
@@ -11785,28 +11787,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             recovery_reason,
         );
 
-        let obs_or_current_asset = |me: &Self, i: usize| -> V16Result<AutoCrankObservationV16> {
-            match work
-                .observations
-                .iter()
-                .copied()
-                .find(|o| o.asset_index == i)
-            {
-                Some(obs) => Ok(obs),
-                None => {
-                    let asset = me.asset_state(i)?;
-                    Ok(AutoCrankObservationV16 {
-                        asset_index: i,
-                        effective_price: asset.effective_price,
-                        funding_rate_e9: 0,
-                    })
+        let obs_or_current_asset =
+            |me: &Self, i: usize| -> V16Result<(AutoCrankObservationV16, bool)> {
+                match work
+                    .observations
+                    .iter()
+                    .copied()
+                    .find(|o| o.asset_index == i)
+                {
+                    Some(obs) => Ok((obs, true)),
+                    None => {
+                        let asset = me.asset_state(i)?;
+                        Ok((
+                            AutoCrankObservationV16 {
+                                asset_index: i,
+                                effective_price: asset.effective_price,
+                                funding_rate_e9: 0,
+                            },
+                            false,
+                        ))
+                    }
                 }
-            }
-        };
+            };
         let crank_with = |me: &mut Self,
                           account: &mut PortfolioV16ViewMut<'_>,
                           asset_index: usize,
                           obs: AutoCrankObservationV16,
+                          observation_supplied: bool,
                           action: PermissionlessCrankActionV16|
          -> V16Result<PermissionlessProgressOutcomeV16> {
             me.permissionless_crank_impl_not_atomic(
@@ -11818,25 +11825,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     funding_rate_e9: obs.funding_rate_e9,
                     action,
                 },
-                work.observations_preaccrued,
+                work.observations_preaccrued || !observation_supplied,
             )
         };
 
         let outcome = match plan {
             AutoCrankPlanV16::NoAction => AutoCrankOutcomeV16::NoAction,
             AutoCrankPlanV16::RefreshAccount { asset_index } => {
-                // Accrue the engine-selected active asset from either a fresh
-                // observation or committed state; if no active asset exists, use
-                // the first supplied observation to give the refresh a price.
-                let (ai, obs) = match asset_index {
-                    Some(i) => (i, obs_or_current_asset(self, i)?),
+                // A committed-state fallback can refresh the account, but only a
+                // supplied observation authorizes advancing the asset's accrual
+                // segment. If no active asset exists, an observation is required.
+                let (ai, obs, observation_supplied) = match asset_index {
+                    Some(i) => {
+                        let (obs, supplied) = obs_or_current_asset(self, i)?;
+                        (i, obs, supplied)
+                    }
                     None => {
                         let o = work
                             .observations
                             .first()
                             .copied()
                             .ok_or(V16Error::NonProgress)?;
-                        (o.asset_index, o)
+                        (o.asset_index, o, true)
                     }
                 };
                 AutoCrankOutcomeV16::Progressed(crank_with(
@@ -11844,26 +11854,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     account,
                     ai,
                     obs,
+                    observation_supplied,
                     PermissionlessCrankActionV16::Refresh,
                 )?)
             }
             AutoCrankPlanV16::SettleBChunk { asset_index } => {
-                let obs = obs_or_current_asset(self, asset_index)?;
+                let (obs, observation_supplied) = obs_or_current_asset(self, asset_index)?;
                 AutoCrankOutcomeV16::Progressed(crank_with(
                     self,
                     account,
                     asset_index,
                     obs,
+                    observation_supplied,
                     PermissionlessCrankActionV16::SettleB { asset_index },
                 )?)
             }
             AutoCrankPlanV16::Liquidate { asset_index } => {
-                let obs = obs_or_current_asset(self, asset_index)?;
+                let (obs, observation_supplied) = obs_or_current_asset(self, asset_index)?;
                 AutoCrankOutcomeV16::Progressed(crank_with(
                     self,
                     account,
                     asset_index,
                     obs,
+                    observation_supplied,
                     PermissionlessCrankActionV16::Liquidate(LiquidationRequestV16 { asset_index }),
                 )?)
             }
