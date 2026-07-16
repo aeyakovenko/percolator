@@ -8956,6 +8956,148 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
     }
 }
 
+// Late backing may increase the resolved payout rate after one winner has
+// already claimed. Exercise both caller orders across that rate change and
+// prove paid_effective makes every receipt converge to its final entitlement.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+#[kani::stub(percolator::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn proof_v16_two_resolved_receipts_are_order_independent_across_rate_increase() {
+    let a_raw: u8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let initial_funding_raw: u8 = kani::any();
+    let final_funding_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&a_raw));
+    kani::assume((1..=16).contains(&b_raw));
+    kani::assume(initial_funding_raw <= final_funding_raw);
+    kani::assume(final_funding_raw <= a_raw + b_raw);
+
+    let a_claim = u128::from(a_raw);
+    let b_claim = u128::from(b_raw);
+    let total_claim = a_claim + b_claim;
+    let initial_funding = u128::from(initial_funding_raw);
+    let final_funding = u128::from(final_funding_raw);
+    let total_bound_num = total_claim * BOUND_SCALE;
+    let initial_ledger = ResolvedPayoutLedgerV16 {
+        snapshot_residual: initial_funding,
+        terminal_claim_exact_receipts_num: total_bound_num,
+        current_payout_rate_num: initial_funding * BOUND_SCALE,
+        current_payout_rate_den: total_bound_num,
+        snapshot_slot: 1,
+        ..ResolvedPayoutLedgerV16::EMPTY
+    };
+    let final_ledger = ResolvedPayoutLedgerV16 {
+        snapshot_residual: final_funding,
+        terminal_claim_exact_receipts_num: total_bound_num,
+        current_payout_rate_num: final_funding * BOUND_SCALE,
+        current_payout_rate_den: total_bound_num,
+        snapshot_slot: 1,
+        ..ResolvedPayoutLedgerV16::EMPTY
+    };
+    let a_receipt = ResolvedPayoutReceiptV16 {
+        present: true,
+        prior_bound_contribution_num: a_claim * BOUND_SCALE,
+        terminal_positive_claim_face: a_claim,
+        ..ResolvedPayoutReceiptV16::EMPTY
+    };
+    let b_receipt = ResolvedPayoutReceiptV16 {
+        present: true,
+        prior_bound_contribution_num: b_claim * BOUND_SCALE,
+        terminal_positive_claim_face: b_claim,
+        ..ResolvedPayoutReceiptV16::EMPTY
+    };
+
+    let a_initial = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        a_receipt,
+        initial_ledger,
+    )
+    .unwrap();
+    let b_initial = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        b_receipt,
+        initial_ledger,
+    )
+    .unwrap();
+    let a_final = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        a_receipt,
+        final_ledger,
+    )
+    .unwrap();
+    let b_final = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        b_receipt,
+        final_ledger,
+    )
+    .unwrap();
+
+    let mut a_first = kani_apply_resolved_payout_receipt_payment(a_receipt, a_initial).unwrap();
+    let mut b_second = b_receipt;
+    let mut a_first_vault = final_funding - a_initial;
+    let b_late = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        b_second,
+        final_ledger,
+    )
+    .unwrap()
+    .min(a_first_vault);
+    b_second = kani_apply_resolved_payout_receipt_payment(b_second, b_late).unwrap();
+    a_first_vault -= b_late;
+    let a_topup = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        a_first,
+        final_ledger,
+    )
+    .unwrap()
+    .min(a_first_vault);
+    a_first = kani_apply_resolved_payout_receipt_payment(a_first, a_topup).unwrap();
+
+    let mut b_first = kani_apply_resolved_payout_receipt_payment(b_receipt, b_initial).unwrap();
+    let mut a_second = a_receipt;
+    let mut b_first_vault = final_funding - b_initial;
+    let a_late = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        a_second,
+        final_ledger,
+    )
+    .unwrap()
+    .min(b_first_vault);
+    a_second = kani_apply_resolved_payout_receipt_payment(a_second, a_late).unwrap();
+    b_first_vault -= a_late;
+    let b_topup = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        b_first,
+        final_ledger,
+    )
+    .unwrap()
+    .min(b_first_vault);
+    b_first = kani_apply_resolved_payout_receipt_payment(b_first, b_topup).unwrap();
+
+    kani::cover!(
+        initial_funding > 0 && final_funding > initial_funding && final_funding < total_claim,
+        "a partially funded payout rate increases after an early claim"
+    );
+    kani::cover!(
+        a_claim != b_claim,
+        "asymmetric winners are order independent"
+    );
+    kani::cover!(
+        a_final + b_final < final_funding,
+        "per-receipt floors leave conservative rounding residue"
+    );
+    kani::cover!(
+        a_initial != b_initial && a_initial > 0 && b_initial > 0,
+        "both unequal winners may collect before the rate increase"
+    );
+    kani::cover!(
+        final_funding == total_claim,
+        "fully funded terminal payouts are also order independent"
+    );
+    assert_eq!(a_first.paid_effective, a_final);
+    assert_eq!(a_second.paid_effective, a_final);
+    assert_eq!(b_first.paid_effective, b_final);
+    assert_eq!(b_second.paid_effective, b_final);
+    assert_eq!(a_initial + b_late + a_topup, a_final + b_final);
+    assert_eq!(b_initial + a_late + b_topup, a_final + b_final);
+    assert!(a_final <= a_claim);
+    assert!(b_final <= b_claim);
+    assert!(a_final + b_final <= final_funding);
+}
+
 fn resolved_flat_close_account_validation_stub<'a: 'a, T>(
     account: &PortfolioV16View<'a>,
     market: &MarketGroupV16View<'_, T>,
@@ -12198,7 +12340,7 @@ fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() 
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
-fn insurance_lien_release_div_rem_stub(num: U256, den: U256) -> (U256, U256) {
+fn bounded_u256_div_rem_stub(num: U256, den: U256) -> (U256, U256) {
     assert_eq!(num.hi(), 0);
     assert_eq!(den.hi(), 0);
     assert_ne!(den.lo(), 0);
@@ -12246,10 +12388,7 @@ fn insurance_lien_release_shape_stub<'a: 'a, T>(
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-#[kani::stub(
-    percolator::wide_math::div_rem_u256,
-    insurance_lien_release_div_rem_stub
-)]
+#[kani::stub(percolator::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
 #[kani::stub(
     MarketGroupV16ViewMut::validate_shape,
     insurance_lien_release_shape_stub
@@ -14042,10 +14181,7 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
     MarketGroupV16ViewMut::validate_shape,
     counterparty_backing_expiry_validation_stub
 )]
-#[kani::stub(
-    percolator::wide_math::div_rem_u256,
-    insurance_lien_release_div_rem_stub
-)]
+#[kani::stub(percolator::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
 fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
     // CONCRETE WITNESS (flagged): any symbolic input here blows the solver
     // budget (the realizable-support query's per-domain U256 credit math on
