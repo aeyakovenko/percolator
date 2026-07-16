@@ -2399,9 +2399,9 @@ fn negative_one_scaled_adl_delta_stub(
     }
 }
 
-// Exact on the four calls reachable from the two-leg cross-asset fixture:
-// aligned +/-2 K deltas and zero F deltas. The generic arithmetic remains
-// independently full-domain proven in proofs_v16_arithmetic.rs.
+// Exact on the bounded settlement fixtures: aligned +/-2 K deltas and zero F
+// deltas. The generic arithmetic remains independently full-domain proven in
+// proofs_v16_arithmetic.rs.
 #[cfg(all(kani, feature = "closure"))]
 fn signed_two_scaled_adl_delta_stub(
     abs_basis_q: u128,
@@ -4085,6 +4085,243 @@ fn closure_unsupported_cross_asset_profit_cannot_move_loss_when_loser_settles_fi
 fn closure_unsupported_cross_asset_profit_cannot_move_loss_when_loser_settles_first_with_two_surplus_atoms_explicit_coverage(
 ) {
     prove_cross_asset_loser_first_funded::<4>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn balanced_pair_source_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    assert_eq!(state.valid_liened_backing_num, 0);
+    assert_eq!(state.impaired_liened_backing_num, 0);
+    assert_eq!(state.spent_backing_num, 0);
+    assert_eq!(state.provider_receivable_num, 0);
+    assert_eq!(state.insurance_credit_reserved_num, 0);
+    assert_eq!(state.valid_liened_insurance_num, 0);
+    assert_eq!(state.impaired_liened_insurance_num, 0);
+    assert_eq!(state.fresh_reserved_backing_num % BOUND_SCALE, 0);
+    assert!(state.fresh_reserved_backing_num <= 2 * BOUND_SCALE);
+    if state.positive_claim_bound_num == 0 {
+        assert_eq!(state.exact_positive_claim_num, 0);
+        Ok(CREDIT_RATE_SCALE)
+    } else {
+        assert_eq!(state.positive_claim_bound_num, 2 * BOUND_SCALE);
+        assert_eq!(state.exact_positive_claim_num, 2 * BOUND_SCALE);
+        Ok(state.fresh_reserved_backing_num * CREDIT_RATE_SCALE / (2 * BOUND_SCALE))
+    }
+}
+
+// Historical malicious-oracle shape: two separately supplied accounts hold a
+// balanced long/short pair in one asset. Settling the winner first may create a
+// claim, but cannot make it favorable before the losing account crystallizes
+// principal. Either settlement order converges to the same domain-local state,
+// and realizable winner support is capped by that loser principal.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_balanced_two_account_settlement_cannot_mint_unfunded_source_support<
+    const LOSER_CAPITAL: u8,
+>() {
+    assert!(LOSER_CAPITAL <= 3);
+    let winner_first: bool = kani::any();
+    let loser_capital = u128::from(LOSER_CAPITAL);
+    let crystallized = loser_capital.min(2);
+    let crystallized_num = crystallized * BOUND_SCALE;
+
+    let (mut header, mut markets, mut winner_header) = two_asset_kf_mapping_fixture();
+    winner_header
+        .init_empty_in_place(winner_header.provenance_header)
+        .unwrap();
+    let mut loser_header = winner_header;
+    header.vault = V16PodU128::new(10 + loser_capital);
+    header.c_tot = V16PodU128::new(loser_capital);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    loser_header.capital = V16PodU128::new(loser_capital);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.k_long = 2 * ADL_ONE as i128;
+    asset.k_short = -(2 * ADL_ONE as i128);
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    winner_header.active_bitmap = bitmap.map(V16PodU64::new);
+    loser_header.active_bitmap = bitmap.map(V16PodU64::new);
+    winner_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_epoch_snap: asset.epoch_long,
+        ..PortfolioLegV16::EMPTY
+    });
+    loser_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -(POS_SCALE as i128),
+        a_basis: ADL_ONE,
+        epoch_snap: asset.epoch_short,
+        loss_weight: POS_SCALE,
+        b_epoch_snap: asset.epoch_short,
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let header_before = header;
+    let unrelated_before = markets[1].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    if winner_first {
+        let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+        market
+            .settle_leg_kf_effects_at_slot(&mut winner, 0)
+            .unwrap();
+        let early_support = market
+            .account_source_realizable_support(&winner.as_view(), 2)
+            .unwrap();
+        kani::cover!(
+            early_support == 0,
+            "winner-first claim has zero support before loser settlement"
+        );
+        assert_eq!(early_support, 0);
+        let mut loser = PortfolioV16ViewMut::new(&mut loser_header);
+        market.settle_leg_kf_effects_at_slot(&mut loser, 0).unwrap();
+    } else {
+        let mut loser = PortfolioV16ViewMut::new(&mut loser_header);
+        market.settle_leg_kf_effects_at_slot(&mut loser, 0).unwrap();
+        let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+        market
+            .settle_leg_kf_effects_at_slot(&mut winner, 0)
+            .unwrap();
+    }
+
+    let winner = PortfolioV16View::new(&winner_header);
+    let loser = PortfolioV16View::new(&loser_header);
+    let support = market
+        .account_source_realizable_support(&winner, 2)
+        .unwrap();
+    kani::cover!(
+        winner_first && support == crystallized,
+        "winner-first settlement converges to principal-capped support"
+    );
+    kani::cover!(
+        !winner_first && support == crystallized,
+        "loser-first settlement converges to principal-capped support"
+    );
+
+    let winner_source = winner.header.source_domains[0];
+    assert_eq!(winner.header.pnl.get(), 2);
+    assert_eq!(winner_source.domain.get(), 1);
+    assert_eq!(winner_source.source_claim_market_id.get(), asset.market_id);
+    assert_eq!(winner_source.source_claim_bound_num.get(), 2 * BOUND_SCALE);
+    assert_eq!(loser.header.capital.get(), loser_capital - crystallized);
+    assert_eq!(loser.header.pnl.get(), -((2 - crystallized) as i128));
+    assert_eq!(
+        loser.header.residual_crystallized_loss_atoms_total.get(),
+        crystallized
+    );
+    assert_eq!(support, crystallized);
+    assert!(support <= loser_capital);
+
+    let source = market.source_credit_for_domain(1).unwrap();
+    let bucket = market.backing_bucket_for_domain(1).unwrap();
+    assert_eq!(source.positive_claim_bound_num, 2 * BOUND_SCALE);
+    assert_eq!(source.exact_positive_claim_num, 2 * BOUND_SCALE);
+    assert_eq!(source.fresh_reserved_backing_num, crystallized_num);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(source.credit_rate_num, crystallized * CREDIT_RATE_SCALE / 2);
+    assert_eq!(bucket.fresh_unliened_backing_num, crystallized_num);
+    assert_eq!(
+        bucket.status,
+        if crystallized == 0 {
+            BackingBucketStatusV16::Empty
+        } else {
+            BackingBucketStatusV16::Fresh
+        }
+    );
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot.get(), loser_capital - crystallized);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(market.header.pnl_pos_tot.get(), 2);
+    assert_eq!(
+        market.header.source_claim_bound_total_num.get(),
+        2 * BOUND_SCALE
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        crystallized_num
+    );
+    assert_eq!(market.residual(), residual_before);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &unrelated_before,
+        &market.markets[1].engine
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    balanced_pair_source_credit_rate_stub
+)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_balanced_two_account_bankruptcy_cannot_mint_unfunded_source_support() {
+    prove_balanced_two_account_settlement_cannot_mint_unfunded_source_support::<0>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    balanced_pair_source_credit_rate_stub
+)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_balanced_two_account_partial_principal_caps_source_support() {
+    prove_balanced_two_account_settlement_cannot_mint_unfunded_source_support::<1>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    balanced_pair_source_credit_rate_stub
+)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_balanced_two_account_exact_principal_funds_only_source_support() {
+    prove_balanced_two_account_settlement_cannot_mint_unfunded_source_support::<2>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::scaled_adl_delta_fast, signed_two_scaled_adl_delta_stub)]
+#[kani::stub(
+    crate::v16::V16Core::expected_source_credit_rate_num_for_state,
+    balanced_pair_source_credit_rate_stub
+)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_balanced_two_account_surplus_principal_remains_senior_to_source_support() {
+    prove_balanced_two_account_settlement_cannot_mint_unfunded_source_support::<3>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
