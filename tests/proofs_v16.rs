@@ -1520,6 +1520,135 @@ fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral(
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+// This is the wrapper's exact permissionless asset-creation sequence: expose
+// one already allocated slot in the header, then activate that POD slot.  The
+// complete post-state frame proves that a new oracle domain starts with no
+// authority over existing insurance or backing and cannot mutate asset 0.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_wrapper_growth_activation_is_domain_isolated_and_exact() {
+    let long_budget_raw: u8 = kani::any();
+    let short_budget_raw: u8 = kani::any();
+    let unbudgeted_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let backing_units_raw: u8 = kani::any();
+    let price_raw: u16 = kani::any();
+    let now_slot_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&backing_units_raw));
+    kani::assume((1..=10_000).contains(&price_raw));
+    kani::assume((2..=16).contains(&now_slot_raw));
+
+    let long_budget = long_budget_raw as u128;
+    let short_budget = short_budget_raw as u128;
+    let unbudgeted = unbudgeted_raw as u128;
+    let c_tot = c_tot_raw as u128;
+    let surplus = surplus_raw as u128;
+    let backing_num = (backing_units_raw as u128) * BOUND_SCALE;
+    let insurance = long_budget + short_budget + unbudgeted;
+    let initial_price = price_raw as u64;
+    let now_slot = now_slot_raw as u64;
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_group_id, cfg, 2, 0).unwrap();
+    let mut markets = [
+        Market::new(11u64, EngineAssetSlotV16Account::default()),
+        Market::new(22u64, EngineAssetSlotV16Account::default()),
+    ];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_budget);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_budget);
+    let mut source = SourceCreditStateV16::EMPTY;
+    source.fresh_reserved_backing_num = backing_num;
+    markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(&source);
+    let mut backing = BackingBucketV16::empty_for_market(1);
+    backing.fresh_unliened_backing_num = backing_num;
+    backing.expiry_slot = 32;
+    backing.status = BackingBucketStatusV16::Fresh;
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&backing);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(long_budget + short_budget);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(insurance);
+    header.vault = V16PodU128::new(c_tot + insurance + surplus);
+    assert_eq!(
+        header.insurance_domain_budget_remaining_total.get(),
+        long_budget + short_budget
+    );
+    assert!(header.insurance_domain_budget_remaining_total.get() <= header.insurance.get());
+    assert_eq!(
+        header.vault.get(),
+        header.c_tot.get() + header.insurance.get() + surplus
+    );
+
+    let header_before = header;
+    let markets_before = markets;
+    header.grow_asset_slot_capacity_not_atomic(2, 2).unwrap();
+    header
+        .activate_empty_asset_slot_not_atomic(1, &mut markets[1].engine, initial_price, now_slot)
+        .unwrap();
+
+    kani::cover!(
+        long_budget > 0
+            && short_budget > 0
+            && unbudgeted > 0
+            && c_tot > 0
+            && surplus > 0
+            && backing_units_raw > 4
+            && initial_price > 100
+            && now_slot > 2,
+        "asset creation preserves a funded asset 0 and nontrivial global value state"
+    );
+
+    let mut expected_config = header_before.config.try_to_runtime_shape().unwrap();
+    expected_config.max_market_slots = 2;
+    let mut expected_header = header_before;
+    expected_header.config = V16ConfigAccount::from_runtime(&expected_config);
+    expected_header.next_market_id = V16PodU64::new(header_before.next_market_id.get() + 1);
+    expected_header.current_slot = V16PodU64::new(now_slot);
+    expected_header.asset_activation_count =
+        V16PodU64::new(header_before.asset_activation_count.get() + 1);
+    expected_header.last_asset_activation_slot = V16PodU64::new(now_slot);
+    expected_header.asset_set_epoch = V16PodU64::new(header_before.asset_set_epoch.get() + 2);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 2);
+
+    let new_market_id = header_before.next_market_id.get();
+    let mut expected_asset = AssetStateV16::default();
+    expected_asset.market_id = new_market_id;
+    expected_asset.lifecycle = AssetLifecycleV16::Active;
+    expected_asset.raw_oracle_target_price = initial_price;
+    expected_asset.effective_price = initial_price;
+    expected_asset.fund_px_last = initial_price;
+    expected_asset.slot_last = now_slot;
+    let mut expected_new_slot = EngineAssetSlotV16Account::empty_for_market(new_market_id);
+    expected_new_slot.asset = AssetStateV16Account::from_runtime(&expected_asset);
+
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &markets_before[0].engine,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_new_slot,
+        &markets[1].engine
+    ));
+    assert_eq!(markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(markets[1].wrapper, markets_before[1].wrapper);
+    assert_eq!(
+        header.insurance_domain_budget_remaining_total.get(),
+        long_budget + short_budget
+    );
+    assert_eq!(header.vault, header_before.vault);
+    assert_eq!(header.c_tot, header_before.c_tot);
+    assert_eq!(header.insurance, header_before.insurance);
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
