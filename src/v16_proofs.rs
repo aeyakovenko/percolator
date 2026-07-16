@@ -4838,6 +4838,307 @@ fn closure_risk_increasing_trade_reserves_all_positive_credit_at_exact_im_bounda
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn shared_backing_trade_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    if state == SourceCreditStateV16::EMPTY {
+        return Ok(CREDIT_RATE_SCALE);
+    }
+    let backing_num = 2 * BOUND_SCALE;
+    let liened_num = state.valid_liened_backing_num;
+    assert!(
+        state.positive_claim_bound_num == 4 * BOUND_SCALE
+            && state.exact_positive_claim_num == 4 * BOUND_SCALE
+            && state.fresh_reserved_backing_num == backing_num
+            && liened_num <= backing_num
+            && liened_num % BOUND_SCALE == 0
+            && state.impaired_liened_backing_num == 0
+            && state.spent_backing_num == 0
+            && state.provider_receivable_num == 0
+            && state.insurance_credit_reserved_num == 0
+            && state.valid_liened_insurance_num == 0
+            && state.impaired_liened_insurance_num == 0
+    );
+    Ok((backing_num - liened_num) * CREDIT_RATE_SCALE / (4 * BOUND_SCALE))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn shared_backing_trade_lien_amounts_stub(
+    effective_credit: u128,
+    credit_rate_num: u128,
+) -> V16Result<(u128, u128)> {
+    assert_eq!(effective_credit, 1);
+    let backing_num = BOUND_SCALE;
+    match credit_rate_num {
+        0 => Err(V16Error::LockActive),
+        r if r == CREDIT_RATE_SCALE / 2 => Ok((2 * BOUND_SCALE, backing_num)),
+        r if r == CREDIT_RATE_SCALE / 4 => Ok((4 * BOUND_SCALE, backing_num)),
+        _ => panic!("unexpected shared-backing credit rate"),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn shared_backing_trade_counterparty_selection_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    domain: usize,
+    backing_num: u128,
+) -> V16Result<SourceCreditBackingSourceV16> {
+    assert!(domain == SOURCE_BACKED_TRADE_DOMAIN && backing_num == BOUND_SCALE);
+    let (bucket, source) = V16Core::prepare_counterparty_lien_create_delta(
+        market.backing_bucket_for_domain(domain)?,
+        market.source_credit_for_domain(domain)?,
+        market.header.current_slot.get(),
+        backing_num,
+    )?;
+    let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
+        source,
+        market.header.risk_epoch.get(),
+    )?;
+    market.markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&bucket);
+    market.markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&source);
+    market.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+    Ok(SourceCreditBackingSourceV16::Counterparty)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn shared_backing_trade_equity_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<i128> {
+    if account.header.pnl.get() == 0 {
+        assert!(
+            account.header.capital.get() == 100
+                && account.header.source_domains[0].is_sparse_tail_default()
+        );
+        return Ok(100);
+    }
+    let source = account.header.source_domains[0];
+    let effective = source.source_lien_effective_reserved.get();
+    assert!(
+        account.header.pnl.get() == 2
+            && account.header.capital.get() == 99
+            && effective == 1
+            && source.domain.get() == SOURCE_BACKED_TRADE_DOMAIN as u32
+            && source.source_claim_bound_num.get() == 2 * BOUND_SCALE
+            && source.source_claim_liened_num.get() == 2 * BOUND_SCALE
+            && source.source_claim_counterparty_liened_num.get() == 2 * BOUND_SCALE
+            && source.source_claim_insurance_liened_num.get() == 0
+            && source.source_lien_counterparty_backing_num.get() == BOUND_SCALE
+            && source.source_lien_insurance_backing_num.get() == 0
+    );
+    Ok(100)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn shared_backing_trade_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert!(
+        account.header.provenance_header.version.get() == V16_ACCOUNT_VERSION
+            && account.header.provenance_header.layout_discriminator.get()
+                == V16_LAYOUT_DISCRIMINATOR
+    );
+    if account.header.pnl.get() == 0 {
+        assert!(
+            account.header.capital.get() == 100
+                && account.header.source_domains[0].is_sparse_tail_default()
+        );
+        return Ok(());
+    }
+    let source = account.header.source_domains[0];
+    let effective = source.source_lien_effective_reserved.get();
+    assert!(
+        account.header.pnl.get() == 2
+            && account.header.capital.get() == 99
+            && effective <= 1
+            && source.domain.get() == SOURCE_BACKED_TRADE_DOMAIN as u32
+            && source.source_claim_market_id == market.markets[0].engine.asset.market_id
+            && source.source_claim_bound_num.get() == 2 * BOUND_SCALE
+            && source.source_claim_liened_num.get() == effective * 2 * BOUND_SCALE
+            && source.source_claim_counterparty_liened_num.get() == effective * 2 * BOUND_SCALE
+            && source.source_claim_insurance_liened_num.get() == 0
+            && source.source_lien_counterparty_backing_num.get() == effective * BOUND_SCALE
+            && source.source_lien_insurance_backing_num.get() == 0
+            && source.source_claim_impaired_num.get() == 0
+            && source.source_lien_impaired_effective_reserved.get() == 0
+            && account.header.source_domains[1].is_sparse_tail_default()
+    );
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn shared_backing_trade_fixture(
+    prior_lien_atoms: u128,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    assert!(prior_lien_atoms <= 2);
+    let backing_num = 2 * BOUND_SCALE;
+    let prior_lien_num = prior_lien_atoms * BOUND_SCALE;
+    let (mut header, mut markets, mut source, mut counterparty) =
+        source_backed_trade_fixture(2, true);
+    header.c_tot = V16PodU128::new(199);
+    header.vault = V16PodU128::new(211);
+    header.pnl_pos_tot = V16PodU128::new(4);
+    header.pnl_pos_bound_tot = V16PodU128::new(4);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(4 * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(4 * BOUND_SCALE);
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: 4 * BOUND_SCALE,
+            exact_positive_claim_num: 4 * BOUND_SCALE,
+            fresh_reserved_backing_num: backing_num,
+            valid_liened_backing_num: prior_lien_num,
+            credit_rate_num: (backing_num - prior_lien_num) * CREDIT_RATE_SCALE / (4 * BOUND_SCALE),
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num - prior_lien_num,
+        valid_liened_backing_num: prior_lien_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let cert = |equity: i128, initial: u128| {
+        HealthCertV16Account::from_runtime(&HealthCertV16 {
+            certified_equity: equity,
+            certified_initial_req: initial,
+            certified_maintenance_req: initial,
+            certified_liq_deficit: initial.saturating_sub(equity.max(0) as u128),
+            certified_worst_case_loss: initial,
+            cert_oracle_epoch: header.oracle_epoch.get(),
+            cert_funding_epoch: header.funding_epoch.get(),
+            cert_risk_epoch: header.risk_epoch.get(),
+            cert_asset_set_epoch: header.asset_set_epoch.get(),
+            active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+            valid: true,
+        })
+    };
+    source.capital = V16PodU128::new(99);
+    source.health_cert = cert(if prior_lien_atoms == 0 { 100 } else { 99 }, 100);
+    counterparty.health_cert = cert(100, 0);
+    (header, markets, source, counterparty)
+}
+
+// Cross-account no-double-use at the wrapper-facing trade boundary. The
+// market starts with zero, one, or both backing atoms already liened by other
+// accounts. A new risk increase may reserve one atom only when the shared
+// source ledger can fund it; it can never take the same backing twice.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    shared_backing_trade_credit_rate_stub
+)]
+#[kani::stub(
+    V16Core::source_credit_lien_amounts_for_effective,
+    shared_backing_trade_lien_amounts_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::create_account_source_credit_lien_for_effective_any_not_atomic,
+    source_backed_trade_unique_domain_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::create_source_credit_lien_backing_not_atomic,
+    shared_backing_trade_counterparty_selection_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::collect_account_backing_utilization_fee_for_domain_not_atomic,
+    source_backed_trade_zero_utilization_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_haircut_equity,
+    shared_backing_trade_equity_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    shared_backing_trade_account_validation_stub
+)]
+fn closure_risk_increasing_trade_cannot_reuse_shared_source_backing() {
+    let prior_lien_raw: u8 = kani::any();
+    kani::assume(prior_lien_raw <= 2);
+    let prior_lien = prior_lien_raw as u128;
+    let (mut header, mut markets, mut source_header, mut counterparty_header) =
+        shared_backing_trade_fixture(prior_lien);
+    let header_before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut source = PortfolioV16ViewMut::new(&mut source_header);
+    let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+
+    let result = market.finish_trade_checks_not_atomic(
+        &mut source,
+        &mut counterparty,
+        false,
+        true,
+        true,
+        false,
+    );
+    let succeeds = prior_lien == 0;
+    kani::cover!(
+        succeeds && result.is_ok(),
+        "fresh shared backing is reservable"
+    );
+    kani::cover!(
+        prior_lien == 1 && result.is_err(),
+        "partially reserved backing cannot be reused above its current rate"
+    );
+    kani::cover!(
+        prior_lien == 2 && result.is_err(),
+        "fully reserved backing cannot be reused"
+    );
+    assert_eq!(
+        result,
+        if succeeds {
+            Ok(())
+        } else {
+            Err(V16Error::LockActive)
+        }
+    );
+
+    let source_state = &market.markets[0].engine.source_credit_short;
+    let bucket = &market.markets[0].engine.backing_short;
+    let expected_lien_atoms = prior_lien + u128::from(succeeds);
+    let account_source = source.header.source_domains[0];
+    assert!(
+        source_state.positive_claim_bound_num.get() == 4 * BOUND_SCALE
+            && source_state.exact_positive_claim_num.get() == 4 * BOUND_SCALE
+            && source_state.fresh_reserved_backing_num.get() == 2 * BOUND_SCALE
+            && source_state.valid_liened_backing_num.get() == expected_lien_atoms * BOUND_SCALE
+            && source_state.valid_liened_backing_num.get()
+                <= source_state.fresh_reserved_backing_num.get()
+            && source_state.credit_rate_num.get()
+                == (2 - expected_lien_atoms) * CREDIT_RATE_SCALE / 4
+            && bucket.fresh_unliened_backing_num.get() == (2 - expected_lien_atoms) * BOUND_SCALE
+            && bucket.valid_liened_backing_num.get() == expected_lien_atoms * BOUND_SCALE
+            && bucket.fresh_unliened_backing_num.get() + bucket.valid_liened_backing_num.get()
+                == 2 * BOUND_SCALE
+            && account_source.source_lien_effective_reserved.get() == u128::from(succeeds)
+            && account_source.source_claim_liened_num.get()
+                == u128::from(succeeds) * 2 * BOUND_SCALE
+            && account_source.source_lien_counterparty_backing_num.get()
+                == u128::from(succeeds) * BOUND_SCALE
+            && market.header.risk_epoch.get()
+                == header_before.risk_epoch.get() + u64::from(succeeds)
+            && market.header.vault == header_before.vault
+            && market.header.c_tot == header_before.c_tot
+            && market.header.insurance == header_before.insurance
+            && market.header.source_fresh_backing_total_num.get() == 2 * BOUND_SCALE
+            && market.header.source_claim_bound_total_num.get() == 4 * BOUND_SCALE
+            && market.header.vault.get()
+                == market.header.c_tot.get()
+                    + market.header.insurance.get()
+                    + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn source_backed_trade_unlocked_h_lock_stub<'a: 'a, T>(
     market: &MarketGroupV16ViewMut<'a, T>,
     account: Option<&PortfolioV16View<'_>>,
