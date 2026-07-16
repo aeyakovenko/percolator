@@ -16418,6 +16418,220 @@ fn closure_asset_one_short_funded_recovery_forfeit_is_local() {
     prove_funded_recovery_forfeit_is_value_conservative_and_asset_local::<1, false>();
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn consumed_counterparty_lien_zero_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    let available = V16Core::available_backing_num_for_source_credit_state(state)?;
+    assert!(
+        (BOUND_SCALE..=2 * BOUND_SCALE).contains(&state.positive_claim_bound_num)
+            && state.positive_claim_bound_num % BOUND_SCALE == 0
+            && state.exact_positive_claim_num == state.positive_claim_bound_num
+            && available == 0,
+        "counterparty forfeit reached an unexpected source-rate state"
+    );
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn forfeit_negative_one_scaled_adl_delta_stub(
+    abs_basis_q: u128,
+    a_basis: u128,
+    then: i128,
+    now: i128,
+) -> Option<i128> {
+    assert!(
+        abs_basis_q == POS_SCALE && a_basis == ADL_ONE,
+        "counterparty forfeit reached an unexpected K/F basis"
+    );
+    if then == now {
+        Some(0)
+    } else {
+        assert!(
+            then == 0 && now == -(ADL_ONE as i128),
+            "counterparty forfeit reached an unexpected K/F delta"
+        );
+        Some(-1)
+    }
+}
+
+// Recovery forfeit is the public route that composes adverse K/F settlement
+// with the durable close ledger. Exercise a real existing source lien here so
+// the cure cannot disappear between those independently proved layers.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_counterparty_lien_forfeit_counts_support_once() {
+    // Arbitrary lien ratios and tranche sizes are proved by the source-credit
+    // consume contracts; this closure fixes their smallest partial witness and
+    // proves the surrounding public-route composition.
+    let claim = 2u128;
+    let remaining_num = (claim - 1) * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+    install_fully_liened_cross_asset_claim(&mut header, &mut markets, &mut account_header, claim);
+
+    let mut risk_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    risk_asset.lifecycle = AssetLifecycleV16::Recovery;
+    risk_asset.k_long = -(ADL_ONE as i128);
+    risk_asset.k_short = ADL_ONE as i128;
+    risk_asset.oi_eff_long_q = POS_SCALE;
+    risk_asset.oi_eff_short_q = POS_SCALE;
+    risk_asset.stored_pos_count_long = 1;
+    risk_asset.stored_pos_count_short = 1;
+    risk_asset.loss_weight_sum_long = POS_SCALE;
+    risk_asset.loss_weight_sum_short = POS_SCALE;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&risk_asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: risk_asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        epoch_snap: risk_asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_epoch_snap: risk_asset.epoch_long,
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let mut expected_header = header_before;
+    expected_header.pnl_pos_tot = V16PodU128::new(1);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(1);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(remaining_num);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(remaining_num);
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(remaining_num);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 2);
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(1);
+
+    let mut expected_markets = [markets_before[0].engine, markets_before[1].engine];
+    expected_markets[0].source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: remaining_num,
+            exact_positive_claim_num: remaining_num,
+            fresh_reserved_backing_num: remaining_num,
+            valid_liened_backing_num: remaining_num,
+            spent_backing_num: BOUND_SCALE,
+            provider_receivable_num: BOUND_SCALE,
+            credit_rate_num: 0,
+            credit_epoch: header_before.risk_epoch.get() + 2,
+            ..SourceCreditStateV16::EMPTY
+        });
+    expected_markets[0].backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets_before[0].engine.asset.market_id.get(),
+        valid_liened_backing_num: remaining_num,
+        consumed_liened_backing_num: BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    let mut selected_after = risk_asset;
+    selected_after.oi_eff_long_q = 0;
+    selected_after.stored_pos_count_long = 0;
+    selected_after.loss_weight_sum_long = 0;
+    expected_markets[1].asset = AssetStateV16Account::from_runtime(&selected_after);
+
+    let final_close = CloseProgressLedgerV16 {
+        active: true,
+        finalized: true,
+        close_id: 1,
+        asset_index: 1,
+        market_id: risk_asset.market_id,
+        domain_side: SideV16::Short,
+        gross_loss_at_close_start: 1,
+        drift_reference_slot: header_before.current_slot.get(),
+        max_close_slot: header_before.current_slot.get()
+            + header_before.config.max_bankrupt_close_lifetime_slots.get(),
+        support_consumed: 1,
+        junior_face_burned: 1,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(1);
+    expected_account.active_bitmap = V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new);
+    expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    expected_account.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: markets_before[0].engine.asset.market_id,
+        source_claim_bound_num: V16PodU128::new(remaining_num),
+        source_claim_liened_num: V16PodU128::new(remaining_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(remaining_num),
+        source_lien_effective_reserved: V16PodU128::new(1),
+        source_lien_counterparty_backing_num: V16PodU128::new(remaining_num),
+        source_lien_fee_last_slot: header_before.current_slot,
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    expected_account.health_cert.valid = 0;
+    expected_account.close_progress = CloseProgressLedgerV16Account::from_runtime(&final_close);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market
+        .forfeit_recovery_leg_not_atomic(&mut account, 1, 1)
+        .unwrap();
+
+    kani::cover!(
+        outcome.support_consumed == 1 && outcome.detached,
+        "source-backed recovery forfeit reaches terminal close progress"
+    );
+    assert_eq!(
+        outcome,
+        DeadLegForfeitOutcomeV16 {
+            detached: true,
+            positive_pnl_forfeited: 0,
+            loss_settled: 1,
+            support_consumed: 1,
+            junior_face_burned: 1,
+            principal_used: 0,
+            insurance_used: 0,
+            residual_booked: 0,
+            explicit_loss: 0,
+        }
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+    assert_eq!(market.residual(), residual_before + 1);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::v16::scaled_adl_delta_fast,
+    forfeit_negative_one_scaled_adl_delta_stub
+)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    consumed_counterparty_lien_zero_rate_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_counterparty_lien_recovery_forfeit_counts_support_once() {
+    prove_counterparty_lien_forfeit_counts_support_once();
+}
+
 // Production post-settlement rebalance mutation seam. Full-domain contracts
 // separately prove admission and arbitrary request clamping. These closures
 // join that clamp to the real current-position mutation, matching OI update,
