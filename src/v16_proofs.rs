@@ -19455,6 +19455,242 @@ fn closure_full_refresh_never_pools_fractional_credit_across_domains() {
     );
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn fractional_allocator_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    if state == SourceCreditStateV16::EMPTY {
+        return Ok(CREDIT_RATE_SCALE);
+    }
+    let claim_atoms = state.positive_claim_bound_num / BOUND_SCALE;
+    assert!(
+        (claim_atoms == 2 || claim_atoms == 3)
+            && state.positive_claim_bound_num == claim_atoms * BOUND_SCALE
+            && state.exact_positive_claim_num == state.positive_claim_bound_num
+            && state.fresh_reserved_backing_num == BOUND_SCALE
+            && state.valid_liened_backing_num == 0
+            && state.impaired_liened_backing_num == 0
+            && state.spent_backing_num == 0
+            && state.provider_receivable_num == 0
+            && state.insurance_credit_reserved_num == 0
+            && state.valid_liened_insurance_num == 0
+            && state.impaired_liened_insurance_num == 0
+            && state.credit_rate_num == CREDIT_RATE_SCALE / claim_atoms
+    );
+    Ok(CREDIT_RATE_SCALE / claim_atoms)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn fractional_allocator_unreachable_lien_amounts_stub(
+    _effective_credit: u128,
+    _credit_rate_num: u128,
+) -> V16Result<(u128, u128)> {
+    panic!("fractional credit from separate domains must not create a whole-atom lien")
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn fractional_allocator_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert!(
+        account.header.provenance_header.version.get() == V16_ACCOUNT_VERSION
+            && account.header.provenance_header.layout_discriminator.get()
+                == V16_LAYOUT_DISCRIMINATOR
+    );
+    assert!(account.header.pnl.get() == 2 && account.header.capital.get() == 99);
+    let mut source_slot = 0usize;
+    while source_slot < 2 {
+        let asset_index = source_slot;
+        let domain = asset_index * 2 + 1;
+        let source = account.header.source_domains[source_slot];
+        let market_slot = &market.markets[asset_index].engine;
+        let state = market_slot.source_credit_short.try_to_runtime()?;
+        let bucket = market_slot.backing_short.try_to_runtime()?;
+        let claim_atoms = state.positive_claim_bound_num / BOUND_SCALE;
+        assert!(
+            (claim_atoms == 2 || claim_atoms == 3)
+                && source.is_occupied()
+                && source.domain.get() == domain as u32
+                && source.source_claim_market_id == market_slot.asset.market_id
+                && source.source_claim_bound_num.get() == BOUND_SCALE
+                && source.source_claim_liened_num.get() == 0
+                && source.source_claim_counterparty_liened_num.get() == 0
+                && source.source_claim_insurance_liened_num.get() == 0
+                && source.source_lien_effective_reserved.get() == 0
+                && source.source_lien_counterparty_backing_num.get() == 0
+                && source.source_lien_insurance_backing_num.get() == 0
+                && state.positive_claim_bound_num == claim_atoms * BOUND_SCALE
+                && state.exact_positive_claim_num == state.positive_claim_bound_num
+                && state.fresh_reserved_backing_num == BOUND_SCALE
+                && state.credit_rate_num == CREDIT_RATE_SCALE / claim_atoms
+                && bucket.market_id == market_slot.asset.market_id.get()
+                && bucket.fresh_unliened_backing_num == BOUND_SCALE
+                && bucket.valid_liened_backing_num == 0
+                && bucket.expiry_slot > market.header.current_slot.get()
+                && bucket.status == BackingBucketStatusV16::Fresh
+        );
+        source_slot += 1;
+    }
+    assert!(account.header.source_domains[2].is_sparse_tail_default());
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn fractional_allocator_fixture(
+    claim_atoms_a: u128,
+    claim_atoms_b: u128,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u8>; 2],
+    PortfolioAccountV16Account,
+) {
+    assert!(
+        (claim_atoms_a == 2 || claim_atoms_a == 3) && (claim_atoms_b == 2 || claim_atoms_b == 3)
+    );
+    let (mut header, fixture_markets, mut source) = two_asset_kf_mapping_fixture();
+    let mut markets = [
+        Market::new(0u8, fixture_markets[0].engine),
+        Market::new(0u8, fixture_markets[1].engine),
+    ];
+    source
+        .init_empty_in_place(source.provenance_header)
+        .unwrap();
+    header.c_tot = V16PodU128::new(99);
+    header.vault = V16PodU128::new(101 + header.insurance.get());
+    header.pnl_pos_tot = V16PodU128::new(claim_atoms_a + claim_atoms_b);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim_atoms_a + claim_atoms_b);
+    header.pnl_pos_bound_tot_num = V16PodU128::new((claim_atoms_a + claim_atoms_b) * BOUND_SCALE);
+    header.source_claim_bound_total_num =
+        V16PodU128::new((claim_atoms_a + claim_atoms_b) * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new(2 * BOUND_SCALE);
+    header.materialized_portfolio_count = V16PodU64::new(1);
+    source.capital = V16PodU128::new(99);
+    source.pnl = V16PodI128::new(2);
+
+    for (asset_index, claim_atoms) in [(0usize, claim_atoms_a), (1, claim_atoms_b)] {
+        let market_id = markets[asset_index].engine.asset.market_id.get();
+        markets[asset_index].engine.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                positive_claim_bound_num: claim_atoms * BOUND_SCALE,
+                exact_positive_claim_num: claim_atoms * BOUND_SCALE,
+                fresh_reserved_backing_num: BOUND_SCALE,
+                credit_rate_num: CREDIT_RATE_SCALE / claim_atoms,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[asset_index].engine.backing_short =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                market_id,
+                fresh_unliened_backing_num: BOUND_SCALE,
+                expiry_slot: 10,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            });
+        source.source_domains[asset_index] = PortfolioSourceDomainV16Account {
+            domain: V16PodU32::new((asset_index * 2 + 1) as u32),
+            source_claim_market_id: V16PodU64::new(market_id),
+            source_claim_bound_num: V16PodU128::new(BOUND_SCALE),
+            ..PortfolioSourceDomainV16Account::default()
+        };
+    }
+    (header, markets, source)
+}
+
+// The trade margin gate delegates its whole-atom deficit to this allocator.
+// Independent source domains must remain separately rounded rather than pool
+// sub-atom credit into a lien that no single domain can fund.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    fractional_allocator_credit_rate_stub
+)]
+#[kani::stub(
+    V16Core::source_credit_lien_amounts_for_effective,
+    fractional_allocator_unreachable_lien_amounts_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    fractional_allocator_account_validation_stub
+)]
+fn closure_source_credit_allocator_cannot_pool_fractional_cross_domain_credit() {
+    let half_a: bool = kani::any();
+    let half_b: bool = kani::any();
+    let claim_atoms_a = if half_a { 2 } else { 3 };
+    let claim_atoms_b = if half_b { 2 } else { 3 };
+    let (mut header, mut markets, mut source_header) =
+        fractional_allocator_fixture(claim_atoms_a, claim_atoms_b);
+    let header_before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut source = PortfolioV16ViewMut::new(&mut source_header);
+
+    let result =
+        market.create_account_source_credit_lien_for_effective_any_not_atomic(&mut source, 1);
+    kani::cover!(
+        half_a && half_b && result == Err(V16Error::LockActive),
+        "two half credits cannot pool into one trade lien atom"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    let rate_a = CREDIT_RATE_SCALE / claim_atoms_a;
+    let rate_b = CREDIT_RATE_SCALE / claim_atoms_b;
+    assert!((BOUND_SCALE * rate_a / CREDIT_RATE_SCALE) < BOUND_SCALE);
+    assert!((BOUND_SCALE * rate_b / CREDIT_RATE_SCALE) < BOUND_SCALE);
+    if half_a && half_b {
+        assert_eq!(
+            (BOUND_SCALE * rate_a / CREDIT_RATE_SCALE + BOUND_SCALE * rate_b / CREDIT_RATE_SCALE)
+                / BOUND_SCALE,
+            1
+        );
+    }
+    assert!(
+        market.header.vault == header_before.vault
+            && market.header.c_tot == header_before.c_tot
+            && market.header.insurance == header_before.insurance
+            && market.header.risk_epoch == header_before.risk_epoch
+            && market.header.source_claim_bound_total_num
+                == header_before.source_claim_bound_total_num
+            && market.header.source_fresh_backing_total_num
+                == header_before.source_fresh_backing_total_num
+            && source.header.source_domains[0]
+                .source_lien_effective_reserved
+                .get()
+                == 0
+            && source.header.source_domains[1]
+                .source_lien_effective_reserved
+                .get()
+                == 0
+            && market.markets[0]
+                .engine
+                .source_credit_short
+                .valid_liened_backing_num
+                .get()
+                == 0
+            && market.markets[1]
+                .engine
+                .source_credit_short
+                .valid_liened_backing_num
+                .get()
+                == 0
+            && market.markets[0]
+                .engine
+                .backing_short
+                .fresh_unliened_backing_num
+                .get()
+                == BOUND_SCALE
+            && market.markets[1]
+                .engine
+                .backing_short
+                .fresh_unliened_backing_num
+                .get()
+                == BOUND_SCALE
+            && market.header.vault.get()
+                == market.header.c_tot.get()
+                    + market.header.insurance.get()
+                    + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE
+    );
+}
+
 // A pending-domain barrier must not trap an owner in live risk. The public
 // rebalance route may close the position, but it must retain the selected
 // side's loss weight as one zero-basis obligation until the barrier releases.
