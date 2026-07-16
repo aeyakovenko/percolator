@@ -7767,63 +7767,103 @@ fn proof_v16_unliened_source_support_is_capped_by_realizable_backing() {
 
 // Cross-account solvency: two independent winners holding positive-PnL claims
 // attributed to the SAME source-credit domain cannot jointly realize more value
-// than the single shared backing pool they both draw from. The existing
-// single-account `unliened_source_support_is_capped_by_realizable_backing` proves
-// support <= backing for ONE account; nothing proves the apportionment is
-// conservative ACROSS accounts. This is the static heart of the issue-#104
-// (asymmetric K-snap) class: an undercapitalized loser leaves backing < total
-// claim, and the credit-rate haircut must dilute BOTH winners so their summed
-// realizable support never exceeds the actual backing.
+// than the domain's currently available counterparty + insurance backing. Cover
+// every backing-source and encumbrance regime used by production, including
+// valid liens and impaired insurance that must contribute zero reusable credit.
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
     let a_raw: u8 = kani::any();
     let b_raw: u8 = kani::any();
-    let backing_raw: u8 = kani::any();
-    kani::assume((1..=63).contains(&a_raw));
-    kani::assume((1..=63).contains(&b_raw));
+    let available_raw: u8 = kani::any();
+    let layout_raw: u8 = kani::any();
+    kani::assume((1..=15).contains(&a_raw));
+    kani::assume((1..=15).contains(&b_raw));
+    kani::assume(layout_raw <= 5);
     let a = a_raw as u128;
     let b = b_raw as u128;
     let total = a + b;
-    // Undercapitalized (haircut) OR exactly-backed regime: backing <= total claim.
-    kani::assume(backing_raw as u128 <= total);
-    let backing = backing_raw as u128;
+    kani::assume(available_raw as u128 <= total);
+    let available = available_raw as u128;
 
     let total_num = total * BOUND_SCALE;
-    let backing_num = backing * BOUND_SCALE;
+    let (counterparty_available, insurance_available) = match layout_raw {
+        0 | 3 => (available, 0),
+        1 | 4 | 5 => (0, available),
+        2 if available > 1 => (1, available - 1),
+        2 => (available, 0),
+        _ => unreachable!(),
+    };
+    let counterparty_liened = u128::from(layout_raw == 3);
+    let insurance_liened = u128::from(layout_raw == 4);
+    let insurance_impaired = u128::from(layout_raw == 5);
 
-    // Shared domain: total claim bound = a + b, single backing pool = `backing`.
     let mut source_credit = SourceCreditStateV16 {
         positive_claim_bound_num: total_num,
         exact_positive_claim_num: total_num,
-        fresh_reserved_backing_num: backing_num,
+        fresh_reserved_backing_num: (counterparty_available + counterparty_liened) * BOUND_SCALE,
+        valid_liened_backing_num: counterparty_liened * BOUND_SCALE,
+        insurance_credit_reserved_num: (insurance_available
+            + insurance_liened
+            + insurance_impaired)
+            * BOUND_SCALE,
+        valid_liened_insurance_num: insurance_liened * BOUND_SCALE,
+        impaired_liened_insurance_num: insurance_impaired * BOUND_SCALE,
         ..SourceCreditStateV16::EMPTY
     };
     source_credit.credit_rate_num =
         kani_expected_source_credit_rate_num_for_state(source_credit).unwrap();
 
-    // The sparse table and settlement wiring are covered by separate proofs. This
-    // harness targets the shared-source arithmetic used by every account support
-    // query: two independently evaluated face claims cannot jointly realize more
-    // than the single source-credit backing pool.
+    let production_available =
+        kani_available_backing_num_for_source_credit_state(source_credit).unwrap();
     let support_a = kani_source_credit_state_realizable_support_for_face(source_credit, a).unwrap();
     let support_b = kani_source_credit_state_realizable_support_for_face(source_credit, b).unwrap();
 
     kani::cover!(
-        backing < total,
-        "cross-account support covers undercapitalized haircut regime"
+        layout_raw == 0 && available > 0 && available < total,
+        "counterparty-only backing haircuts both winners"
     );
     kani::cover!(
-        backing == total,
-        "cross-account support covers fully backed regime"
+        layout_raw == 1 && available > 0 && available < total,
+        "insurance-only backing haircuts both winners"
+    );
+    kani::cover!(
+        layout_raw == 2 && available > 1 && available < total,
+        "mixed counterparty and insurance backing shares one cap"
+    );
+    kani::cover!(
+        layout_raw == 3 && available > 0,
+        "valid counterparty liens are excluded from reusable backing"
+    );
+    kani::cover!(
+        layout_raw == 4 && available > 0,
+        "valid insurance liens are excluded from reusable backing"
+    );
+    kani::cover!(
+        layout_raw == 5 && available > 0,
+        "impaired insurance remains unavailable to both winners"
+    );
+    kani::cover!(
+        layout_raw >= 3 && available == 0 && support_a == 0 && support_b == 0,
+        "fully encumbered domains grant no cross-account support"
+    );
+    kani::cover!(
+        available == total && support_a + support_b == total,
+        "exact backing grants full but not excess support"
     );
 
-    // Global conservation: the two winners' independently-computed realizable
-    // support cannot jointly exceed the shared backing pool.
-    assert!(support_a + support_b <= backing);
+    assert_eq!(production_available, available * BOUND_SCALE);
+    assert!(support_a + support_b <= available);
+    assert!(support_a + support_b <= total);
     assert!(support_a <= a);
     assert!(support_b <= b);
+    if available == 0 {
+        assert_eq!(support_a + support_b, 0);
+    }
+    if available == total {
+        assert_eq!(support_a + support_b, total);
+    }
 }
 
 // Global junior-bound aggregation invariant: the group-level junior claim bound
