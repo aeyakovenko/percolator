@@ -768,6 +768,34 @@ impl V16Core {
         Ok((source, effective))
     }
 
+    /// PRODUCTION KERNEL: one step of the compact source-domain scan. The
+    /// first sparse-tail entry or actionable domain terminates the scan.
+    fn kernel_live_source_backing_reconcile_scan_step(
+        selected: Option<(usize, bool, bool)>,
+        sparse_tail: bool,
+        occupied: bool,
+        domain: usize,
+        counterparty_backing_num: u128,
+        bucket_status: BackingBucketStatusV16,
+        expiry_slot: u64,
+        current_slot: u64,
+    ) -> (Option<(usize, bool, bool)>, bool) {
+        if selected.is_some() || sparse_tail {
+            return (selected, true);
+        }
+        if !occupied {
+            return (None, false);
+        }
+        let newly_lapsed =
+            bucket_status == BackingBucketStatusV16::Fresh && expiry_slot <= current_slot;
+        let impair_account = counterparty_backing_num != 0
+            && (newly_lapsed || bucket_status == BackingBucketStatusV16::Impaired);
+        if newly_lapsed || impair_account {
+            return (Some((domain, newly_lapsed, impair_account)), true);
+        }
+        (None, false)
+    }
+
     fn crystallize_source_lien_fee_for_effective(
         source: &mut PortfolioSourceDomainV16Account,
         impaired_effective: u128,
@@ -8686,28 +8714,52 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(Self::account_source_claim_bound_sum_num(account)? != 0)
     }
 
-    fn account_has_lapsed_source_backing(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
+    fn first_live_account_source_backing_reconcile_action(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<Option<(usize, bool, bool)>> {
         let current_slot = self.header.current_slot.get();
+        let mut selected = None;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = account.source_domains()[slot];
-            if source.has_default_sparse_tag() && !source.is_occupied() {
-                break;
-            }
-            if source.is_occupied() {
+            let occupied = source.is_occupied();
+            let sparse_tail = source.has_default_sparse_tag() && !occupied;
+            let (domain, counterparty_backing_num, bucket_status, expiry_slot) = if occupied {
                 let domain = source.domain.get() as usize;
                 let bucket = self.backing_bucket_for_domain(domain)?;
-                let newly_lapsed = bucket.status == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot <= current_slot;
-                let pending_account_impairment = bucket.status == BackingBucketStatusV16::Impaired
-                    && source.source_lien_counterparty_backing_num.get() != 0;
-                if newly_lapsed || pending_account_impairment {
-                    return Ok(true);
-                }
+                (
+                    domain,
+                    source.source_lien_counterparty_backing_num.get(),
+                    bucket.status,
+                    bucket.expiry_slot,
+                )
+            } else {
+                (0, 0, BackingBucketStatusV16::Empty, 0)
+            };
+            let (next_selected, stop) = V16Core::kernel_live_source_backing_reconcile_scan_step(
+                selected,
+                sparse_tail,
+                occupied,
+                domain,
+                counterparty_backing_num,
+                bucket_status,
+                expiry_slot,
+                current_slot,
+            );
+            selected = next_selected;
+            if stop {
+                break;
             }
             slot += 1;
         }
-        Ok(false)
+        Ok(selected)
+    }
+
+    fn account_has_lapsed_source_backing(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
+        Ok(self
+            .first_live_account_source_backing_reconcile_action(account)?
+            .is_some())
     }
 
     fn source_claim_unliened_num(account: &PortfolioV16View<'_>, domain: usize) -> V16Result<u128> {
@@ -8839,47 +8891,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(None);
         }
         let current_slot = self.header.current_slot.get();
-        let mut slot = 0usize;
-        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = account.header.source_domains[slot];
-            if source.has_default_sparse_tag() && !source.is_occupied() {
-                break;
-            }
-            if !source.is_occupied() {
-                slot += 1;
-                continue;
-            }
-            let domain = source.domain.get() as usize;
-            let bucket_before = self.backing_bucket_for_domain(domain)?;
-            let newly_lapsed = bucket_before.status == BackingBucketStatusV16::Fresh
-                && bucket_before.expiry_slot <= current_slot;
-            let pending_account_impairment = source.source_lien_counterparty_backing_num.get() != 0
-                && (newly_lapsed || bucket_before.status == BackingBucketStatusV16::Impaired);
-            if pending_account_impairment {
-                self.collect_account_backing_utilization_fee_for_domain_not_atomic(
-                    account, domain,
-                )?;
-            }
-            if newly_lapsed {
-                self.expire_source_backing_bucket_core_not_atomic(domain, current_slot)?;
-            }
-            if pending_account_impairment {
-                let impaired_backing = self
-                    .backing_bucket_for_domain(domain)?
-                    .impaired_liened_backing_num;
-                if impaired_backing < source.source_lien_counterparty_backing_num.get() {
-                    return Err(V16Error::CounterUnderflow);
-                }
-                Self::impair_account_source_credit_counterparty_lien_fields(account, domain)?;
-            }
-            if newly_lapsed || pending_account_impairment {
-                account.validate_with_market(&self.as_view())?;
-                self.validate_shape()?;
-                return Ok(Some(domain));
-            }
-            slot += 1;
+        let Some((domain, newly_lapsed, impair_account)) =
+            self.first_live_account_source_backing_reconcile_action(&account.as_view())?
+        else {
+            return Ok(None);
+        };
+        let source = account.as_view().source_domain(domain)?;
+        if impair_account {
+            self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, domain)?;
         }
-        Ok(None)
+        if newly_lapsed {
+            self.expire_source_backing_bucket_core_not_atomic(domain, current_slot)?;
+        }
+        if impair_account {
+            let impaired_backing = self
+                .backing_bucket_for_domain(domain)?
+                .impaired_liened_backing_num;
+            if impaired_backing < source.source_lien_counterparty_backing_num.get() {
+                return Err(V16Error::CounterUnderflow);
+            }
+            Self::impair_account_source_credit_counterparty_lien_fields(account, domain)?;
+        }
+        account.validate_with_market(&self.as_view())?;
+        self.validate_shape()?;
+        Ok(Some(domain))
     }
 
     // Release one domain's counterparty/insurance source-credit lien (returning the

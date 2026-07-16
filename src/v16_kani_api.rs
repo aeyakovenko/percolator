@@ -798,6 +798,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::prepare_account_counterparty_lien_impairment(source)
     }
 
+    pub fn kani_live_source_backing_reconcile_scan_step(
+        selected: Option<(usize, bool, bool)>,
+        sparse_tail: bool,
+        occupied: bool,
+        domain: usize,
+        counterparty_backing_num: u128,
+        bucket_status: BackingBucketStatusV16,
+        expiry_slot: u64,
+        current_slot: u64,
+    ) -> (Option<(usize, bool, bool)>, bool) {
+        V16Core::kernel_live_source_backing_reconcile_scan_step(
+            selected,
+            sparse_tail,
+            occupied,
+            domain,
+            counterparty_backing_num,
+            bucket_status,
+            expiry_slot,
+            current_slot,
+        )
+    }
+
     pub fn kani_counterparty_cure_atoms_from_scaled_backing(amount: u128) -> V16Result<u128> {
         V16Core::validate_bound_num_atom_aligned(amount)?;
         Ok(amount / BOUND_SCALE)

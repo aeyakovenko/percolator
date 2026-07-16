@@ -16087,3 +16087,171 @@ fn proof_v16_expired_counterparty_lien_impairment_is_exact_relabel() {
         live_fee as u128 + impaired_fee as u128
     );
 }
+
+// Repeated production scan steps composed with the real expiry and account
+// impairment kernels form a finite rank-decreasing permissionless process.
+// This separates the amount-independent liveness theorem from the full-width
+// relabel theorem above, avoiding an artificial solver dependency on amounts.
+#[kani::proof]
+#[kani::unwind(12)]
+#[kani::solver(cadical)]
+fn proof_v16_live_source_backing_reconcile_is_bounded_progress() {
+    assert_eq!(PORTFOLIO_SOURCE_DOMAIN_CAP, 4);
+    let roster_len: u8 = kani::any();
+    let lapsed_mask: u8 = kani::any();
+    let lapsed_lien_mask: u8 = kani::any();
+    let impaired_lien_mask: u8 = kani::any();
+    let future_lien_mask: u8 = kani::any();
+    let foreign_impaired_mask: u8 = kani::any();
+    kani::assume(roster_len as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    let roster_mask = (1u8 << roster_len) - 1;
+    kani::assume(lapsed_mask & !roster_mask == 0);
+    kani::assume(lapsed_lien_mask & !lapsed_mask == 0);
+    kani::assume(impaired_lien_mask & !roster_mask == 0);
+    kani::assume(future_lien_mask & !roster_mask == 0);
+    kani::assume(foreign_impaired_mask & !roster_mask == 0);
+    kani::assume(lapsed_mask & impaired_lien_mask == 0);
+    kani::assume(lapsed_mask & future_lien_mask == 0);
+    kani::assume(lapsed_mask & foreign_impaired_mask == 0);
+    kani::assume(impaired_lien_mask & future_lien_mask == 0);
+    kani::assume(impaired_lien_mask & foreign_impaired_mask == 0);
+    kani::assume(future_lien_mask & foreign_impaired_mask == 0);
+
+    let now_slot = 10u64;
+    let initial_actionable = lapsed_mask | impaired_lien_mask;
+    let mut remaining = initial_actionable;
+    let mut remaining_lapsed = lapsed_mask;
+    let mut account_lien_mask = lapsed_lien_mask | impaired_lien_mask | future_lien_mask;
+    let mut calls = 0usize;
+    while calls <= PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let rank_before = remaining.count_ones();
+        let mut expected = None;
+        let mut selected = None;
+        let mut stopped = false;
+        let mut domain = 0usize;
+        while domain < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let bit = 1u8 << domain;
+            if expected.is_none() && remaining & bit != 0 {
+                expected = Some(domain);
+            }
+            if !stopped {
+                let occupied = domain < roster_len as usize;
+                let sparse_tail = domain == roster_len as usize;
+                let processed_lapsed_lien = lapsed_lien_mask & !remaining_lapsed & bit != 0;
+                let status = if remaining_lapsed & bit != 0 {
+                    BackingBucketStatusV16::Fresh
+                } else if (impaired_lien_mask | foreign_impaired_mask) & bit != 0
+                    || processed_lapsed_lien
+                {
+                    BackingBucketStatusV16::Impaired
+                } else if future_lien_mask & bit != 0 {
+                    BackingBucketStatusV16::Fresh
+                } else {
+                    BackingBucketStatusV16::Expired
+                };
+                let expiry_slot = if remaining_lapsed & bit != 0 {
+                    now_slot
+                } else {
+                    now_slot + 1
+                };
+                (selected, stopped) =
+                    MarketGroupV16ViewMut::<u64>::kani_live_source_backing_reconcile_scan_step(
+                        selected,
+                        sparse_tail,
+                        occupied,
+                        domain,
+                        if account_lien_mask & bit != 0 {
+                            BOUND_SCALE
+                        } else {
+                            0
+                        },
+                        status,
+                        expiry_slot,
+                        now_slot,
+                    );
+            }
+            domain += 1;
+        }
+        assert_eq!(selected.map(|action| action.0), expected);
+
+        if let Some((selected_domain, newly_lapsed, impair_account)) = selected {
+            let selected_bit = 1u8 << selected_domain;
+            assert!(remaining & selected_bit != 0);
+            assert_eq!(newly_lapsed, remaining_lapsed & selected_bit != 0);
+            assert_eq!(impair_account, account_lien_mask & selected_bit != 0);
+            if newly_lapsed {
+                let liened = lapsed_lien_mask & selected_bit != 0;
+                let bucket = BackingBucketV16 {
+                    market_id: 1,
+                    fresh_unliened_backing_num: if liened { 0 } else { BOUND_SCALE },
+                    valid_liened_backing_num: if liened { BOUND_SCALE } else { 0 },
+                    expiry_slot: now_slot,
+                    status: BackingBucketStatusV16::Fresh,
+                    ..BackingBucketV16::EMPTY
+                };
+                let source = SourceCreditStateV16 {
+                    fresh_reserved_backing_num: BOUND_SCALE,
+                    valid_liened_backing_num: bucket.valid_liened_backing_num,
+                    ..SourceCreditStateV16::EMPTY
+                };
+                let (bucket_after, source_after) =
+                    MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+                        bucket, source, now_slot,
+                    )
+                    .unwrap();
+                assert_eq!(source_after.fresh_reserved_backing_num, 0);
+                assert_ne!(bucket_after.status, BackingBucketStatusV16::Fresh);
+                remaining_lapsed &= !selected_bit;
+            }
+            if impair_account {
+                let source = PortfolioSourceDomainV16Account {
+                    domain: V16PodU32::new(selected_domain as u32),
+                    source_claim_bound_num: V16PodU128::new(2 * BOUND_SCALE),
+                    source_claim_liened_num: V16PodU128::new(BOUND_SCALE),
+                    source_claim_counterparty_liened_num: V16PodU128::new(BOUND_SCALE),
+                    source_lien_effective_reserved: V16PodU128::new(1),
+                    source_lien_counterparty_backing_num: V16PodU128::new(BOUND_SCALE),
+                    ..PortfolioSourceDomainV16Account::default()
+                };
+                let (source_after, impaired_effective) = MarketGroupV16ViewMut::<u64>::
+                    kani_prepare_account_counterparty_lien_impairment(source)
+                    .unwrap();
+                assert_eq!(impaired_effective, 1);
+                assert_eq!(source_after.source_lien_counterparty_backing_num.get(), 0);
+                account_lien_mask &= !selected_bit;
+            }
+            remaining &= !selected_bit;
+            assert_eq!(remaining.count_ones() + 1, rank_before);
+        } else {
+            assert_eq!(rank_before, 0);
+        }
+        assert_eq!(account_lien_mask & future_lien_mask, future_lien_mask);
+        assert_eq!(account_lien_mask & foreign_impaired_mask, 0);
+        calls += 1;
+    }
+
+    assert_eq!(remaining, 0);
+    kani::cover!(initial_actionable == 0, "clean roster is a fixed point");
+    kani::cover!(
+        initial_actionable.count_ones() > 1,
+        "multiple obligations drain in bounded calls"
+    );
+    kani::cover!(
+        lapsed_mask & !lapsed_lien_mask != 0,
+        "unliened lapsed backing progresses"
+    );
+    kani::cover!(lapsed_lien_mask != 0, "lapsed account liens progress");
+    kani::cover!(
+        impaired_lien_mask != 0,
+        "already-impaired account liens progress"
+    );
+    kani::cover!(future_lien_mask != 0, "future source liens stay live");
+    kani::cover!(
+        foreign_impaired_mask != 0,
+        "foreign impaired backing remains isolated"
+    );
+    kani::cover!(
+        initial_actionable & 1 == 0 && initial_actionable != 0,
+        "scan skips earlier non-actionable domains"
+    );
+}
