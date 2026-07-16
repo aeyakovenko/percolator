@@ -19107,6 +19107,8 @@ fn unreachable_stale_cert_liquidation_stub<'a: 'a, T>(
 // certified at an old oracle epoch must enter the real Refresh arm, never
 // Liquidate, use the first active leg's engine-owned asset, clear stale state,
 // and forward committed observation data to accrual only after recertification.
+// The next call must then select Liquidate rather than oscillating back to
+// Refresh or stalling; liquidation transition semantics are proved separately.
 #[cfg(all(kani, feature = "closure"))]
 fn prove_stale_deficit_auto_crank_refreshes_active_asset<const ASSET: usize>() {
     assert!(ASSET < 2);
@@ -19280,6 +19282,25 @@ fn prove_stale_deficit_auto_crank_refreshes_active_asset<const ASSET: usize>() {
         );
         asset_index += 1;
     }
+
+    let next_summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    let (next_b_stale_asset, next_active_asset) =
+        MarketGroupV16ViewMut::<u64>::auto_crank_selected_assets(&account.as_view()).unwrap();
+    let next_plan = V16Core::select_auto_crank_plan(
+        next_summary,
+        next_b_stale_asset.unwrap_or(0),
+        next_active_asset.unwrap_or(0),
+        next_active_asset,
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    );
+    kani::cover!(
+        !next_summary.stale && next_summary.liquidatable,
+        "refresh leaves a current, actionable liquidation witness"
+    );
+    assert_eq!(
+        next_plan,
+        AutoCrankPlanV16::Liquidate { asset_index: ASSET }
+    );
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -19318,7 +19339,7 @@ fn prove_stale_deficit_auto_crank_refreshes_active_asset<const ASSET: usize>() {
     MarketGroupV16ViewMut::close_resolved_account_not_atomic,
     unreachable_resolved_close_stub
 )]
-fn closure_asset_zero_stale_deficit_auto_crank_refreshes_active_asset() {
+fn closure_asset_zero_stale_deficit_auto_crank_refreshes_then_selects_liquidation() {
     prove_stale_deficit_auto_crank_refreshes_active_asset::<0>();
 }
 
@@ -19355,7 +19376,7 @@ fn closure_asset_zero_stale_deficit_auto_crank_refreshes_active_asset() {
     MarketGroupV16ViewMut::close_resolved_account_not_atomic,
     unreachable_resolved_close_stub
 )]
-fn closure_asset_one_stale_deficit_auto_crank_refreshes_active_asset() {
+fn closure_asset_one_stale_deficit_auto_crank_refreshes_then_selects_liquidation() {
     prove_stale_deficit_auto_crank_refreshes_active_asset::<1>();
 }
 
