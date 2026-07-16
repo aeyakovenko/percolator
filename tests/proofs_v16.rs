@@ -3,13 +3,14 @@
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
     backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
-    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
-    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_auto_crank_leg_flags, kani_auto_crank_lifecycle_dispatchable,
-    kani_available_backing_num_for_source_credit_state,
+    kani_active_bitmap_with_cleared, kani_add_open_interest_for_new_position,
+    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
+    kani_apply_resolved_payout_receipt_payment, kani_auto_crank_leg_flags,
+    kani_auto_crank_lifecycle_dispatchable, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
-    kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
-    kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
+    kani_backing_utilization_rate_e9_for_source_state, kani_build_resolved_close_rank,
+    kani_cert_is_current, kani_expected_source_credit_rate_num_for_state,
+    kani_first_actionable_slot, kani_first_active_bitmap_slot,
     kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
@@ -237,6 +238,100 @@ fn proof_v16_active_bitmap_set_get_count_is_exact_and_bounds_checked() {
         assert!(!active_bitmap_get(bitmap, slot));
         assert_eq!(after_count, before_count);
     }
+}
+
+#[kani::proof]
+#[kani::unwind(17)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_leg_detach_exhausts_exact_rank_and_frames_other_obligations() {
+    assert_eq!(V16_ACTIVE_BITMAP_WORDS, 1);
+    assert!(V16_MAX_PORTFOLIO_ASSETS_N < 64);
+
+    let raw_bitmap: u64 = kani::any();
+    let valid_mask = (1u64 << V16_MAX_PORTFOLIO_ASSETS_N) - 1;
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    bitmap[0] = raw_bitmap & valid_mask;
+
+    let b_stale: bool = kani::any();
+    let negative_pnl: bool = kani::any();
+    let capital_pending: bool = kani::any();
+    let receipt_present: bool = kani::any();
+    let recovery_required: bool = kani::any();
+    let pnl = if negative_pnl { -1 } else { 0 };
+    let capital = u128::from(capital_pending);
+    let initial_count = active_bitmap_count_ones(bitmap);
+    let mut steps = 0u32;
+
+    kani::cover!(
+        initial_count == 0,
+        "resolved account can begin without active legs"
+    );
+    kani::cover!(
+        initial_count == 1,
+        "resolved account can begin with one active leg"
+    );
+    kani::cover!(
+        initial_count == V16_MAX_PORTFOLIO_ASSETS_N as u32,
+        "resolved account can begin at the maximum active-leg shape"
+    );
+    kani::cover!(
+        initial_count >= 2 && bitmap[0] & 1 == 0,
+        "sparse active-leg sets require deterministic repeated teardown"
+    );
+    kani::cover!(
+        initial_count > 0
+            && b_stale
+            && negative_pnl
+            && capital_pending
+            && receipt_present
+            && recovery_required,
+        "leg teardown frames every unrelated resolved-close obligation"
+    );
+
+    loop {
+        let Some(slot) = kani_first_active_bitmap_slot(bitmap).unwrap() else {
+            break;
+        };
+        let before = kani_build_resolved_close_rank(
+            b_stale,
+            pnl,
+            bitmap,
+            capital,
+            receipt_present,
+            recovery_required,
+        );
+        assert_eq!(slot, bitmap[0].trailing_zeros() as usize);
+        assert!(active_bitmap_get(bitmap, slot));
+
+        let after_bitmap = kani_active_bitmap_with_cleared(bitmap, slot).unwrap();
+        let after = kani_build_resolved_close_rank(
+            b_stale,
+            pnl,
+            after_bitmap,
+            capital,
+            receipt_present,
+            recovery_required,
+        );
+
+        assert_eq!(after.active_leg_count + 1, before.active_leg_count);
+        assert_eq!(after.b_stale, before.b_stale);
+        assert_eq!(after.negative_pnl, before.negative_pnl);
+        assert_eq!(after.capital, before.capital);
+        assert_eq!(after.receipt_claim, before.receipt_claim);
+        assert_eq!(after.recovery_required, before.recovery_required);
+        assert_eq!(after_bitmap[0], bitmap[0] & !(1u64 << slot));
+        assert_eq!(
+            active_bitmap_count_ones(after_bitmap) + steps + 1,
+            initial_count
+        );
+
+        bitmap = after_bitmap;
+        steps += 1;
+    }
+
+    assert!(active_bitmap_is_empty(bitmap));
+    assert_eq!(steps, initial_count);
+    assert!(steps <= V16_MAX_PORTFOLIO_ASSETS_N as u32);
 }
 
 #[kani::proof]

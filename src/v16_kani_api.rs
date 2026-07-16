@@ -123,6 +123,35 @@ pub fn kani_active_bitmap_set(
     active_bitmap_set(bitmap, leg_slot_index)
 }
 
+pub fn kani_active_bitmap_with_cleared(
+    bitmap: V16ActiveBitmap,
+    leg_slot_index: usize,
+) -> V16Result<V16ActiveBitmap> {
+    active_bitmap_with_cleared(bitmap, leg_slot_index)
+}
+
+pub fn kani_first_active_bitmap_slot(bitmap: V16ActiveBitmap) -> V16Result<Option<usize>> {
+    first_active_bitmap_slot(bitmap)
+}
+
+pub fn kani_build_resolved_close_rank(
+    b_stale: bool,
+    pnl: i128,
+    active_bitmap: V16ActiveBitmap,
+    capital: u128,
+    receipt_present: bool,
+    recovery_required: bool,
+) -> ResolvedCloseRankV16 {
+    V16Core::build_resolved_close_rank(
+        b_stale,
+        pnl,
+        active_bitmap,
+        capital,
+        receipt_present,
+        recovery_required,
+    )
+}
+
 pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
     pnl: i128,
     capital: u128,

@@ -276,6 +276,23 @@ fn active_bitmap_with_cleared(
 }
 
 #[inline]
+fn first_active_bitmap_slot(bitmap: V16ActiveBitmap) -> V16Result<Option<usize>> {
+    let mut word_index = 0usize;
+    while word_index < V16_ACTIVE_BITMAP_WORDS {
+        let word = bitmap[word_index];
+        if word != 0 {
+            let slot = word_index * 64 + word.trailing_zeros() as usize;
+            if slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+                return Err(V16Error::InvalidLeg);
+            }
+            return Ok(Some(slot));
+        }
+        word_index += 1;
+    }
+    Ok(None)
+}
+
+#[inline]
 fn liquidation_remaining_active_bitmap_after_close(
     active_bitmap: V16ActiveBitmap,
     leg_slot_index: usize,
@@ -13140,9 +13157,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let asset = V16Core::kernel_clear_leg(leg, asset)?;
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
-        let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        active_bitmap_clear(&mut bitmap, leg_slot)?;
-        account.header.active_bitmap = bitmap.map(V16PodU64::new);
+        account.header.active_bitmap =
+            active_bitmap_with_cleared(account.header.active_bitmap.map(V16PodU64::get), leg_slot)?
+                .map(V16PodU64::new);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
         Ok(())
@@ -13184,9 +13201,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let asset = V16Core::kernel_clear_leg(leg, asset)?;
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
-        let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        active_bitmap_clear(&mut bitmap, leg_slot)?;
-        account.header.active_bitmap = bitmap.map(V16PodU64::new);
+        account.header.active_bitmap =
+            active_bitmap_with_cleared(account.header.active_bitmap.map(V16PodU64::get), leg_slot)?
+                .map(V16PodU64::new);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
         Ok(())
@@ -15772,43 +15789,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(false);
         }
 
-        let configured_max = self.header.config.max_market_slots.get() as usize;
-        // Readiness and teardown are account-local but potentially expensive per
-        // leg. Inspect only the deterministic first active leg in this step.
-        let mut slot = 0usize;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active {
-                if leg.b_stale || leg.stale {
-                    return Ok(false);
-                }
-                let asset_index = leg.asset_index as usize;
-                if asset_index >= configured_max {
-                    return Err(V16Error::InvalidLeg);
-                }
-                if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-                    return Ok(false);
-                }
-                let asset = self.asset_state(asset_index)?;
-                if Self::leg_has_exhausted_effective_oi(asset, leg) {
-                    // A legacy Live state may resolve before its next auto-crank.
-                    // Establish the same terminal reset epoch here so resolved
-                    // teardown does not subtract stored basis from zero OI.
-                    self.begin_full_drain_reset_inner(asset_index, leg.side)?;
-                }
-                let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
-                if k_target != leg.k_snap || f_target != leg.f_snap {
-                    return Ok(false);
-                }
-                if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
-                    return Ok(false);
-                }
-                self.clear_resolved_close_leg(account, asset_index)?;
-                return Ok(true);
-            }
-            slot += 1;
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let Some(slot) = first_active_bitmap_slot(bitmap)? else {
+            return Ok(false);
+        };
+        let leg = account.header.legs[slot].try_to_runtime()?;
+        if !leg.active {
+            return Err(V16Error::HiddenLeg);
         }
-        Ok(false)
+        if leg.b_stale || leg.stale {
+            return Ok(false);
+        }
+        let asset_index = leg.asset_index as usize;
+        if asset_index >= self.header.config.max_market_slots.get() as usize {
+            return Err(V16Error::InvalidLeg);
+        }
+        if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
+            return Ok(false);
+        }
+        let asset = self.asset_state(asset_index)?;
+        if Self::leg_has_exhausted_effective_oi(asset, leg) {
+            // A legacy Live state may resolve before its next auto-crank.
+            // Establish the same terminal reset epoch here so resolved
+            // teardown does not subtract stored basis from zero OI.
+            self.begin_full_drain_reset_inner(asset_index, leg.side)?;
+        }
+        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+        if k_target != leg.k_snap || f_target != leg.f_snap {
+            return Ok(false);
+        }
+        if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
+            return Ok(false);
+        }
+        self.clear_resolved_close_leg(account, asset_index)?;
+        Ok(true)
     }
 
     pub fn deposit_not_atomic(
