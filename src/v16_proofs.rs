@@ -2483,6 +2483,15 @@ fn conversion_flow_validate_stub(proof: &TokenValueFlowProofV16) -> V16Result<()
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn conversion_withdrawal_flow_validate_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
+    if proof.external_quote_out == 0 {
+        conversion_flow_validate_stub(proof)
+    } else {
+        withdrawal_flow_validate_stub(proof)
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn canonical_conversion_compact_stub<'a: 'a>(account: &mut PortfolioV16ViewMut<'a>) {
     let first = account.header.source_domains[0];
     assert!(first.is_occupied() || first.has_default_sparse_tag());
@@ -7803,18 +7812,29 @@ fn closure_resolved_bankruptcy_attribution_is_unique_and_ledger_authoritative() 
     assert_eq!(ambiguous, None);
 }
 
-// Public source-backed conversion is the boundary where junior, oracle-derived
-// PnL becomes withdrawable capital. The conversion must consume the selected
-// domain's real counterparty or reserved-insurance backing, move that exact
-// stock into C_tot, and leave every byte of the other asset untouched.
 #[cfg(all(kani, feature = "closure"))]
-fn prove_source_backed_conversion_is_asset_local<
+struct SourceBackedConversionFixture {
+    header: MarketGroupV16HeaderAccount,
+    markets: [Market<u64>; 2],
+    account: PortfolioAccountV16Account,
+    expected_header: MarketGroupV16HeaderAccount,
+    expected_markets: [EngineAssetSlotV16Account; 2],
+    expected_account: PortfolioAccountV16Account,
+    claim: u128,
+    backing: u128,
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_conversion_fixture<
     const ASSET: usize,
     const SOURCE_LONG: bool,
     const INSURANCE_BACKED: bool,
->() {
+    const UNDERBACKED: bool,
+>() -> SourceBackedConversionFixture {
     assert!(ASSET < 2);
+    assert!(!UNDERBACKED || !INSURANCE_BACKED);
     let claim = 2u128;
+    let backing = if UNDERBACKED { 1 } else { claim };
     let source_side = if SOURCE_LONG {
         SideV16::Long
     } else {
@@ -7822,26 +7842,27 @@ fn prove_source_backed_conversion_is_asset_local<
     };
     let domain = ASSET * 2 + encode_side(source_side) as usize;
     let claim_num = claim * BOUND_SCALE;
+    let backing_num = backing * BOUND_SCALE;
     let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
     account_header
         .init_empty_in_place(account_header.provenance_header)
         .unwrap();
 
-    header.vault = V16PodU128::new(if INSURANCE_BACKED { 10 } else { 10 + claim });
+    header.vault = V16PodU128::new(if INSURANCE_BACKED { 10 } else { 10 + backing });
     header.c_tot = V16PodU128::new(0);
     header.pnl_pos_tot = V16PodU128::new(claim);
     header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
     header.pnl_pos_bound_tot = V16PodU128::new(claim);
     header.source_claim_bound_total_num = V16PodU128::new(claim_num);
     if INSURANCE_BACKED {
-        header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(claim);
-        header.insurance_domain_budget_remaining_total = V16PodU128::new(8);
+        header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(backing);
+        header.insurance_domain_budget_remaining_total = V16PodU128::new(4 * backing);
         for market in &mut markets {
-            market.engine.insurance_domain_budget_long = V16PodU128::new(claim);
-            market.engine.insurance_domain_budget_short = V16PodU128::new(claim);
+            market.engine.insurance_domain_budget_long = V16PodU128::new(backing);
+            market.engine.insurance_domain_budget_short = V16PodU128::new(backing);
         }
     } else {
-        header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+        header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
     }
     account_header.pnl = V16PodI128::new(claim as i128);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -7864,21 +7885,21 @@ fn prove_source_backed_conversion_is_asset_local<
     let initial_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
         positive_claim_bound_num: claim_num,
         exact_positive_claim_num: claim_num,
-        fresh_reserved_backing_num: if INSURANCE_BACKED { 0 } else { claim_num },
-        insurance_credit_reserved_num: if INSURANCE_BACKED { claim_num } else { 0 },
-        credit_rate_num: CREDIT_RATE_SCALE,
+        fresh_reserved_backing_num: if INSURANCE_BACKED { 0 } else { backing_num },
+        insurance_credit_reserved_num: if INSURANCE_BACKED { backing_num } else { 0 },
+        credit_rate_num: backing_num * CREDIT_RATE_SCALE / claim_num,
         ..SourceCreditStateV16::EMPTY
     });
     let initial_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id: markets[ASSET].engine.asset.market_id.get(),
-        fresh_unliened_backing_num: claim_num,
+        fresh_unliened_backing_num: backing_num,
         expiry_slot: 10,
         status: BackingBucketStatusV16::Fresh,
         ..BackingBucketV16::EMPTY
     });
     let initial_reservation =
         InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
-            insurance_credit_reserved_num: claim_num,
+            insurance_credit_reserved_num: backing_num,
             ..InsuranceCreditReservationV16::EMPTY
         });
     match source_side {
@@ -7901,37 +7922,37 @@ fn prove_source_backed_conversion_is_asset_local<
     }
 
     let mut expected_header = header;
-    expected_header.c_tot = V16PodU128::new(claim);
+    expected_header.c_tot = V16PodU128::new(backing);
     expected_header.pnl_pos_tot = V16PodU128::new(0);
     expected_header.pnl_pos_bound_tot_num = V16PodU128::new(0);
     expected_header.pnl_pos_bound_tot = V16PodU128::new(0);
     expected_header.source_claim_bound_total_num = V16PodU128::new(0);
     expected_header.source_fresh_backing_total_num = V16PodU128::new(0);
     if INSURANCE_BACKED {
-        expected_header.insurance = V16PodU128::new(10 - claim);
+        expected_header.insurance = V16PodU128::new(10 - backing);
         expected_header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(0);
-        expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(8 - claim);
+        expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(3 * backing);
     }
     expected_header.risk_epoch = V16PodU64::new(header.risk_epoch.get() + 2);
 
     let mut expected_markets = [markets[0].engine, markets[1].engine];
     let consumed_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
-        spent_backing_num: if INSURANCE_BACKED { 0 } else { claim_num },
-        provider_receivable_num: if INSURANCE_BACKED { 0 } else { claim_num },
+        spent_backing_num: if INSURANCE_BACKED { 0 } else { backing_num },
+        provider_receivable_num: if INSURANCE_BACKED { 0 } else { backing_num },
         credit_rate_num: CREDIT_RATE_SCALE,
         credit_epoch: 2,
         ..SourceCreditStateV16::EMPTY
     });
     let consumed_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id: markets[ASSET].engine.asset.market_id.get(),
-        consumed_liened_backing_num: claim_num,
+        consumed_liened_backing_num: backing_num,
         expiry_slot: 10,
         status: BackingBucketStatusV16::Expired,
         ..BackingBucketV16::EMPTY
     });
     let consumed_reservation =
         InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
-            consumed_insurance_num: claim_num,
+            consumed_insurance_num: backing_num,
             ..InsuranceCreditReservationV16::EMPTY
         });
     match source_side {
@@ -7939,7 +7960,7 @@ fn prove_source_backed_conversion_is_asset_local<
             expected_markets[ASSET].source_credit_long = consumed_source;
             if INSURANCE_BACKED {
                 expected_markets[ASSET].insurance_reservation_long = consumed_reservation;
-                expected_markets[ASSET].insurance_domain_spent_long = V16PodU128::new(claim);
+                expected_markets[ASSET].insurance_domain_spent_long = V16PodU128::new(backing);
             } else {
                 expected_markets[ASSET].backing_long = consumed_bucket;
             }
@@ -7948,7 +7969,7 @@ fn prove_source_backed_conversion_is_asset_local<
             expected_markets[ASSET].source_credit_short = consumed_source;
             if INSURANCE_BACKED {
                 expected_markets[ASSET].insurance_reservation_short = consumed_reservation;
-                expected_markets[ASSET].insurance_domain_spent_short = V16PodU128::new(claim);
+                expected_markets[ASSET].insurance_domain_spent_short = V16PodU128::new(backing);
             } else {
                 expected_markets[ASSET].backing_short = consumed_bucket;
             }
@@ -7956,20 +7977,54 @@ fn prove_source_backed_conversion_is_asset_local<
     }
 
     let mut expected_account = account_header;
-    expected_account.capital = V16PodU128::new(claim);
+    expected_account.capital = V16PodU128::new(backing);
     expected_account.pnl = V16PodI128::new(0);
     expected_account.health_cert.valid = 0;
     expected_account.source_domains[0] = PortfolioSourceDomainV16Account::default();
 
+    SourceBackedConversionFixture {
+        header,
+        markets,
+        account: account_header,
+        expected_header,
+        expected_markets,
+        expected_account,
+        claim,
+        backing,
+    }
+}
+
+// Public source-backed conversion is the boundary where junior, oracle-derived
+// PnL becomes withdrawable capital. The conversion must consume the selected
+// domain's real counterparty or reserved-insurance backing, move that exact
+// stock into C_tot, and leave every byte of the other asset untouched.
+#[cfg(all(kani, feature = "closure"))]
+fn prove_source_backed_conversion_is_asset_local<
+    const ASSET: usize,
+    const SOURCE_LONG: bool,
+    const INSURANCE_BACKED: bool,
+    const UNDERBACKED: bool,
+>() {
+    let SourceBackedConversionFixture {
+        mut header,
+        mut markets,
+        mut account,
+        expected_header,
+        expected_markets,
+        expected_account,
+        backing,
+        ..
+    } = source_backed_conversion_fixture::<ASSET, SOURCE_LONG, INSURANCE_BACKED, UNDERBACKED>();
+
     kani::cover!(true, "source-backed conversion route is reachable");
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let mut account = PortfolioV16ViewMut::new(&mut account);
     let converted = market
         .convert_released_pnl_to_capital_not_atomic(&mut account)
         .unwrap();
 
-    kani::cover!(converted == claim, "public conversion succeeds");
-    assert_eq!(converted, claim);
+    kani::cover!(converted == backing, "public conversion succeeds");
+    assert_eq!(converted, backing);
     assert!(kani_eq_market_group_v16_header_account(
         &expected_header,
         market.header
@@ -7989,6 +8044,117 @@ fn prove_source_backed_conversion_is_asset_local<
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn prove_underbacked_asset_one_conversion_exit_is_capped() {
+    let SourceBackedConversionFixture {
+        mut header,
+        mut markets,
+        mut account,
+        expected_header,
+        expected_markets,
+        expected_account,
+        claim,
+        backing,
+    } = source_backed_conversion_fixture::<1, true, false, true>();
+
+    kani::cover!(true, "underbacked conversion route is reachable");
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account);
+    let converted = market
+        .convert_released_pnl_to_capital_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(converted == backing, "real backing converts to capital");
+    assert_eq!(converted, backing);
+    assert_eq!(market.header.vault, expected_header.vault);
+    assert_eq!(market.header.c_tot, expected_header.c_tot);
+    assert_eq!(market.header.insurance, expected_header.insurance);
+    assert_eq!(market.header.pnl_pos_tot, expected_header.pnl_pos_tot);
+    assert_eq!(
+        market.header.source_claim_bound_total_num,
+        expected_header.source_claim_bound_total_num
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num,
+        expected_header.source_fresh_backing_total_num
+    );
+    assert_eq!(account.header.capital, expected_account.capital);
+    assert_eq!(account.header.pnl, expected_account.pnl);
+    assert_eq!(
+        account.header.source_domains[0],
+        expected_account.source_domains[0]
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine
+    ));
+
+    let requested_raw: u8 = kani::any();
+    kani::assume((1..=claim as u8).contains(&requested_raw));
+    let requested = requested_raw as u128;
+    let succeeds = requested <= backing;
+    let mut final_expected_header = expected_header;
+    let mut final_expected_account = expected_account;
+    if succeeds {
+        final_expected_header.vault = V16PodU128::new(expected_header.vault.get() - requested);
+        final_expected_header.c_tot = V16PodU128::new(expected_header.c_tot.get() - requested);
+        final_expected_account.capital =
+            V16PodU128::new(expected_account.capital.get() - requested);
+    }
+
+    let result = market.withdraw_not_atomic(&mut account, requested);
+    kani::cover!(
+        succeeds && requested == backing,
+        "all realizable backing exits as external quote"
+    );
+    kani::cover!(
+        !succeeds && requested > backing,
+        "paper profit above realizable backing cannot exit"
+    );
+    assert_eq!(
+        result,
+        if succeeds {
+            Ok(())
+        } else {
+            Err(V16Error::LockActive)
+        }
+    );
+    assert_eq!(market.header.vault, final_expected_header.vault);
+    assert_eq!(market.header.c_tot, final_expected_header.c_tot);
+    assert_eq!(market.header.insurance, final_expected_header.insurance);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total,
+        final_expected_header.insurance_domain_budget_remaining_total
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num,
+        final_expected_header.source_fresh_backing_total_num
+    );
+    assert_eq!(
+        market.header.source_claim_bound_total_num,
+        final_expected_header.source_claim_bound_total_num
+    );
+    assert_eq!(account.header.capital, final_expected_account.capital);
+    assert_eq!(account.header.pnl, final_expected_account.pnl);
+    assert_eq!(
+        account.header.source_domains[0],
+        final_expected_account.source_domains[0]
+    );
+    let external_out = expected_header.vault.get() - market.header.vault.get();
+    assert_eq!(external_out, if succeeds { requested } else { 0 });
+    assert!(external_out <= backing);
+    assert_eq!(
+        market.header.vault.get(),
+        market.header.c_tot.get()
+            + market.header.insurance.get()
+            + market.header.backing_provider_earnings_total.get()
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
 #[kani::unwind(96)]
 #[kani::solver(cadical)]
@@ -8001,7 +8167,7 @@ fn prove_source_backed_conversion_is_asset_local<
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_zero_long_source_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<0, true, false>();
+    prove_source_backed_conversion_is_asset_local::<0, true, false, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -8017,7 +8183,7 @@ fn closure_asset_zero_long_source_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_zero_short_source_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<0, false, false>();
+    prove_source_backed_conversion_is_asset_local::<0, false, false, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -8033,7 +8199,7 @@ fn closure_asset_zero_short_source_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_one_long_source_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<1, true, false>();
+    prove_source_backed_conversion_is_asset_local::<1, true, false, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -8049,7 +8215,7 @@ fn closure_asset_one_long_source_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_one_short_source_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<1, false, false>();
+    prove_source_backed_conversion_is_asset_local::<1, false, false, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -8065,7 +8231,7 @@ fn closure_asset_one_short_source_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_zero_long_insurance_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<0, true, true>();
+    prove_source_backed_conversion_is_asset_local::<0, true, true, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -8081,7 +8247,7 @@ fn closure_asset_zero_long_insurance_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_zero_short_insurance_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<0, false, true>();
+    prove_source_backed_conversion_is_asset_local::<0, false, true, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -8097,7 +8263,7 @@ fn closure_asset_zero_short_insurance_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_one_long_insurance_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<1, true, true>();
+    prove_source_backed_conversion_is_asset_local::<1, true, true, false>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -8113,7 +8279,30 @@ fn closure_asset_one_long_insurance_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_asset_one_short_insurance_backed_conversion_is_local() {
-    prove_source_backed_conversion_is_asset_local::<1, false, true>();
+    prove_source_backed_conversion_is_asset_local::<1, false, true, false>();
+}
+
+// End-to-end malicious-oracle boundary: asset 1 carries two atoms of paper PnL
+// but only one atom of counterparty backing. The real public conversion route
+// may create at most one atom of capital, and the real public withdrawal route
+// must reject the second atom without touching asset 0 or any insurance stock.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    conversion_withdrawal_flow_validate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_underbacked_asset_one_conversion_cannot_exit_more_than_source_backing() {
+    prove_underbacked_asset_one_conversion_exit_is_capped();
 }
 
 #[cfg(all(kani, feature = "closure"))]
