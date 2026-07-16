@@ -18896,6 +18896,80 @@ fn closure_resolved_payout_topup_is_capped_conservative_and_terminal() {
     ));
 }
 
+// Activation prunes an all-notional solvency range only when the worst loss at
+// the high endpoint fits beneath maintenance at the low endpoint. Symbolic
+// interior notionals and fee/floor transitions prove that this optimization
+// cannot skip an under-margined configuration.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn closure_solvency_interval_certificate_cannot_skip_interior_failure() {
+    let x_raw: u16 = kani::any();
+    let loss_budget_bps_raw: u16 = kani::any();
+    let liquidation_fee_bps_raw: u16 = kani::any();
+    let has_min_liquidation_abs: bool = kani::any();
+    let cap_exceeds_min: bool = kani::any();
+    let maintenance_percent_raw: u8 = kani::any();
+    let min_nonzero_mm_req_raw: u16 = kani::any();
+
+    kani::assume(x_raw > 1 && x_raw < u16::MAX);
+    kani::assume(loss_budget_bps_raw <= 10_000);
+    kani::assume(liquidation_fee_bps_raw <= 10_000);
+    kani::assume((1..=100).contains(&maintenance_percent_raw));
+    kani::assume(min_nonzero_mm_req_raw <= 10_000);
+
+    let lo = 1u128;
+    let x = u128::from(x_raw);
+    let hi = u128::from(u16::MAX);
+    let loss_num = u128::from(loss_budget_bps_raw);
+    let loss_den = 10_000u128;
+    let price_budget_bps = u128::from(loss_budget_bps_raw);
+    let min_liquidation_abs = u128::from(u8::from(has_min_liquidation_abs));
+    let liquidation_fee_cap = min_liquidation_abs + u128::from(u8::from(cap_exceeds_min));
+    let mut config = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    config.liquidation_fee_bps = u64::from(liquidation_fee_bps_raw);
+    config.min_liquidation_abs = min_liquidation_abs;
+    config.liquidation_fee_cap = liquidation_fee_cap;
+    config.maintenance_margin_bps = u64::from(maintenance_percent_raw) * 100;
+    config.min_nonzero_mm_req = u128::from(min_nonzero_mm_req_raw);
+
+    let total_lo = config
+        .solvency_envelope_total_for_notional(lo, loss_num, loss_den, price_budget_bps)
+        .unwrap();
+    let total_x = config
+        .solvency_envelope_total_for_notional(x, loss_num, loss_den, price_budget_bps)
+        .unwrap();
+    let total_hi = config
+        .solvency_envelope_total_for_notional(hi, loss_num, loss_den, price_budget_bps)
+        .unwrap();
+    let mm_lo = config.maintenance_requirement_for_notional(lo).unwrap();
+    let mm_x = config.maintenance_requirement_for_notional(x).unwrap();
+    let mm_hi = config.maintenance_requirement_for_notional(hi).unwrap();
+    let certified = config
+        .solvency_envelope_interval_certifies(lo, hi, loss_num, loss_den, price_budget_bps)
+        .unwrap();
+    let interior_holds = config
+        .solvency_envelope_holds_for_notional(x, loss_num, loss_den, price_budget_bps)
+        .unwrap();
+
+    kani::cover!(
+        certified && total_x > 0 && loss_budget_bps_raw > 0 && liquidation_fee_bps_raw > 0,
+        "a nonzero loss/fee interval is certified across an interior point"
+    );
+    kani::cover!(
+        certified && mm_lo == config.min_nonzero_mm_req && mm_hi > mm_lo,
+        "certification crosses from the absolute maintenance floor into proportional margin"
+    );
+    kani::cover!(
+        certified && liquidation_fee_bps_raw > 0 && has_min_liquidation_abs && cap_exceeds_min,
+        "certification covers a nontrivial liquidation fee clamp"
+    );
+    assert!(total_lo <= total_x && total_x <= total_hi);
+    assert!(mm_lo <= mm_x && mm_x <= mm_hi);
+    assert!(!certified || interior_holds);
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn two_leg_refresh_loss_weight_stub(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     assert_eq!(a_basis, ADL_ONE);
