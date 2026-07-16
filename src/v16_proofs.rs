@@ -9272,6 +9272,154 @@ fn closure_two_domain_conversion_consumer_uses_each_domain_once() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn shared_conversion_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    assert!(
+        state.positive_claim_bound_num % BOUND_SCALE == 0
+            && state.exact_positive_claim_num == state.positive_claim_bound_num
+            && state.fresh_reserved_backing_num % BOUND_SCALE == 0
+            && state.fresh_reserved_backing_num <= 2 * BOUND_SCALE
+            && state.valid_liened_backing_num == 0
+            && state.spent_backing_num == 2 * BOUND_SCALE - state.fresh_reserved_backing_num
+            && state.provider_receivable_num == state.spent_backing_num
+    );
+    if state.positive_claim_bound_num == 0 {
+        return Ok(CREDIT_RATE_SCALE);
+    }
+    Ok(state.fresh_reserved_backing_num * CREDIT_RATE_SCALE / state.positive_claim_bound_num)
+}
+
+// The account allocator theorem above and the generic counterparty-consume
+// contracts establish this exact post-consumption state. Canonically burning
+// the first winner's claim must recompute the shared source so the untouched
+// winner can realize only the one backing atom left.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    shared_conversion_credit_rate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+fn closure_source_claim_burn_recomputes_shared_winner_support() {
+    let wide_first: bool = kani::any();
+    let first_claim = if wide_first { 4u128 } else { 2 };
+    let second_claim = 2u128;
+    let total_claim = first_claim + second_claim;
+    let (mut header, mut markets, mut first) = two_asset_kf_mapping_fixture();
+    first.init_empty_in_place(first.provenance_header).unwrap();
+    let mut second = PortfolioAccountV16Account::default();
+    second
+        .init_empty_in_place(ProvenanceHeaderV16Account::from_runtime(
+            &ProvenanceHeaderV16::new(header.market_group_id, [8; 32], [9; 32]),
+        ))
+        .unwrap();
+
+    header.pnl_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_claim * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(total_claim * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new(BOUND_SCALE);
+    header.materialized_portfolio_count = V16PodU64::new(2);
+    let market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: total_claim * BOUND_SCALE,
+            exact_positive_claim_num: total_claim * BOUND_SCALE,
+            fresh_reserved_backing_num: BOUND_SCALE,
+            spent_backing_num: BOUND_SCALE,
+            provider_receivable_num: BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE / total_claim,
+            credit_epoch: 1,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: BOUND_SCALE,
+        consumed_liened_backing_num: BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    for (account, claim) in [(&mut first, first_claim), (&mut second, second_claim)] {
+        account.pnl = V16PodI128::new(claim as i128);
+        account.source_domains[0] = PortfolioSourceDomainV16Account {
+            domain: V16PodU32::new(0),
+            source_claim_market_id: V16PodU64::new(market_id),
+            source_claim_bound_num: V16PodU128::new(claim * BOUND_SCALE),
+            ..PortfolioSourceDomainV16Account::default()
+        };
+    }
+
+    let header_before = header;
+    let source_before = markets[0].engine.source_credit_long;
+    let bucket_before = markets[0].engine.backing_long;
+    let other_market_before = markets[1].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .burn_account_source_claim_bound_num(
+            &mut PortfolioV16ViewMut::new(&mut first),
+            first_claim * BOUND_SCALE,
+        )
+        .unwrap();
+    let remaining_support = V16Core::source_credit_state_realizable_support_for_face(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .try_to_runtime()
+            .unwrap(),
+        second_claim,
+    )
+    .unwrap();
+
+    kani::cover!(
+        wide_first && remaining_support == 1,
+        "burning a wider first claim leaves exactly one funded atom for the other winner"
+    );
+    let source = market.markets[0].engine.source_credit_long;
+    let bucket = market.markets[0].engine.backing_long;
+    assert!(
+        remaining_support == 1
+            && source.spent_backing_num.get() / BOUND_SCALE + remaining_support == 2
+            && first.capital.get() == 0
+            && second.capital.get() == 0
+            && first.pnl.get() == first_claim as i128
+            && second.pnl.get() == second_claim as i128
+            && first.source_domains[0].is_sparse_tail_default()
+            && second.source_domains[0].is_occupied()
+            && second.source_domains[0].domain.get() == 0
+            && second.source_domains[0].source_claim_bound_num.get() == second_claim * BOUND_SCALE
+            && market.header.vault == header_before.vault
+            && market.header.c_tot == header_before.c_tot
+            && market.header.insurance == header_before.insurance
+            && market.header.pnl_pos_tot == header_before.pnl_pos_tot
+            && market.header.pnl_pos_bound_tot_num == header_before.pnl_pos_bound_tot_num
+            && market.header.source_claim_bound_total_num.get() == second_claim * BOUND_SCALE
+            && market.header.source_fresh_backing_total_num.get() == BOUND_SCALE
+            && market.header.risk_epoch.get() == header_before.risk_epoch.get() + 1
+            && source.positive_claim_bound_num.get() == second_claim * BOUND_SCALE
+            && source.exact_positive_claim_num.get() == second_claim * BOUND_SCALE
+            && source.fresh_reserved_backing_num.get() == BOUND_SCALE
+            && source.spent_backing_num.get() == BOUND_SCALE
+            && source.provider_receivable_num.get() == BOUND_SCALE
+            && source.credit_rate_num.get() == CREDIT_RATE_SCALE / 2
+            && source.credit_epoch.get() == source_before.credit_epoch.get() + 1
+            && bucket.fresh_unliened_backing_num.get() == BOUND_SCALE
+            && bucket.consumed_liened_backing_num.get() == BOUND_SCALE
+            && bucket.status == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+            && kani_eq_backing_bucket_v16_account(&bucket_before, &bucket)
+            && kani_eq_engine_asset_slot_v16_account(
+                &other_market_before,
+                &market.markets[1].engine
+            )
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn prove_reversed_risk_lien_remains_fully_realizable_and_asset_local<
     const INSURANCE_BACKED: bool,
     const FULL_LIEN: bool,
