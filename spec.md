@@ -1312,10 +1312,6 @@ If full B settlement is too large, partial settlement is allowed. While `B_remai
 
 `accrue_asset_to(asset, now_slot, effective_price, funding_rate)` requires Active/DrainOnly live mode, authenticated time, valid price, and bounded funding rate. Domain locks do not block K/F/price/time accrual. Accrual MUST NOT mutate B, A, OI, weights, staged residuals, staged insurance, ADL, pending barriers, pending obligations, or exposure-clear state for a locked domain unless held by the close/recovery path.
 
-For an exposed asset with `raw_oracle_target_price != effective_price`, a positive accrual segment MUST NOT successfully consume elapsed time when the submitted effective price is unchanged. If cap quantization admits no representable price atom, accrual MUST return `NonProgress` before mutation so transaction rollback preserves the elapsed segment for a later target-directed move. Repeated permissionless calls MUST NOT reset `slot_last` while leaving the lagged effective price unchanged.
-
-If the wrapper authenticates and applies the bounded market-accrual stage before calling `permissionless_auto_crank_not_atomic`, it MUST set `observations_preaccrued`. In that mode the engine dispatches the selected current-state account action without applying a second accrual segment. The wrapper MUST set the flag only after successful pre-accrual in the same transaction and MUST propagate every engine error so SVM rollback covers all not-atomic mutations.
-
 Before any accrual/effective-price/K/F write is usable by a favorable action:
 1. affected source-domain claim-bound buckets MUST be recomputed conservatively;
 2. affected backing freshness buckets MUST be applied;
@@ -1654,7 +1650,6 @@ Wrappers MUST expose full refresh, hinted crank, bounded catchup, active close c
 100. `stock_reconciliation_includes_settlement_rounding_residue_total`.
 101. `drift_consumed_partition_category_is_reserved_and_zero` *(v16.9.0)*.
 102. `per_class_stock_reconciliation_matches_o1_ledgers_where_available`.
-103. `lagged_oracle_target_zero_delta_cannot_consume_accrual_segment`.
 -------------------------------------------------------------------------------
 15. Audit summary and intended tradeoff
 -------------------------------------------------------------------------------
