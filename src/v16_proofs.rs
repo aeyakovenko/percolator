@@ -18243,6 +18243,443 @@ fn closure_full_refresh_never_certifies_more_than_domain_realizable_backing() {
     assert_eq!(account.header.health_cert.try_to_runtime(), Ok(cert));
 }
 
+// A pending-domain barrier must not trap an owner in live risk. The public
+// rebalance route may close the position, but it must retain the selected
+// side's loss weight as one zero-basis obligation until the barrier releases.
+// This composition executes the real request clamp, barrier gate, position
+// mutation, matching-OI reduction, aggregate blocker update, and rank check.
+#[cfg(all(kani, feature = "closure"))]
+fn pending_obligation_exit_fixture<const ASSET: usize>(
+    long_side: bool,
+    position_q: u128,
+    capital: u128,
+    barrier_count: u64,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+) {
+    assert!(ASSET < 2);
+    assert!(position_q == POS_SCALE || position_q == 3 * POS_SCALE);
+    assert!((1..=8).contains(&capital));
+    assert!((1..=3).contains(&barrier_count));
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let (mut header, mut markets, mut account) = two_asset_kf_mapping_fixture();
+    account
+        .init_empty_in_place(account.provenance_header)
+        .unwrap();
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(header.insurance.get() + capital);
+    header.resolved_payout_blocker_count = V16PodU64::new(3 + barrier_count);
+    account.capital = V16PodU128::new(capital);
+    account.active_bitmap[0] = V16PodU64::new(1);
+
+    let slot = &mut markets[ASSET].engine;
+    match side {
+        SideV16::Long => slot.pending_domain_loss_barrier_long = V16PodU64::new(barrier_count),
+        SideV16::Short => slot.pending_domain_loss_barrier_short = V16PodU64::new(barrier_count),
+    }
+    let mut asset = slot.asset.try_to_runtime().unwrap();
+    asset.slot_last = header.current_slot.get();
+    asset.oi_eff_long_q = 2 * position_q;
+    asset.oi_eff_short_q = 2 * position_q;
+    asset.loss_weight_sum_long = 2 * position_q;
+    asset.loss_weight_sum_short = 2 * position_q;
+    match side {
+        SideV16::Long => {
+            asset.stored_pos_count_long = 2;
+            asset.stored_pos_count_short = 1;
+        }
+        SideV16::Short => {
+            asset.stored_pos_count_long = 1;
+            asset.stored_pos_count_short = 2;
+        }
+    }
+    slot.asset = AssetStateV16Account::from_runtime(&asset);
+    account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: ASSET as u32,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: if long_side {
+            position_q as i128
+        } else {
+            -(position_q as i128)
+        },
+        a_basis: ADL_ONE,
+        k_snap: if long_side {
+            asset.k_long
+        } else {
+            asset.k_short
+        },
+        f_snap: if long_side {
+            asset.f_long_num
+        } else {
+            asset.f_short_num
+        },
+        epoch_snap: if long_side {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        loss_weight: position_q,
+        b_snap: if long_side {
+            asset.b_long_num
+        } else {
+            asset.b_short_num
+        },
+        b_epoch_snap: if long_side {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        ..PortfolioLegV16::EMPTY
+    });
+    (header, markets, account)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn pending_obligation_current_side_effects_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    b_delta_budget: u128,
+) -> V16Result<PermissionlessProgressOutcomeV16> {
+    let leg = account.header.legs[0].try_to_runtime()?;
+    let asset_index = leg.asset_index as usize;
+    let asset = market.asset_state(asset_index)?;
+    let (k, f, b) = if leg.side == SideV16::Long {
+        (asset.k_long, asset.f_long_num, asset.b_long_num)
+    } else {
+        (asset.k_short, asset.f_short_num, asset.b_short_num)
+    };
+    let barrier = market.has_pending_domain_loss_barrier(asset_index, leg.side)?;
+    assert!(
+        b_delta_budget == market.header.config.public_b_chunk_atoms.get()
+            && account.header.pnl.get() == 0
+            && account.header.stale_state == 0
+            && account.header.b_stale_state == 0
+            && account.header.active_bitmap[0].get() == 1
+            && leg.active
+            && !leg.stale
+            && !leg.b_stale
+            && leg.basis_pos_q != 0
+            && asset.slot_last == market.header.current_slot.get()
+            && leg.k_snap == k
+            && leg.f_snap == f
+            && leg.b_snap == b
+            && barrier
+    );
+    account.header.health_cert.valid = 0;
+    Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn pending_obligation_full_reduce_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    asset_index: usize,
+    close_q: u128,
+) -> V16Result<()> {
+    let leg = account.header.legs[0].try_to_runtime()?;
+    let barrier = market.has_pending_domain_loss_barrier(asset_index, leg.side)?;
+    assert!(
+        account.header.active_bitmap[0].get() == 1
+            && leg.active
+            && leg.asset_index as usize == asset_index
+            && leg.basis_pos_q != 0
+            && !leg.stale
+            && !leg.b_stale
+            && close_q == leg.basis_pos_q.unsigned_abs()
+            && barrier
+    );
+    let delta_q = match leg.side {
+        SideV16::Long => -(close_q as i128),
+        SideV16::Short => close_q as i128,
+    };
+    let lookup = PositionDeltaLookupV16 {
+        existing_slot: Some(0),
+        empty_slot: None,
+        current_q: leg.basis_pos_q,
+        next_q: 0,
+    };
+    market.apply_current_position_delta_with_lookup(account, asset_index, delta_q, lookup)?;
+    market.reduce_matching_open_interest_for_unilateral_close(asset_index, leg.side, close_q)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn pending_obligation_certify_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    price_override: Option<(usize, u64)>,
+) -> V16Result<HealthCertV16> {
+    let leg = account.header.legs[0].try_to_runtime()?;
+    let risk_units = leg.basis_pos_q.unsigned_abs() / POS_SCALE;
+    assert!(
+        price_override.is_none()
+            && account.header.pnl.get() == 0
+            && account.header.stale_state == 0
+            && account.header.b_stale_state == 0
+            && account.header.active_bitmap[0].get() == 1
+            && leg.active
+            && !leg.stale
+            && !leg.b_stale
+            && (risk_units == 0 || risk_units == 1 || risk_units == 3)
+    );
+    let cert = HealthCertV16 {
+        certified_equity: account.header.capital.get() as i128,
+        certified_initial_req: risk_units,
+        certified_maintenance_req: risk_units,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: risk_units,
+        cert_oracle_epoch: market.header.oracle_epoch.get(),
+        cert_funding_epoch: market.header.funding_epoch.get(),
+        cert_risk_epoch: market.header.risk_epoch.get(),
+        cert_asset_set_epoch: market.header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account.header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+    };
+    account.header.health_cert = HealthCertV16Account::from_runtime(&cert);
+    Ok(cert)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn pending_obligation_matching_a_stub(a: u128, b: u128, d: u128) -> u128 {
+    assert!(a == ADL_ONE && (b == POS_SCALE || b == 3 * POS_SCALE) && d == 2 * b);
+    ADL_ONE / 2
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn pending_obligation_no_full_reset_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _side: SideV16,
+) -> V16Result<()> {
+    panic!("a barrier exit with remaining OI must not reset either side")
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn pending_obligation_loss_weight_stub(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
+    assert!((abs_basis_q == POS_SCALE || abs_basis_q == 3 * POS_SCALE) && a_basis == ADL_ONE);
+    Ok(abs_basis_q)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn pending_obligation_risk_score_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<RiskScoreV16> {
+    let leg = account.header.legs[0].try_to_runtime()?;
+    let cert = account.header.health_cert.try_to_runtime()?;
+    let risk_units = leg.basis_pos_q.unsigned_abs() / POS_SCALE;
+    assert!(
+        account.header.active_bitmap[0].get() == 1
+            && leg.active
+            && !leg.stale
+            && !leg.b_stale
+            && (risk_units == 0 || risk_units == 1 || risk_units == 3)
+            && cert.valid
+            && cert.certified_liq_deficit == 0
+            && cert.certified_worst_case_loss == risk_units
+            && cert.active_bitmap_at_cert[0] == 1
+    );
+    Ok(RiskScoreV16 {
+        certified_liq_deficit: 0,
+        unsettled_b_loss_bound: 0,
+        stale_loss_bound: 0,
+        gross_risk_notional: risk_units,
+        active_leg_count: 1,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn prove_public_barrier_rebalance_creates_completable_obligation<
+    const ASSET: usize,
+    const LONG_SIDE: bool,
+    const DUST_POSITION: bool,
+    const OVERSIZED_REQUEST: bool,
+>() {
+    assert!(ASSET < 2);
+    let capital_raw: u8 = kani::any();
+    let barrier_count_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&capital_raw));
+    kani::assume((1..=3).contains(&barrier_count_raw));
+    let capital = u128::from(capital_raw);
+    let barrier_count = u64::from(barrier_count_raw);
+    let position_q = if DUST_POSITION {
+        POS_SCALE
+    } else {
+        3 * POS_SCALE
+    };
+    let requested_q = if OVERSIZED_REQUEST {
+        2 * position_q
+    } else {
+        position_q
+    };
+    let side = if LONG_SIDE {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let (mut header, mut markets, mut account_header) =
+        pending_obligation_exit_fixture::<ASSET>(LONG_SIDE, position_q, capital, barrier_count);
+    let header_before = header;
+    let markets_before = [markets[0].engine, markets[1].engine];
+    let account_before = account_header;
+    let other = 1 - ASSET;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market
+        .rebalance_reduce_position_not_atomic(
+            &mut account,
+            RebalanceRequestV16 {
+                asset_index: ASSET,
+                reduce_q: requested_q,
+            },
+        )
+        .unwrap();
+    let leg = account.header.legs[0].try_to_runtime().unwrap();
+    let selected = market.asset_state(ASSET).unwrap();
+
+    kani::cover!(
+        capital_raw > 1 && barrier_count_raw > 1,
+        "barrier exit covers nontrivial capital and concurrent close barriers"
+    );
+    let cert = account.header.health_cert.try_to_runtime().unwrap();
+    assert!(
+        outcome.reduced_q == position_q
+            && leg.active
+            && leg.side == side
+            && leg.asset_index as usize == ASSET
+            && leg.basis_pos_q == 0
+            && leg.loss_weight == position_q
+            && account.header.active_bitmap[0].get() == 1
+            && cert.valid
+            && cert.certified_worst_case_loss == 0
+    );
+    let selected_exact = match side {
+        SideV16::Long => {
+            selected.oi_eff_long_q == position_q
+                && selected.oi_eff_short_q == position_q
+                && selected.stored_pos_count_long == 2
+                && selected.stored_pos_count_short == 1
+                && selected.pending_obligation_count_long == 1
+                && selected.pending_obligation_count_short == 0
+                && selected.loss_weight_sum_long == 2 * position_q
+                && selected.loss_weight_sum_short == 2 * position_q
+                && selected.a_long == ADL_ONE
+                && selected.a_short == ADL_ONE / 2
+        }
+        SideV16::Short => {
+            selected.oi_eff_long_q == position_q
+                && selected.oi_eff_short_q == position_q
+                && selected.stored_pos_count_long == 1
+                && selected.stored_pos_count_short == 2
+                && selected.pending_obligation_count_long == 0
+                && selected.pending_obligation_count_short == 1
+                && selected.loss_weight_sum_long == 2 * position_q
+                && selected.loss_weight_sum_short == 2 * position_q
+                && selected.a_long == ADL_ONE / 2
+                && selected.a_short == ADL_ONE
+        }
+    };
+    assert!(selected_exact);
+    let selected_blockers =
+        slot_resolved_payout_blockers_v16(market.markets[ASSET].engine_slot()).unwrap();
+    let expected_blockers = 3 + barrier_count;
+    assert!(
+        market.has_pending_domain_loss_barrier(ASSET, side).unwrap()
+            && market.header.resolved_payout_blocker_count.get() == expected_blockers
+            && selected_blockers == expected_blockers
+            && kani_eq_market_group_v16_header_account(&header_before, market.header)
+            && account_value_and_gate_frame_unchanged(&account_before, account.header)
+            && kani_eq_engine_asset_slot_v16_account(
+                &markets_before[other],
+                &market.markets[other].engine
+            )
+            && market.markets[0].wrapper == 0
+            && market.markets[1].wrapper == 0
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    pending_obligation_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    pending_obligation_full_reduce_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    pending_obligation_certify_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    zero_pnl_principal_settlement_stub
+)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    pending_obligation_matching_a_stub
+)]
+#[kani::stub(crate::v16::loss_weight_for_basis, pending_obligation_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::risk_score_unchecked,
+    pending_obligation_risk_score_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::begin_full_drain_reset_inner,
+    pending_obligation_no_full_reset_stub
+)]
+fn closure_public_asset_zero_long_barrier_rebalance_creates_completable_obligation() {
+    prove_public_barrier_rebalance_creates_completable_obligation::<0, true, true, true>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    pending_obligation_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    pending_obligation_full_reduce_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    pending_obligation_certify_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    zero_pnl_principal_settlement_stub
+)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    pending_obligation_matching_a_stub
+)]
+#[kani::stub(crate::v16::loss_weight_for_basis, pending_obligation_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::risk_score_unchecked,
+    pending_obligation_risk_score_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::begin_full_drain_reset_inner,
+    pending_obligation_no_full_reset_stub
+)]
+fn closure_public_asset_zero_short_barrier_rebalance_creates_completable_obligation() {
+    prove_public_barrier_rebalance_creates_completable_obligation::<0, false, true, true>();
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn settled_obligation_active_leg_validation_stub(leg: PortfolioLegV16) -> V16Result<()> {
     assert!(leg.active);
