@@ -9046,6 +9046,232 @@ fn closure_underbacked_asset_one_insurance_conversion_cannot_exit_other_domain_b
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn two_domain_conversion_compact_stub<'a: 'a>(account: &mut PortfolioV16ViewMut<'a>) {
+    let first = account.header.source_domains[0];
+    let second = account.header.source_domains[1];
+    let canonical_live = first.is_occupied()
+        && first.domain.get() == 0
+        && second.is_occupied()
+        && second.domain.get() == 3;
+    let canonical_empty = first.is_sparse_tail_default() && second.is_sparse_tail_default();
+    assert!(
+        (canonical_live || canonical_empty)
+            && account.header.source_domains[2].is_sparse_tail_default()
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn two_domain_counterparty_consume_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    domain: usize,
+    amount: u128,
+) -> V16Result<()> {
+    let (asset_index, source_long) = match domain {
+        0 => (0usize, true),
+        3 => (1usize, false),
+        _ => panic!("unexpected two-domain conversion source"),
+    };
+    assert_eq!(amount, BOUND_SCALE);
+    let slot = &mut market.markets[asset_index].engine;
+    let (source, bucket) = if source_long {
+        (&mut slot.source_credit_long, &mut slot.backing_long)
+    } else {
+        (&mut slot.source_credit_short, &mut slot.backing_short)
+    };
+    assert!(
+        (source.positive_claim_bound_num.get() == 2 * BOUND_SCALE
+            || source.positive_claim_bound_num.get() == 4 * BOUND_SCALE)
+            && source.exact_positive_claim_num == source.positive_claim_bound_num
+            && source.fresh_reserved_backing_num.get() == BOUND_SCALE
+            && source.valid_liened_backing_num.get() == 0
+            && source.spent_backing_num.get() == 0
+            && source.provider_receivable_num.get() == 0
+            && bucket.fresh_unliened_backing_num.get() == BOUND_SCALE
+            && bucket.valid_liened_backing_num.get() == 0
+            && bucket.consumed_liened_backing_num.get() == 0
+            && bucket.status == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+            && bucket.expiry_slot.get() > market.header.current_slot.get()
+    );
+    source.fresh_reserved_backing_num = V16PodU128::new(0);
+    source.spent_backing_num = V16PodU128::new(BOUND_SCALE);
+    source.provider_receivable_num = V16PodU128::new(BOUND_SCALE);
+    source.credit_rate_num = V16PodU128::new(0);
+    source.credit_epoch = V16PodU64::new(source.credit_epoch.get() + 1);
+    bucket.fresh_unliened_backing_num = V16PodU128::new(0);
+    bucket.consumed_liened_backing_num = V16PodU128::new(BOUND_SCALE);
+    bucket.status = encode_backing_bucket_status(BackingBucketStatusV16::Expired);
+    market.header.source_fresh_backing_total_num =
+        V16PodU128::new(market.header.source_fresh_backing_total_num.get() - BOUND_SCALE);
+    market.header.risk_epoch = V16PodU64::new(market.header.risk_epoch.get() + 1);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn two_domain_conversion_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    let claim = state.positive_claim_bound_num / BOUND_SCALE;
+    assert!(
+        (claim == 2 || claim == 4)
+            && state.positive_claim_bound_num == claim * BOUND_SCALE
+            && state.exact_positive_claim_num == state.positive_claim_bound_num
+            && state.fresh_reserved_backing_num == BOUND_SCALE
+            && state.credit_rate_num == CREDIT_RATE_SCALE / claim
+    );
+    Ok(CREDIT_RATE_SCALE / claim)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn two_domain_conversion_lien_amounts_stub(
+    effective_credit: u128,
+    credit_rate_num: u128,
+) -> V16Result<(u128, u128)> {
+    assert_eq!(effective_credit, 1);
+    let face = if credit_rate_num == CREDIT_RATE_SCALE / 2 {
+        2 * BOUND_SCALE
+    } else {
+        assert_eq!(credit_rate_num, CREDIT_RATE_SCALE / 4);
+        4 * BOUND_SCALE
+    };
+    Ok((face, BOUND_SCALE))
+}
+
+// Cross-margin conversion may aggregate independently realizable source credit,
+// but its account-level consumer must take each atom from one concrete domain.
+// Public single-domain compositions prove that this funded transit is credited
+// to capital and is the only value the withdrawal route can release.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(112)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    two_domain_conversion_credit_rate_stub
+)]
+#[kani::stub(
+    V16Core::source_credit_lien_amounts_for_effective,
+    two_domain_conversion_lien_amounts_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    two_domain_conversion_compact_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::create_and_consume_source_credit_from_counterparty_core_not_atomic,
+    two_domain_counterparty_consume_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+fn closure_two_domain_conversion_consumer_uses_each_domain_once() {
+    let wide_a: bool = kani::any();
+    let wide_b: bool = kani::any();
+    let claim_a = if wide_a { 4u128 } else { 2 };
+    let claim_b = if wide_b { 4u128 } else { 2 };
+    let claim_total = claim_a + claim_b;
+    let backing_total = 2u128;
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    account_header
+        .init_empty_in_place(account_header.provenance_header)
+        .unwrap();
+
+    header.vault = V16PodU128::new(header.insurance.get() + backing_total);
+    header.c_tot = V16PodU128::new(0);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_total * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new(2 * BOUND_SCALE);
+
+    for (source_slot, asset_index, domain, claim) in
+        [(0usize, 0usize, 0usize, claim_a), (1, 1, 3, claim_b)]
+    {
+        let market_id = markets[asset_index].engine.asset.market_id.get();
+        let claim_num = claim * BOUND_SCALE;
+        let source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE / claim,
+            ..SourceCreditStateV16::EMPTY
+        });
+        let bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: BOUND_SCALE,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+        if domain % 2 == 0 {
+            markets[asset_index].engine.source_credit_long = source;
+            markets[asset_index].engine.backing_long = bucket;
+        } else {
+            markets[asset_index].engine.source_credit_short = source;
+            markets[asset_index].engine.backing_short = bucket;
+        }
+        account_header.source_domains[source_slot] = PortfolioSourceDomainV16Account {
+            domain: V16PodU32::new(domain as u32),
+            source_claim_market_id: V16PodU64::new(market_id),
+            source_claim_bound_num: V16PodU128::new(claim_num),
+            ..PortfolioSourceDomainV16Account::default()
+        };
+    }
+
+    let header_before = header;
+    let market_a_before = markets[0].engine;
+    let market_b_before = markets[1].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let consumption = market
+        .create_and_consume_account_source_credit_for_effective_not_atomic(
+            &mut account,
+            backing_total,
+        )
+        .unwrap();
+
+    kani::cover!(
+        wide_a != wide_b && consumption.counterparty_credit_consumed == 2,
+        "asymmetric source rates consume each domain's one backing atom"
+    );
+    let source_a = market.markets[0].engine.source_credit_long;
+    let source_b = market.markets[1].engine.source_credit_short;
+    let bucket_a = market.markets[0].engine.backing_long;
+    let bucket_b = market.markets[1].engine.backing_short;
+    assert!(
+        consumption.face_burn == claim_total
+            && consumption.counterparty_credit_consumed == backing_total
+            && consumption.insurance_credit_consumed == 0
+            && account.header.source_domains[0]
+                .source_claim_bound_num
+                .get()
+                == claim_a * BOUND_SCALE
+            && account.header.source_domains[1]
+                .source_claim_bound_num
+                .get()
+                == claim_b * BOUND_SCALE
+            && market.header.vault == header_before.vault
+            && market.header.c_tot == header_before.c_tot
+            && market.header.insurance == header_before.insurance
+            && market.header.source_claim_bound_total_num
+                == header_before.source_claim_bound_total_num
+            && market.header.source_fresh_backing_total_num.get() == 0
+            && source_a.positive_claim_bound_num.get() == claim_a * BOUND_SCALE
+            && source_a.fresh_reserved_backing_num.get() == 0
+            && source_a.spent_backing_num.get() == BOUND_SCALE
+            && source_a.provider_receivable_num.get() == BOUND_SCALE
+            && source_b.positive_claim_bound_num.get() == claim_b * BOUND_SCALE
+            && source_b.fresh_reserved_backing_num.get() == 0
+            && source_b.spent_backing_num.get() == BOUND_SCALE
+            && source_b.provider_receivable_num.get() == BOUND_SCALE
+            && bucket_a.consumed_liened_backing_num.get() == BOUND_SCALE
+            && bucket_b.consumed_liened_backing_num.get() == BOUND_SCALE
+            && market.markets[0].engine.source_credit_short == market_a_before.source_credit_short
+            && market.markets[0].engine.backing_short == market_a_before.backing_short
+            && market.markets[1].engine.source_credit_long == market_b_before.source_credit_long
+            && market.markets[1].engine.backing_long == market_b_before.backing_long
+            && market.header.vault.get()
+                == market.header.c_tot.get()
+                    + market.header.insurance.get()
+                    + consumption.counterparty_credit_consumed
+                    + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn prove_reversed_risk_lien_remains_fully_realizable_and_asset_local<
     const INSURANCE_BACKED: bool,
     const FULL_LIEN: bool,
