@@ -18681,6 +18681,80 @@ fn closure_public_asset_zero_short_barrier_rebalance_creates_completable_obligat
 }
 
 #[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    pending_obligation_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    pending_obligation_full_reduce_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    pending_obligation_certify_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    zero_pnl_principal_settlement_stub
+)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    pending_obligation_matching_a_stub
+)]
+#[kani::stub(crate::v16::loss_weight_for_basis, pending_obligation_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::risk_score_unchecked,
+    pending_obligation_risk_score_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::begin_full_drain_reset_inner,
+    pending_obligation_no_full_reset_stub
+)]
+fn closure_public_asset_one_long_barrier_rebalance_creates_completable_obligation() {
+    prove_public_barrier_rebalance_creates_completable_obligation::<1, true, false, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_not_atomic,
+    pending_obligation_current_side_effects_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reduce_position,
+    pending_obligation_full_reduce_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::certify_account_after_local_settlement_with_price_override,
+    pending_obligation_certify_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_not_atomic,
+    zero_pnl_principal_settlement_stub
+)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    pending_obligation_matching_a_stub
+)]
+#[kani::stub(crate::v16::loss_weight_for_basis, pending_obligation_loss_weight_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::risk_score_unchecked,
+    pending_obligation_risk_score_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::begin_full_drain_reset_inner,
+    pending_obligation_no_full_reset_stub
+)]
+fn closure_public_asset_one_short_barrier_rebalance_creates_completable_obligation() {
+    prove_public_barrier_rebalance_creates_completable_obligation::<1, false, false, false>();
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn settled_obligation_active_leg_validation_stub(leg: PortfolioLegV16) -> V16Result<()> {
     assert!(leg.active);
     assert_eq!(leg.asset_index, 0);
