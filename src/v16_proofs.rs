@@ -7041,6 +7041,196 @@ fn closure_insurance_reward_is_budget_isolated_and_failure_atomic() {
     assert!(market.header.insurance.get() >= budget);
 }
 
+// Wrapper composition after liquidation: only the net insurance increase may
+// fund the cranker reward, and every retained atom then becomes either selected
+// asset budget or asset-zero budget. Prior domain budgets and prior unbudgeted
+// insurance survive exactly; no shared-insurance atom can be silently consumed.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    insurance_reward_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    insurance_reward_market_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    valid_domain_ledger_stub
+)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    insurance_reward_flow_validation_stub
+)]
+fn closure_liquidation_reward_then_fee_split_preserves_prior_insurance_capacity() {
+    let retained_raw: u8 = kani::any();
+    let reward_raw: u8 = kani::any();
+    let redirect_raw: u8 = kani::any();
+    let prior_unbudgeted_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&retained_raw));
+    kani::assume(reward_raw <= retained_raw);
+    kani::assume(redirect_raw <= retained_raw - reward_raw);
+    kani::assume(prior_unbudgeted_raw <= 8);
+    kani::assume((1..=8).contains(&capital_raw));
+
+    let retained = u128::from(retained_raw);
+    let reward = u128::from(reward_raw);
+    let remaining = retained - reward;
+    let redirect = u128::from(redirect_raw);
+    let selected = remaining - redirect;
+    let prior_unbudgeted = u128::from(prior_unbudgeted_raw);
+    let capital = u128::from(capital_raw);
+
+    let (mut header, mut markets, mut account_header) = two_asset_kf_mapping_fixture();
+    let prior_budget_total = header.insurance_domain_budget_remaining_total.get();
+    let insurance_after_liquidation = prior_budget_total + prior_unbudgeted + retained;
+    header.insurance = V16PodU128::new(insurance_after_liquidation);
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(capital + insurance_after_liquidation);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+    });
+
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let mut expected_header = header_before;
+    expected_header.insurance = V16PodU128::new(insurance_after_liquidation - reward);
+    expected_header.c_tot = V16PodU128::new(capital + reward);
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(prior_budget_total + remaining);
+    let mut expected_markets = markets_before;
+    expected_markets[1].engine.insurance_domain_budget_long = V16PodU128::new(
+        expected_markets[1]
+            .engine
+            .insurance_domain_budget_long
+            .get()
+            + selected / 2,
+    );
+    expected_markets[1].engine.insurance_domain_budget_short = V16PodU128::new(
+        expected_markets[1]
+            .engine
+            .insurance_domain_budget_short
+            .get()
+            + selected
+            - selected / 2,
+    );
+    expected_markets[0].engine.insurance_domain_budget_long = V16PodU128::new(
+        expected_markets[0]
+            .engine
+            .insurance_domain_budget_long
+            .get()
+            + redirect / 2,
+    );
+    expected_markets[0].engine.insurance_domain_budget_short = V16PodU128::new(
+        expected_markets[0]
+            .engine
+            .insurance_domain_budget_short
+            .get()
+            + redirect
+            - redirect / 2,
+    );
+    let mut expected_account = account_before;
+    if reward != 0 {
+        expected_account.capital = V16PodU128::new(capital + reward);
+        expected_account.health_cert.valid = 0;
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    if reward != 0 {
+        market
+            .credit_account_from_insurance_not_atomic(&mut account, reward)
+            .unwrap();
+    }
+    let selected_long = selected / 2;
+    let selected_short = selected - selected_long;
+    if selected_long != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(2, selected_long)
+            .unwrap();
+    }
+    if selected_short != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(3, selected_short)
+            .unwrap();
+    }
+    let redirect_long = redirect / 2;
+    let redirect_short = redirect - redirect_long;
+    if redirect_long != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(0, redirect_long)
+            .unwrap();
+    }
+    if redirect_short != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(1, redirect_short)
+            .unwrap();
+    }
+
+    kani::cover!(
+        reward == 0 && redirect == 0,
+        "all retained insurance remains with the selected asset"
+    );
+    kani::cover!(
+        reward > 0 && reward < retained && redirect > 0 && redirect < remaining,
+        "reward and fee remainder split across selected and base assets"
+    );
+    kani::cover!(
+        reward == retained,
+        "the reward may consume the full new fee but no prior insurance"
+    );
+    kani::cover!(
+        remaining > 0 && redirect == remaining,
+        "the full post-reward fee may redirect to asset zero"
+    );
+
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0].engine,
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1].engine,
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.residual(), residual_before);
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        prior_unbudgeted
+    );
+    assert_eq!(
+        market.header.c_tot.get() + market.header.insurance.get(),
+        header_before.c_tot.get() + header_before.insurance.get()
+    );
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn small_source_grant_bound_num_stub(amount: u128) -> V16Result<u128> {
     assert!(amount <= 8);
