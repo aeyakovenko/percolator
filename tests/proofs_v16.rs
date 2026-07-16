@@ -5,7 +5,7 @@ use percolator::v16::{
     backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
     kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
     kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_available_backing_num_for_source_credit_state,
+    kani_auto_crank_skip_post_action_accrual, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
@@ -15318,6 +15318,138 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     }));
 }
 
+#[kani::proof]
+fn proof_v16_auto_crank_accrual_requires_selected_observation_and_no_preaccrual() {
+    let observations_preaccrued: bool = kani::any();
+    let selected_observation_supplied: bool = kani::any();
+    let skip = kani_auto_crank_skip_post_action_accrual(
+        observations_preaccrued,
+        selected_observation_supplied,
+    );
+
+    kani::cover!(
+        !observations_preaccrued && !selected_observation_supplied && skip,
+        "committed-price fallback cannot authorize accrual"
+    );
+    kani::cover!(
+        !observations_preaccrued && selected_observation_supplied && !skip,
+        "fresh selected observation authorizes one accrual segment"
+    );
+    kani::cover!(
+        observations_preaccrued && selected_observation_supplied && skip,
+        "pre-accrued selected observation cannot apply a second segment"
+    );
+    kani::cover!(
+        observations_preaccrued && !selected_observation_supplied && skip,
+        "pre-accrued work remains single-segment when the observation list is consumed"
+    );
+    assert_eq!(
+        !skip,
+        selected_observation_supplied && !observations_preaccrued
+    );
+}
+
+fn assert_v16_crank_observation_authorization<const OBSERVATION_SUPPLIED: bool>(
+    long_segment: bool,
+) {
+    let now_slot = if long_segment { 4 } else { 2 };
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, 101)
+            .unwrap();
+    }
+    let slot_before = markets[0].engine;
+    let slot_last_before = slot_before.asset.slot_last.get();
+    let max_accrual_dt_slots = header.config.max_accrual_dt_slots.get();
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    assert!(!account_header.health_cert.try_to_runtime().unwrap().valid);
+
+    let skip_post_action_accrual =
+        kani_auto_crank_skip_post_action_accrual(false, OBSERVATION_SUPPLIED);
+    let effective_price = if OBSERVATION_SUPPLIED {
+        101
+    } else {
+        slot_before.asset.effective_price.get()
+    };
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market.kani_permissionless_crank_with_skip_post_action_accrual(
+        &mut account,
+        PermissionlessCrankRequestV16 {
+            now_slot,
+            asset_index: 0,
+            effective_price,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        },
+        skip_post_action_accrual,
+    );
+
+    assert_eq!(
+        outcome,
+        Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+    );
+    assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    if OBSERVATION_SUPPLIED {
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        let expected_dt = (now_slot - slot_last_before).min(max_accrual_dt_slots);
+        assert!(expected_dt > 0);
+        assert_eq!(asset.slot_last, slot_last_before + expected_dt);
+        assert_eq!(
+            market.header.loss_stale_active != 0,
+            asset.slot_last < now_slot
+        );
+        assert_eq!(asset.effective_price, 101);
+        assert!(!kani_eq_engine_asset_slot_v16_account(
+            &slot_before,
+            &market.markets[0].engine
+        ));
+    } else {
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &slot_before,
+            &market.markets[0].engine
+        ));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_observation_free_crank_preserves_asset_while_account_progresses() {
+    let long_segment: bool = kani::any();
+    kani::cover!(
+        !long_segment,
+        "short elapsed segment cannot be consumed by committed-price fallback"
+    );
+    kani::cover!(
+        long_segment,
+        "long elapsed segment cannot be consumed by committed-price fallback"
+    );
+    assert_v16_crank_observation_authorization::<false>(long_segment);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_observed_crank_accrues_asset_while_preserving_value() {
+    let long_segment: bool = kani::any();
+    kani::cover!(
+        !long_segment,
+        "short elapsed segment accrues with a selected observation"
+    );
+    kani::cover!(
+        long_segment,
+        "long elapsed segment accrues with a selected observation"
+    );
+    assert_v16_crank_observation_authorization::<true>(long_segment);
+}
 // LoF — no free open interest: a risk-increasing fill with nonzero size, nonzero
 // price, and nonzero fee_bps must charge a STRICTLY POSITIVE fee per side. The
 // pre-fix code derived the fee from trade_notional_floor, which rounds sub-atom

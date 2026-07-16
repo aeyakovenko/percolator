@@ -4830,6 +4830,14 @@ pub struct AutoCrankWorkV16<'a> {
     pub resolved_close_fee_rate_per_slot: u128,
 }
 
+#[inline(always)]
+const fn auto_crank_skip_post_action_accrual(
+    observations_preaccrued: bool,
+    selected_observation_supplied: bool,
+) -> bool {
+    observations_preaccrued || !selected_observation_supplied
+}
+
 /// The bounded progress step the engine SELECTED from current state (engine.md).
 /// The asset/leg is chosen by the engine, not the caller. One auto-crank call
 /// dispatches exactly one of these.
@@ -11825,7 +11833,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     funding_rate_e9: obs.funding_rate_e9,
                     action,
                 },
-                work.observations_preaccrued || !observation_supplied,
+                auto_crank_skip_post_action_accrual(
+                    work.observations_preaccrued,
+                    observation_supplied,
+                ),
             )
         };
 

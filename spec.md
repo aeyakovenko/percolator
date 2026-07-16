@@ -1316,8 +1316,6 @@ For an exposed asset with `raw_oracle_target_price != effective_price`, a positi
 
 If the wrapper authenticates and applies the bounded market-accrual stage before calling `permissionless_auto_crank_not_atomic`, it MUST set `observations_preaccrued`. In that mode the engine dispatches the selected current-state account action without applying a second accrual segment. The wrapper MUST set the flag only after successful pre-accrual in the same transaction and MUST propagate every engine error so SVM rollback covers all not-atomic mutations.
 
-When the selected account action is realizable from committed state but its matching observation is absent, auto-crank MAY dispatch that account action but MUST NOT advance the selected asset's accrual segment. A synthesized committed price is sufficient for account refresh or liquidation bookkeeping; it is not an authenticated observation and cannot consume elapsed market time.
-
 Before any accrual/effective-price/K/F write is usable by a favorable action:
 1. affected source-domain claim-bound buckets MUST be recomputed conservatively;
 2. affected backing freshness buckets MUST be applied;

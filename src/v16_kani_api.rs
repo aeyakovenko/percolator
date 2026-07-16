@@ -9,6 +9,13 @@
 use super::*;
 use crate::wide_math::U256;
 
+pub fn kani_auto_crank_skip_post_action_accrual(
+    observations_preaccrued: bool,
+    selected_observation_supplied: bool,
+) -> bool {
+    auto_crank_skip_post_action_accrual(observations_preaccrued, selected_observation_supplied)
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,
@@ -1944,5 +1951,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         request: PermissionlessCrankRequestV16,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.permissionless_crank_not_atomic(account, request)
+    }
+
+    pub fn kani_permissionless_crank_with_skip_post_action_accrual(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        request: PermissionlessCrankRequestV16,
+        skip_post_action_accrual: bool,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.permissionless_crank_impl_not_atomic(account, request, skip_post_action_accrual)
     }
 }
