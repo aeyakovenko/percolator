@@ -6,7 +6,8 @@ use percolator::v16::{
 use percolator::wide_math::{
     ceil_div_positive_checked, floor_div_signed_conservative_i128, mul_div_ceil_u256,
     mul_div_floor_u256, mul_div_floor_u256_with_rem, wide_signed_mul_div_floor,
-    wide_signed_mul_div_floor_from_k_pair, I256, U256,
+    wide_signed_mul_div_floor_from_k_pair, wide_signed_mul_div_floor_with_carry_from_k_pair, I256,
+    U256,
 };
 use percolator::{ADL_ONE, POS_SCALE};
 
@@ -19,6 +20,16 @@ fn small_signed_floor_reference(n: i128, d: u128) -> i128 {
         let r = abs % d;
         -((q + u128::from(r != 0)) as i128)
     }
+}
+
+fn cadence_div_rem_stub(num: U256, den: U256) -> (U256, U256) {
+    assert_eq!(num.hi(), 0);
+    assert_eq!(den.hi(), 0);
+    assert_ne!(den.lo(), 0);
+    (
+        U256::from_u128(num.lo() / den.lo()),
+        U256::from_u128(num.lo() % den.lo()),
+    )
 }
 
 #[kani::proof]
@@ -139,6 +150,7 @@ fn proof_v16_wide_signed_mul_div_floor_matches_small_reference() {
 #[kani::proof]
 #[kani::unwind(80)]
 #[kani::solver(cadical)]
+#[kani::stub(percolator::wide_math::div_rem_u256, cadence_div_rem_stub)]
 fn proof_v16_k_pair_mul_div_floor_matches_small_reference() {
     let abs_basis_raw: u8 = kani::any();
     let k_then_raw: i8 = kani::any();
@@ -159,6 +171,61 @@ fn proof_v16_k_pair_mul_div_floor_matches_small_reference() {
     kani::cover!(k_now < k_then, "negative K-diff pair branch");
     kani::cover!(k_now > k_then, "positive K-diff pair branch");
     assert_eq!(got, expected);
+}
+
+#[kani::proof]
+#[kani::unwind(80)]
+#[kani::solver(cadical)]
+#[kani::stub(percolator::wide_math::div_rem_u256, cadence_div_rem_stub)]
+fn proof_v16_k_pair_carry_is_reference_exact_and_partition_invariant() {
+    let abs_basis_raw: u8 = kani::any();
+    let first_delta_raw: i8 = kani::any();
+    let second_delta_raw: i8 = kani::any();
+    let den_raw: u8 = kani::any();
+    let carry_raw: u8 = kani::any();
+    kani::assume(abs_basis_raw <= 4);
+    kani::assume((-4..=4).contains(&first_delta_raw));
+    kani::assume((-4..=4).contains(&second_delta_raw));
+    kani::assume((1..=8).contains(&den_raw));
+    kani::assume(carry_raw < den_raw);
+
+    let abs_basis = u128::from(abs_basis_raw);
+    let first_delta = i128::from(first_delta_raw);
+    let second_delta = i128::from(second_delta_raw);
+    let k_mid = first_delta;
+    let k_end = first_delta + second_delta;
+    let den = u128::from(den_raw);
+    let carry = u128::from(carry_raw);
+
+    let (first_q, first_rem) =
+        wide_signed_mul_div_floor_with_carry_from_k_pair(abs_basis, 0, k_mid, den, carry);
+    let (second_q, fragmented_rem) =
+        wide_signed_mul_div_floor_with_carry_from_k_pair(abs_basis, k_mid, k_end, den, first_rem);
+    let (delayed_q, delayed_rem) =
+        wide_signed_mul_div_floor_with_carry_from_k_pair(abs_basis, 0, k_end, den, carry);
+
+    let exact_num = carry as i128 + abs_basis as i128 * k_end;
+    let expected_q = small_signed_floor_reference(exact_num, den);
+    let expected_rem = (exact_num - expected_q * den as i128) as u128;
+
+    kani::cover!(
+        first_delta > 0 && second_delta > 0 && first_rem != 0,
+        "positive fragmented accrual carries a fractional remainder"
+    );
+    kani::cover!(
+        first_delta < 0 && second_delta < 0 && first_rem != 0,
+        "negative fragmented accrual carries a fractional remainder"
+    );
+    kani::cover!(
+        first_delta.signum() == -second_delta.signum() && k_end != 0,
+        "fragmentation remains exact across an index direction reversal"
+    );
+    kani::cover!(carry > 0, "an existing settlement remainder is preserved");
+    assert_eq!(first_q + second_q, delayed_q);
+    assert_eq!(fragmented_rem, delayed_rem);
+    assert_eq!(delayed_q, expected_q);
+    assert_eq!(delayed_rem, expected_rem);
+    assert!(delayed_rem < den);
 }
 
 #[kani::proof]
