@@ -4359,6 +4359,601 @@ fn closure_scoped_trade_short_is_live_and_isolated_from_unrelated_loss_stale_ass
 }
 
 #[cfg(all(kani, feature = "closure"))]
+const SOURCE_BACKED_TRADE_DOMAIN: usize = 1;
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_refresh_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<HealthCertV16> {
+    let cert = account.header.health_cert.try_to_runtime()?;
+    assert!(
+        account.header.active_bitmap[0].get() == 0
+            && account.header.stale_state == 0
+            && account.header.b_stale_state == 0
+            && cert.valid
+            && cert.certified_equity == 100
+            && cert.certified_initial_req == 0
+            && cert.certified_maintenance_req == 0
+            && cert.certified_worst_case_loss == 0
+            && cert.cert_risk_epoch == market.header.risk_epoch.get()
+            && cert.active_bitmap_at_cert == [0; V16_ACTIVE_BITMAP_WORDS]
+    );
+    if account.header.pnl.get() > 0 {
+        let pnl = account.header.pnl.get() as u128;
+        let source = account.header.source_domains[0];
+        assert!(
+            account.header.capital.get() + pnl == 100
+                && source.is_occupied()
+                && source.domain.get() == SOURCE_BACKED_TRADE_DOMAIN as u32
+                && source.source_claim_bound_num.get() == pnl * BOUND_SCALE
+                && source.source_claim_liened_num.get() == 0
+        );
+    } else {
+        assert!(
+            account.header.pnl.get() == 0
+                && account.header.capital.get() == 100
+                && account.header.source_domains[0].is_sparse_tail_default()
+        );
+    }
+    Ok(cert)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_request_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    request: TradeRequestV16,
+) -> V16Result<()> {
+    assert!(
+        request.asset_index == 0
+            && request.size_q.unsigned_abs() == POS_SCALE
+            && request.exec_price == 100
+            && request.fee_bps == 0
+            && market.header.config.max_market_slots.get() == 1
+    );
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn full_rate_source_lien_amounts_stub(
+    effective_credit: u128,
+    credit_rate_num: u128,
+) -> V16Result<(u128, u128)> {
+    assert!((1..=8).contains(&effective_credit) && credit_rate_num == CREDIT_RATE_SCALE);
+    let scaled = effective_credit
+        .checked_mul(BOUND_SCALE)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    Ok((scaled, scaled))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    let claim_num = state.positive_claim_bound_num;
+    assert!(
+        (BOUND_SCALE..=8 * BOUND_SCALE).contains(&claim_num)
+            && state.exact_positive_claim_num == claim_num
+            && state.fresh_reserved_backing_num == claim_num
+            && (state.valid_liened_backing_num == 0
+                || state.valid_liened_backing_num == state.fresh_reserved_backing_num)
+            && state.impaired_liened_backing_num == 0
+            && state.spent_backing_num == 0
+            && state.provider_receivable_num == 0
+            && state.insurance_credit_reserved_num == 0
+            && state.valid_liened_insurance_num == 0
+            && state.impaired_liened_insurance_num == 0
+    );
+    if state.valid_liened_backing_num == 0 {
+        assert_eq!(state.credit_rate_num, CREDIT_RATE_SCALE);
+        Ok(CREDIT_RATE_SCALE)
+    } else {
+        assert!(state.credit_rate_num == CREDIT_RATE_SCALE || state.credit_rate_num == 0);
+        Ok(0)
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_unique_domain_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    effective_credit: u128,
+) -> V16Result<()> {
+    let source = account.header.source_domains[0];
+    assert!(
+        (1..=8).contains(&effective_credit)
+            && source.is_occupied()
+            && source.domain.get() == SOURCE_BACKED_TRADE_DOMAIN as u32
+            && account.header.source_domains[1].is_sparse_tail_default()
+    );
+    market.create_account_source_credit_lien_for_effective_not_atomic(
+        account,
+        SOURCE_BACKED_TRADE_DOMAIN,
+        effective_credit,
+    )
+}
+
+#[cfg(all(kani, feature = "closure"))]
+// Exact composition contract of the independently symbolic counterparty-lien
+// delta, credit-rate, and public market-ledger transition proofs.
+fn source_backed_trade_counterparty_selection_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    domain: usize,
+    backing_num: u128,
+) -> V16Result<SourceCreditBackingSourceV16> {
+    let bucket = market.backing_bucket_for_domain(domain)?;
+    let mut source = market.source_credit_for_domain(domain)?;
+    assert!(
+        domain == SOURCE_BACKED_TRADE_DOMAIN
+            && (BOUND_SCALE..=8 * BOUND_SCALE).contains(&backing_num)
+            && bucket.status == BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot > market.header.current_slot.get()
+            && bucket.fresh_unliened_backing_num == backing_num
+            && bucket.valid_liened_backing_num == 0
+            && source.positive_claim_bound_num == backing_num
+            && source.exact_positive_claim_num == backing_num
+            && source.fresh_reserved_backing_num == backing_num
+            && source.valid_liened_backing_num == 0
+            && source.credit_rate_num == CREDIT_RATE_SCALE
+    );
+
+    let mut next_bucket = bucket;
+    next_bucket.fresh_unliened_backing_num = 0;
+    next_bucket.valid_liened_backing_num = backing_num;
+    source.valid_liened_backing_num = backing_num;
+    source.credit_rate_num = 0;
+    source.credit_epoch = source
+        .credit_epoch
+        .checked_add(1)
+        .ok_or(V16Error::CounterOverflow)?;
+    market.markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&next_bucket);
+    market.markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&source);
+    market.header.risk_epoch = V16PodU64::new(
+        market
+            .header
+            .risk_epoch
+            .get()
+            .checked_add(1)
+            .ok_or(V16Error::CounterOverflow)?,
+    );
+    Ok(SourceCreditBackingSourceV16::Counterparty)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_zero_utilization_fee_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    domain: usize,
+) -> V16Result<u128> {
+    let source = account.header.source_domains[0];
+    assert!(
+        domain == SOURCE_BACKED_TRADE_DOMAIN
+            && source.domain.get() == domain as u32
+            && source.source_lien_counterparty_backing_num.get() == 0
+            && source.source_lien_fee_last_slot.get() == 0
+    );
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_post_lien_equity_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<i128> {
+    let pnl = u128::try_from(account.header.pnl.get()).map_err(|_| V16Error::ArithmeticOverflow)?;
+    let account_source = account.header.source_domains[0];
+    let source = market.markets[0]
+        .engine
+        .source_credit_short
+        .try_to_runtime()?;
+    let bucket = market.markets[0].engine.backing_short.try_to_runtime()?;
+    assert!(
+        (1..=8).contains(&pnl)
+            && account.header.capital.get() + pnl == 100
+            && account_source.domain.get() == SOURCE_BACKED_TRADE_DOMAIN as u32
+            && account_source.source_claim_liened_num.get() == pnl * BOUND_SCALE
+            && account_source.source_lien_effective_reserved.get() == pnl
+            && account_source.source_lien_counterparty_backing_num.get() == pnl * BOUND_SCALE
+            && source.valid_liened_backing_num == source.fresh_reserved_backing_num
+            && bucket.valid_liened_backing_num == source.fresh_reserved_backing_num
+            && bucket.fresh_unliened_backing_num == 0
+            && bucket.status == BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot > market.header.current_slot.get()
+    );
+    Ok(100)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+// Exact control-flow contract of the separately proven signed-fill route. The
+// proof-only last_fee_slot witness records which signed request reached it.
+fn source_backed_trade_apply_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    source_account: &mut PortfolioV16ViewMut<'_>,
+    counterparty: &mut PortfolioV16ViewMut<'_>,
+    request: TradeRequestV16,
+    recertify_after_fill: bool,
+) -> V16Result<TradeApplyOutcomeV16> {
+    source_backed_trade_request_stub(market, request)?;
+    let pnl = u128::try_from(source_account.header.pnl.get())
+        .map_err(|_| V16Error::ArithmeticOverflow)?;
+    let source = source_account.header.source_domains[0];
+    assert!(
+        recertify_after_fill
+            && (1..=8).contains(&pnl)
+            && source_account.header.capital.get() + pnl == 100
+            && counterparty.header.pnl.get() == 0
+            && counterparty.header.capital.get() == 100
+            && source.domain.get() == SOURCE_BACKED_TRADE_DOMAIN as u32
+            && source.source_claim_bound_num.get() == pnl * BOUND_SCALE
+            && source.source_claim_liened_num.get() == 0
+    );
+    source_account.header.last_fee_slot = V16PodU64::new(if request.size_q > 0 { 1 } else { 2 });
+
+    Ok(TradeApplyOutcomeV16 {
+        fee_a: 0,
+        fee_b: 0,
+        notional: 100,
+        risk_increasing: true,
+        long_has_source_claims: true,
+        short_has_source_claims: false,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert!(
+        account.header.provenance_header.version.get() == V16_ACCOUNT_VERSION
+            && account.header.provenance_header.layout_discriminator.get()
+                == V16_LAYOUT_DISCRIMINATOR
+    );
+    let pnl = account.header.pnl.get();
+    if pnl > 0 {
+        let pnl = pnl as u128;
+        let source = account.header.source_domains[0];
+        let claim_num = pnl * BOUND_SCALE;
+        let effective = source.source_lien_effective_reserved.get();
+        assert!(
+            (1..=8).contains(&pnl)
+                && account.header.capital.get() + pnl == 100
+                && (effective == 0 || effective == pnl)
+                && source.domain.get() == SOURCE_BACKED_TRADE_DOMAIN as u32
+                && source.source_claim_market_id == market.markets[0].engine.asset.market_id
+                && source.source_claim_bound_num.get() == claim_num
+                && source.source_claim_liened_num.get() == effective * BOUND_SCALE
+                && source.source_claim_counterparty_liened_num.get() == effective * BOUND_SCALE
+                && source.source_claim_insurance_liened_num.get() == 0
+                && source.source_lien_counterparty_backing_num.get() == effective * BOUND_SCALE
+                && source.source_lien_insurance_backing_num.get() == 0
+                && source.source_claim_impaired_num.get() == 0
+                && source.source_lien_impaired_effective_reserved.get() == 0
+                && source.source_lien_fee_last_slot.get()
+                    == if effective == 0 {
+                        0
+                    } else {
+                        market.header.current_slot.get()
+                    }
+                && account.header.source_domains[1].is_sparse_tail_default()
+        );
+    } else {
+        assert!(
+            pnl == 0
+                && account.header.capital.get() == 100
+                && account.header.source_domains[0].is_sparse_tail_default()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_fixture(
+    pnl: u128,
+    post_fill: bool,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    assert!((1..=8).contains(&pnl));
+    let backing_num = pnl * BOUND_SCALE;
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = [1; 32];
+    header.config =
+        V16ConfigAccount::from_runtime(&V16Config::public_user_fund_with_market_slots(1, 1, 0, 10));
+    header.asset_slot_capacity = V16PodU32::new(1);
+    header.next_market_id = V16PodU64::new(2);
+    header.asset_activation_count = V16PodU64::new(1);
+    header.last_asset_activation_slot = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(2);
+    header.asset_set_epoch = V16PodU64::new(1);
+    header.risk_epoch = V16PodU64::new(2);
+    header.c_tot = V16PodU128::new(200 - pnl);
+    header.vault = V16PodU128::new(210);
+    header.insurance = V16PodU128::new(10);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(10);
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(backing_num);
+    header.source_claim_bound_total_num = V16PodU128::new(backing_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    asset.raw_oracle_target_price = 100;
+    asset.effective_price = 100;
+    asset.fund_px_last = 100;
+    asset.slot_last = 1;
+    let mut markets = [Market::new(
+        0u64,
+        EngineAssetSlotV16Account::empty_for_market(1),
+    )];
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(10);
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: backing_num,
+            exact_positive_claim_num: backing_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let requirement = if post_fill { 100 } else { 0 };
+    let account = |owner: [u8; 32], account_id: [u8; 32], capital: u128, pnl: i128| {
+        let mut account = PortfolioAccountV16Account::default();
+        account.provenance_header = ProvenanceHeaderV16Account::from_runtime(
+            &ProvenanceHeaderV16::new(header.market_group_id, account_id, owner),
+        );
+        account.owner = owner;
+        account.capital = V16PodU128::new(capital);
+        account.pnl = V16PodI128::new(pnl);
+        account.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+            certified_equity: 100,
+            certified_initial_req: requirement,
+            certified_maintenance_req: requirement,
+            certified_liq_deficit: 0,
+            certified_worst_case_loss: requirement,
+            cert_oracle_epoch: header.oracle_epoch.get(),
+            cert_funding_epoch: header.funding_epoch.get(),
+            cert_risk_epoch: header.risk_epoch.get(),
+            cert_asset_set_epoch: header.asset_set_epoch.get(),
+            active_bitmap_at_cert: [0; V16_ACTIVE_BITMAP_WORDS],
+            valid: true,
+        });
+        account
+    };
+    let mut source = account([3; 32], [4; 32], 100 - pnl, pnl as i128);
+    source.source_domains[0].domain = V16PodU32::new(SOURCE_BACKED_TRADE_DOMAIN as u32);
+    source.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    source.source_domains[0].source_claim_bound_num = V16PodU128::new(backing_num);
+    let counterparty = account([5; 32], [6; 32], 100, 0);
+    (header, markets, source, counterparty)
+}
+
+// The wrapper-facing trade route trusts this production finalizer to reserve
+// source backing whenever a contract-certified post-fill state uses positive
+// PnL for IM. Required-credit calculation, account-lien mutation, recertify,
+// and both final margin gates execute as production code; independently proven
+// rate and market-reservation postconditions are composed at their exact seams.
+// The companion route theorem checks flag forwarding into this finalizer.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    source_backed_trade_credit_rate_stub
+)]
+#[kani::stub(
+    V16Core::source_credit_lien_amounts_for_effective,
+    full_rate_source_lien_amounts_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::create_account_source_credit_lien_for_effective_any_not_atomic,
+    source_backed_trade_unique_domain_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::create_source_credit_lien_backing_not_atomic,
+    source_backed_trade_counterparty_selection_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::collect_account_backing_utilization_fee_for_domain_not_atomic,
+    source_backed_trade_zero_utilization_fee_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_haircut_equity,
+    source_backed_trade_post_lien_equity_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    source_backed_trade_account_validation_stub
+)]
+fn closure_risk_increasing_trade_reserves_all_positive_credit_at_exact_im_boundary() {
+    // Assertion reachability stays enabled: both symbolic amount classes must
+    // reach every postcondition without materializing a full-state cover trace.
+    let dust_credit: bool = kani::any();
+    let pnl = if dust_credit { 1 } else { 8 };
+    let backing_num = pnl * BOUND_SCALE;
+    let (mut header, mut markets, mut source_header, mut counterparty_header) =
+        source_backed_trade_fixture(pnl, true);
+
+    let header_before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut source_account = PortfolioV16ViewMut::new(&mut source_header);
+    let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+    market
+        .finish_trade_checks_not_atomic(
+            &mut source_account,
+            &mut counterparty,
+            false,
+            true,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let source = source_account.header.source_domains[0];
+    let cert = source_account.header.health_cert.try_to_runtime().unwrap();
+    assert!(
+        source.domain.get() == SOURCE_BACKED_TRADE_DOMAIN as u32
+            && source.source_claim_liened_num.get() == backing_num
+            && source.source_lien_effective_reserved.get() == pnl
+            && source.source_lien_counterparty_backing_num.get() == backing_num
+            && source.source_lien_insurance_backing_num.get() == 0
+            && source_account.header.capital.get() + source.source_lien_effective_reserved.get()
+                == 100
+            && cert.valid
+            && cert.certified_equity == 100
+            && cert.certified_initial_req == 100
+            && cert.cert_risk_epoch == market.header.risk_epoch.get()
+            && counterparty.header.source_domains[0].is_sparse_tail_default()
+            && market.header.vault.get() == header_before.vault.get()
+            && market.header.c_tot.get() == header_before.c_tot.get()
+            && market.header.insurance.get() == header_before.insurance.get()
+            && market.header.pnl_pos_tot.get() == header_before.pnl_pos_tot.get()
+            && market.header.vault.get()
+                == market.header.c_tot.get()
+                    + market.header.insurance.get()
+                    + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_unlocked_h_lock_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: Option<&PortfolioV16View<'_>>,
+    instruction_bankruptcy_candidate: bool,
+) -> V16Result<HLockLaneV16> {
+    let account = account.expect("trade supplies both accounts");
+    assert!(
+        !instruction_bankruptcy_candidate
+            && account.header.stale_state == 0
+            && account.header.b_stale_state == 0
+            && account.header.close_progress.active == 0
+            && market.header.threshold_stress_active == 0
+            && market.header.bankruptcy_hlock_active == 0
+    );
+    Ok(HLockLaneV16::HMin)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_backed_trade_finish_witness_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    long_account: &mut PortfolioV16ViewMut<'_>,
+    short_account: &mut PortfolioV16ViewMut<'_>,
+    locked: bool,
+    risk_increasing: bool,
+    long_has_source_claims: bool,
+    short_has_source_claims: bool,
+) -> V16Result<()> {
+    let pnl =
+        u128::try_from(long_account.header.pnl.get()).map_err(|_| V16Error::ArithmeticOverflow)?;
+    let source = long_account.header.source_domains[0];
+    assert!(
+        !locked
+            && risk_increasing
+            && long_has_source_claims
+            && !short_has_source_claims
+            && (1..=8).contains(&pnl)
+            && source.domain.get() == SOURCE_BACKED_TRADE_DOMAIN as u32
+            && source.source_claim_bound_num.get() == pnl * BOUND_SCALE
+            && source.source_claim_liened_num.get() == 0
+            && short_account.header.source_domains[0].is_sparse_tail_default()
+            && (long_account.header.last_fee_slot.get() == 1
+                || long_account.header.last_fee_slot.get() == 2)
+            && short_account.header.last_fee_slot.get() == 0
+    );
+    long_account.header.reserved_pnl = V16PodU128::new(pnl);
+    Ok(())
+}
+
+// The batch core must not drop the source-claim or risk-increasing flags
+// produced by a signed fill. The finalizer stub records a witness only after
+// asserting the exact call contract; the preceding theorem proves that
+// contract's production finalizer reserves backing and enforces final IM.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_trade_request,
+    source_backed_trade_request_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_for_position_action_and_refresh_not_atomic,
+    source_backed_trade_refresh_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::h_lock_lane,
+    source_backed_trade_unlocked_h_lock_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::apply_trade_after_refresh_not_atomic,
+    source_backed_trade_apply_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::finish_trade_checks_not_atomic,
+    source_backed_trade_finish_witness_stub
+)]
+fn closure_signed_trade_forwards_source_claims_to_final_margin_checks() {
+    let positive_size: bool = kani::any();
+    let (mut header, mut markets, mut source_header, mut counterparty_header) =
+        source_backed_trade_fixture(1, false);
+    let header_before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut source_account = PortfolioV16ViewMut::new(&mut source_header);
+    let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+    let request = TradeRequestV16 {
+        asset_index: 0,
+        size_q: if positive_size {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        },
+        exec_price: 100,
+        fee_bps: 0,
+    };
+    let outcome = market
+        .execute_batch_with_fee_after_tail_validation_not_atomic(
+            &mut source_account,
+            &mut counterparty,
+            core::slice::from_ref(&request),
+        )
+        .unwrap();
+    kani::cover!(
+        positive_size && source_account.header.reserved_pnl.get() == 1,
+        "positive signed fill reaches source-aware finalizer"
+    );
+    kani::cover!(
+        !positive_size && source_account.header.reserved_pnl.get() == 1,
+        "negative signed fill reaches source-aware finalizer"
+    );
+    assert!(
+        outcome.fill_count == 1
+            && outcome.fee_a == 0
+            && outcome.fee_b == 0
+            && outcome.notional == 100
+            && source_account.header.reserved_pnl.get() == 1
+            && source_account.header.last_fee_slot.get() == if positive_size { 1 } else { 2 }
+            && counterparty.header.last_fee_slot.get() == 0
+            && market.header.vault.get() == header_before.vault.get()
+            && market.header.c_tot.get() == header_before.c_tot.get()
+            && market.header.insurance.get() == header_before.insurance.get()
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
 // Assertion-heavy seam for the separately proven single-fill body. It applies
 // kernel_attach_leg's exact postcondition and the public fee proof's exact
 // one-atom transfer, leaving this theorem to verify two-fill sequencing.
