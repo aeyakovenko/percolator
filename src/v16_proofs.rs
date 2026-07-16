@@ -18243,6 +18243,429 @@ fn closure_full_refresh_never_certifies_more_than_domain_realizable_backing() {
     assert_eq!(account.header.health_cert.try_to_runtime(), Ok(cert));
 }
 
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_active_leg_validation_stub(leg: PortfolioLegV16) -> V16Result<()> {
+    assert!(leg.active);
+    assert_eq!(leg.asset_index, 0);
+    assert_eq!(leg.market_id, 1);
+    assert_eq!(leg.basis_pos_q, 0);
+    assert_eq!(leg.a_basis, ADL_ONE);
+    assert!((1..=8).contains(&leg.loss_weight));
+    assert_eq!(leg.b_rem, 0);
+    assert_eq!(leg.b_epoch_snap, leg.epoch_snap);
+    assert!(!leg.b_stale && !leg.stale);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_current_kf_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    leg_slot: usize,
+    asset: AssetStateV16,
+) -> V16Result<()> {
+    assert_eq!(leg_slot, 0);
+    let leg = account.header.legs[leg_slot].try_to_runtime()?;
+    assert!(leg.active && leg.basis_pos_q == 0);
+    assert_eq!(leg.asset_index, 0);
+    assert_eq!(leg.market_id, asset.market_id);
+    let (k, f, b, epoch, pending) = match leg.side {
+        SideV16::Long => (
+            asset.k_long,
+            asset.f_long_num,
+            asset.b_long_num,
+            asset.epoch_long,
+            asset.pending_obligation_count_long,
+        ),
+        SideV16::Short => (
+            asset.k_short,
+            asset.f_short_num,
+            asset.b_short_num,
+            asset.epoch_short,
+            asset.pending_obligation_count_short,
+        ),
+    };
+    assert_eq!(pending, 1);
+    assert_eq!(leg.k_snap, k);
+    assert_eq!(leg.f_snap, f);
+    assert_eq!(leg.b_snap, b);
+    assert_eq!(leg.epoch_snap, epoch);
+    assert_eq!(leg.b_epoch_snap, epoch);
+    account.header.health_cert.valid = 0;
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_zero_notional_stub(abs_pos_q: u128, _price: u64) -> V16Result<u128> {
+    assert_eq!(abs_pos_q, 0);
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_zero_margin_stub(notional: u128, _bps: u64, _floor: u128) -> V16Result<u128> {
+    assert_eq!(notional, 0);
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_scalar_preflight_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.version.get(),
+        V16_ACCOUNT_VERSION
+    );
+    assert_eq!(
+        account.header.provenance_header.layout_discriminator.get(),
+        V16_LAYOUT_DISCRIMINATOR
+    );
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(account.header.close_progress.active, 0);
+    assert_eq!(account.header.resolved_payout_receipt.present, 0);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_no_source_fees_stub<'a: 'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<u128> {
+    assert!(account.header.source_domains[0].is_sparse_tail_default());
+    Ok(0)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_clear_kernel_stub(
+    leg: PortfolioLegV16,
+    mut asset: AssetStateV16,
+) -> V16Result<AssetStateV16> {
+    assert!(leg.active && leg.basis_pos_q == 0);
+    assert_eq!(leg.asset_index, 0);
+    assert_eq!(leg.market_id, asset.market_id);
+    assert!((1..=8).contains(&leg.loss_weight));
+    assert_eq!(leg.b_rem, 0);
+    match leg.side {
+        SideV16::Long => {
+            assert_eq!(asset.stored_pos_count_long, 1);
+            assert_eq!(asset.pending_obligation_count_long, 1);
+            assert_eq!(asset.loss_weight_sum_long, leg.loss_weight);
+            asset.stored_pos_count_long = 0;
+            asset.pending_obligation_count_long = 0;
+            asset.loss_weight_sum_long = 0;
+        }
+        SideV16::Short => {
+            assert_eq!(asset.stored_pos_count_short, 1);
+            assert_eq!(asset.pending_obligation_count_short, 1);
+            assert_eq!(asset.loss_weight_sum_short, leg.loss_weight);
+            asset.stored_pos_count_short = 0;
+            asset.pending_obligation_count_short = 0;
+            asset.loss_weight_sum_short = 0;
+        }
+    }
+    Ok(asset)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_clear_route_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    asset_index: usize,
+    leg_slot: usize,
+) -> V16Result<()> {
+    assert_eq!(asset_index, 0);
+    assert_eq!(leg_slot, 0);
+    assert_eq!(account.header.active_bitmap[0].get(), 1);
+    let leg = account.header.legs[0].try_to_runtime()?;
+    assert!(leg.active && leg.basis_pos_q == 0);
+    assert!((1..=8).contains(&leg.loss_weight));
+    assert_eq!(market.header.resolved_payout_blocker_count.get(), 1);
+    let asset = &mut market.markets[0].engine.asset;
+    match leg.side {
+        SideV16::Long => {
+            assert_eq!(asset.stored_pos_count_long.get(), 1);
+            assert_eq!(asset.pending_obligation_count_long.get(), 1);
+            assert_eq!(asset.loss_weight_sum_long.get(), leg.loss_weight);
+            asset.stored_pos_count_long = V16PodU64::new(0);
+            asset.pending_obligation_count_long = V16PodU64::new(0);
+            asset.loss_weight_sum_long = V16PodU128::new(0);
+        }
+        SideV16::Short => {
+            assert_eq!(asset.stored_pos_count_short.get(), 1);
+            assert_eq!(asset.pending_obligation_count_short.get(), 1);
+            assert_eq!(asset.loss_weight_sum_short.get(), leg.loss_weight);
+            asset.stored_pos_count_short = V16PodU64::new(0);
+            asset.pending_obligation_count_short = V16PodU64::new(0);
+            asset.loss_weight_sum_short = V16PodU128::new(0);
+        }
+    }
+    account.header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    account.header.active_bitmap[0] = V16PodU64::new(0);
+    account.header.health_cert.valid = 0;
+    market.header.resolved_payout_blocker_count = V16PodU64::new(0);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_fixture(
+    long_side: bool,
+    weight: u128,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u8>; 2],
+    PortfolioAccountV16Account,
+) {
+    assert!((1..=8).contains(&weight));
+    let side = if long_side {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let (mut header, fixture_markets, mut account) = two_asset_kf_mapping_fixture();
+    let mut markets = [
+        Market::new(0u8, fixture_markets[0].engine),
+        Market::new(0u8, fixture_markets[1].engine),
+    ];
+    account
+        .init_empty_in_place(account.provenance_header)
+        .unwrap();
+    header.c_tot = V16PodU128::new(8);
+    header.vault = V16PodU128::new(header.insurance.get() + 8);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account.capital = V16PodU128::new(8);
+    account.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    match side {
+        SideV16::Long => {
+            asset.stored_pos_count_long = 1;
+            asset.pending_obligation_count_long = 1;
+            asset.loss_weight_sum_long = weight;
+        }
+        SideV16::Short => {
+            asset.stored_pos_count_short = 1;
+            asset.pending_obligation_count_short = 1;
+            asset.loss_weight_sum_short = weight;
+        }
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: 0,
+        a_basis: ADL_ONE,
+        k_snap: match side {
+            SideV16::Long => asset.k_long,
+            SideV16::Short => asset.k_short,
+        },
+        f_snap: match side {
+            SideV16::Long => asset.f_long_num,
+            SideV16::Short => asset.f_short_num,
+        },
+        epoch_snap: match side {
+            SideV16::Long => asset.epoch_long,
+            SideV16::Short => asset.epoch_short,
+        },
+        loss_weight: weight,
+        b_snap: match side {
+            SideV16::Long => asset.b_long_num,
+            SideV16::Short => asset.b_short_num,
+        },
+        b_epoch_snap: match side {
+            SideV16::Long => asset.epoch_long,
+            SideV16::Short => asset.epoch_short,
+        },
+        ..PortfolioLegV16::EMPTY
+    });
+    (header, markets, account)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_current_kf_target_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    leg: PortfolioLegV16,
+) -> V16Result<(i128, i128)> {
+    assert_eq!(asset_index, 0);
+    assert!(leg.active && leg.basis_pos_q == 0);
+    let asset = market.markets[0].engine.asset.try_to_runtime()?;
+    Ok(match leg.side {
+        SideV16::Long => (asset.k_long, asset.f_long_num),
+        SideV16::Short => (asset.k_short, asset.f_short_num),
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn settled_obligation_current_b_target_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    leg: PortfolioLegV16,
+) -> V16Result<u128> {
+    assert_eq!(asset_index, 0);
+    assert!(leg.active && leg.basis_pos_q == 0);
+    let asset = market.markets[0].engine.asset.try_to_runtime()?;
+    Ok(match leg.side {
+        SideV16::Long => asset.b_long_num,
+        SideV16::Short => asset.b_short_num,
+    })
+}
+
+// A same-side exit under a pending-domain barrier leaves a zero-basis leg so
+// later B bookings still charge its retained loss weight. Once the barrier is
+// released and the leg is current, public refresh must finalize that obligation;
+// otherwise no trade, rebalance, withdrawal, or dematerialization route can
+// remove the occupied slot. This theorem covers both sides and symbolic weight.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, two_leg_refresh_config_stub)]
+#[kani::stub(crate::v16::risk_notional_ceil, settled_obligation_zero_notional_stub)]
+#[kani::stub(crate::v16::margin_requirement, settled_obligation_zero_margin_stub)]
+#[kani::stub(
+    crate::v16::validate_active_leg,
+    settled_obligation_active_leg_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_account_scalar_preflight,
+    settled_obligation_scalar_preflight_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_leg_kf_effects_at_slot_with_asset,
+    settled_obligation_current_kf_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_core_not_atomic,
+    zero_pnl_principal_settlement_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::collect_account_backing_utilization_fees_not_atomic,
+    settled_obligation_no_source_fees_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_haircut_equity,
+    two_leg_refresh_equity_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::clear_leg_at_slot,
+    settled_obligation_clear_route_stub
+)]
+fn closure_released_domain_barrier_refresh_finalizes_settled_obligation() {
+    let long_side: bool = kani::any();
+    let dust_weight: bool = kani::any();
+    let weight = if dust_weight { 1 } else { 8 };
+    let capital = 8u128;
+    let (mut header, mut markets, mut account_header) =
+        settled_obligation_fixture(long_side, weight);
+
+    let header_before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let cert = market
+        .full_account_refresh_not_atomic(&mut account)
+        .unwrap();
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        long_side && dust_weight,
+        "settled long dust obligation reaches finalization"
+    );
+    kani::cover!(
+        !long_side && !dust_weight,
+        "settled short multi-unit obligation reaches finalization"
+    );
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert!(account.header.legs[0].try_to_runtime().unwrap().is_empty());
+    assert_eq!(asset_after.stored_pos_count_long, 0);
+    assert_eq!(asset_after.stored_pos_count_short, 0);
+    assert_eq!(asset_after.pending_obligation_count_long, 0);
+    assert_eq!(asset_after.pending_obligation_count_short, 0);
+    assert_eq!(asset_after.loss_weight_sum_long, 0);
+    assert_eq!(asset_after.loss_weight_sum_short, 0);
+    assert_eq!(market.header.resolved_payout_blocker_count.get(), 0);
+    assert!(cert.valid);
+    assert_eq!(cert.certified_equity, capital as i128);
+    assert_eq!(cert.certified_initial_req, 0);
+    assert_eq!(cert.certified_maintenance_req, 0);
+    assert_eq!(cert.active_bitmap_at_cert, V16_EMPTY_ACTIVE_BITMAP);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+}
+
+// Exact transition composed by the public-route theorem above. The production
+// known-slot clear executes here; only the separately contracted scalar clear
+// kernel and already-current K/F/B target calculations are summarized.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::kf_target_for_leg,
+    settled_obligation_current_kf_target_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::b_target_for_leg,
+    settled_obligation_current_b_target_stub
+)]
+#[kani::stub(V16Core::kernel_clear_leg, settled_obligation_clear_kernel_stub)]
+fn closure_settled_obligation_known_slot_clear_is_conservative() {
+    let long_side: bool = kani::any();
+    let dust_weight: bool = kani::any();
+    let weight = if dust_weight { 1 } else { 8 };
+    let (mut header, mut markets, mut account_header) =
+        settled_obligation_fixture(long_side, weight);
+    let header_before = header;
+    let unrelated_market_id = markets[1].engine.asset.market_id;
+    let unrelated_long_budget = markets[1].engine.insurance_domain_budget_long;
+    let unrelated_short_budget = markets[1].engine.insurance_domain_budget_short;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.clear_leg_at_slot(&mut account, 0, 0).unwrap();
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        long_side && !dust_weight,
+        "known-slot clear reaches long multi-unit obligation"
+    );
+    kani::cover!(
+        !long_side && dust_weight,
+        "known-slot clear reaches short dust obligation"
+    );
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert!(account.header.legs[0].try_to_runtime().unwrap().is_empty());
+    assert_eq!(asset.stored_pos_count_long, 0);
+    assert_eq!(asset.stored_pos_count_short, 0);
+    assert_eq!(asset.pending_obligation_count_long, 0);
+    assert_eq!(asset.pending_obligation_count_short, 0);
+    assert_eq!(asset.loss_weight_sum_long, 0);
+    assert_eq!(asset.loss_weight_sum_short, 0);
+    assert_eq!(market.header.resolved_payout_blocker_count.get(), 0);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(market.header.risk_epoch, header_before.risk_epoch);
+    assert_eq!(
+        market.markets[1].engine.asset.market_id,
+        unrelated_market_id
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long,
+        unrelated_long_budget
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_short,
+        unrelated_short_budget
+    );
+}
+
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
 // The review's closable half: for the two kernel-backed actionable classes,
 // prove ActionableClass(S) => EXISTS a successful rank-decreasing call —
