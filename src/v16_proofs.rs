@@ -5138,6 +5138,104 @@ fn closure_risk_increasing_trade_cannot_reuse_shared_source_backing() {
     );
 }
 
+// The public trade theorem above proves that risk-increasing approval creates
+// this exact source lien; the conversion theorems prove that another account
+// can realize only the post-lien source rate. Compose those production seams:
+// reserving one winner's risk credit must remove the same atoms from every
+// other winner's realizable support, for either backing class.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+fn closure_trade_lien_reservation_caps_other_account_realizable_support() {
+    let first_claim_raw: u8 = kani::any();
+    let second_claim_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let reserve_raw: u8 = kani::any();
+    let insurance_backed: bool = kani::any();
+    kani::assume((1..=8).contains(&first_claim_raw));
+    kani::assume((1..=8).contains(&second_claim_raw));
+    kani::assume((1..=16).contains(&backing_raw));
+    kani::assume((1..=8).contains(&reserve_raw));
+
+    let first_claim = u128::from(first_claim_raw);
+    let second_claim = u128::from(second_claim_raw);
+    let total_claim = first_claim + second_claim;
+    let backing = u128::from(backing_raw);
+    let reserve = u128::from(reserve_raw);
+    kani::assume(backing <= total_claim);
+    kani::assume(reserve <= backing);
+
+    let backing_num = backing * BOUND_SCALE;
+    let reserve_num = reserve * BOUND_SCALE;
+    let mut source = SourceCreditStateV16 {
+        positive_claim_bound_num: total_claim * BOUND_SCALE,
+        exact_positive_claim_num: total_claim * BOUND_SCALE,
+        fresh_reserved_backing_num: if insurance_backed { 0 } else { backing_num },
+        insurance_credit_reserved_num: if insurance_backed { backing_num } else { 0 },
+        ..SourceCreditStateV16::EMPTY
+    };
+    source.credit_rate_num = V16Core::expected_source_credit_rate_num_for_state(source).unwrap();
+    let first_support_before =
+        V16Core::source_credit_state_realizable_support_for_face(source, first_claim).unwrap();
+    kani::assume(reserve <= first_support_before);
+    let (required_face_num, required_backing_num) =
+        V16Core::source_credit_lien_amounts_for_effective(reserve, source.credit_rate_num).unwrap();
+    assert!(required_face_num <= first_claim * BOUND_SCALE);
+    assert_eq!(required_backing_num, reserve_num);
+
+    let (source_after, counterparty_liened_num, insurance_liened_num) = if insurance_backed {
+        let reservation = InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: backing_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        };
+        let (reservation, source) =
+            V16Core::prepare_insurance_lien_create_delta(reservation, source, reserve_num).unwrap();
+        (source, 0, reservation.valid_liened_insurance_num)
+    } else {
+        let bucket = BackingBucketV16 {
+            market_id: 1,
+            fresh_unliened_backing_num: backing_num,
+            expiry_slot: 2,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        };
+        let (bucket, source) =
+            V16Core::prepare_counterparty_lien_create_delta(bucket, source, 1, reserve_num)
+                .unwrap();
+        (source, bucket.valid_liened_backing_num, 0)
+    };
+    let (source_after, _) =
+        V16Core::prepare_source_credit_domain_recompute_for_epoch(source_after, 1).unwrap();
+    let second_support_after =
+        V16Core::source_credit_state_realizable_support_for_face(source_after, second_claim)
+            .unwrap();
+    let available_after =
+        V16Core::available_backing_num_for_source_credit_state(source_after).unwrap();
+
+    kani::cover!(
+        !insurance_backed && backing < total_claim && second_support_after > 0,
+        "counterparty-backed trade leaves only haircut-limited conversion support"
+    );
+    kani::cover!(
+        insurance_backed && backing < total_claim && second_support_after > 0,
+        "insurance-backed trade leaves only haircut-limited conversion support"
+    );
+    kani::cover!(
+        reserve < backing && second_support_after == 0,
+        "per-account flooring may leave unusable dust but cannot over-allocate it"
+    );
+    kani::cover!(
+        backing == total_claim && reserve > 1,
+        "fully backed sources also exclude a multi-atom trade reservation"
+    );
+    assert_eq!(counterparty_liened_num + insurance_liened_num, reserve_num);
+    assert_eq!(available_after, (backing - reserve) * BOUND_SCALE);
+    assert!(reserve + second_support_after <= backing);
+    assert!(second_support_after <= second_claim);
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn repeated_lien_trade_credit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
     if state == SourceCreditStateV16::EMPTY {
