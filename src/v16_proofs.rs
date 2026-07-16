@@ -7832,7 +7832,6 @@ fn source_backed_conversion_fixture<
     const UNDERBACKED: bool,
 >() -> SourceBackedConversionFixture {
     assert!(ASSET < 2);
-    assert!(!UNDERBACKED || !INSURANCE_BACKED);
     let claim = 2u128;
     let backing = if UNDERBACKED { 1 } else { claim };
     let source_side = if SOURCE_LONG {
@@ -8044,7 +8043,54 @@ fn prove_source_backed_conversion_is_asset_local<
 }
 
 #[cfg(all(kani, feature = "closure"))]
-fn prove_underbacked_asset_one_conversion_exit_is_capped() {
+fn assert_source_domain_accounting_frame(
+    expected: &EngineAssetSlotV16Account,
+    actual: &EngineAssetSlotV16Account,
+) {
+    assert_eq!(
+        actual.insurance_domain_budget_long,
+        expected.insurance_domain_budget_long
+    );
+    assert_eq!(
+        actual.insurance_domain_budget_short,
+        expected.insurance_domain_budget_short
+    );
+    assert_eq!(
+        actual.insurance_domain_spent_long,
+        expected.insurance_domain_spent_long
+    );
+    assert_eq!(
+        actual.insurance_domain_spent_short,
+        expected.insurance_domain_spent_short
+    );
+    assert!(kani_eq_source_credit_state_v16_account(
+        &actual.source_credit_long,
+        &expected.source_credit_long
+    ));
+    assert!(kani_eq_source_credit_state_v16_account(
+        &actual.source_credit_short,
+        &expected.source_credit_short
+    ));
+    assert!(kani_eq_backing_bucket_v16_account(
+        &actual.backing_long,
+        &expected.backing_long
+    ));
+    assert!(kani_eq_backing_bucket_v16_account(
+        &actual.backing_short,
+        &expected.backing_short
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &actual.insurance_reservation_long,
+        &expected.insurance_reservation_long
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &actual.insurance_reservation_short,
+        &expected.insurance_reservation_short
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn prove_underbacked_asset_one_conversion_exit_is_capped<const INSURANCE_BACKED: bool>() {
     let SourceBackedConversionFixture {
         mut header,
         mut markets,
@@ -8054,7 +8100,7 @@ fn prove_underbacked_asset_one_conversion_exit_is_capped() {
         expected_account,
         claim,
         backing,
-    } = source_backed_conversion_fixture::<1, true, false, true>();
+    } = source_backed_conversion_fixture::<1, true, INSURANCE_BACKED, true>();
 
     kani::cover!(true, "underbacked conversion route is reachable");
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -8077,20 +8123,35 @@ fn prove_underbacked_asset_one_conversion_exit_is_capped() {
         market.header.source_fresh_backing_total_num,
         expected_header.source_fresh_backing_total_num
     );
+    assert_eq!(
+        market.header.source_insurance_credit_reserved_total_atoms,
+        expected_header.source_insurance_credit_reserved_total_atoms
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total,
+        expected_header.insurance_domain_budget_remaining_total
+    );
     assert_eq!(account.header.capital, expected_account.capital);
     assert_eq!(account.header.pnl, expected_account.pnl);
     assert_eq!(
         account.header.source_domains[0],
         expected_account.source_domains[0]
     );
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &expected_markets[0],
-        &market.markets[0].engine
-    ));
-    assert!(kani_eq_engine_asset_slot_v16_account(
-        &expected_markets[1],
-        &market.markets[1].engine
-    ));
+    if INSURANCE_BACKED {
+        assert_source_domain_accounting_frame(&expected_markets[0], &market.markets[0].engine);
+        assert_source_domain_accounting_frame(&expected_markets[1], &market.markets[1].engine);
+        assert_eq!(market.markets[0].wrapper, 0);
+        assert_eq!(market.markets[1].wrapper, 0);
+    } else {
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &expected_markets[0],
+            &market.markets[0].engine
+        ));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &expected_markets[1],
+            &market.markets[1].engine
+        ));
+    }
 
     let requested_raw: u8 = kani::any();
     kani::assume((1..=claim as u8).contains(&requested_raw));
@@ -8136,6 +8197,10 @@ fn prove_underbacked_asset_one_conversion_exit_is_capped() {
     assert_eq!(
         market.header.source_claim_bound_total_num,
         final_expected_header.source_claim_bound_total_num
+    );
+    assert_eq!(
+        market.header.source_insurance_credit_reserved_total_atoms,
+        final_expected_header.source_insurance_credit_reserved_total_atoms
     );
     assert_eq!(account.header.capital, final_expected_account.capital);
     assert_eq!(account.header.pnl, final_expected_account.pnl);
@@ -8302,7 +8367,29 @@ fn closure_asset_one_short_insurance_backed_conversion_is_local() {
 #[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
 fn closure_underbacked_asset_one_conversion_cannot_exit_more_than_source_backing() {
-    prove_underbacked_asset_one_conversion_exit_is_capped();
+    prove_underbacked_asset_one_conversion_exit_is_capped::<false>();
+}
+
+// Insurance mirror of the malicious-oracle boundary above. One reserved atom
+// in asset 1's source domain may become external quote; the second paper atom
+// cannot borrow global insurance or any other asset-side domain budget.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::wide_math::div_rem_u256, bounded_u256_div_rem_stub)]
+#[kani::stub(
+    TokenValueFlowProofV16::validate,
+    conversion_withdrawal_flow_validate_stub
+)]
+#[kani::stub(
+    PortfolioV16ViewMut::compact_source_domains,
+    canonical_conversion_compact_stub
+)]
+#[kani::stub(PortfolioV16View::validate_with_market, valid_conversion_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_conversion_market_stub)]
+fn closure_underbacked_asset_one_insurance_conversion_cannot_exit_other_domain_budget() {
+    prove_underbacked_asset_one_conversion_exit_is_capped::<true>();
 }
 
 #[cfg(all(kani, feature = "closure"))]
