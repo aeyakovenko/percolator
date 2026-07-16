@@ -9982,6 +9982,138 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
     }
 }
 
+fn cadence_asset_indices(k_units: i128, f_units: i128) -> AssetStateV16 {
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.k_long = k_units * ADL_ONE as i128;
+    asset.k_short = -asset.k_long;
+    asset.f_long_num = f_units * ADL_ONE as i128;
+    asset.f_short_num = -asset.f_long_num;
+    asset
+}
+
+fn production_cadence_wide_unreachable(
+    _abs_basis: u128,
+    _then: i128,
+    _now: i128,
+    _den: u128,
+    _carry: u128,
+) -> (i128, u128) {
+    kani::assume(false);
+    (0, 0)
+}
+
+// Production-wiring half of the cadence theorem. This constructs the live fast-path shape
+// (`a_basis == ADL_ONE`, ADL-aligned indices/carries); the arithmetic harness separately proves
+// the wide fallback exact and partition invariant. The unreachable stub prevents Kani from
+// bit-blasting a branch excluded by this harness's construction.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    percolator::wide_math::wide_signed_mul_div_floor_with_carry_from_k_pair,
+    production_cadence_wide_unreachable
+)]
+fn proof_v16_production_kf_settlement_is_invariant_to_crank_partition() {
+    let first_raw: i8 = kani::any();
+    let second_raw: i8 = kani::any();
+    let k_active: bool = kani::any();
+    let f_active: bool = kani::any();
+    let short: bool = kani::any();
+    kani::assume((-4..=4).contains(&first_raw));
+    kani::assume((-4..=4).contains(&second_raw));
+    kani::assume(k_active || f_active);
+
+    let eighth_position = POS_SCALE / 8;
+    let eighth_remainder = ADL_ONE * eighth_position;
+    let basis_q = 3 * eighth_position;
+    let carry = eighth_remainder;
+    let first = i128::from(first_raw);
+    let end = first + i128::from(second_raw);
+    let k_mid = if k_active { first } else { 0 };
+    let k_end = if k_active { end } else { 0 };
+    let f_mid = if f_active { first } else { 0 };
+    let f_end = if f_active { end } else { 0 };
+    let side = if short { SideV16::Short } else { SideV16::Long };
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: 1,
+        side,
+        basis_pos_q: if short {
+            -(basis_q as i128)
+        } else {
+            basis_q as i128
+        },
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        k_rem_num: if k_active { carry } else { 0 },
+        f_rem_num: if f_active { carry } else { 0 },
+        epoch_snap: 0,
+        loss_weight: basis_q,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+
+    let (mid_leg, first_f_delta, first_net) =
+        MarketGroupV16ViewMut::<u64>::kani_leg_kf_settlement_transition_from_asset(
+            cadence_asset_indices(k_mid, f_mid),
+            leg,
+        )
+        .unwrap();
+    let (fragmented_leg, second_f_delta, second_net) =
+        MarketGroupV16ViewMut::<u64>::kani_leg_kf_settlement_transition_from_asset(
+            cadence_asset_indices(k_end, f_end),
+            mid_leg,
+        )
+        .unwrap();
+    let (delayed_leg, delayed_f_delta, delayed_net) =
+        MarketGroupV16ViewMut::<u64>::kani_leg_kf_settlement_transition_from_asset(
+            cadence_asset_indices(k_end, f_end),
+            leg,
+        )
+        .unwrap();
+
+    kani::cover!(
+        k_active
+            && f_active
+            && short
+            && first_raw < 0
+            && second_raw > 0
+            && end != 0
+            && fragmented_leg.k_rem_num != 0
+            && fragmented_leg.f_rem_num != 0,
+        "both production lanes preserve carry across a short-side direction reversal"
+    );
+    assert!(
+        fragmented_leg.k_snap == delayed_leg.k_snap
+            && fragmented_leg.f_snap == delayed_leg.f_snap
+            && fragmented_leg.k_rem_num == delayed_leg.k_rem_num
+            && fragmented_leg.f_rem_num == delayed_leg.f_rem_num
+            && fragmented_leg.active == leg.active
+            && fragmented_leg.asset_index == leg.asset_index
+            && fragmented_leg.market_id == leg.market_id
+            && fragmented_leg.side == leg.side
+            && fragmented_leg.basis_pos_q == leg.basis_pos_q
+            && fragmented_leg.a_basis == leg.a_basis
+            && fragmented_leg.epoch_snap == leg.epoch_snap
+            && fragmented_leg.loss_weight == leg.loss_weight
+            && fragmented_leg.b_snap == leg.b_snap
+            && fragmented_leg.b_rem == leg.b_rem
+            && fragmented_leg.b_epoch_snap == leg.b_epoch_snap
+            && fragmented_leg.b_stale == leg.b_stale
+            && fragmented_leg.stale == leg.stale
+            && first_f_delta + second_f_delta == delayed_f_delta
+            && first_net + second_net == delayed_net
+            && delayed_leg.k_rem_num < ADL_ONE * POS_SCALE
+            && delayed_leg.f_rem_num < ADL_ONE * POS_SCALE
+    );
+}
+
 fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i128, i128) {
     let (mut header, mut markets, _) = one_market_view_fixture();
     if positive_funding {

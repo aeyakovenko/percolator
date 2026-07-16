@@ -790,6 +790,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.leg_kf_delta_for_settlement(leg)
     }
 
+    pub fn kani_leg_kf_settlement_transition_from_asset(
+        asset: AssetStateV16,
+        mut leg: PortfolioLegV16,
+    ) -> V16Result<(PortfolioLegV16, i128, i128)> {
+        let (f_delta, net) = Self::apply_leg_kf_settlement_transition_from_asset(asset, &mut leg)?;
+        Ok((leg, f_delta, net))
+    }
+
     pub fn kani_collect_account_backing_utilization_fee_for_domain_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

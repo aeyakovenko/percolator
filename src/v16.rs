@@ -10548,15 +10548,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok((k_now, f_now, k_delta, f_delta, k_rem_num, f_rem_num, net))
     }
 
+    #[inline(always)]
+    fn apply_leg_kf_settlement_transition_from_asset(
+        asset: AssetStateV16,
+        leg: &mut PortfolioLegV16,
+    ) -> V16Result<(i128, i128)> {
+        let (k_now, f_now, _k_delta, f_delta, k_rem_num, f_rem_num, net) =
+            Self::leg_kf_delta_components_for_settlement_from_asset(asset, *leg)?;
+        leg.k_snap = k_now;
+        leg.f_snap = f_now;
+        leg.k_rem_num = k_rem_num;
+        leg.f_rem_num = f_rem_num;
+        Ok((f_delta, net))
+    }
+
     #[cfg(kani)]
     #[inline(always)]
     fn leg_kf_delta_for_settlement_from_asset(
         asset: AssetStateV16,
-        leg: PortfolioLegV16,
+        mut leg: PortfolioLegV16,
     ) -> V16Result<(i128, i128, i128)> {
-        let (k_now, f_now, _k_delta, _f_delta, _k_rem_num, _f_rem_num, net) =
-            Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
-        Ok((k_now, f_now, net))
+        let (_f_delta, net) = Self::apply_leg_kf_settlement_transition_from_asset(asset, &mut leg)?;
+        Ok((leg.k_snap, leg.f_snap, net))
     }
 
     #[cfg(kani)]
@@ -10603,8 +10616,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidLeg);
         }
-        let (k_now, f_now, _k_delta, f_delta, k_rem_num, f_rem_num, net) =
-            Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
+        let (f_delta, net) = Self::apply_leg_kf_settlement_transition_from_asset(asset, &mut leg)?;
         if net != 0 {
             if net > 0 {
                 let source_domain =
@@ -10624,10 +10636,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         Self::record_account_funding_flow(account, leg.side, f_delta)?;
-        leg.k_snap = k_now;
-        leg.f_snap = f_now;
-        leg.k_rem_num = k_rem_num;
-        leg.f_rem_num = f_rem_num;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         Ok(())
@@ -15628,8 +15636,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
         let asset = self.asset_state(asset_index)?;
-        let (k_now, f_now, _k_delta, f_delta, k_rem_num, f_rem_num, net) =
-            Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
+        let (f_delta, net) = Self::apply_leg_kf_settlement_transition_from_asset(asset, &mut leg)?;
 
         let mut loss_settled = 0u128;
         let mut support_consumed = 0u128;
@@ -15645,10 +15652,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         Self::record_account_funding_flow(account, leg.side, f_delta)?;
-        leg.k_snap = k_now;
-        leg.f_snap = f_now;
-        leg.k_rem_num = k_rem_num;
-        leg.f_rem_num = f_rem_num;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         Ok((
