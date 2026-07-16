@@ -16,26 +16,27 @@ use percolator::v16::{
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_select_auto_crank_plan,
-    kani_should_clear_prior_reset_obligation, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    ActionableSummaryV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
-    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
-    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
-    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
-    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
-    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
-    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
-    SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
-    TokenValueFlowProofV16, TradeRequestV16, V16Config, V16ConfigAccount, V16Error,
-    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
-    BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
-    PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
+    kani_prepare_asset_recovery_transition, kani_resolved_source_close_phase,
+    kani_select_auto_crank_plan, kani_should_clear_prior_reset_obligation,
+    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
+    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
+    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
+    SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
+    StockReconciliationProofV16, TokenValueClassV16, TokenValueFlowProofV16, V16Config,
+    V16ConfigAccount, V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128,
+    V16PodU32, V16PodU64, BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT,
+    MAX_BACKING_FEE_UTIL_BPS, PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP,
+    V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
@@ -8694,6 +8695,75 @@ fn proof_v16_resolved_close_terminal_payout_conserves_vault_and_value_classes() 
         assert_eq!(capital_paid, account_capital);
         assert_eq!(resolved_paid, resolved_claimable);
     }
+}
+
+// Inductive liveness theorem for the production resolved-source phase selector. Every domain has
+// one terminal claim step plus at most one lien release and one backing expiry. The untouched tail
+// rank represents every remaining domain, so this proves the full 28-domain bound rather than a
+// fixture-sized trace. Public max-shape regressions bind the selector to the close route and CU cap.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_source_close_phase_strictly_decreases_global_rank() {
+    let liened: bool = kani::any();
+    let status_raw: u8 = kani::any();
+    let expiry_slot: u8 = kani::any();
+    let current_slot: u8 = kani::any();
+    let remaining_domains: u8 = kani::any();
+    let tail_rank: u8 = kani::any();
+    kani::assume(status_raw <= 3);
+    kani::assume(remaining_domains >= 1);
+    kani::assume(remaining_domains as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    let min_tail_rank = remaining_domains - 1;
+    let max_tail_rank = 3 * (remaining_domains - 1);
+    kani::assume(tail_rank >= min_tail_rank && tail_rank <= max_tail_rank);
+
+    let status = match status_raw {
+        0 => BackingBucketStatusV16::Empty,
+        1 => BackingBucketStatusV16::Fresh,
+        2 => BackingBucketStatusV16::Expired,
+        _ => BackingBucketStatusV16::Impaired,
+    };
+    let lapsed = status == BackingBucketStatusV16::Fresh && expiry_slot <= current_slot;
+    let phase = kani_resolved_source_close_phase(
+        if liened { BOUND_SCALE } else { 0 },
+        status,
+        expiry_slot as u64,
+        current_slot as u64,
+    );
+    let current_rank = 1u8 + u8::from(liened) + u8::from(lapsed);
+    let rank_before = tail_rank + current_rank;
+    let rank_after = match phase {
+        0 => tail_rank + 1 + u8::from(lapsed),
+        1 => tail_rank + 1,
+        2 => tail_rank,
+        _ => unreachable!(),
+    };
+
+    kani::cover!(
+        liened && lapsed && remaining_domains as usize == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "max-domain close releases a lien before retaining its pending expiry"
+    );
+    kani::cover!(
+        !liened && lapsed && remaining_domains > 1,
+        "an expired first domain progresses while a nonempty tail remains"
+    );
+    kani::cover!(
+        !liened && !lapsed && remaining_domains > 1 && tail_rank > min_tail_rank,
+        "a prepared claim is processed with nontrivial later obligations"
+    );
+    kani::cover!(
+        !liened && !lapsed && remaining_domains == 1 && tail_rank == 0,
+        "the final prepared claim reaches the zero-rank base case"
+    );
+
+    assert_eq!(phase == 0, liened);
+    assert_eq!(phase == 1, !liened && lapsed);
+    assert_eq!(phase == 2, !liened && !lapsed);
+    assert_eq!(rank_after + 1, rank_before);
+    assert!(rank_after < rank_before);
+    assert!(rank_before >= remaining_domains);
+    assert!(rank_before <= 3 * remaining_domains);
 }
 
 #[kani::proof]

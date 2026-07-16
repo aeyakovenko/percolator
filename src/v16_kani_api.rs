@@ -9,6 +9,24 @@
 use super::*;
 use crate::wide_math::U256;
 
+pub fn kani_resolved_source_close_phase(
+    source_claim_liened_num: u128,
+    bucket_status: BackingBucketStatusV16,
+    bucket_expiry_slot: u64,
+    current_slot: u64,
+) -> u8 {
+    match V16Core::resolved_source_close_phase(
+        source_claim_liened_num,
+        bucket_status,
+        bucket_expiry_slot,
+        current_slot,
+    ) {
+        ResolvedSourceClosePhaseV16::ReleaseLien => 0,
+        ResolvedSourceClosePhaseV16::ExpireBacking => 1,
+        ResolvedSourceClosePhaseV16::ProcessClaim => 2,
+    }
+}
+
 pub fn kani_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> bool {
     V16Core::kernel_auto_crank_lifecycle_dispatchable(lifecycle)
 }

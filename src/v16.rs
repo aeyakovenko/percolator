@@ -635,9 +635,34 @@ pub fn active_bitmap_count_ones(bitmap: V16ActiveBitmap) -> u32 {
     total
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedSourceClosePhaseV16 {
+    ReleaseLien,
+    ExpireBacking,
+    ProcessClaim,
+}
+
 struct V16Core;
 
 impl V16Core {
+    #[inline]
+    fn resolved_source_close_phase(
+        source_claim_liened_num: u128,
+        bucket_status: BackingBucketStatusV16,
+        bucket_expiry_slot: u64,
+        current_slot: u64,
+    ) -> ResolvedSourceClosePhaseV16 {
+        if source_claim_liened_num != 0 {
+            ResolvedSourceClosePhaseV16::ReleaseLien
+        } else if bucket_status == BackingBucketStatusV16::Fresh
+            && bucket_expiry_slot <= current_slot
+        {
+            ResolvedSourceClosePhaseV16::ExpireBacking
+        } else {
+            ResolvedSourceClosePhaseV16::ProcessClaim
+        }
+    }
+
     fn loss_stale_trade_scope_allowed(
         market_loss_stale_active: bool,
         trade_asset_loss_stale: bool,
@@ -15408,39 +15433,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         account.compact_source_domains();
         let current_slot = self.header.current_slot.get();
-        let mut slot = 0usize;
-        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = account.header.source_domains[slot];
-            if source.has_default_sparse_tag() && !source.is_occupied() {
-                break;
-            }
-            if !source.is_occupied() {
-                slot += 1;
-                continue;
-            }
-
-            let domain = source.domain.get() as usize;
-            self.domain_asset_side(domain)?;
-            if source.source_claim_liened_num.get() != 0 {
+        let source = account.header.source_domains[0];
+        if !source.is_occupied() || source.source_claim_bound_num.get() == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        let domain = source.domain.get() as usize;
+        self.domain_asset_side(domain)?;
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        match V16Core::resolved_source_close_phase(
+            source.source_claim_liened_num.get(),
+            bucket.status,
+            bucket.expiry_slot,
+            current_slot,
+        ) {
+            ResolvedSourceClosePhaseV16::ReleaseLien => {
                 self.release_account_source_credit_lien_for_domain_not_atomic(account, domain)?;
                 account.header.health_cert.valid = 0;
                 self.validate_shape()?;
                 account.validate_with_market(&self.as_view())?;
-                return Ok(Some(domain));
+                Ok(Some(domain))
             }
-
-            let bucket = self.backing_bucket_for_domain(domain)?;
-            if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= current_slot
-            {
+            ResolvedSourceClosePhaseV16::ExpireBacking => {
                 self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
                 account.header.health_cert.valid = 0;
                 self.validate_shape()?;
                 account.validate_with_market(&self.as_view())?;
-                return Ok(Some(domain));
+                Ok(Some(domain))
             }
-            slot += 1;
+            ResolvedSourceClosePhaseV16::ProcessClaim => Ok(None),
         }
-        Ok(None)
     }
 
     /// Settle exactly one prepared source domain. Realizable source support
