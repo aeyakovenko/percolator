@@ -10133,6 +10133,204 @@ fn proof_v16_view_initial_margin_source_lien_creation_is_backed() {
 }
 
 #[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_source_lien_allocation_plan_is_complete_bounded_and_ordered() {
+    let claim_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let backing_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let rate_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let request_raw: u8 = kani::any();
+    let request = (request_raw & 31) as u128;
+    let mut remaining = request;
+    let mut total_capacity = 0u128;
+    let mut domain = 0usize;
+    let mut touched = 0usize;
+    let mut used_fractional_rate = false;
+    while domain < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let claim = (claim_raw[domain] & 7) as u128;
+        let backing = (backing_raw[domain] & 7) as u128;
+        let rate_code = rate_raw[domain] & 3;
+        let rate = if rate_code == 3 {
+            0
+        } else {
+            CREDIT_RATE_SCALE >> rate_code
+        };
+        let claim_capacity = claim * rate / CREDIT_RATE_SCALE;
+        let capacity = claim_capacity.min(backing);
+        let take = MarketGroupV16ViewMut::<u64>::kani_source_credit_lien_allocation_take(
+            remaining,
+            claim * BOUND_SCALE,
+            backing * BOUND_SCALE,
+            rate,
+        )
+        .unwrap();
+        assert_eq!(take, remaining.min(capacity));
+        assert!(take <= remaining);
+        assert!(take <= claim);
+        assert!(take <= backing);
+        if remaining == 0 {
+            assert_eq!(take, 0);
+        }
+        if take != 0 {
+            touched += 1;
+            used_fractional_rate |= rate != CREDIT_RATE_SCALE;
+        }
+        remaining -= take;
+        total_capacity += capacity;
+        domain += 1;
+    }
+
+    let allocated = request - remaining;
+    kani::cover!(request == 0, "zero source-credit request is the identity");
+    kani::cover!(
+        request > total_capacity && total_capacity > 0,
+        "insufficient aggregate backing exhausts every source"
+    );
+    kani::cover!(
+        request < total_capacity && touched > 1,
+        "allocation crosses source boundaries and stops with surplus"
+    );
+    kani::cover!(
+        touched == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "allocation can consume every bounded source"
+    );
+    kani::cover!(
+        used_fractional_rate && touched > 1,
+        "allocation composes independently haircutted sources"
+    );
+    assert_eq!(allocated, request.min(total_capacity));
+    assert_eq!(remaining, request.saturating_sub(total_capacity));
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_source_lien_entry_relabel_preserves_persisted_aggregate_invariant() {
+    let pre_effective = (kani::any::<u8>() & 7) as u128;
+    let added_effective = 1 + (kani::any::<u8>() & 3) as u128;
+    let claim_slack = (kani::any::<u8>() & 7) as u128;
+    let pre_counterparty: bool = kani::any();
+    let add_counterparty: bool = kani::any();
+    let current_slot = 2 + (kani::any::<u8>() & 7) as u64;
+    let pre_num = pre_effective * BOUND_SCALE;
+    let added_num = added_effective * BOUND_SCALE;
+    let claim_bound_num = (pre_effective + added_effective + claim_slack) * BOUND_SCALE;
+    let pre_counterparty_num = if pre_counterparty { pre_num } else { 0 };
+    let pre_insurance_num = if pre_counterparty { 0 } else { pre_num };
+    let prior_fee_slot = if pre_counterparty_num == 0 {
+        0
+    } else {
+        current_slot - 1
+    };
+    let mut source = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(1),
+        source_claim_market_id: V16PodU64::new(9),
+        source_claim_bound_num: V16PodU128::new(claim_bound_num),
+        source_claim_liened_num: V16PodU128::new(pre_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(pre_counterparty_num),
+        source_claim_insurance_liened_num: V16PodU128::new(pre_insurance_num),
+        source_lien_effective_reserved: V16PodU128::new(pre_effective),
+        source_lien_counterparty_backing_num: V16PodU128::new(pre_counterparty_num),
+        source_lien_insurance_backing_num: V16PodU128::new(pre_insurance_num),
+        source_lien_fee_last_slot: V16PodU64::new(prior_fee_slot),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    MarketGroupV16ViewMut::<u64>::kani_validate_account_source_credit_lien_entry(source, 1)
+        .unwrap();
+    let before = source;
+
+    if add_counterparty {
+        MarketGroupV16ViewMut::<u64>::kani_apply_counterparty_source_credit_lien_delta(
+            &mut source,
+            added_num,
+            added_num,
+            added_effective,
+            current_slot,
+        )
+        .unwrap();
+    } else {
+        MarketGroupV16ViewMut::<u64>::kani_apply_insurance_source_credit_lien_delta(
+            &mut source,
+            added_num,
+            added_num,
+            added_effective,
+            current_slot,
+        )
+        .unwrap();
+    }
+    MarketGroupV16ViewMut::<u64>::kani_validate_account_source_credit_lien_entry(source, 1)
+        .unwrap();
+
+    let added_counterparty_num = if add_counterparty { added_num } else { 0 };
+    let added_insurance_num = if add_counterparty { 0 } else { added_num };
+    kani::cover!(
+        pre_effective > 0 && pre_counterparty && add_counterparty,
+        "an existing counterparty lien can be extended"
+    );
+    kani::cover!(
+        pre_effective > 0 && !pre_counterparty && add_counterparty,
+        "a counterparty lien can be added beside an insurance lien"
+    );
+    kani::cover!(
+        pre_effective > 0 && pre_counterparty && !add_counterparty,
+        "an insurance lien can be added beside a counterparty lien"
+    );
+    kani::cover!(
+        pre_effective == 0 && claim_slack > 0,
+        "a first lien can reserve only part of a larger claim"
+    );
+    assert_eq!(source.domain, before.domain);
+    assert_eq!(source.source_claim_market_id, before.source_claim_market_id);
+    assert_eq!(source.source_claim_bound_num, before.source_claim_bound_num);
+    assert_eq!(source.source_claim_liened_num.get(), pre_num + added_num);
+    assert_eq!(
+        source.source_claim_counterparty_liened_num.get(),
+        pre_counterparty_num + added_counterparty_num
+    );
+    assert_eq!(
+        source.source_claim_insurance_liened_num.get(),
+        pre_insurance_num + added_insurance_num
+    );
+    assert_eq!(
+        source.source_lien_effective_reserved.get(),
+        pre_effective + added_effective
+    );
+    assert_eq!(
+        source.source_lien_counterparty_backing_num.get(),
+        pre_counterparty_num + added_counterparty_num
+    );
+    assert_eq!(
+        source.source_lien_insurance_backing_num.get(),
+        pre_insurance_num + added_insurance_num
+    );
+    assert_eq!(
+        source.source_lien_fee_last_slot.get(),
+        if add_counterparty && pre_counterparty_num == 0 {
+            current_slot
+        } else {
+            prior_fee_slot
+        }
+    );
+    assert_eq!(
+        source
+            .source_lien_counterparty_backing_num
+            .get()
+            .checked_add(source.source_lien_insurance_backing_num.get())
+            .unwrap(),
+        source.source_lien_effective_reserved.get() * BOUND_SCALE
+    );
+    assert!(source.source_claim_liened_num.get() <= source.source_claim_bound_num.get());
+    assert_eq!(
+        source.source_claim_impaired_num,
+        before.source_claim_impaired_num
+    );
+    assert_eq!(
+        source.source_lien_impaired_effective_reserved,
+        before.source_lien_impaired_effective_reserved
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_lien_create_moves_fresh_to_valid_without_value_movement() {

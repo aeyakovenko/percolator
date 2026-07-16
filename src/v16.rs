@@ -716,6 +716,29 @@ impl V16Core {
         Ok((required_face_num, required_backing_num))
     }
 
+    #[inline(always)]
+    fn source_credit_lien_allocation_take(
+        remaining: u128,
+        unliened_face_num: u128,
+        available_backing_num: u128,
+        credit_rate_num: u128,
+    ) -> V16Result<u128> {
+        if remaining == 0 || unliened_face_num == 0 || credit_rate_num == 0 {
+            return Ok(0);
+        }
+        if credit_rate_num > CREDIT_RATE_SCALE {
+            return Err(V16Error::InvalidConfig);
+        }
+        let realizable_num = U256::from_u128(unliened_face_num)
+            .checked_mul(U256::from_u128(credit_rate_num))
+            .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(remaining
+            .min(realizable_num / BOUND_SCALE)
+            .min(available_backing_num / BOUND_SCALE))
+    }
+
     #[inline]
     fn validate_bound_num_atom_aligned(bound_num: u128) -> V16Result<()> {
         if bound_num == 0 {
@@ -4384,24 +4407,7 @@ impl<'a> PortfolioV16View<'a> {
             if source.source_claim_bound_num.get() > domain_credit.positive_claim_bound_num {
                 return Err(V16Error::InvalidLeg);
             }
-            let proof = SourceCreditLienAggregateProofV16 {
-                domain: u16::try_from(d).map_err(|_| V16Error::ArithmeticOverflow)?,
-                source_claim_bound_num: source.source_claim_bound_num.get(),
-                face_claim_locked_num: source.source_claim_liened_num.get(),
-                counterparty_face_claim_locked_num: source
-                    .source_claim_counterparty_liened_num
-                    .get(),
-                insurance_face_claim_locked_num: source.source_claim_insurance_liened_num.get(),
-                effective_credit_reserved: source.source_lien_effective_reserved.get(),
-                counterparty_backing_reserved_num: source
-                    .source_lien_counterparty_backing_num
-                    .get(),
-                insurance_backing_reserved_num: source.source_lien_insurance_backing_num.get(),
-                impaired_face_claim_num: source.source_claim_impaired_num.get(),
-                impaired_effective_credit_reserved: source
-                    .source_lien_impaired_effective_reserved
-                    .get(),
-            };
+            let proof = Self::source_credit_lien_aggregate_proof(source, d)?;
             proof.validate()?;
             let locked = proof
                 .face_claim_locked_num
@@ -4448,6 +4454,26 @@ impl<'a> PortfolioV16View<'a> {
             slot_index += 1;
         }
         Ok(())
+    }
+
+    fn source_credit_lien_aggregate_proof(
+        source: PortfolioSourceDomainV16Account,
+        domain: usize,
+    ) -> V16Result<SourceCreditLienAggregateProofV16> {
+        Ok(SourceCreditLienAggregateProofV16 {
+            domain: u16::try_from(domain).map_err(|_| V16Error::ArithmeticOverflow)?,
+            source_claim_bound_num: source.source_claim_bound_num.get(),
+            face_claim_locked_num: source.source_claim_liened_num.get(),
+            counterparty_face_claim_locked_num: source.source_claim_counterparty_liened_num.get(),
+            insurance_face_claim_locked_num: source.source_claim_insurance_liened_num.get(),
+            effective_credit_reserved: source.source_lien_effective_reserved.get(),
+            counterparty_backing_reserved_num: source.source_lien_counterparty_backing_num.get(),
+            insurance_backing_reserved_num: source.source_lien_insurance_backing_num.get(),
+            impaired_face_claim_num: source.source_claim_impaired_num.get(),
+            impaired_effective_credit_reserved: source
+                .source_lien_impaired_effective_reserved
+                .get(),
+        })
     }
 
     fn source_claim_bound_sum_num(&self) -> V16Result<u128> {
@@ -9691,14 +9717,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let unliened = Self::source_claim_unliened_num(&account.as_view(), d)?;
             if rate != 0 && unliened != 0 {
                 self.validate_source_domain_ledger_current(d)?;
-                let soft_num = U256::from_u128(unliened)
-                    .checked_mul(U256::from_u128(rate))
-                    .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-                    .and_then(|v| v.try_into_u128())
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                let by_claim = soft_num / BOUND_SCALE;
-                let by_backing = self.source_credit_available_backing_num(d)? / BOUND_SCALE;
-                let take = remaining.min(by_claim).min(by_backing);
+                let take = V16Core::source_credit_lien_allocation_take(
+                    remaining,
+                    unliened,
+                    self.source_credit_available_backing_num(d)?,
+                    rate,
+                )?;
                 if take != 0 {
                     let (face_num, backing_num) =
                         V16Core::source_credit_lien_amounts_for_effective(take, rate)?;
@@ -9895,14 +9919,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let unliened = Self::source_claim_unliened_num(&account.as_view(), d)?;
             if rate != 0 && unliened != 0 {
                 self.validate_source_domain_ledger_current(d)?;
-                let soft_num = U256::from_u128(unliened)
-                    .checked_mul(U256::from_u128(rate))
-                    .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-                    .and_then(|v| v.try_into_u128())
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                let by_claim = soft_num / BOUND_SCALE;
-                let by_backing = self.source_credit_available_backing_num(d)? / BOUND_SCALE;
-                let take = remaining.min(by_claim).min(by_backing);
+                let take = V16Core::source_credit_lien_allocation_take(
+                    remaining,
+                    unliened,
+                    self.source_credit_available_backing_num(d)?,
+                    rate,
+                )?;
                 if take != 0 {
                     self.create_account_source_credit_lien_for_effective_core_not_atomic(
                         account, d, take,

@@ -728,6 +728,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_apply_insurance_source_credit_lien_delta(
+        source: &mut PortfolioSourceDomainV16Account,
+        required_face_num: u128,
+        required_backing_num: u128,
+        effective_credit: u128,
+        current_slot: u64,
+    ) -> V16Result<()> {
+        Self::apply_account_source_credit_lien_delta(
+            source,
+            SourceCreditBackingSourceV16::Insurance,
+            required_face_num,
+            required_backing_num,
+            effective_credit,
+            current_slot,
+        )
+    }
+
+    pub fn kani_validate_account_source_credit_lien_entry(
+        source: PortfolioSourceDomainV16Account,
+        domain: usize,
+    ) -> V16Result<()> {
+        PortfolioV16View::source_credit_lien_aggregate_proof(source, domain)?.validate()
+    }
+
     pub fn kani_prepare_counterparty_lien_create_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
@@ -790,6 +814,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         credit_rate_num: u128,
     ) -> V16Result<(u128, u128)> {
         V16Core::source_credit_lien_amounts_for_effective(effective_credit, credit_rate_num)
+    }
+
+    pub fn kani_source_credit_lien_allocation_take(
+        remaining: u128,
+        unliened_face_num: u128,
+        available_backing_num: u128,
+        credit_rate_num: u128,
+    ) -> V16Result<u128> {
+        V16Core::source_credit_lien_allocation_take(
+            remaining,
+            unliened_face_num,
+            available_backing_num,
+            credit_rate_num,
+        )
     }
 
     pub fn kani_counterparty_cure_atoms_from_scaled_backing(amount: u128) -> V16Result<u128> {
