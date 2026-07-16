@@ -13771,6 +13771,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    fn ensure_trade_final_margin_policy(
+        long_account: &PortfolioV16View<'_>,
+        short_account: &PortfolioV16View<'_>,
+        locked: bool,
+        risk_increasing: bool,
+    ) -> V16Result<()> {
+        let long_cert = long_account.header.health_cert.try_to_runtime()?;
+        let short_cert = short_account.header.health_cert.try_to_runtime()?;
+        let maintenance_healthy =
+            long_cert.certified_liq_deficit == 0 && short_cert.certified_liq_deficit == 0;
+        if risk_increasing || !maintenance_healthy {
+            Self::ensure_initial_margin(long_account)?;
+            Self::ensure_initial_margin(short_account)?;
+            if locked {
+                Self::ensure_no_positive_credit_initial_margin(long_account)?;
+                Self::ensure_no_positive_credit_initial_margin(short_account)?;
+            }
+        }
+        Ok(())
+    }
+
     fn recertify_account_after_source_lien_change(
         &self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -13993,24 +14014,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.create_initial_margin_source_lien_if_needed(short_account)?;
             }
         }
-        let long_cert = long_account.header.health_cert.try_to_runtime()?;
-        let short_cert = short_account.header.health_cert.try_to_runtime()?;
-        let maintenance_healthy =
-            long_cert.certified_liq_deficit == 0 && short_cert.certified_liq_deficit == 0;
         // Initial margin is an admission gate for new risk and remains a bankruptcy-path gate for
         // liquidatable accounts. A maintenance-healthy matched reduction has already proved that
         // neither account's absolute position grows. Requiring those accounts to regain IM in the
         // same fill can deadlock fragmented recovery when every counterparty is smaller than the
         // reduction needed to cross the IM boundary. Keep the locked-lane no-positive-credit gate
         // scoped to the same admission/bankruptcy boundary.
-        if risk_increasing || !maintenance_healthy {
-            Self::ensure_initial_margin(&long_account.as_view())?;
-            Self::ensure_initial_margin(&short_account.as_view())?;
-            if locked {
-                Self::ensure_no_positive_credit_initial_margin(&long_account.as_view())?;
-                Self::ensure_no_positive_credit_initial_margin(&short_account.as_view())?;
-            }
-        }
+        Self::ensure_trade_final_margin_policy(
+            &long_account.as_view(),
+            &short_account.as_view(),
+            locked,
+            risk_increasing,
+        )?;
         self.validate_shape_audit_scan()?;
         self.validate_account_audit_scan(&long_account.as_view())?;
         self.validate_account_audit_scan(&short_account.as_view())?;

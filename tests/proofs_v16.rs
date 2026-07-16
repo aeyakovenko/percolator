@@ -4221,6 +4221,142 @@ fn proof_v16_locked_trade_margin_gate_cannot_use_positive_pnl_credit() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_final_margin_policy_preserves_exit_liveness_and_bankruptcy_gates() {
+    let long_capital_raw: u8 = kani::any();
+    let short_capital_raw: u8 = kani::any();
+    let long_pnl_raw: i8 = kani::any();
+    let short_pnl_raw: i8 = kani::any();
+    let long_fee_debt_raw: u8 = kani::any();
+    let short_fee_debt_raw: u8 = kani::any();
+    let long_equity_raw: i8 = kani::any();
+    let short_equity_raw: i8 = kani::any();
+    let long_req_raw: u8 = kani::any();
+    let short_req_raw: u8 = kani::any();
+    let long_liq_deficit_raw: u8 = kani::any();
+    let short_liq_deficit_raw: u8 = kani::any();
+    let long_cert_valid: bool = kani::any();
+    let short_cert_valid: bool = kani::any();
+    let risk_increasing: bool = kani::any();
+    let locked: bool = kani::any();
+
+    let account = |capital_raw: u8,
+                   pnl_raw: i8,
+                   fee_debt_raw: u8,
+                   equity_raw: i8,
+                   req_raw: u8,
+                   liq_deficit_raw: u8,
+                   valid: bool| {
+        let mut header = PortfolioAccountV16Account::default();
+        header.capital = V16PodU128::new(capital_raw as u128);
+        header.pnl = V16PodI128::new(pnl_raw as i128);
+        header.fee_credits = V16PodI128::new(-(fee_debt_raw as i128));
+        header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+            certified_equity: equity_raw as i128,
+            certified_initial_req: req_raw as u128,
+            certified_maintenance_req: req_raw as u128,
+            certified_liq_deficit: liq_deficit_raw as u128,
+            certified_worst_case_loss: req_raw as u128,
+            cert_oracle_epoch: 0,
+            cert_funding_epoch: 0,
+            cert_risk_epoch: 0,
+            cert_asset_set_epoch: 0,
+            active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+            valid,
+        });
+        header
+    };
+    let long_header = account(
+        long_capital_raw,
+        long_pnl_raw,
+        long_fee_debt_raw,
+        long_equity_raw,
+        long_req_raw,
+        long_liq_deficit_raw,
+        long_cert_valid,
+    );
+    let short_header = account(
+        short_capital_raw,
+        short_pnl_raw,
+        short_fee_debt_raw,
+        short_equity_raw,
+        short_req_raw,
+        short_liq_deficit_raw,
+        short_cert_valid,
+    );
+    let long = PortfolioV16View::new(&long_header);
+    let short = PortfolioV16View::new(&short_header);
+
+    let certified_ok =
+        |equity: i8, req: u8, valid: bool| valid && equity >= 0 && (equity as u8) >= req;
+    let principal_only_ok = |capital: u8, pnl: i8, fee_debt: u8, req: u8| {
+        let equity = capital as i128 + (pnl as i128).min(0) - fee_debt as i128;
+        equity >= 0 && (equity as u128) >= req as u128
+    };
+    let long_certified_ok = certified_ok(long_equity_raw, long_req_raw, long_cert_valid);
+    let short_certified_ok = certified_ok(short_equity_raw, short_req_raw, short_cert_valid);
+    let long_principal_only_ok = principal_only_ok(
+        long_capital_raw,
+        long_pnl_raw,
+        long_fee_debt_raw,
+        long_req_raw,
+    );
+    let short_principal_only_ok = principal_only_ok(
+        short_capital_raw,
+        short_pnl_raw,
+        short_fee_debt_raw,
+        short_req_raw,
+    );
+    let margin_required =
+        risk_increasing || long_liq_deficit_raw != 0 || short_liq_deficit_raw != 0;
+    let expected_ok = !margin_required
+        || (long_certified_ok
+            && short_certified_ok
+            && (!locked || (long_principal_only_ok && short_principal_only_ok)));
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_ensure_trade_final_margin_policy(
+        &long,
+        &short,
+        locked,
+        risk_increasing,
+    );
+
+    kani::cover!(
+        !margin_required && !long_certified_ok && !short_certified_ok,
+        "maintenance-healthy bilateral reductions progress below IM"
+    );
+    kani::cover!(
+        risk_increasing && !long_certified_ok && result.is_err(),
+        "risk increases cannot bypass certified initial margin"
+    );
+    kani::cover!(
+        !risk_increasing && long_liq_deficit_raw != 0 && !long_certified_ok && result.is_err(),
+        "liquidatable counterparties cannot use the reduction exemption"
+    );
+    kani::cover!(
+        margin_required
+            && locked
+            && long_certified_ok
+            && short_certified_ok
+            && !long_principal_only_ok
+            && result.is_err(),
+        "locked risk cannot satisfy IM using positive credit"
+    );
+    kani::cover!(
+        margin_required
+            && locked
+            && long_certified_ok
+            && short_certified_ok
+            && long_principal_only_ok
+            && short_principal_only_ok
+            && result.is_ok(),
+        "fully funded locked risk remains admissible"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_live_market_shape_rejects_long_short_oi_mismatch() {

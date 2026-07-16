@@ -938,6 +938,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::ensure_no_positive_credit_initial_margin(account)
     }
 
+    pub fn kani_ensure_trade_final_margin_policy(
+        long_account: &PortfolioV16View<'_>,
+        short_account: &PortfolioV16View<'_>,
+        locked: bool,
+        risk_increasing: bool,
+    ) -> V16Result<()> {
+        Self::ensure_trade_final_margin_policy(long_account, short_account, locked, risk_increasing)
+    }
+
     pub fn kani_apply_trade_after_refresh_not_atomic(
         &mut self,
         long_account: &mut PortfolioV16ViewMut<'_>,
