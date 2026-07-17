@@ -3,9 +3,9 @@
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
     backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
-    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
-    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_available_backing_num_for_source_credit_state,
+    kani_add_open_interest_for_new_position, kani_adl_scaled_accrual_index_deltas,
+    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
+    kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
@@ -14,7 +14,8 @@ use percolator::v16::{
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
-    kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
+    kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_position_change_requires_unit_adl, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
@@ -41,7 +42,7 @@ use percolator::v16::{
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
-    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
+    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
@@ -881,7 +882,11 @@ fn proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes()
     let long_mode_raw: u8 = kani::any();
     let short_mode_raw: u8 = kani::any();
     let risk_increasing: bool = kani::any();
+    let a_long_raw: u64 = kani::any();
+    let a_short_raw: u64 = kani::any();
     kani::assume(lifecycle_raw <= 5 && long_mode_raw <= 2 && short_mode_raw <= 2);
+    kani::assume((MIN_A_SIDE as u64..=ADL_ONE as u64).contains(&a_long_raw));
+    kani::assume((MIN_A_SIDE as u64..=ADL_ONE as u64).contains(&a_short_raw));
 
     let decode_mode = |raw| match raw {
         0 => SideModeV16::Normal,
@@ -898,15 +903,21 @@ fn proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes()
     };
     let long_mode = decode_mode(long_mode_raw);
     let short_mode = decode_mode(short_mode_raw);
+    let a_long = a_long_raw as u128;
+    let a_short = a_short_raw as u128;
     let expected_ok = !risk_increasing
         || (lifecycle == AssetLifecycleV16::Active
             && long_mode == SideModeV16::Normal
-            && short_mode == SideModeV16::Normal);
-    let (mut header, mut markets, _) = one_market_view_fixture();
+            && short_mode == SideModeV16::Normal
+            && a_long == ADL_ONE
+            && a_short == ADL_ONE);
+    let (mut header, mut markets) = one_market_only_fixture();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.lifecycle = lifecycle;
     asset.mode_long = long_mode;
     asset.mode_short = short_mode;
+    asset.a_long = a_long;
+    asset.a_short = a_short;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let result = market.kani_require_asset_risk_change_allowed(0, risk_increasing);
@@ -915,8 +926,18 @@ fn proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes()
         risk_increasing
             && lifecycle == AssetLifecycleV16::Active
             && long_mode == SideModeV16::Normal
-            && short_mode == SideModeV16::Normal,
+            && short_mode == SideModeV16::Normal
+            && a_long == ADL_ONE
+            && a_short == ADL_ONE,
         "active Normal/Normal admits risk increase"
+    );
+    kani::cover!(
+        risk_increasing
+            && lifecycle == AssetLifecycleV16::Active
+            && long_mode == SideModeV16::Normal
+            && short_mode == SideModeV16::Normal
+            && (a_long != ADL_ONE || a_short != ADL_ONE),
+        "a non-unit ADL factor blocks fresh risk even in an otherwise live asset"
     );
     kani::cover!(
         risk_increasing
@@ -954,6 +975,282 @@ fn proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes()
     } else {
         assert_eq!(result, Err(V16Error::LockActive));
     }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_adl_position_change_gate_is_route_complete_and_exit_live() {
+    let current_raw: i8 = kani::any();
+    let new_raw: i8 = kani::any();
+    let a_long_raw: u64 = kani::any();
+    let a_short_raw: u64 = kani::any();
+    kani::assume((-8..=8).contains(&current_raw));
+    kani::assume((-8..=8).contains(&new_raw));
+    kani::assume(current_raw != new_raw);
+    kani::assume((MIN_A_SIDE as u64..=ADL_ONE as u64).contains(&a_long_raw));
+    kani::assume((MIN_A_SIDE as u64..=ADL_ONE as u64).contains(&a_short_raw));
+
+    let current = i128::from(current_raw);
+    let new = i128::from(new_raw);
+    let a_long = u128::from(a_long_raw);
+    let a_short = u128::from(a_short_raw);
+    let requires_unit_adl = kani_position_change_requires_unit_adl(current, new);
+    let expected_requires = current == 0
+        || (new != 0 && current.signum() != new.signum())
+        || new.unsigned_abs() > current.unsigned_abs();
+    assert_eq!(requires_unit_adl, expected_requires);
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.a_long = a_long;
+    asset.a_short = a_short;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.kani_require_position_change_adl_safe(0, current, new);
+    let unit_adl = a_long == ADL_ONE && a_short == ADL_ONE;
+    let expected_ok = !requires_unit_adl || unit_adl;
+
+    kani::cover!(
+        !unit_adl && current == 0 && new != 0 && result.is_err(),
+        "non-unit ADL blocks every fresh attachment"
+    );
+    kani::cover!(
+        !unit_adl
+            && current != 0
+            && new != 0
+            && current.signum() != new.signum()
+            && new.unsigned_abs() < current.unsigned_abs()
+            && result.is_err(),
+        "non-unit ADL blocks even a raw-basis-reducing side flip"
+    );
+    kani::cover!(
+        !unit_adl
+            && current.signum() == new.signum()
+            && new.unsigned_abs() > current.unsigned_abs()
+            && result.is_err(),
+        "non-unit ADL blocks same-side enlargement"
+    );
+    kani::cover!(
+        !unit_adl
+            && current.signum() == new.signum()
+            && new != 0
+            && new.unsigned_abs() < current.unsigned_abs()
+            && result.is_ok(),
+        "non-unit ADL preserves same-side reduction liveness"
+    );
+    kani::cover!(
+        !unit_adl && current != 0 && new == 0 && result.is_ok(),
+        "non-unit ADL preserves full-close liveness"
+    );
+    kani::cover!(
+        unit_adl && requires_unit_adl && result.is_ok(),
+        "unit ADL admits every otherwise-live position route"
+    );
+
+    assert_eq!(result.is_ok(), expected_ok);
+    if expected_ok {
+        assert_eq!(result, Ok(()));
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_adl_scaled_accrual_kernel_matches_every_valid_factor() {
+    let a_long_raw: u64 = kani::any();
+    let a_short_raw: u64 = kani::any();
+    let price_delta_raw: i8 = kani::any();
+    let funding_delta_raw: i8 = kani::any();
+    kani::assume((MIN_A_SIDE as u64..=ADL_ONE as u64).contains(&a_long_raw));
+    kani::assume((MIN_A_SIDE as u64..=ADL_ONE as u64).contains(&a_short_raw));
+    kani::assume((-8..=8).contains(&price_delta_raw));
+    kani::assume((-8..=8).contains(&funding_delta_raw));
+
+    let a_long = u128::from(a_long_raw);
+    let a_short = u128::from(a_short_raw);
+    let price_delta = i128::from(price_delta_raw);
+    let funding_delta = i128::from(funding_delta_raw);
+    let result = kani_adl_scaled_accrual_index_deltas(price_delta, funding_delta, a_long, a_short);
+    assert!(result.is_ok());
+    let (k_long, k_short, f_long, f_short) = result.unwrap();
+
+    kani::cover!(
+        a_long != a_short && price_delta > 0 && funding_delta < 0,
+        "unequal ADL factors cover simultaneous positive-price and negative-funding accrual"
+    );
+    kani::cover!(
+        a_long != a_short && price_delta < 0 && funding_delta > 0,
+        "unequal ADL factors cover the opposite signed accrual direction"
+    );
+    kani::cover!(
+        a_long == ADL_ONE && a_short == ADL_ONE && price_delta != 0,
+        "unit ADL remains the symmetric baseline"
+    );
+
+    assert_eq!(k_long, price_delta * i128::from(a_long_raw));
+    assert_eq!(k_short, -price_delta * i128::from(a_short_raw));
+    assert_eq!(f_long, -funding_delta * i128::from(a_long_raw));
+    assert_eq!(f_short, funding_delta * i128::from(a_short_raw));
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_adl_scaled_accrual_is_cross_side_zero_sum_at_every_factor_quantum() {
+    let a_long_units: u8 = kani::any();
+    let a_short_units: u8 = kani::any();
+    let price_delta_raw: i8 = kani::any();
+    let funding_delta_raw: i8 = kani::any();
+    kani::assume((1..=10).contains(&a_long_units));
+    kani::assume((1..=10).contains(&a_short_units));
+    kani::assume((-8..=8).contains(&price_delta_raw));
+    kani::assume((-8..=8).contains(&funding_delta_raw));
+
+    assert_eq!(ADL_ONE, 10 * MIN_A_SIDE);
+    let a_long = u128::from(a_long_units) * MIN_A_SIDE;
+    let a_short = u128::from(a_short_units) * MIN_A_SIDE;
+    let (k_long, k_short, f_long, f_short) = kani_adl_scaled_accrual_index_deltas(
+        i128::from(price_delta_raw),
+        i128::from(funding_delta_raw),
+        a_long,
+        a_short,
+    )
+    .unwrap();
+    let a_long_i = i128::from(a_long_units);
+    let a_short_i = i128::from(a_short_units);
+
+    kani::cover!(
+        a_long_units != a_short_units && price_delta_raw != 0 && funding_delta_raw != 0,
+        "unequal ADL factors cover simultaneous nonzero price and funding accrual"
+    );
+    kani::cover!(
+        a_long_units == 1 && a_short_units == 10,
+        "minimum and maximum factors are covered together"
+    );
+    kani::cover!(
+        a_long_units == 10 && a_short_units == 1,
+        "maximum and minimum factors are covered together"
+    );
+
+    assert_eq!(k_long * a_short_i + k_short * a_long_i, 0);
+    assert_eq!(f_long * a_short_i + f_short * a_long_i, 0);
+}
+
+fn adl_partition_settlement_net(
+    market: &MarketGroupV16ViewMut<'_, u64>,
+    side: SideV16,
+    basis_units: u8,
+) -> i128 {
+    if basis_units == 0 {
+        return 0;
+    }
+    let abs_basis_q = u128::from(basis_units) * POS_SCALE;
+    let basis_pos_q = match side {
+        SideV16::Long => abs_basis_q as i128,
+        SideV16::Short => -(abs_basis_q as i128),
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: 1,
+        side,
+        basis_pos_q,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: abs_basis_q,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    market.kani_leg_kf_delta_for_settlement(leg).unwrap().2
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_adl_kf_settlement_is_account_partition_invariant_and_zero_sum() {
+    let a_long_units: u8 = kani::any();
+    let a_short_units: u8 = kani::any();
+    let long_first_units: u8 = kani::any();
+    let short_first_units: u8 = kani::any();
+    let price_units_raw: i8 = kani::any();
+    let funding_units_raw: i8 = kani::any();
+    kani::assume((1..=4).contains(&a_long_units));
+    kani::assume((1..=4).contains(&a_short_units));
+    kani::assume(long_first_units <= a_short_units);
+    kani::assume(short_first_units <= a_long_units);
+    kani::assume((-4..=4).contains(&price_units_raw));
+    kani::assume((-4..=4).contains(&funding_units_raw));
+    kani::assume(price_units_raw != 0 || funding_units_raw != 0);
+
+    assert_eq!(ADL_ONE % 4, 0);
+    let a_quantum = ADL_ONE / 4;
+    let a_long = u128::from(a_long_units) * a_quantum;
+    let a_short = u128::from(a_short_units) * a_quantum;
+    let price_units = i128::from(price_units_raw);
+    let funding_units = i128::from(funding_units_raw);
+    let (k_long, k_short, f_long, f_short) =
+        kani_adl_scaled_accrual_index_deltas(4 * price_units, 4 * funding_units, a_long, a_short)
+            .unwrap();
+
+    let (mut header, mut markets) = one_market_only_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.a_long = a_long;
+    asset.a_short = a_short;
+    asset.k_long = k_long;
+    asset.k_short = k_short;
+    asset.f_long_num = f_long;
+    asset.f_short_num = f_short;
+    let matched_oi = u128::from(a_long_units)
+        .checked_mul(u128::from(a_short_units))
+        .and_then(|v| v.checked_mul(POS_SCALE))
+        .unwrap()
+        / 4;
+    asset.oi_eff_long_q = matched_oi;
+    asset.oi_eff_short_q = matched_oi;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let long_whole = adl_partition_settlement_net(&market, SideV16::Long, a_short_units);
+    let short_whole = adl_partition_settlement_net(&market, SideV16::Short, a_long_units);
+    let long_split = adl_partition_settlement_net(&market, SideV16::Long, long_first_units)
+        + adl_partition_settlement_net(&market, SideV16::Long, a_short_units - long_first_units);
+    let short_split = adl_partition_settlement_net(&market, SideV16::Short, short_first_units)
+        + adl_partition_settlement_net(&market, SideV16::Short, a_long_units - short_first_units);
+    let expected_long =
+        i128::from(a_long_units) * i128::from(a_short_units) * (price_units - funding_units);
+
+    kani::cover!(
+        a_long != a_short
+            && price_units != 0
+            && funding_units != 0
+            && long_first_units > 0
+            && long_first_units < a_short_units
+            && short_first_units > 0
+            && short_first_units < a_long_units,
+        "unequal ADL factors cover nontrivial two-account partitions on both matched sides"
+    );
+    kani::cover!(
+        a_long != a_short && price_units > 0 && funding_units < 0,
+        "unequal ADL factors cover reinforcing price and funding settlement"
+    );
+    kani::cover!(
+        a_long == ADL_ONE && a_short == ADL_ONE,
+        "unit ADL remains a covered partition-invariant baseline"
+    );
+
+    assert_eq!(long_whole, expected_long);
+    assert_eq!(short_whole, -expected_long);
+    assert_eq!(long_split, long_whole);
+    assert_eq!(short_split, short_whole);
+    assert_eq!(long_split + short_split, 0);
 }
 
 #[kani::proof]

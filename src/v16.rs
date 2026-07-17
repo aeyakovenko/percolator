@@ -764,6 +764,26 @@ impl V16Core {
     }
 
     #[inline]
+    pub(crate) fn kernel_adl_scaled_accrual_index_deltas(
+        price_delta: i128,
+        funding_index_delta: i128,
+        a_long: u128,
+        a_short: u128,
+    ) -> V16Result<(i128, i128, i128, i128)> {
+        let a_long = i128::try_from(a_long).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let a_short = i128::try_from(a_short).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let k_long = checked_i128_mul(price_delta, a_long)?;
+        let k_short = checked_i128_mul(price_delta, a_short)?
+            .checked_neg()
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let f_long = checked_i128_mul(funding_index_delta, a_long)?
+            .checked_neg()
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let f_short = checked_i128_mul(funding_index_delta, a_short)?;
+        Ok((k_long, k_short, f_long, f_short))
+    }
+
+    #[inline]
     fn liquidation_progress_from_scores(before: RiskScoreV16, after: RiskScoreV16) -> bool {
         after.strictly_reduces_from(before)
             || after.certified_liq_deficit < before.certified_liq_deficit
@@ -1394,6 +1414,19 @@ impl V16Core {
             PositionRouteV16::Flip
         } else {
             PositionRouteV16::Resize
+        }
+    }
+
+    #[inline]
+    pub(crate) fn kernel_position_route_requires_unit_adl(
+        route: PositionRouteV16,
+        current: i128,
+        new: i128,
+    ) -> bool {
+        match route {
+            PositionRouteV16::Attach | PositionRouteV16::Flip => true,
+            PositionRouteV16::Clear => false,
+            PositionRouteV16::Resize => new.unsigned_abs() > current.unsigned_abs(),
         }
     }
 
@@ -11422,10 +11455,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         let price_delta = effective_price as i128 - old.effective_price as i128;
-        let a_long = i128::try_from(old.a_long).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let a_short = i128::try_from(old.a_short).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let k_delta_long = checked_i128_mul(price_delta, a_long)?;
-        let k_delta_short = checked_i128_mul(price_delta, a_short)?;
         let funding_index_delta = if activity.funding_active {
             let n = funding_rate_e9
                 .checked_mul(segment_dt as i128)
@@ -11435,23 +11464,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             0
         };
-        let funding_delta_long = checked_i128_mul(funding_index_delta, a_long)?;
-        let funding_delta_short = checked_i128_mul(funding_index_delta, a_short)?;
+        let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
+            V16Core::kernel_adl_scaled_accrual_index_deltas(
+                price_delta,
+                funding_index_delta,
+                old.a_long,
+                old.a_short,
+            )?;
 
         let mut asset = old;
         asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
-        asset.k_short = add_non_min_i128(
-            asset.k_short,
-            k_delta_short
-                .checked_neg()
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        )?;
-        asset.f_long_num = add_non_min_i128(
-            asset.f_long_num,
-            funding_delta_long
-                .checked_neg()
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        )?;
+        asset.k_short = add_non_min_i128(asset.k_short, k_delta_short)?;
+        asset.f_long_num = add_non_min_i128(asset.f_long_num, funding_delta_long)?;
         asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta_short)?;
         asset.effective_price = effective_price;
         asset.fund_px_last = effective_price;
@@ -11978,6 +12002,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         asset_risk_increase_gate(asset.lifecycle, asset.mode_long, asset.mode_short)
+    }
+
+    fn require_position_route_adl_safe(
+        &self,
+        asset_index: usize,
+        route: PositionRouteV16,
+        current: i128,
+        new: i128,
+    ) -> V16Result<()> {
+        if V16Core::kernel_position_route_requires_unit_adl(route, current, new) {
+            self.require_asset_risk_change_allowed(asset_index, true)?;
+        }
+        Ok(())
     }
 
     fn validate_configured_asset_index(&self, asset_index: usize) -> V16Result<()> {
@@ -12943,6 +12980,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // PRODUCTION KERNEL: classify the route (Attach/Clear/Flip/Resize) — the
         // exact decision this body dispatches on, factored out and contracted.
         let route = V16Core::kernel_classify_position_delta(current, new);
+        self.require_position_route_adl_safe(asset_index, route, current, new)?;
         if route == PositionRouteV16::Attach {
             let side = if new > 0 {
                 SideV16::Long
@@ -12991,7 +13029,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return self.clear_leg(account, asset_index);
         }
         if route == PositionRouteV16::Flip {
-            self.require_asset_risk_change_allowed(asset_index, true)?;
             self.clear_leg(account, asset_index)?;
             let side = if new > 0 {
                 SideV16::Long
@@ -12999,9 +13036,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 SideV16::Short
             };
             return self.attach_leg(account, asset_index, side, new);
-        }
-        if new.unsigned_abs() > current.unsigned_abs() {
-            self.require_asset_risk_change_allowed(asset_index, true)?;
         }
         let old_leg = account.header.legs[leg_slot].try_to_runtime()?;
         let new_weight = loss_weight_for_basis(new.unsigned_abs(), old_leg.a_basis)?;
