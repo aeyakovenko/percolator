@@ -366,6 +366,25 @@ pub fn kani_position_delta_increases_risk(current: i128, delta_q: i128) -> V16Re
     position_delta_increases_risk(current, delta_q)
 }
 
+pub fn kani_position_change_requires_unit_adl(current: i128, new: i128) -> bool {
+    let route = V16Core::kernel_classify_position_delta(current, new);
+    V16Core::kernel_position_route_requires_unit_adl(route, current, new)
+}
+
+pub fn kani_adl_scaled_accrual_index_deltas(
+    price_delta: i128,
+    funding_index_delta: i128,
+    a_long: u128,
+    a_short: u128,
+) -> V16Result<(i128, i128, i128, i128)> {
+    V16Core::kernel_adl_scaled_accrual_index_deltas(
+        price_delta,
+        funding_index_delta,
+        a_long,
+        a_short,
+    )
+}
+
 pub fn kani_trade_preexisting_oi_reduction_gate(
     oi_long_q: u128,
     oi_short_q: u128,
@@ -1124,6 +1143,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         risk_increasing: bool,
     ) -> V16Result<()> {
         self.require_asset_risk_change_allowed(asset_index, risk_increasing)
+    }
+
+    pub fn kani_require_position_change_adl_safe(
+        &self,
+        asset_index: usize,
+        current: i128,
+        new: i128,
+    ) -> V16Result<()> {
+        let route = V16Core::kernel_classify_position_delta(current, new);
+        self.require_position_route_adl_safe(asset_index, route, current, new)
     }
 
     pub fn kani_ensure_close_progress_not_expired(
