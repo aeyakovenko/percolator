@@ -11422,24 +11422,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         let price_delta = effective_price as i128 - old.effective_price as i128;
-        let k_delta = checked_i128_mul(price_delta, ADL_ONE as i128)?;
-        let funding_delta = if activity.funding_active {
+        let a_long = i128::try_from(old.a_long).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let a_short = i128::try_from(old.a_short).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let k_delta_long = checked_i128_mul(price_delta, a_long)?;
+        let k_delta_short = checked_i128_mul(price_delta, a_short)?;
+        let funding_index_delta = if activity.funding_active {
             let n = funding_rate_e9
                 .checked_mul(segment_dt as i128)
                 .and_then(|v| v.checked_mul(effective_price as i128))
                 .ok_or(V16Error::ArithmeticOverflow)?;
             floor_div_signed_conservative_i128(n, FUNDING_DEN)
-                .checked_mul(ADL_ONE as i128)
-                .ok_or(V16Error::ArithmeticOverflow)?
         } else {
             0
         };
+        let funding_delta_long = checked_i128_mul(funding_index_delta, a_long)?;
+        let funding_delta_short = checked_i128_mul(funding_index_delta, a_short)?;
 
         let mut asset = old;
-        asset.k_long = add_non_min_i128(asset.k_long, k_delta)?;
-        asset.k_short = add_non_min_i128(asset.k_short, -k_delta)?;
-        asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
-        asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
+        asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
+        asset.k_short = add_non_min_i128(
+            asset.k_short,
+            k_delta_short
+                .checked_neg()
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        )?;
+        asset.f_long_num = add_non_min_i128(
+            asset.f_long_num,
+            funding_delta_long
+                .checked_neg()
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        )?;
+        asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta_short)?;
         asset.effective_price = effective_price;
         asset.fund_px_last = effective_price;
         asset.slot_last = asset
@@ -11961,6 +11974,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(());
         }
         let asset = self.asset_state(asset_index)?;
+        if asset.a_long != ADL_ONE || asset.a_short != ADL_ONE {
+            return Err(V16Error::LockActive);
+        }
         asset_risk_increase_gate(asset.lifecycle, asset.mode_long, asset.mode_short)
     }
 

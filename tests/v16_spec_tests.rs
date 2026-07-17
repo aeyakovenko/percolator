@@ -10,7 +10,7 @@ use percolator::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceRequestV16, ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
     V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
@@ -23,6 +23,161 @@ const FUNDING_COUNTER_ATOMS_PER_SLOT: u128 = 10;
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
+}
+
+#[test]
+fn v16_quantity_adl_blocks_fresh_basis_reissue_across_split_trades() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 220);
+    let mut short_header = account_fixture(1, 221);
+    let mut successor_header = account_fixture(1, 222);
+    let open_q = 4 * POS_SCALE;
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        let mut successor = PortfolioV16ViewMut::new(&mut successor_header);
+        market.deposit_not_atomic(&mut long, 10_000).unwrap();
+        market.deposit_not_atomic(&mut short, 10_000).unwrap();
+        market.deposit_not_atomic(&mut successor, 10_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(open_q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE,
+                },
+            )
+            .unwrap();
+    }
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, 3 * POS_SCALE);
+    assert_eq!(asset.oi_eff_short_q, 3 * POS_SCALE);
+    assert_eq!(asset.a_short, ADL_ONE * 3 / 4);
+    assert_eq!(
+        short_header.legs[0]
+            .try_to_runtime()
+            .unwrap()
+            .basis_pos_q
+            .unsigned_abs(),
+        open_q
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let mut successor = PortfolioV16ViewMut::new(&mut successor_header);
+    let result = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut short,
+        &mut successor,
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(open_q / 2),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+    );
+
+    assert_eq!(result, Err(V16Error::LockActive));
+}
+
+#[test]
+fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 223);
+    let mut short_header = account_fixture(1, 224);
+    let open_q = 4 * POS_SCALE;
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 100_000_000).unwrap();
+        market.deposit_not_atomic(&mut short, 100_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(open_q),
+                    exec_price: FUNDING_COUNTER_PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(
+                0,
+                2,
+                FUNDING_COUNTER_PRICE + 1,
+                FUNDING_COUNTER_RATE_E9,
+                true,
+            )
+            .unwrap();
+        market.markets[0].engine.asset.raw_oracle_target_price =
+            V16PodU64::new(FUNDING_COUNTER_PRICE + 1);
+    }
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    let scaled = (ADL_ONE * 3 / 4) as i128;
+    assert_eq!(asset.k_long, ADL_ONE as i128);
+    assert_eq!(asset.k_short, -scaled);
+    assert_eq!(
+        asset.f_long_num,
+        -(FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * ADL_ONE as i128)
+    );
+    assert_eq!(
+        asset.f_short_num,
+        FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * scaled
+    );
+
+    let total_value = |long: &PortfolioAccountV16Account,
+                       short: &PortfolioAccountV16Account|
+     -> i128 {
+        long.capital.get() as i128 + long.pnl.get() + short.capital.get() as i128 + short.pnl.get()
+    };
+    let value_before = total_value(&long_header, &short_header);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: -signed_q(POS_SCALE),
+                    exec_price: FUNDING_COUNTER_PRICE + 1,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(total_value(&long_header, &short_header), value_before);
 }
 
 fn market_fixture(
