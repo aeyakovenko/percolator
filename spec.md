@@ -1342,6 +1342,8 @@ If `W == 0`, residual clears only by reserved insurance or explicit protocol-own
 
 Quantity ADL applies exactly once after residual durability and is atomic with closing exposure clear/finalization or protected by a non-preemptible finalization barrier.
 
+After quantity ADL, each side's subsequent K and F index increments MUST be scaled by that side's current `A_side`; aggregate price and funding settlement across matched effective OI remains zero-sum. While either side has `A_side != ADL_ONE`, trades may reduce matched risk but MUST NOT attach, flip, or enlarge a leg. This prevents a fresh `a_basis` from reissuing quantity already removed by ADL while preserving bilateral exit progress.
+
 `begin_full_drain_reset(asset, side)` requires zero OI, no close/pending barrier, no pending obligations, no liens, and side not already `ResetPending`.
 
 -------------------------------------------------------------------------------
