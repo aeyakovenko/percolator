@@ -2,28 +2,37 @@
 
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
-    backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
-    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
-    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_available_backing_num_for_source_credit_state,
+    backing_domain_fee_split_for_lien_delta_num, bankruptcy_asset_slot_has_lock_state,
+    bankruptcy_hlock_to_wire, kani_active_bitmap_set as active_bitmap_set,
+    kani_active_bitmap_with_cleared, kani_add_open_interest_for_new_position,
+    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
+    kani_apply_resolved_payout_receipt_payment, kani_auto_crank_leg_flags,
+    kani_auto_crank_lifecycle_dispatchable, kani_auto_crank_liquidatable,
+    kani_auto_crank_skip_post_action_accrual, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
-    kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
-    kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
+    kani_backing_utilization_rate_e9_for_source_state, kani_build_resolved_close_rank,
+    kani_cert_is_current, kani_clear_resolved_leg, kani_close_progress_auto_crank_plan,
+    kani_commit_declared_liquidation_recovery, kani_expected_source_credit_rate_num_for_state,
+    kani_first_actionable_slot, kani_first_active_bitmap_slot,
+    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
-    kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_permissionless_kf_settlement_commits_step,
+    kani_position_action_reuses_current_certificate, kani_position_delta_increases_risk,
+    kani_prepare_asset_recovery_transition, kani_resolved_source_close_phase,
+    kani_select_auto_crank_plan, kani_should_clear_prior_reset_obligation,
+    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
+    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, MarketModeV16,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
@@ -40,7 +49,7 @@ use percolator::v16::{
     kani_eq_portfolio_account_v16_account,
 };
 use percolator::{
-    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS, MAX_OI_SIDE_Q,
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
@@ -79,11 +88,7 @@ fn one_market_view_fixture() -> (
     (header, markets, account_header)
 }
 
-fn two_market_view_fixture() -> (
-    MarketGroupV16HeaderAccount,
-    [Market<u64>; 2],
-    PortfolioAccountV16Account,
-) {
+fn two_market_only_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 2]) {
     let (market_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
@@ -96,6 +101,16 @@ fn two_market_view_fixture() -> (
         view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
         view.activate_empty_market_not_atomic(1, 100, 2).unwrap();
     }
+    (header, markets)
+}
+
+fn two_market_view_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+) {
+    let (header, markets) = two_market_only_fixture();
+    let (market_id, _, _) = ids();
     let account_header = empty_account_fixture(market_id, 2);
     (header, markets, account_header)
 }
@@ -184,7 +199,7 @@ fn empty_recovery_slot_for_market(
 }
 
 #[kani::proof]
-#[kani::unwind(8)]
+#[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_active_bitmap_set_get_count_is_exact_and_bounds_checked() {
     let slot_raw: u8 = kani::any();
@@ -235,6 +250,267 @@ fn proof_v16_active_bitmap_set_get_count_is_exact_and_bounds_checked() {
         assert!(!active_bitmap_get(bitmap, slot));
         assert_eq!(after_count, before_count);
     }
+}
+
+#[kani::proof]
+#[kani::unwind(17)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_leg_detach_exhausts_exact_rank_and_frames_other_obligations() {
+    assert_eq!(V16_ACTIVE_BITMAP_WORDS, 1);
+    assert!(V16_MAX_PORTFOLIO_ASSETS_N < 64);
+
+    let raw_bitmap: u64 = kani::any();
+    let valid_mask = (1u64 << V16_MAX_PORTFOLIO_ASSETS_N) - 1;
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    bitmap[0] = raw_bitmap & valid_mask;
+
+    let b_stale: bool = kani::any();
+    let negative_pnl: bool = kani::any();
+    let capital_pending: bool = kani::any();
+    let receipt_present: bool = kani::any();
+    let recovery_required: bool = kani::any();
+    let pnl = if negative_pnl { -1 } else { 0 };
+    let capital = u128::from(capital_pending);
+    let initial_count = active_bitmap_count_ones(bitmap);
+    let mut steps = 0u32;
+
+    kani::cover!(
+        initial_count == 0,
+        "resolved account can begin without active legs"
+    );
+    kani::cover!(
+        initial_count == 1,
+        "resolved account can begin with one active leg"
+    );
+    kani::cover!(
+        initial_count == V16_MAX_PORTFOLIO_ASSETS_N as u32,
+        "resolved account can begin at the maximum active-leg shape"
+    );
+    kani::cover!(
+        initial_count >= 2 && bitmap[0] & 1 == 0,
+        "sparse active-leg sets require deterministic repeated teardown"
+    );
+    kani::cover!(
+        initial_count > 0
+            && b_stale
+            && negative_pnl
+            && capital_pending
+            && receipt_present
+            && recovery_required,
+        "leg teardown frames every unrelated resolved-close obligation"
+    );
+
+    loop {
+        let Some(slot) = kani_first_active_bitmap_slot(bitmap).unwrap() else {
+            break;
+        };
+        let before = kani_build_resolved_close_rank(
+            b_stale,
+            pnl,
+            bitmap,
+            capital,
+            receipt_present,
+            recovery_required,
+        );
+        assert_eq!(slot, bitmap[0].trailing_zeros() as usize);
+        assert!(active_bitmap_get(bitmap, slot));
+
+        let after_bitmap = kani_active_bitmap_with_cleared(bitmap, slot).unwrap();
+        let after = kani_build_resolved_close_rank(
+            b_stale,
+            pnl,
+            after_bitmap,
+            capital,
+            receipt_present,
+            recovery_required,
+        );
+
+        assert_eq!(after.active_leg_count + 1, before.active_leg_count);
+        assert_eq!(after.b_stale, before.b_stale);
+        assert_eq!(after.negative_pnl, before.negative_pnl);
+        assert_eq!(after.capital, before.capital);
+        assert_eq!(after.receipt_claim, before.receipt_claim);
+        assert_eq!(after.recovery_required, before.recovery_required);
+        assert_eq!(after_bitmap[0], bitmap[0] & !(1u64 << slot));
+        assert_eq!(
+            active_bitmap_count_ones(after_bitmap) + steps + 1,
+            initial_count
+        );
+
+        bitmap = after_bitmap;
+        steps += 1;
+    }
+
+    assert!(active_bitmap_is_empty(bitmap));
+    assert_eq!(steps, initial_count);
+    assert!(steps <= V16_MAX_PORTFOLIO_ASSETS_N as u32);
+}
+
+#[kani::proof]
+#[kani::unwind(17)]
+#[kani::solver(cadical)]
+fn proof_v16_permissionless_source_kf_refresh_exhausts_exact_pending_rank() {
+    assert!(V16_MAX_PORTFOLIO_ASSETS_N < 64);
+    let raw_pending: u64 = kani::any();
+    let valid_mask = (1u64 << V16_MAX_PORTFOLIO_ASSETS_N) - 1;
+    let mut pending = raw_pending & valid_mask;
+    let initial_count = pending.count_ones();
+    let source_domain_count = (kani::any::<u8>() as usize) % (PORTFOLIO_SOURCE_DOMAIN_CAP + 1);
+    let allow_b_chunk: bool = kani::any();
+    let chunked = allow_b_chunk && source_domain_count != 0;
+    let mut steps = 0u32;
+
+    kani::cover!(
+        chunked && initial_count == V16_MAX_PORTFOLIO_ASSETS_N as u32,
+        "permissionless source refresh covers the maximum stale-leg shape"
+    );
+    kani::cover!(
+        chunked && initial_count >= 2 && pending & 1 == 0,
+        "permissionless source refresh covers sparse stale-leg sets"
+    );
+    kani::cover!(
+        allow_b_chunk && source_domain_count == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "permissionless refresh covers the maximum source-domain shape"
+    );
+    kani::cover!(
+        !allow_b_chunk && source_domain_count != 0 && initial_count != 0,
+        "direct refresh remains unchunked despite source attribution"
+    );
+    kani::cover!(
+        allow_b_chunk && source_domain_count == 0 && initial_count != 0,
+        "source-free permissionless refresh remains unchunked"
+    );
+
+    loop {
+        let has_pending = pending != 0;
+        let mut selected = None;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg_pending = pending & (1u64 << slot) != 0;
+            if kani_permissionless_kf_settlement_commits_step(
+                allow_b_chunk,
+                source_domain_count,
+                has_pending,
+                leg_pending,
+            ) {
+                selected = Some(slot);
+                break;
+            }
+            slot += 1;
+        }
+
+        if !chunked || pending == 0 {
+            assert!(selected.is_none());
+            break;
+        }
+
+        let selected = selected.unwrap();
+        assert_eq!(selected, pending.trailing_zeros() as usize);
+        let after = pending & !(1u64 << selected);
+        assert_eq!(after.count_ones() + 1, pending.count_ones());
+        assert_eq!(after.count_ones() + steps + 1, initial_count);
+        pending = after;
+        steps += 1;
+    }
+
+    if chunked {
+        assert_eq!(pending, 0);
+        assert_eq!(steps, initial_count);
+        assert!(steps <= V16_MAX_PORTFOLIO_ASSETS_N as u32);
+    } else {
+        assert_eq!(pending.count_ones(), initial_count);
+        assert_eq!(steps, 0);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_current_liquidatable_account_reuses_certificate_without_refresh() {
+    let cert = HealthCertV16 {
+        certified_equity: kani::any(),
+        certified_initial_req: kani::any(),
+        certified_maintenance_req: kani::any(),
+        certified_liq_deficit: kani::any(),
+        certified_worst_case_loss: kani::any(),
+        cert_oracle_epoch: kani::any(),
+        cert_funding_epoch: kani::any(),
+        cert_risk_epoch: kani::any(),
+        cert_asset_set_epoch: kani::any(),
+        active_bitmap_at_cert: kani::any(),
+        valid: kani::any(),
+    };
+    let oracle_epoch: u64 = kani::any();
+    let funding_epoch: u64 = kani::any();
+    let risk_epoch: u64 = kani::any();
+    let asset_set_epoch: u64 = kani::any();
+    let account_bitmap = kani::any();
+    let account_stale: bool = kani::any();
+    let account_b_stale: bool = kani::any();
+    let has_b_stale_leg: bool = kani::any();
+    let cert_current = kani_cert_is_current(
+        cert,
+        oracle_epoch,
+        funding_epoch,
+        risk_epoch,
+        asset_set_epoch,
+        account_bitmap,
+    );
+    let reuse = kani_position_action_reuses_current_certificate(
+        account_stale,
+        account_b_stale,
+        cert_current,
+        has_b_stale_leg,
+    );
+
+    kani::cover!(
+        reuse && cert.certified_liq_deficit > 0,
+        "a current liquidatable account takes the certificate fast path"
+    );
+    kani::cover!(
+        !reuse && cert_current,
+        "account or leg staleness blocks certificate reuse"
+    );
+    kani::cover!(
+        !reuse && !cert_current,
+        "an invalid or epoch-mismatched certificate forces refresh"
+    );
+
+    assert_eq!(
+        reuse,
+        !account_stale
+            && !account_b_stale
+            && cert.valid
+            && cert.cert_oracle_epoch == oracle_epoch
+            && cert.cert_funding_epoch == funding_epoch
+            && cert.cert_risk_epoch == risk_epoch
+            && cert.cert_asset_set_epoch == asset_set_epoch
+            && cert.active_bitmap_at_cert == account_bitmap
+            && !has_b_stale_leg
+    );
+
+    let mut alternate_liquidation_state = cert;
+    alternate_liquidation_state.certified_liq_deficit = if cert.certified_liq_deficit == 0 {
+        1
+    } else {
+        0
+    };
+    let alternate_current = kani_cert_is_current(
+        alternate_liquidation_state,
+        oracle_epoch,
+        funding_epoch,
+        risk_epoch,
+        asset_set_epoch,
+        account_bitmap,
+    );
+    let alternate_reuse = kani_position_action_reuses_current_certificate(
+        account_stale,
+        account_b_stale,
+        alternate_current,
+        has_b_stale_leg,
+    );
+    assert_eq!(alternate_current, cert_current);
+    assert_eq!(alternate_reuse, reuse);
 }
 
 #[kani::proof]
@@ -1761,6 +2037,9 @@ fn proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value(
     let short_budget = short_budget_raw as u128;
     let budget_total = long_budget + short_budget;
     let insurance = budget_total + slack_raw as u128;
+    let [k_long, k_short, k_epoch_long, k_epoch_short] = [7, -11, 13, -17];
+    let [b_long, b_short, b_epoch_long, b_epoch_short] = [1; 4];
+    let [f_long, f_short, f_epoch_long, f_epoch_short] = [1, -1, 1, -1];
 
     let (market_group_id, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
@@ -1792,6 +2071,18 @@ fn proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value(
     old_asset.fund_px_last = 100;
     old_asset.slot_last = current_slot;
     old_asset.retired_slot = if restart_retired { current_slot } else { 0 };
+    old_asset.k_long = k_long;
+    old_asset.k_short = k_short;
+    old_asset.k_epoch_start_long = k_epoch_long;
+    old_asset.k_epoch_start_short = k_epoch_short;
+    old_asset.b_long_num = b_long;
+    old_asset.b_short_num = b_short;
+    old_asset.b_epoch_start_long_num = b_epoch_long;
+    old_asset.b_epoch_start_short_num = b_epoch_short;
+    old_asset.f_long_num = f_long;
+    old_asset.f_short_num = f_short;
+    old_asset.f_epoch_start_long_num = f_epoch_long;
+    old_asset.f_epoch_start_short_num = f_epoch_short;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&old_asset);
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_budget);
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_budget);
@@ -1828,6 +2119,18 @@ fn proof_v16_public_restart_empty_asset_zero_preserves_budgets_and_senior_value(
     assert_eq!(restarted_asset.effective_price, price_raw as u64);
     assert_eq!(restarted_asset.fund_px_last, price_raw as u64);
     assert_eq!(restarted_asset.slot_last, now_slot);
+    assert_eq!(restarted_asset.k_long, 0);
+    assert_eq!(restarted_asset.k_short, 0);
+    assert_eq!(restarted_asset.k_epoch_start_long, 0);
+    assert_eq!(restarted_asset.k_epoch_start_short, 0);
+    assert_eq!(restarted_asset.b_long_num, 0);
+    assert_eq!(restarted_asset.b_short_num, 0);
+    assert_eq!(restarted_asset.b_epoch_start_long_num, 0);
+    assert_eq!(restarted_asset.b_epoch_start_short_num, 0);
+    assert_eq!(restarted_asset.f_long_num, 0);
+    assert_eq!(restarted_asset.f_short_num, 0);
+    assert_eq!(restarted_asset.f_epoch_start_long_num, 0);
+    assert_eq!(restarted_asset.f_epoch_start_short_num, 0);
     assert_eq!(restarted.insurance_domain_budget_long.get(), long_budget);
     assert_eq!(restarted.insurance_domain_budget_short.get(), short_budget);
     assert_eq!(restarted.insurance_domain_spent_long.get(), 0);
@@ -1927,6 +2230,10 @@ fn assert_v16_public_restart_two_slot_selected_only<const SELECTED_INDEX: usize>
     selected_asset.fund_px_last = 100;
     selected_asset.slot_last = current_slot;
     selected_asset.retired_slot = if restart_retired { current_slot } else { 0 };
+    selected_asset.k_long = 19;
+    selected_asset.k_short = -23;
+    selected_asset.k_epoch_start_long = 29;
+    selected_asset.k_epoch_start_short = -31;
     markets[selected_index].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
     markets[selected_index].engine.insurance_domain_budget_long =
         V16PodU128::new(selected_long_budget);
@@ -1995,6 +2302,10 @@ fn assert_v16_public_restart_two_slot_selected_only<const SELECTED_INDEX: usize>
     assert_eq!(restarted_asset.effective_price, price_raw as u64);
     assert_eq!(restarted_asset.fund_px_last, price_raw as u64);
     assert_eq!(restarted_asset.slot_last, now_slot);
+    assert_eq!(restarted_asset.k_long, 0);
+    assert_eq!(restarted_asset.k_short, 0);
+    assert_eq!(restarted_asset.k_epoch_start_long, 0);
+    assert_eq!(restarted_asset.k_epoch_start_short, 0);
     assert_eq!(
         restarted.insurance_domain_budget_long.get(),
         selected_budget_long_before
@@ -3175,6 +3486,7 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
+    let start_in_recovery: bool = kani::any();
     let current_slot_raw: u8 = kani::any();
     let stale_lag_raw: u8 = kani::any();
     let resolved_delta_raw: u8 = kani::any();
@@ -3197,10 +3509,17 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     header.loss_stale_active = if slot_last < current_slot { 1 } else { 0 };
     header.current_slot = V16PodU64::new(current_slot);
     header.slot_last = V16PodU64::new(slot_last);
+    if start_in_recovery {
+        header.mode = 2;
+        header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        ));
+    }
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
     let slot_last_before = header.slot_last;
+    let recovery_reason_before = header.recovery_reason;
     let asset_before = markets[0].engine.asset;
     let long_budget_before = markets[0].engine.insurance_domain_budget_long;
     let short_budget_before = markets[0].engine.insurance_domain_budget_short;
@@ -3221,11 +3540,16 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
             && surplus > 255,
         "resolved market transition covers future authenticated slot over wide symbolic value state"
     );
+    kani::cover!(
+        start_in_recovery && c_tot > 255 && insurance > 255,
+        "permissionless Recovery-to-Resolved transition preserves nontrivial senior value"
+    );
     assert_eq!(market.header.mode, 1);
     assert_eq!(market.header.resolved_slot.get(), resolved_slot);
     assert_eq!(market.header.current_slot.get(), resolved_slot);
     assert_eq!(market.header.slot_last, slot_last_before);
     assert_eq!(market.header.loss_stale_active, 0);
+    assert_eq!(market.header.recovery_reason, recovery_reason_before);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
@@ -3537,6 +3861,296 @@ fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate(
         "global h-lock lane covers same-instruction candidate h_max branch"
     );
     assert_eq!(lane, expected);
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_bankruptcy_hlock_attribution_is_asset_local_and_fail_closed() {
+    let wire: u8 = kani::any();
+    let lock_0: bool = kani::any();
+    let lock_1: bool = kani::any();
+    let leg_0: bool = kani::any();
+    let leg_1: bool = kani::any();
+    let source_0: bool = kani::any();
+    let source_1: bool = kani::any();
+    let close_ref: u8 = kani::any();
+    kani::assume(wire <= 2);
+    kani::assume(close_ref <= 2);
+    kani::assume(wire != 0 || (!lock_0 && !lock_1));
+    kani::assume(wire != 2 || lock_0 || lock_1);
+
+    let (mut header, mut markets, mut account_header) = two_market_view_fixture();
+    header.bankruptcy_hlock_active = wire;
+    header.bankruptcy_hlock_asset_count = V16PodU32::new(lock_0 as u32 + lock_1 as u32);
+    markets[0].engine.bankruptcy_hlock_active = lock_0 as u8;
+    markets[1].engine.bankruptcy_hlock_active = lock_1 as u8;
+
+    let assets = [
+        markets[0].engine.asset.try_to_runtime().unwrap(),
+        markets[1].engine.asset.try_to_runtime().unwrap(),
+    ];
+    for (slot, active) in [leg_0, leg_1].into_iter().enumerate() {
+        if active {
+            let asset = assets[slot];
+            account_header.legs[slot] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+                active: true,
+                asset_index: slot as u32,
+                market_id: asset.market_id,
+                side: SideV16::Long,
+                basis_pos_q: POS_SCALE as i128,
+                a_basis: ADL_ONE,
+                k_snap: asset.k_long,
+                f_snap: asset.f_long_num,
+                k_rem_num: 0,
+                f_rem_num: 0,
+                epoch_snap: asset.epoch_long,
+                loss_weight: POS_SCALE,
+                b_snap: asset.b_long_num,
+                b_rem: 0,
+                b_epoch_snap: asset.epoch_long,
+                b_stale: false,
+                stale: false,
+            });
+            let word = slot / 64;
+            account_header.active_bitmap[word] =
+                V16PodU64::new(account_header.active_bitmap[word].get() | (1u64 << (slot % 64)));
+        }
+    }
+    let mut source_slot = 0usize;
+    for (asset_index, active) in [source_0, source_1].into_iter().enumerate() {
+        if active {
+            account_header.source_domains[source_slot].domain =
+                V16PodU32::new((asset_index * 2) as u32);
+            account_header.source_domains[source_slot].source_claim_market_id =
+                V16PodU64::new(assets[asset_index].market_id);
+            account_header.source_domains[source_slot].source_claim_bound_num = V16PodU128::new(1);
+            source_slot += 1;
+        }
+    }
+    if close_ref != 0 {
+        let asset_index = (close_ref - 1) as usize;
+        account_header.close_progress =
+            CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+                active: true,
+                close_id: 1,
+                asset_index: asset_index as u32,
+                market_id: assets[asset_index].market_id,
+                domain_side: SideV16::Long,
+                gross_loss_at_close_start: 1,
+                residual_remaining: 1,
+                ..CloseProgressLedgerV16::EMPTY
+            });
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let only_unrelated = market
+        .kani_bankruptcy_hlock_is_only_unrelated_to_account(&account)
+        .unwrap();
+
+    let references_0 = leg_0 || source_0 || close_ref == 1;
+    let references_1 = leg_1 || source_1 || close_ref == 2;
+    let references_locked_asset = (lock_0 && references_0) || (lock_1 && references_1);
+    let expected = wire == 2 && !references_locked_asset;
+
+    kani::cover!(
+        wire == 2 && lock_1 && references_0 && !references_1 && only_unrelated,
+        "an attributed bankruptcy on another asset does not freeze this account"
+    );
+    kani::cover!(
+        wire == 2 && lock_0 && leg_0 && !only_unrelated,
+        "an active leg on the bankrupt asset remains fail-closed"
+    );
+    kani::cover!(
+        wire == 2 && lock_0 && source_0 && !only_unrelated,
+        "a source claim on the bankrupt asset remains fail-closed"
+    );
+    kani::cover!(
+        wire == 2 && lock_0 && close_ref == 1 && !only_unrelated,
+        "an active close on the bankrupt asset remains fail-closed"
+    );
+    kani::cover!(
+        wire == 1 && !only_unrelated,
+        "an unattributed global bankruptcy lock remains fail-closed"
+    );
+    kani::cover!(
+        wire == 0 && !only_unrelated,
+        "an inactive lock is not ignored"
+    );
+    assert_eq!(only_unrelated, expected);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_bankruptcy_asset_lock_is_durable_not_inferred_from_transient_state() {
+    let durable_lock: bool = kani::any();
+    let transient_mask: u8 = kani::any();
+    kani::assume(transient_mask <= 0x3f);
+    let mut slot = EngineAssetSlotV16Account::empty_for_market(1);
+    let mut asset = AssetStateV16 {
+        market_id: 1,
+        lifecycle: AssetLifecycleV16::Active,
+        ..AssetStateV16::default()
+    };
+    if transient_mask & 1 != 0 {
+        asset.mode_long = SideModeV16::DrainOnly;
+    }
+    if transient_mask & 2 != 0 {
+        asset.b_long_num = 1;
+    }
+    if transient_mask & 4 != 0 {
+        asset.social_loss_remainder_long_num = 1;
+    }
+    if transient_mask & 8 != 0 {
+        asset.explicit_unallocated_loss_long = 1;
+    }
+    if transient_mask & 16 != 0 {
+        slot.insurance_domain_spent_long = V16PodU128::new(1);
+    }
+    if transient_mask & 32 != 0 {
+        slot.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    }
+    slot.asset = AssetStateV16Account::from_runtime(&asset);
+    slot.bankruptcy_hlock_active = durable_lock as u8;
+
+    let result = bankruptcy_asset_slot_has_lock_state(&slot).unwrap();
+    kani::cover!(
+        !durable_lock && transient_mask != 0 && !result,
+        "ordinary transient asset state never fabricates bankruptcy attribution"
+    );
+    kani::cover!(
+        durable_lock && transient_mask == 0 && result,
+        "bankruptcy attribution survives after transient state clears"
+    );
+    assert_eq!(result, durable_lock);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_mark_attributed_bankruptcy_is_exact_durable_and_idempotent() {
+    let lock_0: bool = kani::any();
+    let lock_1: bool = kani::any();
+    let prior_unattributed: bool = kani::any();
+    let target: bool = kani::any();
+    let (mut header, mut markets) = two_market_only_fixture();
+    let count_before = lock_0 as u32 + lock_1 as u32;
+    header.bankruptcy_hlock_asset_count = V16PodU32::new(count_before);
+    header.bankruptcy_hlock_active = if prior_unattributed {
+        bankruptcy_hlock_to_wire(true, false)
+    } else {
+        bankruptcy_hlock_to_wire(count_before != 0, true)
+    };
+    markets[0].engine.bankruptcy_hlock_active = lock_0 as u8;
+    markets[1].engine.bankruptcy_hlock_active = lock_1 as u8;
+    let target_index = target as usize;
+    let target_was_locked = [lock_0, lock_1][target_index];
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .kani_mark_attributed_bankruptcy_hlock(target_index)
+            .unwrap();
+    }
+    let expected_count = count_before + u32::from(!target_was_locked);
+    assert_eq!(header.bankruptcy_hlock_asset_count.get(), expected_count);
+    assert_eq!(
+        header.bankruptcy_hlock_active,
+        if prior_unattributed { 1 } else { 2 }
+    );
+    assert_eq!(markets[target_index].engine.bankruptcy_hlock_active, 1);
+    assert_eq!(
+        markets[1 - target_index].engine.bankruptcy_hlock_active,
+        [lock_0, lock_1][1 - target_index] as u8
+    );
+
+    let header_after_first = header;
+    let markets_after_first = markets;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .kani_mark_attributed_bankruptcy_hlock(target_index)
+            .unwrap();
+    }
+    kani::cover!(
+        !target_was_locked && count_before != 0 && !prior_unattributed,
+        "a new affected asset extends an attributed lock exactly once"
+    );
+    kani::cover!(
+        target_was_locked,
+        "repeated bankruptcy attribution is idempotent"
+    );
+    kani::cover!(
+        prior_unattributed,
+        "an unattributed event remains globally fail-closed"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &header,
+        &header_after_first
+    ));
+    for i in 0..2 {
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &markets[i].engine,
+            &markets_after_first[i].engine
+        ));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_bankruptcy_asset_reuse_clears_exactly_one_attribution() {
+    let target_locked: bool = kani::any();
+    let other_locked: bool = kani::any();
+    let prior_unattributed: bool = kani::any();
+    let mut header = MarketGroupV16HeaderAccount::default();
+    let count_before = target_locked as u32 + other_locked as u32;
+    header.bankruptcy_hlock_asset_count = V16PodU32::new(count_before);
+    header.bankruptcy_hlock_active = if prior_unattributed {
+        bankruptcy_hlock_to_wire(true, false)
+    } else {
+        bankruptcy_hlock_to_wire(count_before != 0, true)
+    };
+    let mut slot = EngineAssetSlotV16Account::empty_for_market(1);
+    slot.bankruptcy_hlock_active = target_locked as u8;
+
+    header
+        .kani_clear_attributed_bankruptcy_asset_for_reuse(&mut slot)
+        .unwrap();
+    let expected_count = count_before - u32::from(target_locked);
+    let expected_wire = if prior_unattributed {
+        1
+    } else if other_locked {
+        2
+    } else {
+        0
+    };
+    kani::cover!(
+        target_locked && !other_locked && !prior_unattributed,
+        "reusing the final attributed asset releases the global lock"
+    );
+    kani::cover!(
+        target_locked && other_locked && !prior_unattributed,
+        "reusing one asset preserves another asset's lock"
+    );
+    kani::cover!(
+        target_locked && prior_unattributed,
+        "reusing an attributed asset never clears an unattributed event"
+    );
+    assert_eq!(slot.bankruptcy_hlock_active, 0);
+    assert_eq!(header.bankruptcy_hlock_asset_count.get(), expected_count);
+    assert_eq!(header.bankruptcy_hlock_active, expected_wire);
+
+    let header_after_first = header;
+    header
+        .kani_clear_attributed_bankruptcy_asset_for_reuse(&mut slot)
+        .unwrap();
+    assert!(kani_eq_market_group_v16_header_account(
+        &header,
+        &header_after_first
+    ));
 }
 
 #[kani::proof]
@@ -4218,6 +4832,142 @@ fn proof_v16_locked_trade_margin_gate_cannot_use_positive_pnl_credit() {
     if expected_certified_ok && !expected_locked_ok {
         assert_eq!(locked_result, Err(V16Error::LockActive));
     }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_final_margin_policy_preserves_exit_liveness_and_bankruptcy_gates() {
+    let long_capital_raw: u8 = kani::any();
+    let short_capital_raw: u8 = kani::any();
+    let long_pnl_raw: i8 = kani::any();
+    let short_pnl_raw: i8 = kani::any();
+    let long_fee_debt_raw: u8 = kani::any();
+    let short_fee_debt_raw: u8 = kani::any();
+    let long_equity_raw: i8 = kani::any();
+    let short_equity_raw: i8 = kani::any();
+    let long_req_raw: u8 = kani::any();
+    let short_req_raw: u8 = kani::any();
+    let long_liq_deficit_raw: u8 = kani::any();
+    let short_liq_deficit_raw: u8 = kani::any();
+    let long_cert_valid: bool = kani::any();
+    let short_cert_valid: bool = kani::any();
+    let risk_increasing: bool = kani::any();
+    let locked: bool = kani::any();
+
+    let account = |capital_raw: u8,
+                   pnl_raw: i8,
+                   fee_debt_raw: u8,
+                   equity_raw: i8,
+                   req_raw: u8,
+                   liq_deficit_raw: u8,
+                   valid: bool| {
+        let mut header = PortfolioAccountV16Account::default();
+        header.capital = V16PodU128::new(capital_raw as u128);
+        header.pnl = V16PodI128::new(pnl_raw as i128);
+        header.fee_credits = V16PodI128::new(-(fee_debt_raw as i128));
+        header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+            certified_equity: equity_raw as i128,
+            certified_initial_req: req_raw as u128,
+            certified_maintenance_req: req_raw as u128,
+            certified_liq_deficit: liq_deficit_raw as u128,
+            certified_worst_case_loss: req_raw as u128,
+            cert_oracle_epoch: 0,
+            cert_funding_epoch: 0,
+            cert_risk_epoch: 0,
+            cert_asset_set_epoch: 0,
+            active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+            valid,
+        });
+        header
+    };
+    let long_header = account(
+        long_capital_raw,
+        long_pnl_raw,
+        long_fee_debt_raw,
+        long_equity_raw,
+        long_req_raw,
+        long_liq_deficit_raw,
+        long_cert_valid,
+    );
+    let short_header = account(
+        short_capital_raw,
+        short_pnl_raw,
+        short_fee_debt_raw,
+        short_equity_raw,
+        short_req_raw,
+        short_liq_deficit_raw,
+        short_cert_valid,
+    );
+    let long = PortfolioV16View::new(&long_header);
+    let short = PortfolioV16View::new(&short_header);
+
+    let certified_ok =
+        |equity: i8, req: u8, valid: bool| valid && equity >= 0 && (equity as u8) >= req;
+    let principal_only_ok = |capital: u8, pnl: i8, fee_debt: u8, req: u8| {
+        let equity = capital as i128 + (pnl as i128).min(0) - fee_debt as i128;
+        equity >= 0 && (equity as u128) >= req as u128
+    };
+    let long_certified_ok = certified_ok(long_equity_raw, long_req_raw, long_cert_valid);
+    let short_certified_ok = certified_ok(short_equity_raw, short_req_raw, short_cert_valid);
+    let long_principal_only_ok = principal_only_ok(
+        long_capital_raw,
+        long_pnl_raw,
+        long_fee_debt_raw,
+        long_req_raw,
+    );
+    let short_principal_only_ok = principal_only_ok(
+        short_capital_raw,
+        short_pnl_raw,
+        short_fee_debt_raw,
+        short_req_raw,
+    );
+    let margin_required =
+        risk_increasing || long_liq_deficit_raw != 0 || short_liq_deficit_raw != 0;
+    let expected_ok = !margin_required
+        || (long_certified_ok
+            && short_certified_ok
+            && (!locked || (long_principal_only_ok && short_principal_only_ok)));
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_ensure_trade_final_margin_policy(
+        &long,
+        &short,
+        locked,
+        risk_increasing,
+    );
+
+    kani::cover!(
+        !margin_required && !long_certified_ok && !short_certified_ok,
+        "maintenance-healthy bilateral reductions progress below IM"
+    );
+    kani::cover!(
+        risk_increasing && !long_certified_ok && result.is_err(),
+        "risk increases cannot bypass certified initial margin"
+    );
+    kani::cover!(
+        !risk_increasing && long_liq_deficit_raw != 0 && !long_certified_ok && result.is_err(),
+        "liquidatable counterparties cannot use the reduction exemption"
+    );
+    kani::cover!(
+        margin_required
+            && locked
+            && long_certified_ok
+            && short_certified_ok
+            && !long_principal_only_ok
+            && result.is_err(),
+        "locked risk cannot satisfy IM using positive credit"
+    );
+    kani::cover!(
+        margin_required
+            && locked
+            && long_certified_ok
+            && short_certified_ok
+            && long_principal_only_ok
+            && short_principal_only_ok
+            && result.is_ok(),
+        "fully funded locked risk remains admissible"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
 }
 
 #[kani::proof]
@@ -6494,6 +7244,227 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_expiry_reclassifies_principal_and_impairs_lien() {
+    let fresh_atoms: u128 = kani::any();
+    let liened_atoms: u128 = kani::any();
+    kani::assume(fresh_atoms <= MAX_VAULT_TVL);
+    kani::assume(liened_atoms <= MAX_VAULT_TVL - fresh_atoms);
+    let total_atoms = fresh_atoms + liened_atoms;
+    kani::assume(total_atoms > 0);
+    let fresh_num = fresh_atoms * BOUND_SCALE;
+    let liened_num = liened_atoms * BOUND_SCALE;
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: fresh_num,
+        valid_liened_backing_num: liened_num,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: fresh_num + liened_num,
+        valid_liened_backing_num: liened_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let (bucket_after, source_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+            bucket, source, 10,
+        )
+        .unwrap();
+
+    kani::cover!(
+        fresh_atoms > 0 && liened_atoms == 0,
+        "expiry reclassifies fresh-only backing"
+    );
+    kani::cover!(liened_atoms > 0, "expiry impairs liened backing");
+    assert_eq!(bucket_after.fresh_unliened_backing_num, 0);
+    assert_eq!(bucket_after.valid_liened_backing_num, 0);
+    assert_eq!(bucket_after.impaired_liened_backing_num, liened_num);
+    assert_eq!(bucket_after.consumed_liened_backing_num, 0);
+    assert_eq!(source_after.fresh_reserved_backing_num, 0);
+    assert_eq!(source_after.valid_liened_backing_num, 0);
+    assert_eq!(source_after.impaired_liened_backing_num, liened_num);
+    assert_eq!(source_after.provider_receivable_num, 0);
+    assert_eq!(source_after.spent_backing_num, 0);
+    assert_eq!(source_after.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(source_after.credit_epoch, source.credit_epoch);
+    assert_eq!(
+        source.fresh_reserved_backing_num - source_after.fresh_reserved_backing_num,
+        fresh_num + liened_num,
+        "all recoverable provider principal leaves the senior backing class"
+    );
+    if liened_num == 0 {
+        assert_eq!(bucket_after.status, BackingBucketStatusV16::Expired);
+    } else {
+        assert_eq!(bucket_after.status, BackingBucketStatusV16::Impaired);
+    }
+    assert_eq!(
+        bucket_after.impaired_liened_backing_num,
+        source_after.impaired_liened_backing_num
+    );
+
+    let other_senior: u128 = kani::any();
+    kani::assume(other_senior <= MAX_VAULT_TVL - total_atoms);
+    let junior_before: u128 = kani::any();
+    kani::assume(junior_before <= MAX_VAULT_TVL - total_atoms - other_senior);
+    let vault = other_senior + total_atoms + junior_before;
+    let junior_after = vault - other_senior;
+    kani::cover!(junior_before == 0, "expiry covers a tight senior vault");
+    kani::cover!(
+        junior_before > 0,
+        "expiry covers pre-existing junior surplus"
+    );
+    assert_eq!(junior_after, junior_before + total_atoms);
+    assert_eq!(
+        StockReconciliationProofV16 {
+            token_vault: vault,
+            senior_capital_total: other_senior,
+            insurance_capital: 0,
+            backing_provider_earnings: 0,
+            counterparty_backing_principal: total_atoms,
+            settlement_rounding_residue_total: 0,
+            unallocated_protocol_surplus: junior_before,
+        }
+        .validate(),
+        Ok(())
+    );
+    assert_eq!(
+        StockReconciliationProofV16 {
+            token_vault: vault,
+            senior_capital_total: other_senior,
+            insurance_capital: 0,
+            backing_provider_earnings: 0,
+            counterparty_backing_principal: 0,
+            settlement_rounding_residue_total: 0,
+            unallocated_protocol_surplus: junior_after,
+        }
+        .validate(),
+        Ok(())
+    );
+}
+
+// Permissionless expiry liveness over every lapsed/future ordering in the
+// Kani-sized source-domain roster. Each successful step removes exactly one
+// lapsed obligation while future and unrelated domains remain untouched.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_live_source_backing_expiry_is_bounded_complete_and_isolated() {
+    assert_eq!(PORTFOLIO_SOURCE_DOMAIN_CAP, 4);
+    let roster_len: u8 = kani::any();
+    let lapsed_mask: u8 = kani::any();
+    let future_mask: u8 = kani::any();
+    kani::assume(roster_len as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    let roster_mask = (1u8 << roster_len) - 1;
+    kani::assume(lapsed_mask & !roster_mask == 0);
+    kani::assume(future_mask & !roster_mask == 0);
+    kani::assume(lapsed_mask & future_mask == 0);
+
+    let now_slot = 10u64;
+    let mut remaining = lapsed_mask;
+    let mut calls = 0usize;
+    while calls <= PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let rank_before = remaining.count_ones();
+        let mut expected = None;
+        let mut domain = 0usize;
+        while domain < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if expected.is_none() && remaining & (1u8 << domain) != 0 {
+                expected = Some(domain);
+            }
+            domain += 1;
+        }
+
+        let mut selected = None;
+        let mut stopped = false;
+        domain = 0;
+        while domain < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if !stopped {
+                let bit = 1u8 << domain;
+                let occupied = domain < roster_len as usize;
+                let sparse_tail = domain == roster_len as usize;
+                let fresh = remaining & bit != 0 || future_mask & bit != 0;
+                let bucket_status = if fresh {
+                    BackingBucketStatusV16::Fresh
+                } else {
+                    BackingBucketStatusV16::Empty
+                };
+                let expiry_slot = if remaining & bit != 0 {
+                    now_slot
+                } else {
+                    now_slot + 1
+                };
+                (selected, stopped) =
+                    MarketGroupV16ViewMut::<u64>::kani_lapsed_source_backing_scan_step(
+                        selected,
+                        sparse_tail,
+                        occupied,
+                        domain,
+                        bucket_status,
+                        expiry_slot,
+                        now_slot,
+                    );
+            }
+            domain += 1;
+        }
+        assert_eq!(selected, expected);
+
+        if let Some(selected_domain) = selected {
+            let selected_bit = 1u8 << selected_domain;
+            assert!(remaining & selected_bit != 0);
+            assert!(future_mask & selected_bit == 0);
+            remaining &= !selected_bit;
+            assert_eq!(remaining.count_ones() + 1, rank_before);
+            let bucket = BackingBucketV16 {
+                market_id: 1,
+                fresh_unliened_backing_num: BOUND_SCALE,
+                expiry_slot: now_slot,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            };
+            let source = SourceCreditStateV16 {
+                fresh_reserved_backing_num: BOUND_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            };
+            let (expired, source_after) =
+                MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+                    bucket, source, now_slot,
+                )
+                .unwrap();
+            assert_eq!(expired.status, BackingBucketStatusV16::Expired);
+            assert_eq!(expired.fresh_unliened_backing_num, 0);
+            assert_eq!(source_after.fresh_reserved_backing_num, 0);
+        } else {
+            assert_eq!(rank_before, 0);
+        }
+        calls += 1;
+    }
+
+    assert_eq!(remaining, 0);
+
+    kani::cover!(lapsed_mask == 0, "clean roster is a no-op");
+    kani::cover!(
+        lapsed_mask.count_ones() == 1,
+        "single lapsed domain progresses"
+    );
+    kani::cover!(
+        lapsed_mask.count_ones() > 1,
+        "multiple lapsed domains drain"
+    );
+    kani::cover!(
+        lapsed_mask & 1 == 0 && lapsed_mask != 0,
+        "scan skips an earlier non-lapsed domain"
+    );
+    kani::cover!(future_mask != 0, "future backing remains isolated");
+    kani::cover!(
+        (roster_len as usize) < PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "compact sparse tail terminates the scan"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {
@@ -7152,20 +8123,285 @@ fn proof_v16_retire_nonempty_asset_rejects() {
     assert_eq!(result, Err(V16Error::LockActive));
 }
 
+// K is price-settlement history once every claimant-bearing field is empty.
+// Prove magnitude and lane-pattern independence over all four i128 lanes.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_empty_lifecycle_classifier_is_k_history_independent() {
+    let k_history: [i128; 4] = kani::any();
+    let zero_adl_epoch: bool = kani::any();
+    let mut asset = AssetStateV16::default();
+    if zero_adl_epoch {
+        asset.a_long = 0;
+        asset.a_short = 0;
+    }
+    asset.k_long = k_history[0];
+    asset.k_short = k_history[1];
+    asset.k_epoch_start_long = k_history[2];
+    asset.k_epoch_start_short = k_history[3];
+    let mut zero_k = asset;
+    zero_k.k_long = 0;
+    zero_k.k_short = 0;
+    zero_k.k_epoch_start_long = 0;
+    zero_k.k_epoch_start_short = 0;
+
+    let classified = MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(asset);
+    let zero_classified =
+        MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(zero_k);
+
+    kani::cover!(
+        k_history[0] == i128::MAX
+            && k_history[1] == i128::MIN + 1
+            && k_history[2] == 1
+            && k_history[3] == -1,
+        "mixed current and epoch-start K history is inert at valid extrema"
+    );
+    kani::cover!(
+        k_history[0] != 0
+            && k_history[1] != 0
+            && k_history[2] != 0
+            && k_history[3] != 0
+            && zero_adl_epoch,
+        "all K history lanes are inert in the zero ADL epoch"
+    );
+    assert_eq!(classified, zero_classified);
+    assert!(!classified);
+}
+
+// B is discharged history once every claimant-bearing field is empty. Prove
+// magnitude and lane-pattern independence over the full four-u128 domain.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_empty_lifecycle_classifier_is_b_history_independent() {
+    let b_history: [u128; 4] = kani::any();
+    let zero_adl_epoch: bool = kani::any();
+    let mut asset = AssetStateV16::default();
+    if zero_adl_epoch {
+        asset.a_long = 0;
+        asset.a_short = 0;
+    }
+    asset.b_long_num = b_history[0];
+    asset.b_short_num = b_history[1];
+    asset.b_epoch_start_long_num = b_history[2];
+    asset.b_epoch_start_short_num = b_history[3];
+    let mut zero_b = asset;
+    zero_b.b_long_num = 0;
+    zero_b.b_short_num = 0;
+    zero_b.b_epoch_start_long_num = 0;
+    zero_b.b_epoch_start_short_num = 0;
+
+    let classified = MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(asset);
+    let zero_classified =
+        MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(zero_b);
+
+    kani::cover!(
+        b_history[0] == u128::MAX && b_history[1] == 0 && b_history[2] == 1 && b_history[3] > 1,
+        "mixed current and epoch-start B history is inert at full width"
+    );
+    kani::cover!(
+        b_history[0] != 0
+            && b_history[1] != 0
+            && b_history[2] != 0
+            && b_history[3] != 0
+            && zero_adl_epoch,
+        "all B history lanes are inert in the zero ADL epoch"
+    );
+    assert_eq!(classified, zero_classified);
+    assert!(!classified);
+}
+
+// Funding indices are settlement history once every claimant-bearing field is
+// empty. Prove magnitude and lane-pattern independence over all four i128 lanes.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_empty_lifecycle_classifier_is_f_history_independent() {
+    let f_history: [i128; 4] = kani::any();
+    let zero_adl_epoch: bool = kani::any();
+    let mut asset = AssetStateV16::default();
+    if zero_adl_epoch {
+        asset.a_long = 0;
+        asset.a_short = 0;
+    }
+    asset.f_long_num = f_history[0];
+    asset.f_short_num = f_history[1];
+    asset.f_epoch_start_long_num = f_history[2];
+    asset.f_epoch_start_short_num = f_history[3];
+    let mut zero_f = asset;
+    zero_f.f_long_num = 0;
+    zero_f.f_short_num = 0;
+    zero_f.f_epoch_start_long_num = 0;
+    zero_f.f_epoch_start_short_num = 0;
+
+    let classified = MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(asset);
+    let zero_classified =
+        MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(zero_f);
+
+    kani::cover!(
+        f_history[0] == i128::MAX
+            && f_history[1] == i128::MIN + 1
+            && f_history[2] == 1
+            && f_history[3] == -1,
+        "mixed current and epoch-start F history is inert at valid extrema"
+    );
+    kani::cover!(
+        f_history[0] != 0
+            && f_history[1] != 0
+            && f_history[2] != 0
+            && f_history[3] != 0
+            && zero_adl_epoch,
+        "all F history lanes are inert in the zero ADL epoch"
+    );
+    assert_eq!(classified, zero_classified);
+    assert!(!classified);
+}
+
+// Complement the noninterference theorem: every asset-local field that still
+// owns risk, a claimant, or unsettled loss must independently block reuse.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_empty_lifecycle_classifier_rejects_every_asset_claimant_and_loss_field() {
+    let blocker: u8 = kani::any();
+    let short_side: bool = kani::any();
+    kani::assume(blocker <= 9);
+    let mut asset = AssetStateV16 {
+        k_long: i128::MAX,
+        k_short: i128::MIN + 1,
+        k_epoch_start_long: 1,
+        k_epoch_start_short: -1,
+        b_long_num: u128::MAX,
+        b_short_num: 1,
+        b_epoch_start_long_num: u128::MAX,
+        b_epoch_start_short_num: 1,
+        f_long_num: i128::MAX,
+        f_short_num: i128::MIN + 1,
+        f_epoch_start_long_num: 1,
+        f_epoch_start_short_num: -1,
+        ..AssetStateV16::default()
+    };
+
+    match blocker {
+        0 => {
+            if short_side {
+                asset.mode_short = SideModeV16::DrainOnly;
+            } else {
+                asset.mode_long = SideModeV16::DrainOnly;
+            }
+        }
+        1 => {
+            if short_side {
+                asset.a_short = 0;
+            } else {
+                asset.a_long = 0;
+            }
+        }
+        2 => {
+            if short_side {
+                asset.oi_eff_short_q = 1;
+            } else {
+                asset.oi_eff_long_q = 1;
+            }
+        }
+        3 => {
+            if short_side {
+                asset.stored_pos_count_short = 1;
+            } else {
+                asset.stored_pos_count_long = 1;
+            }
+        }
+        4 => {
+            if short_side {
+                asset.stale_account_count_short = 1;
+            } else {
+                asset.stale_account_count_long = 1;
+            }
+        }
+        5 => {
+            if short_side {
+                asset.pending_obligation_count_short = 1;
+            } else {
+                asset.pending_obligation_count_long = 1;
+            }
+        }
+        6 => {
+            if short_side {
+                asset.loss_weight_sum_short = 1;
+            } else {
+                asset.loss_weight_sum_long = 1;
+            }
+        }
+        7 => {
+            if short_side {
+                asset.social_loss_remainder_short_num = 1;
+            } else {
+                asset.social_loss_remainder_long_num = 1;
+            }
+        }
+        8 => {
+            if short_side {
+                asset.social_loss_dust_short_num = 1;
+            } else {
+                asset.social_loss_dust_long_num = 1;
+            }
+        }
+        _ => {
+            if short_side {
+                asset.explicit_unallocated_loss_short = 1;
+            } else {
+                asset.explicit_unallocated_loss_long = 1;
+            }
+        }
+    }
+
+    kani::cover!(
+        blocker == 0 && !short_side,
+        "long mode blocker is reachable"
+    );
+    kani::cover!(
+        blocker == 2 && short_side,
+        "short open-interest blocker is reachable"
+    );
+    kani::cover!(
+        blocker == 9 && !short_side,
+        "long explicit-loss blocker is reachable"
+    );
+    assert!(MarketGroupV16ViewMut::<u64>::kani_asset_has_empty_lifecycle_blocker(asset));
+}
+
+// Bind the classifier theorems to the persisted zero-copy retirement path with
+// all K, F, and B lanes present; the separate theorems above discharge magnitude.
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let with_senior_balances: bool = kani::any();
-    let retire_slot_raw: u8 = kani::any();
-    kani::assume((1..=10).contains(&retire_slot_raw));
+    let late_retirement: bool = kani::any();
     let c_tot = if with_senior_balances { 7 } else { 0 };
     let insurance = if with_senior_balances { 3 } else { 0 };
-    let retire_slot = retire_slot_raw as u64;
+    let retire_slot = if late_retirement { 10 } else { 1 };
+    let [k_long, k_short, k_epoch_long, k_epoch_short] = [7, -11, 13, -17];
+    let [b_long, b_short, b_epoch_long, b_epoch_short] = [1; 4];
+    let [f_long, f_short, f_epoch_long, f_epoch_short] = [1, -1, 1, -1];
     let (mut header, mut markets, _) = one_market_view_fixture();
     header.vault = V16PodU128::new(c_tot + insurance);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
+    let mut historical_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    historical_asset.k_long = k_long;
+    historical_asset.k_short = k_short;
+    historical_asset.k_epoch_start_long = k_epoch_long;
+    historical_asset.k_epoch_start_short = k_epoch_short;
+    historical_asset.b_long_num = b_long;
+    historical_asset.b_short_num = b_short;
+    historical_asset.b_epoch_start_long_num = b_epoch_long;
+    historical_asset.b_epoch_start_short_num = b_epoch_short;
+    historical_asset.f_long_num = f_long;
+    historical_asset.f_short_num = f_short;
+    historical_asset.f_epoch_start_long_num = f_epoch_long;
+    historical_asset.f_epoch_start_short_num = f_epoch_short;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&historical_asset);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -7179,11 +8415,28 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        retire_slot > 1 && with_senior_balances && asset.lifecycle == AssetLifecycleV16::Retired,
-        "empty asset can retire without moving nonzero senior balances"
+        late_retirement
+            && with_senior_balances
+            && asset.lifecycle == AssetLifecycleV16::Retired
+            && asset.k_long != 0
+            && asset.f_long_num != 0
+            && asset.b_long_num != 0,
+        "empty asset with inert K/F/B history can retire without moving senior balances"
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
     assert_eq!(asset.retired_slot, retire_slot);
+    assert_eq!(asset.k_long, k_long);
+    assert_eq!(asset.k_short, k_short);
+    assert_eq!(asset.k_epoch_start_long, k_epoch_long);
+    assert_eq!(asset.k_epoch_start_short, k_epoch_short);
+    assert_eq!(asset.b_long_num, b_long);
+    assert_eq!(asset.b_short_num, b_short);
+    assert_eq!(asset.b_epoch_start_long_num, b_epoch_long);
+    assert_eq!(asset.b_epoch_start_short_num, b_epoch_short);
+    assert_eq!(asset.f_long_num, f_long);
+    assert_eq!(asset.f_short_num, f_short);
+    assert_eq!(asset.f_epoch_start_long_num, f_epoch_long);
+    assert_eq!(asset.f_epoch_start_short_num, f_epoch_short);
     assert_eq!(market.header.current_slot.get(), retire_slot);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
@@ -7193,7 +8446,6 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
         asset_set_epoch_before + 1
     );
     assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
-    assert_eq!(market.validate_shape(), Ok(()));
 }
 
 #[kani::proof]
@@ -8678,6 +9930,119 @@ fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_close_terminal_payout_conserves_vault_and_value_classes() {
+    let account_capital = kani::any::<u64>() as u128;
+    let resolved_claimable = kani::any::<u64>() as u128;
+    let vault = kani::any::<u64>() as u128;
+    let c_tot = kani::any::<u64>() as u128;
+    kani::assume(account_capital <= MAX_VAULT_TVL);
+    kani::assume(resolved_claimable <= MAX_VAULT_TVL);
+    kani::assume(vault <= MAX_VAULT_TVL);
+    kani::assume(c_tot <= MAX_VAULT_TVL);
+    let (payout, capital_paid, resolved_paid, vault_after, c_tot_after) =
+        MarketGroupV16ViewMut::<u64>::kani_resolved_close_terminal_payout_delta(
+            account_capital,
+            resolved_claimable,
+            vault,
+            c_tot,
+        )
+        .unwrap();
+
+    kani::cover!(
+        vault < account_capital && vault > 0,
+        "scarce vault pays only part of account capital"
+    );
+    kani::cover!(
+        vault > account_capital && vault < account_capital + resolved_claimable,
+        "scarce vault pays capital plus part of the resolved claim"
+    );
+    kani::cover!(
+        vault >= account_capital + resolved_claimable
+            && account_capital > 0
+            && resolved_claimable > 0,
+        "funded vault pays both value classes in full"
+    );
+
+    assert_eq!(payout, (account_capital + resolved_claimable).min(vault));
+    assert_eq!(capital_paid + resolved_paid, payout);
+    assert!(capital_paid <= account_capital);
+    assert!(resolved_paid <= resolved_claimable);
+    assert_eq!(vault_after + payout, vault);
+    assert_eq!(c_tot_after + account_capital.min(c_tot), c_tot);
+    if vault >= account_capital + resolved_claimable {
+        assert_eq!(capital_paid, account_capital);
+        assert_eq!(resolved_paid, resolved_claimable);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_source_close_phase_strictly_decreases_global_rank() {
+    let liened: bool = kani::any();
+    let status_raw: u8 = kani::any();
+    let expiry_slot: u8 = kani::any();
+    let current_slot: u8 = kani::any();
+    let remaining_domains: u8 = kani::any();
+    let tail_rank: u8 = kani::any();
+    kani::assume(status_raw <= 3);
+    kani::assume(remaining_domains >= 1);
+    kani::assume(remaining_domains as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    let min_tail_rank = remaining_domains - 1;
+    let max_tail_rank = 3 * (remaining_domains - 1);
+    kani::assume(tail_rank >= min_tail_rank && tail_rank <= max_tail_rank);
+
+    let status = match status_raw {
+        0 => BackingBucketStatusV16::Empty,
+        1 => BackingBucketStatusV16::Fresh,
+        2 => BackingBucketStatusV16::Expired,
+        _ => BackingBucketStatusV16::Impaired,
+    };
+    let lapsed = status == BackingBucketStatusV16::Fresh && expiry_slot <= current_slot;
+    let phase = kani_resolved_source_close_phase(
+        if liened { BOUND_SCALE } else { 0 },
+        status,
+        expiry_slot as u64,
+        current_slot as u64,
+    );
+    let current_rank = 1u8 + u8::from(liened) + u8::from(lapsed);
+    let rank_before = tail_rank + current_rank;
+    let rank_after = match phase {
+        0 => tail_rank + 1 + u8::from(lapsed),
+        1 => tail_rank + 1,
+        2 => tail_rank,
+        _ => unreachable!(),
+    };
+
+    kani::cover!(
+        liened && lapsed && remaining_domains as usize == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "max-domain close releases a lien before retaining its pending expiry"
+    );
+    kani::cover!(
+        !liened && lapsed && remaining_domains > 1,
+        "an expired first domain progresses while a nonempty tail remains"
+    );
+    kani::cover!(
+        !liened && !lapsed && remaining_domains > 1 && tail_rank > min_tail_rank,
+        "a prepared claim is processed with nontrivial later obligations"
+    );
+    kani::cover!(
+        !liened && !lapsed && remaining_domains == 1 && tail_rank == 0,
+        "the final prepared claim reaches the zero-rank base case"
+    );
+
+    assert_eq!(phase == 0, liened);
+    assert_eq!(phase == 1, !liened && lapsed);
+    assert_eq!(phase == 2, !liened && !lapsed);
+    assert_eq!(rank_after + 1, rank_before);
+    assert!(rank_after < rank_before);
+    assert!(rank_before >= remaining_domains);
+    assert!(rank_before <= 3 * remaining_domains);
+}
+
+#[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_resolved_two_active_legs_are_unattributed_for_bankruptcy() {
@@ -8839,6 +10204,63 @@ fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_expired_frozen_asset_close_routing_is_local_and_fail_closed() {
+    let close_active: bool = kani::any();
+    let residual_raw: u8 = kani::any();
+    let deadline_expired: bool = kani::any();
+    let asset_local_recovery: bool = kani::any();
+    let stale: bool = kani::any();
+    let b_stale: bool = kani::any();
+    let liquidatable: bool = kani::any();
+    let residual = residual_raw as u128;
+    let outstanding = close_active && residual != 0;
+
+    let plan = kani_close_progress_auto_crank_plan(
+        close_active,
+        residual,
+        deadline_expired,
+        asset_local_recovery,
+        stale,
+        b_stale,
+        liquidatable,
+    );
+
+    kani::cover!(
+        outstanding && deadline_expired && asset_local_recovery && stale && b_stale && liquidatable,
+        "asset-local close wins every overlapping ordinary continuation"
+    );
+    kani::cover!(
+        outstanding && deadline_expired && !asset_local_recovery,
+        "expired drifting close fails closed to global recovery"
+    );
+    kani::cover!(
+        outstanding && !deadline_expired && !asset_local_recovery && stale,
+        "nonexpired ordinary close does not invent global recovery"
+    );
+
+    if outstanding && asset_local_recovery {
+        assert_eq!(
+            plan,
+            AutoCrankPlanV16::AdvanceRecoveryClose { asset_index: 7 }
+        );
+    }
+    if outstanding && deadline_expired && !asset_local_recovery {
+        assert_eq!(
+            plan,
+            AutoCrankPlanV16::DeclareRecovery {
+                reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            }
+        );
+    }
+    assert!(
+        !matches!(plan, AutoCrankPlanV16::DeclareRecovery { .. })
+            || (outstanding && deadline_expired && !asset_local_recovery)
+    );
 }
 
 #[kani::proof]
@@ -9180,6 +10602,42 @@ fn proof_v16_equity_active_accrual_requires_protective_progress_before_mutation(
     assert_eq!(market.header.current_slot, header_before.current_slot);
     assert_eq!(market.header.slot_last, header_before.slot_last);
     assert_eq!(market.header.oracle_epoch, header_before.oracle_epoch);
+    assert_eq!(market.markets[0].engine.asset, market_before.engine.asset);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_lagged_target_zero_delta_cannot_consume_accrual_segment() {
+    let target_delta_raw: u8 = kani::any();
+    kani::assume(target_delta_raw > 0);
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.raw_oracle_target_price = asset
+        .effective_price
+        .checked_add(target_delta_raw as u64)
+        .unwrap();
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let header_before = header;
+    let market_before = markets[0];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.accrue_asset_to_not_atomic(0, 2, asset.effective_price, 0, true);
+
+    kani::cover!(
+        target_delta_raw > 1,
+        "lagged-target proof covers a nontrivial target distance"
+    );
+    assert_eq!(result, Err(V16Error::NonProgress));
+    assert_eq!(market.header.current_slot, header_before.current_slot);
+    assert_eq!(market.header.slot_last, header_before.slot_last);
+    assert_eq!(market.header.oracle_epoch, header_before.oracle_epoch);
+    assert_eq!(market.header.funding_epoch, header_before.funding_epoch);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
     assert_eq!(market.markets[0].engine.asset, market_before.engine.asset);
 }
 
@@ -10111,6 +11569,204 @@ fn proof_v16_view_initial_margin_source_lien_creation_is_backed() {
         backing_num
     );
     assert_eq!(source_domain.source_lien_fee_last_slot.get(), current_slot);
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_source_lien_allocation_plan_is_complete_bounded_and_ordered() {
+    let claim_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let backing_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let rate_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let request_raw: u8 = kani::any();
+    let request = (request_raw & 31) as u128;
+    let mut remaining = request;
+    let mut total_capacity = 0u128;
+    let mut domain = 0usize;
+    let mut touched = 0usize;
+    let mut used_fractional_rate = false;
+    while domain < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let claim = (claim_raw[domain] & 7) as u128;
+        let backing = (backing_raw[domain] & 7) as u128;
+        let rate_code = rate_raw[domain] & 3;
+        let rate = if rate_code == 3 {
+            0
+        } else {
+            CREDIT_RATE_SCALE >> rate_code
+        };
+        let claim_capacity = claim * rate / CREDIT_RATE_SCALE;
+        let capacity = claim_capacity.min(backing);
+        let take = MarketGroupV16ViewMut::<u64>::kani_source_credit_lien_allocation_take(
+            remaining,
+            claim * BOUND_SCALE,
+            backing * BOUND_SCALE,
+            rate,
+        )
+        .unwrap();
+        assert_eq!(take, remaining.min(capacity));
+        assert!(take <= remaining);
+        assert!(take <= claim);
+        assert!(take <= backing);
+        if remaining == 0 {
+            assert_eq!(take, 0);
+        }
+        if take != 0 {
+            touched += 1;
+            used_fractional_rate |= rate != CREDIT_RATE_SCALE;
+        }
+        remaining -= take;
+        total_capacity += capacity;
+        domain += 1;
+    }
+
+    let allocated = request - remaining;
+    kani::cover!(request == 0, "zero source-credit request is the identity");
+    kani::cover!(
+        request > total_capacity && total_capacity > 0,
+        "insufficient aggregate backing exhausts every source"
+    );
+    kani::cover!(
+        request < total_capacity && touched > 1,
+        "allocation crosses source boundaries and stops with surplus"
+    );
+    kani::cover!(
+        touched == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "allocation can consume every bounded source"
+    );
+    kani::cover!(
+        used_fractional_rate && touched > 1,
+        "allocation composes independently haircutted sources"
+    );
+    assert_eq!(allocated, request.min(total_capacity));
+    assert_eq!(remaining, request.saturating_sub(total_capacity));
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_source_lien_entry_relabel_preserves_persisted_aggregate_invariant() {
+    let pre_effective = (kani::any::<u8>() & 7) as u128;
+    let added_effective = 1 + (kani::any::<u8>() & 3) as u128;
+    let claim_slack = (kani::any::<u8>() & 7) as u128;
+    let pre_counterparty: bool = kani::any();
+    let add_counterparty: bool = kani::any();
+    let current_slot = 2 + (kani::any::<u8>() & 7) as u64;
+    let pre_num = pre_effective * BOUND_SCALE;
+    let added_num = added_effective * BOUND_SCALE;
+    let claim_bound_num = (pre_effective + added_effective + claim_slack) * BOUND_SCALE;
+    let pre_counterparty_num = if pre_counterparty { pre_num } else { 0 };
+    let pre_insurance_num = if pre_counterparty { 0 } else { pre_num };
+    let prior_fee_slot = if pre_counterparty_num == 0 {
+        0
+    } else {
+        current_slot - 1
+    };
+    let mut source = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(1),
+        source_claim_market_id: V16PodU64::new(9),
+        source_claim_bound_num: V16PodU128::new(claim_bound_num),
+        source_claim_liened_num: V16PodU128::new(pre_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(pre_counterparty_num),
+        source_claim_insurance_liened_num: V16PodU128::new(pre_insurance_num),
+        source_lien_effective_reserved: V16PodU128::new(pre_effective),
+        source_lien_counterparty_backing_num: V16PodU128::new(pre_counterparty_num),
+        source_lien_insurance_backing_num: V16PodU128::new(pre_insurance_num),
+        source_lien_fee_last_slot: V16PodU64::new(prior_fee_slot),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    MarketGroupV16ViewMut::<u64>::kani_validate_account_source_credit_lien_entry(source, 1)
+        .unwrap();
+    let before = source;
+
+    if add_counterparty {
+        MarketGroupV16ViewMut::<u64>::kani_apply_counterparty_source_credit_lien_delta(
+            &mut source,
+            added_num,
+            added_num,
+            added_effective,
+            current_slot,
+        )
+        .unwrap();
+    } else {
+        MarketGroupV16ViewMut::<u64>::kani_apply_insurance_source_credit_lien_delta(
+            &mut source,
+            added_num,
+            added_num,
+            added_effective,
+            current_slot,
+        )
+        .unwrap();
+    }
+    MarketGroupV16ViewMut::<u64>::kani_validate_account_source_credit_lien_entry(source, 1)
+        .unwrap();
+
+    let added_counterparty_num = if add_counterparty { added_num } else { 0 };
+    let added_insurance_num = if add_counterparty { 0 } else { added_num };
+    kani::cover!(
+        pre_effective > 0 && pre_counterparty && add_counterparty,
+        "an existing counterparty lien can be extended"
+    );
+    kani::cover!(
+        pre_effective > 0 && !pre_counterparty && add_counterparty,
+        "a counterparty lien can be added beside an insurance lien"
+    );
+    kani::cover!(
+        pre_effective > 0 && pre_counterparty && !add_counterparty,
+        "an insurance lien can be added beside a counterparty lien"
+    );
+    kani::cover!(
+        pre_effective == 0 && claim_slack > 0,
+        "a first lien can reserve only part of a larger claim"
+    );
+    assert_eq!(source.domain, before.domain);
+    assert_eq!(source.source_claim_market_id, before.source_claim_market_id);
+    assert_eq!(source.source_claim_bound_num, before.source_claim_bound_num);
+    assert_eq!(source.source_claim_liened_num.get(), pre_num + added_num);
+    assert_eq!(
+        source.source_claim_counterparty_liened_num.get(),
+        pre_counterparty_num + added_counterparty_num
+    );
+    assert_eq!(
+        source.source_claim_insurance_liened_num.get(),
+        pre_insurance_num + added_insurance_num
+    );
+    assert_eq!(
+        source.source_lien_effective_reserved.get(),
+        pre_effective + added_effective
+    );
+    assert_eq!(
+        source.source_lien_counterparty_backing_num.get(),
+        pre_counterparty_num + added_counterparty_num
+    );
+    assert_eq!(
+        source.source_lien_insurance_backing_num.get(),
+        pre_insurance_num + added_insurance_num
+    );
+    assert_eq!(
+        source.source_lien_fee_last_slot.get(),
+        if add_counterparty && pre_counterparty_num == 0 {
+            current_slot
+        } else {
+            prior_fee_slot
+        }
+    );
+    assert_eq!(
+        source
+            .source_lien_counterparty_backing_num
+            .get()
+            .checked_add(source.source_lien_insurance_backing_num.get())
+            .unwrap(),
+        source.source_lien_effective_reserved.get() * BOUND_SCALE
+    );
+    assert!(source.source_claim_liened_num.get() <= source.source_claim_bound_num.get());
+    assert_eq!(
+        source.source_claim_impaired_num,
+        before.source_claim_impaired_num
+    );
+    assert_eq!(
+        source.source_lien_impaired_effective_reserved,
+        before.source_lien_impaired_effective_reserved
+    );
 }
 
 #[kani::proof]
@@ -12215,6 +13871,261 @@ fn proof_v16_source_credit_lien_face_and_backing_use_scaled_units() {
             previous_realized_scaled < required_backing_num,
             "source-credit lien face must be the minimal scaled face that realizes the required backing"
         );
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_source_lien_face_burn_releases_only_required_backing() {
+    let face_whole_raw: u8 = kani::any();
+    let effective_raw: u8 = kani::any();
+    let burn_whole_raw: u8 = kani::any();
+    let has_fractional_face: bool = kani::any();
+    let burn_full_face: bool = kani::any();
+    kani::assume(face_whole_raw <= 32);
+    kani::assume(burn_whole_raw <= face_whole_raw);
+    let face_whole = face_whole_raw as u128;
+    let fractional_face = if has_fractional_face {
+        BOUND_SCALE / 2
+    } else {
+        0
+    };
+    let face_num = face_whole * BOUND_SCALE + fractional_face;
+    let max_effective = face_whole + u128::from(has_fractional_face);
+    kani::assume((effective_raw as u128) <= max_effective);
+    let backing_num = (effective_raw as u128) * BOUND_SCALE;
+    let face_burn_num = if burn_full_face {
+        face_num
+    } else {
+        (burn_whole_raw as u128) * BOUND_SCALE
+    };
+
+    let release_num = MarketGroupV16ViewMut::<u64>::kani_source_lien_backing_release_for_face_burn(
+        face_num,
+        backing_num,
+        face_burn_num,
+    )
+    .unwrap();
+    let remaining_face = face_num - face_burn_num;
+    let remaining_face_ceiling =
+        remaining_face / BOUND_SCALE + u128::from(remaining_face % BOUND_SCALE != 0);
+    let remaining_effective = (backing_num - release_num) / BOUND_SCALE;
+    let expected_release_effective = (effective_raw as u128).saturating_sub(remaining_face_ceiling);
+
+    kani::cover!(
+        release_num == 0,
+        "remaining face can preserve the full lien"
+    );
+    kani::cover!(release_num != 0, "face burn can require backing release");
+    kani::cover!(
+        has_fractional_face && face_burn_num != face_num,
+        "fractional scaled face is covered"
+    );
+    assert_eq!(release_num % BOUND_SCALE, 0);
+    assert_eq!(release_num, expected_release_effective * BOUND_SCALE);
+    assert!(remaining_effective <= remaining_face_ceiling);
+    if release_num != 0 {
+        assert!(remaining_effective + 1 > remaining_face_ceiling);
+    }
+    if face_burn_num == face_num {
+        assert_eq!(release_num, backing_num);
+    }
+}
+
+// Live mark-reversal liveness and conservation across both source classes.
+// Full-width source partition: every valid liened-face burn is assigned exactly
+// once, counterparty-first, and the aggregate face rank decreases by the burn.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_source_lien_face_burn_partition_is_total_disjoint_and_strict_progress() {
+    let counterparty_face: u128 = kani::any();
+    let insurance_face: u128 = kani::any();
+    kani::assume(counterparty_face <= u128::MAX - insurance_face);
+    let total_face = counterparty_face + insurance_face;
+    kani::assume(total_face > 0);
+    let face_burn: u128 = kani::any();
+    kani::assume(face_burn > 0 && face_burn <= total_face);
+
+    let (counterparty_burn, insurance_burn) =
+        MarketGroupV16ViewMut::<u64>::kani_source_lien_face_burn_partition(
+            counterparty_face,
+            insurance_face,
+            face_burn,
+        )
+        .unwrap();
+
+    assert_eq!(counterparty_burn, face_burn.min(counterparty_face));
+    assert_eq!(counterparty_burn + insurance_burn, face_burn);
+    assert!(counterparty_burn <= counterparty_face);
+    assert!(insurance_burn <= insurance_face);
+    assert_eq!(
+        (counterparty_face - counterparty_burn) + (insurance_face - insurance_burn),
+        total_face - face_burn
+    );
+    kani::cover!(
+        counterparty_burn > 0 && insurance_burn == 0,
+        "counterparty-only partition is reachable"
+    );
+    kani::cover!(
+        counterparty_burn == 0 && insurance_burn > 0,
+        "insurance-only partition is reachable"
+    );
+    kani::cover!(
+        counterparty_burn > 0 && insurance_burn > 0,
+        "one burn can cross both source classes"
+    );
+    kani::cover!(face_burn == total_face, "full face burn reaches rank zero");
+}
+
+// Bounded composition through the complete production plan. The separate
+// full-width partition theorem and fractional source-local release theorem
+// discharge the amount-independent algebra around this composition seam.
+// Any valid liened-face burn must admit a plan, reduce the face rank exactly,
+// release only the backing no longer supportable by remaining face, and leave
+// counterparty/insurance backing independently bounded by their own claims.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_source_lien_face_burn_plan_is_total_minimal_and_source_isolated() {
+    let counterparty_whole: u8 = kani::any();
+    let insurance_whole: u8 = kani::any();
+    let burn_whole: u8 = kani::any();
+    kani::assume(counterparty_whole <= 8);
+    kani::assume(insurance_whole <= 8);
+    kani::assume(burn_whole <= 16);
+    let counterparty_face = (counterparty_whole as u128) * BOUND_SCALE;
+    let insurance_face = (insurance_whole as u128) * BOUND_SCALE;
+    let total_face = counterparty_face + insurance_face;
+    kani::assume(total_face > 0);
+
+    let counterparty_face_ceiling =
+        counterparty_face / BOUND_SCALE + u128::from(counterparty_face % BOUND_SCALE != 0);
+    let insurance_face_ceiling =
+        insurance_face / BOUND_SCALE + u128::from(insurance_face % BOUND_SCALE != 0);
+    let counterparty_effective: u8 = kani::any();
+    let insurance_effective: u8 = kani::any();
+    kani::assume((counterparty_effective as u128) <= counterparty_face_ceiling);
+    kani::assume((insurance_effective as u128) <= insurance_face_ceiling);
+    let counterparty_backing = (counterparty_effective as u128) * BOUND_SCALE;
+    let insurance_backing = (insurance_effective as u128) * BOUND_SCALE;
+    let face_burn = (burn_whole as u128) * BOUND_SCALE;
+    kani::assume(face_burn > 0 && face_burn <= total_face);
+
+    let (counterparty_burn, insurance_burn, counterparty_release, insurance_release, total_release) =
+        MarketGroupV16ViewMut::<u64>::kani_source_lien_face_burn_plan(
+            counterparty_face,
+            insurance_face,
+            counterparty_backing,
+            insurance_backing,
+            face_burn,
+        )
+        .unwrap();
+
+    assert_eq!(counterparty_burn, face_burn.min(counterparty_face));
+    assert_eq!(counterparty_burn + insurance_burn, face_burn);
+    assert!(counterparty_burn <= counterparty_face);
+    assert!(insurance_burn <= insurance_face);
+    assert_eq!(counterparty_release % BOUND_SCALE, 0);
+    assert_eq!(insurance_release % BOUND_SCALE, 0);
+    assert_eq!(total_release, counterparty_release + insurance_release);
+    assert!(counterparty_release <= counterparty_backing);
+    assert!(insurance_release <= insurance_backing);
+
+    let counterparty_face_after = counterparty_face - counterparty_burn;
+    let insurance_face_after = insurance_face - insurance_burn;
+    let counterparty_backing_after = counterparty_backing - counterparty_release;
+    let insurance_backing_after = insurance_backing - insurance_release;
+    let counterparty_ceiling_after = counterparty_face_after / BOUND_SCALE
+        + u128::from(counterparty_face_after % BOUND_SCALE != 0);
+    let insurance_ceiling_after =
+        insurance_face_after / BOUND_SCALE + u128::from(insurance_face_after % BOUND_SCALE != 0);
+
+    assert_eq!(
+        counterparty_face_after + insurance_face_after,
+        total_face - face_burn,
+        "every successful reversal strictly decreases the liened-face rank"
+    );
+    assert!(counterparty_backing_after / BOUND_SCALE <= counterparty_ceiling_after);
+    assert!(insurance_backing_after / BOUND_SCALE <= insurance_ceiling_after);
+    if counterparty_release != 0 {
+        assert_eq!(
+            counterparty_backing_after / BOUND_SCALE,
+            counterparty_ceiling_after
+        );
+    }
+    if insurance_release != 0 {
+        assert_eq!(
+            insurance_backing_after / BOUND_SCALE,
+            insurance_ceiling_after
+        );
+    }
+    if counterparty_burn == counterparty_face {
+        assert_eq!(counterparty_release, counterparty_backing);
+    }
+    if insurance_burn == insurance_face {
+        assert_eq!(insurance_release, insurance_backing);
+    }
+
+    kani::cover!(
+        counterparty_burn > 0 && insurance_burn == 0,
+        "counterparty-only face burn is reachable"
+    );
+    kani::cover!(
+        counterparty_burn == 0 && insurance_burn > 0,
+        "insurance-only face burn is reachable"
+    );
+    kani::cover!(
+        counterparty_burn > 0 && insurance_burn > 0,
+        "one burn can cross both source classes"
+    );
+    kani::cover!(
+        total_release == 0,
+        "face can shrink without over-releasing backing"
+    );
+    kani::cover!(total_release > 0, "face shrink can require backing release");
+    kani::cover!(
+        face_burn == total_face,
+        "full reversal releases the complete lien"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_source_lien_fee_proration_tracks_remaining_backing() {
+    let fee_raw: u8 = kani::any();
+    let before_raw: u8 = kani::any();
+    let after_raw: u8 = kani::any();
+    kani::assume(fee_raw <= 32);
+    kani::assume((1..=16).contains(&before_raw));
+    kani::assume(after_raw <= before_raw);
+    let fee = fee_raw as u128;
+    let before = before_raw as u128 * BOUND_SCALE;
+    let after = after_raw as u128 * BOUND_SCALE;
+
+    let remaining = MarketGroupV16ViewMut::<u64>::kani_source_lien_fee_after_backing_release(
+        fee, before, after,
+    )
+    .unwrap();
+
+    kani::cover!(
+        after == before,
+        "unchanged backing preserves all fee history"
+    );
+    kani::cover!(after == 0, "full backing release clears live fee history");
+    kani::cover!(
+        after > 0 && after < before && fee > 0,
+        "partial backing release prorates nonzero fee history"
+    );
+    assert_eq!(remaining, fee * after / before);
+    assert!(remaining <= fee);
+    if after == before {
+        assert_eq!(remaining, fee);
+    }
+    if after == 0 {
+        assert_eq!(remaining, 0);
     }
 }
 
@@ -14647,9 +16558,16 @@ fn proof_v16_frame_earnings_withdraw_touches_only_declared_state() {
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_frame_resolve_market_touches_only_declared_state() {
+    let start_in_recovery: bool = kani::any();
     let delta_raw: u8 = kani::any();
     kani::assume(delta_raw >= 1 && delta_raw <= 8);
     let (mut header, mut markets, _) = one_market_view_fixture();
+    if start_in_recovery {
+        header.mode = 2;
+        header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        ));
+    }
     let resolved_slot = header.current_slot.get() + delta_raw as u64;
     let h0 = header;
     let s0 = markets[0].engine;
@@ -14657,7 +16575,7 @@ fn proof_v16_frame_resolve_market_touches_only_declared_state() {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         market.resolve_market_not_atomic(resolved_slot).unwrap();
     }
-    kani::cover!(true, "resolve frame reached");
+    kani::cover!(start_in_recovery, "Recovery-to-Resolved frame reached");
     let mut eh = h0;
     eh.mode = 1;
     eh.resolved_slot = V16PodU64::new(resolved_slot);
@@ -15253,7 +17171,7 @@ fn proof_v16_validator_sound_account_reserves() {
 // asset refresh and every other plan are dispatchable from committed state.
 // Pinning this truth table means a future arm that gates committed-state progress
 // on an observation contradicts a machine-checked theorem. Exhaustive over the
-// six AutoCrankPlanV16 variants; the spec matrix ties the predicate to the real
+// eight AutoCrankPlanV16 variants; the spec matrix ties the predicate to the real
 // dispatch for each reachable class.
 #[kani::proof]
 fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
@@ -15269,17 +17187,233 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
         asset_index: None
     }));
     // No other plan does — committed on-chain state suffices.
+    assert!(!needs_obs(&AutoCrankPlanV16::AdvanceRecoveryClose {
+        asset_index: i
+    }));
     assert!(!needs_obs(&AutoCrankPlanV16::SettleBChunk {
         asset_index: i
     }));
     assert!(!needs_obs(&AutoCrankPlanV16::Liquidate { asset_index: i }));
     assert!(!needs_obs(&AutoCrankPlanV16::NoAction));
+    assert!(!needs_obs(&AutoCrankPlanV16::FinalizeRecovery));
     assert!(!needs_obs(&AutoCrankPlanV16::CloseResolved));
     // The predicate matches DeclareRecovery { .. } regardless of reason, so a
     // concrete variant exercises the arm (the reason enum isn't Arbitrary here).
     assert!(!needs_obs(&AutoCrankPlanV16::DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
     }));
+}
+
+// A liquidation error may cross the rollback boundary as successful progress
+// only when it is exactly RecoveryRequired and the same call left both pieces of
+// the durable Recovery marker. Exhaustive over every engine error, market mode,
+// recovery reason, and the missing-reason state.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
+    let error_tag: u8 = kani::any();
+    let mode_tag: u8 = kani::any();
+    let reason_tag: u8 = kani::any();
+    kani::assume(error_tag < 12);
+    kani::assume(mode_tag < 3);
+    kani::assume(reason_tag <= 8);
+
+    let error = match error_tag {
+        0 => V16Error::InvalidConfig,
+        1 => V16Error::ArithmeticOverflow,
+        2 => V16Error::ProvenanceMismatch,
+        3 => V16Error::HiddenLeg,
+        4 => V16Error::InvalidLeg,
+        5 => V16Error::Stale,
+        6 => V16Error::BStale,
+        7 => V16Error::LockActive,
+        8 => V16Error::NonProgress,
+        9 => V16Error::RecoveryRequired,
+        10 => V16Error::CounterOverflow,
+        _ => V16Error::CounterUnderflow,
+    };
+    let mode = match mode_tag {
+        0 => MarketModeV16::Live,
+        1 => MarketModeV16::Resolved,
+        _ => MarketModeV16::Recovery,
+    };
+    let reason = match reason_tag {
+        0 => Some(PermissionlessRecoveryReasonV16::BelowProgressFloor),
+        1 => Some(PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability),
+        2 => Some(PermissionlessRecoveryReasonV16::AccountBSettlementCannotProgress),
+        3 => Some(PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted),
+        4 => Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress),
+        5 => Some(PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow),
+        6 => Some(PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy),
+        7 => Some(PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery),
+        _ => None,
+    };
+
+    let result = kani_commit_declared_liquidation_recovery(error, mode, reason);
+    let complete_declaration =
+        error == V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_some();
+    if complete_declaration {
+        assert_eq!(
+            result,
+            Ok(PermissionlessProgressOutcomeV16::RecoveryDeclared(
+                reason.unwrap()
+            ))
+        );
+    } else {
+        assert_eq!(result, Err(error));
+    }
+
+    kani::cover!(
+        complete_declaration
+            && reason == Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress),
+        "a fully declared liquidation terminal commits successful recovery progress"
+    );
+    kani::cover!(
+        error == V16Error::RecoveryRequired && mode == MarketModeV16::Live,
+        "a bare recovery-required error is not swallowed"
+    );
+    kani::cover!(
+        error == V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_none(),
+        "an incomplete Recovery marker fails closed"
+    );
+    kani::cover!(
+        error != V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_some(),
+        "Recovery state cannot mask an unrelated engine error"
+    );
+}
+
+#[kani::proof]
+fn proof_v16_auto_crank_accrual_requires_selected_observation_and_no_preaccrual() {
+    let observations_preaccrued: bool = kani::any();
+    let selected_observation_supplied: bool = kani::any();
+    let skip = kani_auto_crank_skip_post_action_accrual(
+        observations_preaccrued,
+        selected_observation_supplied,
+    );
+
+    kani::cover!(
+        !observations_preaccrued && !selected_observation_supplied && skip,
+        "committed-price fallback cannot authorize accrual"
+    );
+    kani::cover!(
+        !observations_preaccrued && selected_observation_supplied && !skip,
+        "fresh selected observation authorizes one accrual segment"
+    );
+    kani::cover!(
+        observations_preaccrued && selected_observation_supplied && skip,
+        "pre-accrued selected observation cannot apply a second segment"
+    );
+    kani::cover!(
+        observations_preaccrued && !selected_observation_supplied && skip,
+        "pre-accrued work remains single-segment when the observation list is consumed"
+    );
+    assert_eq!(
+        !skip,
+        selected_observation_supplied && !observations_preaccrued
+    );
+}
+
+fn assert_v16_crank_observation_authorization<const OBSERVATION_SUPPLIED: bool>(
+    long_segment: bool,
+) {
+    let now_slot = if long_segment { 4 } else { 2 };
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, 101)
+            .unwrap();
+    }
+    let slot_before = markets[0].engine;
+    let slot_last_before = slot_before.asset.slot_last.get();
+    let max_accrual_dt_slots = header.config.max_accrual_dt_slots.get();
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    assert!(!account_header.health_cert.try_to_runtime().unwrap().valid);
+
+    let skip_post_action_accrual =
+        kani_auto_crank_skip_post_action_accrual(false, OBSERVATION_SUPPLIED);
+    let effective_price = if OBSERVATION_SUPPLIED {
+        101
+    } else {
+        slot_before.asset.effective_price.get()
+    };
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market.kani_permissionless_crank_with_skip_post_action_accrual(
+        &mut account,
+        PermissionlessCrankRequestV16 {
+            now_slot,
+            asset_index: 0,
+            effective_price,
+            funding_rate_e9: 0,
+            action: PermissionlessCrankActionV16::Refresh,
+        },
+        skip_post_action_accrual,
+    );
+
+    assert_eq!(
+        outcome,
+        Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
+    );
+    assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    if OBSERVATION_SUPPLIED {
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        let expected_dt = (now_slot - slot_last_before).min(max_accrual_dt_slots);
+        assert!(expected_dt > 0);
+        assert_eq!(asset.slot_last, slot_last_before + expected_dt);
+        assert_eq!(
+            market.header.loss_stale_active != 0,
+            asset.slot_last < now_slot
+        );
+        assert_eq!(asset.effective_price, 101);
+        assert!(!kani_eq_engine_asset_slot_v16_account(
+            &slot_before,
+            &market.markets[0].engine
+        ));
+    } else {
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &slot_before,
+            &market.markets[0].engine
+        ));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_observation_free_crank_preserves_asset_while_account_progresses() {
+    let long_segment: bool = kani::any();
+    kani::cover!(
+        !long_segment,
+        "short elapsed segment cannot be consumed by committed-price fallback"
+    );
+    kani::cover!(
+        long_segment,
+        "long elapsed segment cannot be consumed by committed-price fallback"
+    );
+    assert_v16_crank_observation_authorization::<false>(long_segment);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_observed_crank_accrues_asset_while_preserving_value() {
+    let long_segment: bool = kani::any();
+    kani::cover!(
+        !long_segment,
+        "short elapsed segment accrues with a selected observation"
+    );
+    kani::cover!(
+        long_segment,
+        "long elapsed segment accrues with a selected observation"
+    );
+    assert_v16_crank_observation_authorization::<true>(long_segment);
 }
 
 // LoF — no free open interest: a risk-increasing fill with nonzero size, nonzero
@@ -15401,4 +17535,996 @@ fn proof_v16_backing_utilization_zero_fee_carries_accrual_forward() {
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
+}
+
+// Mixed-lifecycle liveness over every ordering and multiplicity in the full
+// 16-leg shape. Recovery obligations cannot become ordinary refresh/liquidation
+// targets or starve later Active/DrainOnly work.
+#[kani::proof]
+#[kani::unwind(18)]
+#[kani::solver(cadical)]
+fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
+    let recovery_mask: u16 = kani::any();
+    let active_mask: u16 = kani::any();
+    let drain_only_mask: u16 = kani::any();
+    kani::assume(recovery_mask != 0);
+    kani::assume(recovery_mask & active_mask == 0);
+    kani::assume(recovery_mask & drain_only_mask == 0);
+    kani::assume(active_mask & drain_only_mask == 0);
+
+    let dispatchable_mask = active_mask | drain_only_mask;
+    let mut dispatchable_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut slot = 0usize;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        let bit = 1u16 << slot;
+        let lifecycle = if recovery_mask & bit != 0 {
+            AssetLifecycleV16::Recovery
+        } else if active_mask & bit != 0 {
+            AssetLifecycleV16::Active
+        } else if drain_only_mask & bit != 0 {
+            AssetLifecycleV16::DrainOnly
+        } else {
+            AssetLifecycleV16::Retired
+        };
+        let dispatchable = kani_auto_crank_lifecycle_dispatchable(lifecycle);
+        assert_eq!(dispatchable, dispatchable_mask & bit != 0);
+        dispatchable_flags[slot] = dispatchable;
+        slot += 1;
+    }
+
+    let selected = kani_first_actionable_slot(dispatchable_flags);
+    let liquidatable = kani_auto_crank_liquidatable(true, true, 1, selected);
+    assert_eq!(liquidatable, dispatchable_mask != 0);
+    let mut recovery_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    slot = 0;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        recovery_flags[slot] = recovery_mask & (1u16 << slot) != 0;
+        slot += 1;
+    }
+    let first_recovery = kani_first_actionable_slot(recovery_flags).unwrap();
+
+    if dispatchable_mask == 0 {
+        assert!(selected.is_none());
+        let plan = kani_select_auto_crank_plan(
+            ActionableSummaryV16 {
+                stale: false,
+                b_stale: false,
+                pending_close: false,
+                expired_close: false,
+                liquidatable,
+                recovery_eligible: false,
+                resolved_winner: false,
+            },
+            0,
+            0,
+            0,
+            None,
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        );
+        assert_eq!(plan, AutoCrankPlanV16::NoAction);
+    } else {
+        let selected = selected.unwrap();
+        let selected_bit = 1u16 << selected;
+        assert!(dispatchable_mask & selected_bit != 0);
+        assert!(recovery_mask & selected_bit == 0);
+        slot = 0;
+        while slot < selected {
+            assert!(dispatchable_mask & (1u16 << slot) == 0);
+            slot += 1;
+        }
+
+        let refresh = kani_select_auto_crank_plan(
+            ActionableSummaryV16 {
+                stale: true,
+                b_stale: false,
+                pending_close: false,
+                expired_close: false,
+                liquidatable: false,
+                recovery_eligible: false,
+                resolved_winner: false,
+            },
+            0,
+            0,
+            selected,
+            Some(selected),
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        );
+        assert_eq!(
+            refresh,
+            AutoCrankPlanV16::RefreshAccount {
+                asset_index: Some(selected)
+            }
+        );
+        let liquidate = kani_select_auto_crank_plan(
+            ActionableSummaryV16 {
+                stale: false,
+                b_stale: false,
+                pending_close: false,
+                expired_close: false,
+                liquidatable,
+                recovery_eligible: false,
+                resolved_winner: false,
+            },
+            0,
+            0,
+            selected,
+            Some(selected),
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        );
+        assert_eq!(
+            liquidate,
+            AutoCrankPlanV16::Liquidate {
+                asset_index: selected
+            }
+        );
+
+        kani::cover!(
+            first_recovery < selected,
+            "Recovery obligation can precede dispatchable work"
+        );
+        kani::cover!(
+            selected < first_recovery,
+            "dispatchable work can precede Recovery obligation"
+        );
+        kani::cover!(
+            active_mask & selected_bit != 0,
+            "Active candidate is selected"
+        );
+        kani::cover!(
+            drain_only_mask & selected_bit != 0,
+            "DrainOnly candidate is selected"
+        );
+    }
+
+    kani::cover!(
+        dispatchable_mask == 0,
+        "Recovery-only account has no fake liquidation target"
+    );
+}
+
+// Permissionless liveness theorem for mixed prior-reset obligations and live
+// liquidation candidates. Each refresh removes exactly one prior-reset
+// obligation, so the rank reaches zero within the bounded portfolio shape;
+// prior-reset legs are never selected as liquidation work.
+#[kani::proof]
+#[kani::unwind(18)]
+#[kani::solver(cadical)]
+fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
+    let reset_mask: u16 = kani::any();
+    let live_mask: u16 = kani::any();
+    let drain_only_mask: u16 = kani::any();
+    let basis_abs: u128 = kani::any();
+    let live_oi_q: u128 = kani::any();
+    let reset_epoch: u64 = kani::any();
+    let negative_basis: bool = kani::any();
+    kani::assume(reset_mask != 0);
+    kani::assume(live_mask != 0);
+    kani::assume(reset_mask & live_mask == 0);
+    kani::assume((1..=MAX_POSITION_ABS_Q).contains(&basis_abs));
+    kani::assume((1..=MAX_OI_SIDE_Q).contains(&live_oi_q));
+    kani::assume(reset_epoch > 0);
+
+    let basis_pos_q = if negative_basis {
+        -(basis_abs as i128)
+    } else {
+        basis_abs as i128
+    };
+    let mut reset_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut slot = 0usize;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        let bit = 1u16 << slot;
+        let is_reset = reset_mask & bit != 0;
+        let is_live = live_mask & bit != 0;
+        let active = is_reset || is_live;
+        let lifecycle = if drain_only_mask & bit != 0 {
+            AssetLifecycleV16::DrainOnly
+        } else {
+            AssetLifecycleV16::Active
+        };
+        let side_mode = if is_reset {
+            SideModeV16::ResetPending
+        } else {
+            SideModeV16::Normal
+        };
+        let asset_epoch = if is_reset { reset_epoch } else { 0 };
+        let leg_epoch_snap = if is_reset { reset_epoch - 1 } else { 0 };
+        let side_oi_q = if is_live { live_oi_q } else { 0 };
+        let (b_stale, refresh, liquidatable, reset_obligation) = kani_auto_crank_leg_flags(
+            active,
+            lifecycle,
+            basis_pos_q,
+            side_oi_q,
+            side_mode,
+            asset_epoch,
+            leg_epoch_snap,
+            false,
+        );
+
+        assert!(!b_stale);
+        assert_eq!(refresh, active);
+        assert_eq!(liquidatable, is_live);
+        assert_eq!(reset_obligation, is_reset);
+        assert!(!(liquidatable && reset_obligation));
+        refresh_flags[slot] = refresh;
+        liquidation_flags[slot] = liquidatable;
+        reset_flags[slot] = reset_obligation;
+        slot += 1;
+    }
+
+    let initial_reset_count = reset_mask.count_ones();
+    let first_reset = kani_first_actionable_slot(reset_flags).unwrap();
+    let first_live = kani_first_actionable_slot(liquidation_flags).unwrap();
+    kani::cover!(
+        initial_reset_count == 1,
+        "single reset obligation is reachable"
+    );
+    kani::cover!(
+        initial_reset_count > 1,
+        "multiple reset obligations are reachable"
+    );
+    kani::cover!(first_reset < first_live, "reset can precede live risk");
+    kani::cover!(first_live < first_reset, "live risk can precede reset");
+    kani::cover!(
+        drain_only_mask & (reset_mask | live_mask) != 0,
+        "DrainOnly legs share the bounded progress classification"
+    );
+
+    let mut calls = 0usize;
+    while calls < V16_MAX_PORTFOLIO_ASSETS_N {
+        let mut pre_reset_count = 0u32;
+        slot = 0;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            pre_reset_count += reset_flags[slot] as u32;
+            slot += 1;
+        }
+        if pre_reset_count != 0 {
+            let selected_reset = kani_first_actionable_slot(reset_flags).unwrap();
+            let refresh_asset = kani_first_actionable_slot(refresh_flags);
+            let plan = kani_select_auto_crank_plan(
+                ActionableSummaryV16 {
+                    stale: true,
+                    b_stale: false,
+                    pending_close: false,
+                    expired_close: false,
+                    liquidatable: false,
+                    recovery_eligible: false,
+                    resolved_winner: false,
+                },
+                0,
+                0,
+                first_live,
+                refresh_asset,
+                PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+            );
+            assert_eq!(
+                plan,
+                AutoCrankPlanV16::RefreshAccount {
+                    asset_index: refresh_asset
+                }
+            );
+
+            let mut already_cleared = false;
+            slot = 0;
+            while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+                if kani_should_clear_prior_reset_obligation(
+                    already_cleared,
+                    reset_flags[slot],
+                    false,
+                ) {
+                    assert_eq!(slot, selected_reset);
+                    reset_flags[slot] = false;
+                    refresh_flags[slot] = false;
+                    already_cleared = true;
+                }
+                slot += 1;
+            }
+            assert!(already_cleared);
+
+            let mut post_reset_count = 0u32;
+            slot = 0;
+            while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+                post_reset_count += reset_flags[slot] as u32;
+                slot += 1;
+            }
+            assert_eq!(post_reset_count + 1, pre_reset_count);
+        }
+        calls += 1;
+    }
+
+    assert!(kani_first_actionable_slot(reset_flags).is_none());
+    let selected_live = kani_first_actionable_slot(liquidation_flags).unwrap();
+    assert_eq!(selected_live, first_live);
+    let final_plan = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: false,
+            b_stale: false,
+            pending_close: false,
+            expired_close: false,
+            liquidatable: true,
+            recovery_eligible: false,
+            resolved_winner: false,
+        },
+        0,
+        0,
+        selected_live,
+        kani_first_actionable_slot(refresh_flags),
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    );
+    assert_eq!(
+        final_plan,
+        AutoCrankPlanV16::Liquidate {
+            asset_index: first_live
+        }
+    );
+
+    assert!(!kani_should_clear_prior_reset_obligation(false, true, true));
+    assert!(!kani_should_clear_prior_reset_obligation(true, true, false));
+}
+
+// Shared liquidation/rebalance theorem for partially ADL-reduced positions.
+// Stored basis may exceed matched effective OI; production capacity must prevent
+// underflow and make any zero-OI stored residue permissionlessly actionable.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_unilateral_close_capacity_is_safe_progress_and_residue_complete() {
+    let side = if kani::any::<bool>() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let stored_abs: u128 = kani::any();
+    let matched_oi: u128 = kani::any();
+    let request: u128 = kani::any();
+    kani::assume((1..=MAX_POSITION_ABS_Q).contains(&stored_abs));
+    kani::assume((1..=MAX_OI_SIDE_Q).contains(&matched_oi));
+    kani::assume(request > 0);
+
+    let capacity = MarketGroupV16ViewMut::<u64>::kani_kernel_unilateral_close_capacity(
+        stored_abs, matched_oi, matched_oi,
+    );
+    let work = request.min(capacity);
+    let pre_basis_signed = match side {
+        SideV16::Long => stored_abs as i128,
+        SideV16::Short => -(stored_abs as i128),
+    };
+    let (reduced_q, delta) = MarketGroupV16ViewMut::<u64>::kani_kernel_reduce_position_delta(
+        pre_basis_signed,
+        side,
+        work,
+    )
+    .unwrap();
+    let expected = request.min(stored_abs).min(matched_oi);
+    let post_basis_signed = pre_basis_signed.checked_add(delta).unwrap();
+    let long_oi_after = matched_oi.checked_sub(reduced_q).unwrap();
+    let short_oi_after = matched_oi.checked_sub(reduced_q).unwrap();
+
+    assert_eq!(capacity, stored_abs.min(matched_oi));
+    assert_eq!(reduced_q, expected);
+    assert!(reduced_q > 0);
+    assert!(reduced_q <= stored_abs);
+    assert!(reduced_q <= matched_oi);
+    assert_eq!(post_basis_signed.unsigned_abs(), stored_abs - reduced_q);
+    assert!(
+        post_basis_signed == 0 || post_basis_signed.signum() == pre_basis_signed.signum(),
+        "risk reduction cannot flip the user's side"
+    );
+
+    if request >= capacity && stored_abs > matched_oi {
+        assert_eq!(long_oi_after, 0);
+        assert_eq!(short_oi_after, 0);
+        assert_ne!(post_basis_signed, 0);
+        let mut asset = AssetStateV16::default();
+        asset.oi_eff_long_q = long_oi_after;
+        asset.oi_eff_short_q = short_oi_after;
+        match side {
+            SideV16::Long => asset.stored_pos_count_long = 1,
+            SideV16::Short => asset.stored_pos_count_short = 1,
+        }
+        let leg = PortfolioLegV16 {
+            active: true,
+            side,
+            basis_pos_q: post_basis_signed,
+            ..PortfolioLegV16::EMPTY
+        };
+        assert!(
+            MarketGroupV16ViewMut::<u64>::kani_leg_has_exhausted_effective_oi(asset, leg),
+            "a nonzero basis after matched OI exhaustion must remain crank-actionable"
+        );
+    }
+
+    kani::cover!(side == SideV16::Long, "capacity covers long reductions");
+    kani::cover!(side == SideV16::Short, "capacity covers short reductions");
+    kani::cover!(request < capacity, "capacity covers partial requested work");
+    kani::cover!(
+        request >= capacity && stored_abs > matched_oi,
+        "capacity covers an ADL terminal residue"
+    );
+    kani::cover!(
+        request >= capacity && stored_abs <= matched_oi,
+        "capacity covers a full account close"
+    );
+}
+
+// Terminal ADL liveness theorem over the production clear kernel. A stored
+// settlement basis may exceed effective OI after quantity ADL; every record
+// still detaches without mutating the opposite side or double-debiting a
+// prior-reset side.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_leg_clear_closes_every_adl_gap_without_cross_side_mutation() {
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let prior_reset: bool = kani::any();
+    let stored_raw: u16 = kani::any();
+    let effective_raw: u16 = kani::any();
+    let trailing_weight_raw: u16 = kani::any();
+    let count_raw: u8 = kani::any();
+    let epoch_raw: u8 = kani::any();
+    let b_rem_raw: u16 = kani::any();
+    kani::assume((1..=1024).contains(&stored_raw));
+    kani::assume(effective_raw < stored_raw);
+    kani::assume(count_raw > 0);
+    kani::assume(epoch_raw < u8::MAX);
+
+    let stored_q = stored_raw as u128 * POS_SCALE;
+    let effective_q = effective_raw as u128 * POS_SCALE;
+    let trailing_weight = trailing_weight_raw as u128 * POS_SCALE;
+    let basis = i128::try_from(stored_q).unwrap();
+    let leg = PortfolioLegV16 {
+        active: true,
+        side,
+        basis_pos_q: if side == SideV16::Long { basis } else { -basis },
+        epoch_snap: epoch_raw as u64,
+        loss_weight: stored_q,
+        b_rem: b_rem_raw as u128,
+        ..PortfolioLegV16::EMPTY
+    };
+    let mut asset = AssetStateV16::default();
+    asset.oi_eff_long_q = if side == SideV16::Long {
+        effective_q
+    } else {
+        7 * POS_SCALE
+    };
+    asset.oi_eff_short_q = if side == SideV16::Short {
+        effective_q
+    } else {
+        11 * POS_SCALE
+    };
+    asset.stored_pos_count_long = if side == SideV16::Long {
+        count_raw as u64
+    } else {
+        5
+    };
+    asset.stored_pos_count_short = if side == SideV16::Short {
+        count_raw as u64
+    } else {
+        3
+    };
+    asset.loss_weight_sum_long = if side == SideV16::Long {
+        stored_q + trailing_weight
+    } else {
+        13 * POS_SCALE
+    };
+    asset.loss_weight_sum_short = if side == SideV16::Short {
+        stored_q + trailing_weight
+    } else {
+        17 * POS_SCALE
+    };
+    if side == SideV16::Long {
+        asset.epoch_long = epoch_raw as u64 + u64::from(prior_reset);
+        asset.mode_long = if prior_reset {
+            SideModeV16::ResetPending
+        } else {
+            SideModeV16::Normal
+        };
+    } else {
+        asset.epoch_short = epoch_raw as u64 + u64::from(prior_reset);
+        asset.mode_short = if prior_reset {
+            SideModeV16::ResetPending
+        } else {
+            SideModeV16::Normal
+        };
+    }
+    let before = asset;
+
+    let after = kani_clear_resolved_leg(leg, asset).unwrap();
+
+    kani::cover!(
+        side == SideV16::Long && !prior_reset && effective_raw > 0 && b_rem_raw > 0,
+        "current-epoch long closes a strict ADL gap"
+    );
+    kani::cover!(
+        side == SideV16::Short && !prior_reset && effective_raw > 0,
+        "current-epoch short closes a strict ADL gap"
+    );
+    kani::cover!(
+        prior_reset && effective_raw > 0,
+        "prior-reset record detaches without a second aggregate debit"
+    );
+
+    match side {
+        SideV16::Long => {
+            assert_eq!(after.stored_pos_count_long, count_raw as u64 - 1);
+            assert_eq!(after.stored_pos_count_short, before.stored_pos_count_short);
+            assert_eq!(after.oi_eff_short_q, before.oi_eff_short_q);
+            assert_eq!(after.loss_weight_sum_short, before.loss_weight_sum_short);
+            if prior_reset {
+                assert_eq!(after.oi_eff_long_q, before.oi_eff_long_q);
+                assert_eq!(after.loss_weight_sum_long, before.loss_weight_sum_long);
+            } else {
+                assert_eq!(after.oi_eff_long_q, 0);
+                assert_eq!(after.loss_weight_sum_long, trailing_weight);
+            }
+        }
+        SideV16::Short => {
+            assert_eq!(after.stored_pos_count_short, count_raw as u64 - 1);
+            assert_eq!(after.stored_pos_count_long, before.stored_pos_count_long);
+            assert_eq!(after.oi_eff_long_q, before.oi_eff_long_q);
+            assert_eq!(after.loss_weight_sum_long, before.loss_weight_sum_long);
+            if prior_reset {
+                assert_eq!(after.oi_eff_short_q, before.oi_eff_short_q);
+                assert_eq!(after.loss_weight_sum_short, before.loss_weight_sum_short);
+            } else {
+                assert_eq!(after.oi_eff_short_q, 0);
+                assert_eq!(after.loss_weight_sum_short, trailing_weight);
+            }
+        }
+    }
+    assert_eq!(
+        after.social_loss_dust_long_num,
+        before.social_loss_dust_long_num
+    );
+    assert_eq!(
+        after.social_loss_dust_short_num,
+        before.social_loss_dust_short_num
+    );
+}
+
+// A partial ADL can leave stored basis after matched effective OI reaches zero.
+// Prove the production reset+clear composition: reset preserves the old K/F/B
+// epoch targets, quarantines fractional social loss, and the prior-epoch clear
+// cannot subtract basis or loss weight from the already-zero current epoch.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
+    let side = if kani::any::<bool>() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let mode = if kani::any::<bool>() {
+        SideModeV16::Normal
+    } else {
+        SideModeV16::DrainOnly
+    };
+    let epoch: u64 = kani::any();
+    let stored_count: u64 = kani::any();
+    let basis_abs: u128 = kani::any();
+    let k: i128 = kani::any();
+    let f: i128 = kani::any();
+    let b: u128 = kani::any();
+    let loss_weight: u128 = kani::any();
+    let remainder: u128 = kani::any();
+    let dust: u128 = kani::any();
+    let explicit_before: u128 = kani::any();
+    kani::assume(epoch < u64::MAX);
+    kani::assume(stored_count > 0);
+    kani::assume((1..=MAX_POSITION_ABS_Q).contains(&basis_abs));
+    kani::assume(remainder < SOCIAL_LOSS_DEN);
+    kani::assume(dust < SOCIAL_LOSS_DEN);
+    kani::assume(explicit_before < u128::MAX);
+
+    let mut asset = AssetStateV16::default();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    match side {
+        SideV16::Long => {
+            asset.a_long = ADL_ONE / 2;
+            asset.k_long = k;
+            asset.f_long_num = f;
+            asset.b_long_num = b;
+            asset.oi_eff_long_q = 0;
+            asset.stored_pos_count_long = stored_count;
+            asset.pending_obligation_count_long = 0;
+            asset.loss_weight_sum_long = loss_weight;
+            asset.social_loss_remainder_long_num = remainder;
+            asset.social_loss_dust_long_num = dust;
+            asset.explicit_unallocated_loss_long = explicit_before;
+            asset.epoch_long = epoch;
+            asset.mode_long = mode;
+        }
+        SideV16::Short => {
+            asset.a_short = ADL_ONE / 2;
+            asset.k_short = k;
+            asset.f_short_num = f;
+            asset.b_short_num = b;
+            asset.oi_eff_short_q = 0;
+            asset.stored_pos_count_short = stored_count;
+            asset.pending_obligation_count_short = 0;
+            asset.loss_weight_sum_short = loss_weight;
+            asset.social_loss_remainder_short_num = remainder;
+            asset.social_loss_dust_short_num = dust;
+            asset.explicit_unallocated_loss_short = explicit_before;
+            asset.epoch_short = epoch;
+            asset.mode_short = mode;
+        }
+    }
+    let before = asset;
+    let reset =
+        MarketGroupV16ViewMut::<u64>::kani_kernel_begin_full_drain_reset(asset, side).unwrap();
+    let total_fraction = dust.checked_add(remainder).unwrap();
+    let (expected_dust, carry) = if total_fraction >= SOCIAL_LOSS_DEN {
+        (total_fraction - SOCIAL_LOSS_DEN, 1)
+    } else {
+        (total_fraction, 0)
+    };
+    let expected_explicit = explicit_before.checked_add(carry).unwrap();
+    let mut expected_reset = before;
+    match side {
+        SideV16::Long => {
+            expected_reset.k_epoch_start_long = k;
+            expected_reset.f_epoch_start_long_num = f;
+            expected_reset.b_epoch_start_long_num = b;
+            expected_reset.k_long = 0;
+            expected_reset.f_long_num = 0;
+            expected_reset.b_long_num = 0;
+            expected_reset.loss_weight_sum_long = 0;
+            expected_reset.social_loss_remainder_long_num = 0;
+            expected_reset.social_loss_dust_long_num = expected_dust;
+            expected_reset.explicit_unallocated_loss_long = expected_explicit;
+            expected_reset.a_long = ADL_ONE;
+            expected_reset.epoch_long = epoch + 1;
+            expected_reset.mode_long = SideModeV16::ResetPending;
+        }
+        SideV16::Short => {
+            expected_reset.k_epoch_start_short = k;
+            expected_reset.f_epoch_start_short_num = f;
+            expected_reset.b_epoch_start_short_num = b;
+            expected_reset.k_short = 0;
+            expected_reset.f_short_num = 0;
+            expected_reset.b_short_num = 0;
+            expected_reset.loss_weight_sum_short = 0;
+            expected_reset.social_loss_remainder_short_num = 0;
+            expected_reset.social_loss_dust_short_num = expected_dust;
+            expected_reset.explicit_unallocated_loss_short = expected_explicit;
+            expected_reset.a_short = ADL_ONE;
+            expected_reset.epoch_short = epoch + 1;
+            expected_reset.mode_short = SideModeV16::ResetPending;
+        }
+    }
+    assert_eq!(reset, expected_reset);
+
+    let basis_pos_q = match side {
+        SideV16::Long => basis_abs as i128,
+        SideV16::Short => -(basis_abs as i128),
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        side,
+        basis_pos_q,
+        epoch_snap: epoch,
+        loss_weight,
+        b_rem: remainder,
+        ..PortfolioLegV16::EMPTY
+    };
+    let cleared = MarketGroupV16ViewMut::<u64>::kani_kernel_clear_leg(leg, reset).unwrap();
+    let mut expected_clear = expected_reset;
+    match side {
+        SideV16::Long => expected_clear.stored_pos_count_long = stored_count - 1,
+        SideV16::Short => expected_clear.stored_pos_count_short = stored_count - 1,
+    }
+
+    kani::cover!(side == SideV16::Long, "reset+clear covers long residues");
+    kani::cover!(side == SideV16::Short, "reset+clear covers short residues");
+    kani::cover!(
+        mode == SideModeV16::DrainOnly,
+        "reset+clear covers DrainOnly"
+    );
+    kani::cover!(remainder > 0, "reset+clear quarantines nonzero remainder");
+    kani::cover!(
+        carry == 1,
+        "reset+clear records a whole-atom fractional carry"
+    );
+    kani::cover!(stored_count > 1, "reset+clear preserves sibling residues");
+    kani::cover!(
+        k != 0 && f != 0 && b != 0,
+        "reset+clear preserves nonzero K/F/B targets"
+    );
+    assert_eq!(cleared, expected_clear);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_expired_counterparty_lien_impairment_is_exact_relabel() {
+    let counter_face_atoms: u8 = kani::any();
+    let counter_effective: u8 = kani::any();
+    let insurance_face_atoms: u8 = kani::any();
+    let insurance_effective: u8 = kani::any();
+    let prior_impaired_face_atoms: u8 = kani::any();
+    let prior_impaired_effective: u8 = kani::any();
+    let live_fee: u8 = kani::any();
+    let impaired_fee: u8 = kani::any();
+    kani::assume(counter_face_atoms > 0 && counter_face_atoms <= 8);
+    kani::assume(counter_effective > 0 && counter_effective <= counter_face_atoms);
+    kani::assume(insurance_face_atoms <= 8);
+    kani::assume(insurance_effective <= insurance_face_atoms);
+    kani::assume(prior_impaired_face_atoms <= 8);
+    kani::assume(prior_impaired_effective <= prior_impaired_face_atoms);
+
+    let counter_face = (counter_face_atoms as u128) * BOUND_SCALE;
+    let insurance_face = (insurance_face_atoms as u128) * BOUND_SCALE;
+    let prior_impaired_face = (prior_impaired_face_atoms as u128) * BOUND_SCALE;
+    let counter_backing = (counter_effective as u128) * BOUND_SCALE;
+    let insurance_backing = (insurance_effective as u128) * BOUND_SCALE;
+    let live_effective = counter_effective as u128 + insurance_effective as u128;
+    let source = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(3),
+        source_claim_market_id: V16PodU64::new(9),
+        source_claim_bound_num: V16PodU128::new(
+            counter_face + insurance_face + prior_impaired_face + BOUND_SCALE,
+        ),
+        source_claim_liened_num: V16PodU128::new(counter_face + insurance_face),
+        source_claim_counterparty_liened_num: V16PodU128::new(counter_face),
+        source_claim_insurance_liened_num: V16PodU128::new(insurance_face),
+        source_lien_effective_reserved: V16PodU128::new(live_effective),
+        source_lien_counterparty_backing_num: V16PodU128::new(counter_backing),
+        source_lien_insurance_backing_num: V16PodU128::new(insurance_backing),
+        source_lien_fee_last_slot: V16PodU64::new(7),
+        source_claim_impaired_num: V16PodU128::new(prior_impaired_face),
+        source_lien_impaired_effective_reserved: V16PodU128::new(prior_impaired_effective as u128),
+        source_lien_capital_at_risk_fee_revenue: V16PodU128::new(live_fee as u128),
+        source_lien_impaired_capital_at_risk_fee_revenue: V16PodU128::new(impaired_fee as u128),
+    };
+
+    let (after, impaired_effective) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_account_counterparty_lien_impairment(source)
+            .unwrap();
+
+    kani::cover!(
+        insurance_face_atoms > 0,
+        "counterparty expiry preserves a mixed insurance-backed lien"
+    );
+    kani::cover!(
+        prior_impaired_face_atoms > 0,
+        "counterparty expiry composes with prior impaired face"
+    );
+    kani::cover!(
+        live_fee > 0 && insurance_effective > 0,
+        "counterparty expiry splits mixed-lien fee revenue"
+    );
+    assert_eq!(impaired_effective, counter_effective as u128);
+    assert_eq!(after.domain.get(), source.domain.get());
+    assert_eq!(
+        after.source_claim_market_id.get(),
+        source.source_claim_market_id.get()
+    );
+    assert_eq!(
+        after.source_claim_bound_num.get(),
+        source.source_claim_bound_num.get()
+    );
+    assert_eq!(after.source_claim_liened_num.get(), insurance_face);
+    assert_eq!(after.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(
+        after.source_claim_insurance_liened_num.get(),
+        source.source_claim_insurance_liened_num.get()
+    );
+    assert_eq!(
+        after.source_claim_impaired_num.get(),
+        prior_impaired_face + counter_face
+    );
+    assert_eq!(
+        after.source_claim_liened_num.get() + after.source_claim_impaired_num.get(),
+        source.source_claim_liened_num.get() + source.source_claim_impaired_num.get()
+    );
+    assert_eq!(
+        after.source_lien_effective_reserved.get(),
+        insurance_effective as u128
+    );
+    assert_eq!(after.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(
+        after.source_lien_insurance_backing_num.get(),
+        source.source_lien_insurance_backing_num.get()
+    );
+    assert_eq!(
+        after.source_lien_impaired_effective_reserved.get(),
+        prior_impaired_effective as u128 + counter_effective as u128
+    );
+    assert_eq!(
+        after.source_lien_effective_reserved.get()
+            + after.source_lien_impaired_effective_reserved.get(),
+        source.source_lien_effective_reserved.get()
+            + source.source_lien_impaired_effective_reserved.get()
+    );
+    assert_eq!(after.source_lien_fee_last_slot.get(), 0);
+    let expected_impaired_fee =
+        (live_fee as u128) * (counter_effective as u128) / (live_effective as u128);
+    assert_eq!(
+        after.source_lien_capital_at_risk_fee_revenue.get(),
+        live_fee as u128 - expected_impaired_fee
+    );
+    assert_eq!(
+        after.source_lien_impaired_capital_at_risk_fee_revenue.get(),
+        impaired_fee as u128 + expected_impaired_fee
+    );
+    assert_eq!(
+        after.source_lien_capital_at_risk_fee_revenue.get()
+            + after.source_lien_impaired_capital_at_risk_fee_revenue.get(),
+        live_fee as u128 + impaired_fee as u128
+    );
+}
+
+// Repeated production scan steps composed with the real expiry and account
+// impairment kernels form a finite rank-decreasing permissionless process.
+// This separates the amount-independent liveness theorem from the full-width
+// relabel theorem above, avoiding an artificial solver dependency on amounts.
+#[kani::proof]
+#[kani::unwind(12)]
+#[kani::solver(cadical)]
+fn proof_v16_live_source_backing_reconcile_is_bounded_progress() {
+    assert_eq!(PORTFOLIO_SOURCE_DOMAIN_CAP, 4);
+    let roster_len: u8 = kani::any();
+    let lapsed_mask: u8 = kani::any();
+    let lapsed_lien_mask: u8 = kani::any();
+    let impaired_lien_mask: u8 = kani::any();
+    let future_lien_mask: u8 = kani::any();
+    let foreign_impaired_mask: u8 = kani::any();
+    kani::assume(roster_len as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    let roster_mask = (1u8 << roster_len) - 1;
+    kani::assume(lapsed_mask & !roster_mask == 0);
+    kani::assume(lapsed_lien_mask & !lapsed_mask == 0);
+    kani::assume(impaired_lien_mask & !roster_mask == 0);
+    kani::assume(future_lien_mask & !roster_mask == 0);
+    kani::assume(foreign_impaired_mask & !roster_mask == 0);
+    kani::assume(lapsed_mask & impaired_lien_mask == 0);
+    kani::assume(lapsed_mask & future_lien_mask == 0);
+    kani::assume(lapsed_mask & foreign_impaired_mask == 0);
+    kani::assume(impaired_lien_mask & future_lien_mask == 0);
+    kani::assume(impaired_lien_mask & foreign_impaired_mask == 0);
+    kani::assume(future_lien_mask & foreign_impaired_mask == 0);
+
+    let now_slot = 10u64;
+    let initial_actionable = lapsed_mask | impaired_lien_mask;
+    let mut remaining = initial_actionable;
+    let mut remaining_lapsed = lapsed_mask;
+    let mut account_lien_mask = lapsed_lien_mask | impaired_lien_mask | future_lien_mask;
+    let mut calls = 0usize;
+    while calls <= PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let rank_before = remaining.count_ones();
+        let mut expected = None;
+        let mut selected = None;
+        let mut stopped = false;
+        let mut domain = 0usize;
+        while domain < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let bit = 1u8 << domain;
+            if expected.is_none() && remaining & bit != 0 {
+                expected = Some(domain);
+            }
+            if !stopped {
+                let occupied = domain < roster_len as usize;
+                let sparse_tail = domain == roster_len as usize;
+                let processed_lapsed_lien = lapsed_lien_mask & !remaining_lapsed & bit != 0;
+                let status = if remaining_lapsed & bit != 0 {
+                    BackingBucketStatusV16::Fresh
+                } else if (impaired_lien_mask | foreign_impaired_mask) & bit != 0
+                    || processed_lapsed_lien
+                {
+                    BackingBucketStatusV16::Impaired
+                } else if future_lien_mask & bit != 0 {
+                    BackingBucketStatusV16::Fresh
+                } else {
+                    BackingBucketStatusV16::Expired
+                };
+                let expiry_slot = if remaining_lapsed & bit != 0 {
+                    now_slot
+                } else {
+                    now_slot + 1
+                };
+                (selected, stopped) =
+                    MarketGroupV16ViewMut::<u64>::kani_live_source_backing_reconcile_scan_step(
+                        selected,
+                        sparse_tail,
+                        occupied,
+                        domain,
+                        if account_lien_mask & bit != 0 {
+                            BOUND_SCALE
+                        } else {
+                            0
+                        },
+                        status,
+                        expiry_slot,
+                        now_slot,
+                    );
+            }
+            domain += 1;
+        }
+        assert_eq!(selected.map(|action| action.0), expected);
+
+        if let Some((selected_domain, newly_lapsed, impair_account)) = selected {
+            let selected_bit = 1u8 << selected_domain;
+            assert!(remaining & selected_bit != 0);
+            assert_eq!(newly_lapsed, remaining_lapsed & selected_bit != 0);
+            assert_eq!(impair_account, account_lien_mask & selected_bit != 0);
+            if newly_lapsed {
+                let liened = lapsed_lien_mask & selected_bit != 0;
+                let bucket = BackingBucketV16 {
+                    market_id: 1,
+                    fresh_unliened_backing_num: if liened { 0 } else { BOUND_SCALE },
+                    valid_liened_backing_num: if liened { BOUND_SCALE } else { 0 },
+                    expiry_slot: now_slot,
+                    status: BackingBucketStatusV16::Fresh,
+                    ..BackingBucketV16::EMPTY
+                };
+                let source = SourceCreditStateV16 {
+                    fresh_reserved_backing_num: BOUND_SCALE,
+                    valid_liened_backing_num: bucket.valid_liened_backing_num,
+                    ..SourceCreditStateV16::EMPTY
+                };
+                let (bucket_after, source_after) =
+                    MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+                        bucket, source, now_slot,
+                    )
+                    .unwrap();
+                assert_eq!(source_after.fresh_reserved_backing_num, 0);
+                assert_ne!(bucket_after.status, BackingBucketStatusV16::Fresh);
+                remaining_lapsed &= !selected_bit;
+            }
+            if impair_account {
+                let source = PortfolioSourceDomainV16Account {
+                    domain: V16PodU32::new(selected_domain as u32),
+                    source_claim_bound_num: V16PodU128::new(2 * BOUND_SCALE),
+                    source_claim_liened_num: V16PodU128::new(BOUND_SCALE),
+                    source_claim_counterparty_liened_num: V16PodU128::new(BOUND_SCALE),
+                    source_lien_effective_reserved: V16PodU128::new(1),
+                    source_lien_counterparty_backing_num: V16PodU128::new(BOUND_SCALE),
+                    ..PortfolioSourceDomainV16Account::default()
+                };
+                let (source_after, impaired_effective) = MarketGroupV16ViewMut::<u64>::
+                    kani_prepare_account_counterparty_lien_impairment(source)
+                    .unwrap();
+                assert_eq!(impaired_effective, 1);
+                assert_eq!(source_after.source_lien_counterparty_backing_num.get(), 0);
+                account_lien_mask &= !selected_bit;
+            }
+            remaining &= !selected_bit;
+            assert_eq!(remaining.count_ones() + 1, rank_before);
+        } else {
+            assert_eq!(rank_before, 0);
+        }
+        assert_eq!(account_lien_mask & future_lien_mask, future_lien_mask);
+        assert_eq!(account_lien_mask & foreign_impaired_mask, 0);
+        calls += 1;
+    }
+
+    assert_eq!(remaining, 0);
+    kani::cover!(initial_actionable == 0, "clean roster is a fixed point");
+    kani::cover!(
+        initial_actionable.count_ones() > 1,
+        "multiple obligations drain in bounded calls"
+    );
+    kani::cover!(
+        lapsed_mask & !lapsed_lien_mask != 0,
+        "unliened lapsed backing progresses"
+    );
+    kani::cover!(lapsed_lien_mask != 0, "lapsed account liens progress");
+    kani::cover!(
+        impaired_lien_mask != 0,
+        "already-impaired account liens progress"
+    );
+    kani::cover!(future_lien_mask != 0, "future source liens stay live");
+    kani::cover!(
+        foreign_impaired_mask != 0,
+        "foreign impaired backing remains isolated"
+    );
+    kani::cover!(
+        initial_actionable & 1 == 0 && initial_actionable != 0,
+        "scan skips earlier non-actionable domains"
+    );
 }

@@ -47,6 +47,23 @@ use crate::{BOUND_SCALE, MAX_VAULT_TVL, V16_TOKEN_VALUE_CLASS_COUNT};
 // with the standalone suite proofs, which fix the operands concretely.
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_commit_declared_liquidation_recovery)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_commit_declared_liquidation_recovery() {
+    let error: V16Error = kani::any();
+    let mode_tag: u8 = kani::any();
+    kani::assume(mode_tag < 3);
+    let mode = match mode_tag {
+        0 => MarketModeV16::Live,
+        1 => MarketModeV16::Resolved,
+        _ => MarketModeV16::Recovery,
+    };
+    let reason: Option<PermissionlessRecoveryReasonV16> = kani::any();
+    let _ = V16Core::kernel_commit_declared_liquidation_recovery(error, mode, reason);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::prepare_counterparty_lien_consume_delta)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -1400,6 +1417,8 @@ fn contract_check_kernel_resize_leg_same_side() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        k_rem_num: kani::any(),
+        f_rem_num: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -1548,6 +1567,143 @@ fn contract_check_kernel_attach_leg() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_fold_social_loss_dust)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_fold_social_loss_dust() {
+    let current_dust: u128 = kani::any();
+    let leg_remainder: u128 = kani::any();
+    kani::assume(current_dust < SOCIAL_LOSS_DEN);
+    kani::assume(leg_remainder < SOCIAL_LOSS_DEN);
+    let result = V16Core::kernel_fold_social_loss_dust(current_dust, leg_remainder);
+    kani::cover!(
+        current_dust + leg_remainder < SOCIAL_LOSS_DEN
+            && result == Ok((current_dust + leg_remainder, 0)),
+        "canonical fractions can fold without a carry"
+    );
+    kani::cover!(
+        current_dust + leg_remainder >= SOCIAL_LOSS_DEN
+            && result == Ok((current_dust + leg_remainder - SOCIAL_LOSS_DEN, 1)),
+        "canonical fractions can fold one whole-atom carry"
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_quarantine_social_loss_remainder)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_quarantine_social_loss_remainder() {
+    let social_remainder: u128 = kani::any();
+    let current_dust: u128 = kani::any();
+    let explicit_before: u128 = kani::any();
+    kani::assume(social_remainder < SOCIAL_LOSS_DEN);
+    kani::assume(current_dust < SOCIAL_LOSS_DEN);
+    kani::assume(explicit_before < u128::MAX);
+    let result = V16Core::kernel_quarantine_social_loss_remainder(
+        social_remainder,
+        current_dust,
+        explicit_before,
+    );
+    kani::cover!(
+        current_dust + social_remainder < SOCIAL_LOSS_DEN
+            && result == Ok((current_dust + social_remainder, explicit_before)),
+        "canonical reset remainder can fold without a carry"
+    );
+    kani::cover!(
+        current_dust + social_remainder >= SOCIAL_LOSS_DEN
+            && result
+                == Ok((
+                    current_dust + social_remainder - SOCIAL_LOSS_DEN,
+                    explicit_before + 1,
+                )),
+        "canonical reset remainder can quarantine one explicit loss atom"
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_side_needs_full_drain_reset)]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_side_needs_full_drain_reset() {
+    let effective_oi: u128 = kani::any();
+    let stored_position_count: u64 = kani::any();
+    let pending_obligation_count: u64 = kani::any();
+    let mode = match kani::any::<u8>() % 3 {
+        0 => SideModeV16::Normal,
+        1 => SideModeV16::DrainOnly,
+        _ => SideModeV16::ResetPending,
+    };
+    let reset = V16Core::kernel_side_needs_full_drain_reset(
+        effective_oi,
+        stored_position_count,
+        pending_obligation_count,
+        mode,
+    );
+    kani::cover!(reset, "zero OI with stored positions requires reset");
+    kani::cover!(!reset, "a non-reset state remains unchanged");
+}
+
+// Exercise the production unilateral-close mutation for both orientations,
+// proving that each zero-OI side enters its bounded old-epoch exit route.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn composition_unilateral_close_resets_both_zero_oi_sides() {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+
+    let closed_side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let stored_position_count = u64::from(kani::any::<u8>()).saturating_add(1);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    match closed_side {
+        SideV16::Long => {
+            asset.oi_eff_long_q = 0;
+            asset.stored_pos_count_long = stored_position_count;
+            asset.oi_eff_short_q = 1;
+            asset.stored_pos_count_short = 1;
+        }
+        SideV16::Short => {
+            asset.oi_eff_short_q = 0;
+            asset.stored_pos_count_short = stored_position_count;
+            asset.oi_eff_long_q = 1;
+            asset.stored_pos_count_long = 1;
+        }
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .kani_reduce_matching_open_interest_for_unilateral_close(0, closed_side, 1)
+            .unwrap();
+    }
+
+    let after = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    assert_eq!(after.mode_long, SideModeV16::ResetPending);
+    assert_eq!(after.mode_short, SideModeV16::ResetPending);
+    kani::cover!(
+        closed_side == SideV16::Long,
+        "long closed side enters reset"
+    );
+    kani::cover!(
+        closed_side == SideV16::Short,
+        "short closed side enters reset"
+    );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::kernel_clear_leg)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -1565,6 +1721,8 @@ fn contract_check_kernel_clear_leg() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        k_rem_num: kani::any(),
+        f_rem_num: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -1625,7 +1783,140 @@ fn contract_check_kernel_clear_leg() {
         },
     };
     kani::assume(leg.basis_pos_q > i128::MIN);
+    kani::assume(leg.b_rem < SOCIAL_LOSS_DEN);
+    kani::assume(asset.social_loss_dust_long_num < SOCIAL_LOSS_DEN);
+    kani::assume(asset.social_loss_dust_short_num < SOCIAL_LOSS_DEN);
     let _ = V16Core::kernel_clear_leg(leg, asset);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_clear_resolved_leg)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_clear_resolved_leg() {
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let basis_pos_q: i128 = kani::any();
+    kani::assume(basis_pos_q > i128::MIN);
+    let leg = PortfolioLegV16 {
+        active: true,
+        side,
+        basis_pos_q,
+        epoch_snap: kani::any(),
+        loss_weight: kani::any(),
+        b_rem: kani::any(),
+        ..PortfolioLegV16::EMPTY
+    };
+    let mut asset = AssetStateV16::default();
+    asset.oi_eff_long_q = kani::any();
+    asset.oi_eff_short_q = kani::any();
+    asset.stored_pos_count_long = kani::any();
+    asset.stored_pos_count_short = kani::any();
+    asset.pending_obligation_count_long = kani::any();
+    asset.pending_obligation_count_short = kani::any();
+    asset.loss_weight_sum_long = kani::any();
+    asset.loss_weight_sum_short = kani::any();
+    asset.social_loss_dust_long_num = kani::any();
+    asset.social_loss_dust_short_num = kani::any();
+    asset.epoch_long = kani::any();
+    asset.epoch_short = kani::any();
+    asset.mode_long = if kani::any() {
+        SideModeV16::Normal
+    } else {
+        SideModeV16::ResetPending
+    };
+    asset.mode_short = if kani::any() {
+        SideModeV16::Normal
+    } else {
+        SideModeV16::ResetPending
+    };
+    let _ = V16Core::kernel_clear_resolved_leg(leg, asset);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_clear_leg_canonical_dust_never_blocks_exit() {
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let current_dust: u128 = kani::any();
+    let leg_remainder: u128 = kani::any();
+    kani::assume(current_dust < SOCIAL_LOSS_DEN);
+    kani::assume(leg_remainder < SOCIAL_LOSS_DEN);
+
+    let basis_abs = POS_SCALE;
+    let basis_pos_q = match side {
+        SideV16::Long => basis_abs as i128,
+        SideV16::Short => -(basis_abs as i128),
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: 1,
+        side,
+        basis_pos_q,
+        a_basis: POS_SCALE,
+        k_snap: 0,
+        f_snap: 0,
+        k_rem_num: 0,
+        f_rem_num: 0,
+        epoch_snap: 0,
+        loss_weight: 1,
+        b_snap: 0,
+        b_rem: leg_remainder,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    let mut asset = AssetStateV16::default();
+    asset.market_id = 1;
+    asset.lifecycle = AssetLifecycleV16::Active;
+    match side {
+        SideV16::Long => {
+            asset.oi_eff_long_q = basis_abs;
+            asset.stored_pos_count_long = 1;
+            asset.loss_weight_sum_long = 1;
+            asset.social_loss_dust_long_num = current_dust;
+        }
+        SideV16::Short => {
+            asset.oi_eff_short_q = basis_abs;
+            asset.stored_pos_count_short = 1;
+            asset.loss_weight_sum_short = 1;
+            asset.social_loss_dust_short_num = current_dust;
+        }
+    }
+
+    let cleared = V16Core::kernel_clear_leg(leg, asset).unwrap();
+    let expected_dust = (current_dust + leg_remainder) % SOCIAL_LOSS_DEN;
+    match side {
+        SideV16::Long => {
+            assert_eq!(cleared.oi_eff_long_q, 0);
+            assert_eq!(cleared.stored_pos_count_long, 0);
+            assert_eq!(cleared.loss_weight_sum_long, 0);
+            assert_eq!(cleared.social_loss_dust_long_num, expected_dust);
+        }
+        SideV16::Short => {
+            assert_eq!(cleared.oi_eff_short_q, 0);
+            assert_eq!(cleared.stored_pos_count_short, 0);
+            assert_eq!(cleared.loss_weight_sum_short, 0);
+            assert_eq!(cleared.social_loss_dust_short_num, expected_dust);
+        }
+    }
+    kani::cover!(
+        current_dust + leg_remainder < SOCIAL_LOSS_DEN,
+        "a no-carry exit clears"
+    );
+    kani::cover!(
+        current_dust + leg_remainder >= SOCIAL_LOSS_DEN,
+        "a whole-atom carry exit clears"
+    );
 }
 
 #[cfg(all(kani, feature = "contracts"))]
@@ -1646,6 +1937,8 @@ fn contract_check_kernel_advance_leg_b_snap() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        k_rem_num: kani::any(),
+        f_rem_num: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -2079,6 +2372,8 @@ fn liveness_b_stale_leg_has_advancing_chunk() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        k_rem_num: kani::any(),
+        f_rem_num: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -2488,8 +2783,8 @@ fn contract_check_kernel_cert_is_current() {
 
 // ROADMAP 3C step 3 (A7 close-rank fidelity): full-domain contract check that
 // build_resolved_close_rank maps each real per-component signal to its rank flag
-// (b-stale, negative PnL, live leg via non-empty bitmap, capital, receipt,
-// recovery). unwind(16): the active-bitmap is-empty scan / memcmp.
+// (b-stale, negative PnL, exact live-leg count, capital, receipt,
+// recovery). unwind(16): the active-bitmap population scan.
 #[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::build_resolved_close_rank)]
 #[kani::unwind(16)]
@@ -2746,14 +3041,14 @@ fn contract_check_first_actionable_slot() {
 }
 
 // ENGINE.MD plan selector: totality (actionable -> non-NoAction), priority
-// determinism (recovery > resolved > b-stale > liquidate > refresh), and
-// selected-asset fidelity (SettleBChunk/Liquidate carry the engine-selected
-// slot). pending_close is classifier-unreachable (required absent).
+// determinism (recovery > resolved > recovery-close > b-stale > liquidate >
+// refresh), and selected-asset fidelity for every asset-scoped continuation.
 #[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::select_auto_crank_plan)]
 #[kani::solver(cadical)]
 fn contract_check_select_auto_crank_plan() {
     let summary: ActionableSummaryV16 = kani::any();
+    let pending_close_slot: usize = kani::any();
     let b_stale_slot: usize = kani::any();
     let liq_slot: usize = kani::any();
     let refresh_asset: Option<usize> = if kani::any() {
@@ -2764,6 +3059,7 @@ fn contract_check_select_auto_crank_plan() {
     let recovery_reason: PermissionlessRecoveryReasonV16 = kani::any();
     let _ = V16Core::select_auto_crank_plan(
         summary,
+        pending_close_slot,
         b_stale_slot,
         liq_slot,
         refresh_asset,

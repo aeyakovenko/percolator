@@ -9,6 +9,134 @@
 use super::*;
 use crate::wide_math::U256;
 
+pub fn kani_resolved_source_close_phase(
+    source_claim_liened_num: u128,
+    bucket_status: BackingBucketStatusV16,
+    bucket_expiry_slot: u64,
+    current_slot: u64,
+) -> u8 {
+    match V16Core::resolved_source_close_phase(
+        source_claim_liened_num,
+        bucket_status,
+        bucket_expiry_slot,
+        current_slot,
+    ) {
+        ResolvedSourceClosePhaseV16::ReleaseLien => 0,
+        ResolvedSourceClosePhaseV16::ExpireBacking => 1,
+        ResolvedSourceClosePhaseV16::ProcessClaim => 2,
+    }
+}
+
+pub fn kani_commit_declared_liquidation_recovery(
+    error: V16Error,
+    mode: MarketModeV16,
+    reason: Option<PermissionlessRecoveryReasonV16>,
+) -> V16Result<PermissionlessProgressOutcomeV16> {
+    V16Core::kernel_commit_declared_liquidation_recovery(error, mode, reason)
+}
+
+pub fn kani_clear_resolved_leg(
+    leg: PortfolioLegV16,
+    asset: AssetStateV16,
+) -> V16Result<AssetStateV16> {
+    V16Core::kernel_clear_resolved_leg(leg, asset)
+}
+
+pub fn kani_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> bool {
+    V16Core::kernel_auto_crank_lifecycle_dispatchable(lifecycle)
+}
+
+pub fn kani_auto_crank_leg_flags(
+    active: bool,
+    lifecycle: AssetLifecycleV16,
+    basis_pos_q: i128,
+    side_oi_q: u128,
+    side_mode: SideModeV16,
+    asset_epoch: u64,
+    leg_epoch_snap: u64,
+    leg_b_stale: bool,
+) -> (bool, bool, bool, bool) {
+    V16Core::kernel_auto_crank_leg_flags(
+        active,
+        lifecycle,
+        basis_pos_q,
+        side_oi_q,
+        side_mode,
+        asset_epoch,
+        leg_epoch_snap,
+        leg_b_stale,
+    )
+}
+
+pub fn kani_should_clear_prior_reset_obligation(
+    already_cleared: bool,
+    prior_reset_obligation: bool,
+    pending_close_residual: bool,
+) -> bool {
+    V16Core::kernel_should_clear_prior_reset_obligation(
+        already_cleared,
+        prior_reset_obligation,
+        pending_close_residual,
+    )
+}
+
+pub fn kani_auto_crank_liquidatable(
+    live: bool,
+    cert_current: bool,
+    certified_liq_deficit: u128,
+    dispatchable_asset: Option<usize>,
+) -> bool {
+    V16Core::kernel_auto_crank_liquidatable(
+        live,
+        cert_current,
+        certified_liq_deficit,
+        dispatchable_asset,
+    )
+}
+
+pub fn kani_first_actionable_slot(flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N]) -> Option<usize> {
+    V16Core::first_actionable_slot(flags)
+}
+
+pub fn kani_permissionless_kf_settlement_commits_step(
+    allow_b_chunk: bool,
+    source_domain_count: usize,
+    has_pending_kf: bool,
+    leg_kf_pending: bool,
+) -> bool {
+    V16Core::kernel_permissionless_kf_settlement_commits_step(
+        allow_b_chunk,
+        source_domain_count,
+        has_pending_kf,
+        leg_kf_pending,
+    )
+}
+
+pub fn kani_select_auto_crank_plan(
+    summary: ActionableSummaryV16,
+    pending_close_slot: usize,
+    b_stale_slot: usize,
+    liq_slot: usize,
+    refresh_asset: Option<usize>,
+    recovery_reason: PermissionlessRecoveryReasonV16,
+) -> AutoCrankPlanV16 {
+    V16Core::select_auto_crank_plan(
+        summary,
+        pending_close_slot,
+        b_stale_slot,
+        liq_slot,
+        refresh_asset,
+        recovery_reason,
+    )
+}
+
+pub fn kani_auto_crank_skip_post_action_accrual(
+    observations_preaccrued: bool,
+    selected_observation_supplied: bool,
+) -> bool {
+    auto_crank_skip_post_action_accrual(observations_preaccrued, selected_observation_supplied)
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,
@@ -58,11 +186,54 @@ pub fn kani_cert_is_current(
     )
 }
 
+pub fn kani_position_action_reuses_current_certificate(
+    account_stale: bool,
+    account_b_stale: bool,
+    cert_current: bool,
+    has_b_stale_leg: bool,
+) -> bool {
+    V16Core::kernel_position_action_reuses_current_certificate(
+        account_stale,
+        account_b_stale,
+        cert_current,
+        has_b_stale_leg,
+    )
+}
+
 pub fn kani_active_bitmap_set(
     bitmap: &mut V16ActiveBitmap,
     leg_slot_index: usize,
 ) -> V16Result<()> {
     active_bitmap_set(bitmap, leg_slot_index)
+}
+
+pub fn kani_active_bitmap_with_cleared(
+    bitmap: V16ActiveBitmap,
+    leg_slot_index: usize,
+) -> V16Result<V16ActiveBitmap> {
+    active_bitmap_with_cleared(bitmap, leg_slot_index)
+}
+
+pub fn kani_first_active_bitmap_slot(bitmap: V16ActiveBitmap) -> V16Result<Option<usize>> {
+    first_active_bitmap_slot(bitmap)
+}
+
+pub fn kani_build_resolved_close_rank(
+    b_stale: bool,
+    pnl: i128,
+    active_bitmap: V16ActiveBitmap,
+    capital: u128,
+    receipt_present: bool,
+    recovery_required: bool,
+) -> ResolvedCloseRankV16 {
+    V16Core::build_resolved_close_rank(
+        b_stale,
+        pnl,
+        active_bitmap,
+        capital,
+        receipt_present,
+        recovery_required,
+    )
 }
 
 pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
@@ -451,9 +622,59 @@ impl MarketGroupV16HeaderAccount {
     ) -> V16Result<()> {
         self.validate_dynamic_market_slot_shape_at(slot_index, slot)
     }
+
+    pub fn kani_clear_attributed_bankruptcy_asset_for_reuse(
+        &mut self,
+        slot: &mut EngineAssetSlotV16Account,
+    ) -> V16Result<()> {
+        self.clear_attributed_bankruptcy_asset_for_reuse(slot)
+    }
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_kernel_unilateral_close_capacity(
+        stored_abs: u128,
+        oi_eff_long_q: u128,
+        oi_eff_short_q: u128,
+    ) -> u128 {
+        V16Core::kernel_unilateral_close_capacity(stored_abs, oi_eff_long_q, oi_eff_short_q)
+    }
+
+    pub fn kani_kernel_reduce_position_delta(
+        pre_basis_signed: i128,
+        side: SideV16,
+        requested: u128,
+    ) -> V16Result<(u128, i128)> {
+        V16Core::kernel_reduce_position_delta(pre_basis_signed, side, requested)
+    }
+
+    pub fn kani_kernel_begin_full_drain_reset(
+        asset: AssetStateV16,
+        side: SideV16,
+    ) -> V16Result<AssetStateV16> {
+        V16Core::kernel_begin_full_drain_reset(asset, side)
+    }
+
+    pub fn kani_kernel_clear_leg(
+        leg: PortfolioLegV16,
+        asset: AssetStateV16,
+    ) -> V16Result<AssetStateV16> {
+        V16Core::kernel_clear_leg(leg, asset)
+    }
+
+    pub fn kani_leg_has_exhausted_effective_oi(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
+        Self::leg_has_exhausted_effective_oi(asset, leg)
+    }
+
+    pub fn kani_reduce_matching_open_interest_for_unilateral_close(
+        &mut self,
+        asset_index: usize,
+        closed_side: SideV16,
+        close_q: u128,
+    ) -> V16Result<()> {
+        self.reduce_matching_open_interest_for_unilateral_close(asset_index, closed_side, close_q)
+    }
+
     pub fn kani_clear_leg(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -636,6 +857,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_apply_insurance_source_credit_lien_delta(
+        source: &mut PortfolioSourceDomainV16Account,
+        required_face_num: u128,
+        required_backing_num: u128,
+        effective_credit: u128,
+        current_slot: u64,
+    ) -> V16Result<()> {
+        Self::apply_account_source_credit_lien_delta(
+            source,
+            SourceCreditBackingSourceV16::Insurance,
+            required_face_num,
+            required_backing_num,
+            effective_credit,
+            current_slot,
+        )
+    }
+
+    pub fn kani_validate_account_source_credit_lien_entry(
+        source: PortfolioSourceDomainV16Account,
+        domain: usize,
+    ) -> V16Result<()> {
+        PortfolioV16View::source_credit_lien_aggregate_proof(source, domain)?.validate()
+    }
+
     pub fn kani_prepare_counterparty_lien_create_delta(
         bucket: BackingBucketV16,
         source: SourceCreditStateV16,
@@ -685,11 +930,129 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::prepare_counterparty_backing_withdraw_delta(bucket, source, amount)
     }
 
+    pub fn kani_prepare_counterparty_backing_expiry_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+        now_slot: u64,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        V16Core::prepare_counterparty_backing_expiry_delta(bucket, source, now_slot)
+    }
+
+    pub fn kani_lapsed_source_backing_scan_step(
+        selected: Option<usize>,
+        sparse_tail: bool,
+        occupied: bool,
+        domain: usize,
+        bucket_status: BackingBucketStatusV16,
+        expiry_slot: u64,
+        current_slot: u64,
+    ) -> (Option<usize>, bool) {
+        V16Core::kernel_lapsed_source_backing_scan_step(
+            selected,
+            sparse_tail,
+            occupied,
+            domain,
+            bucket_status,
+            expiry_slot,
+            current_slot,
+        )
+    }
+
     pub fn kani_source_credit_lien_amounts_for_effective(
         effective_credit: u128,
         credit_rate_num: u128,
     ) -> V16Result<(u128, u128)> {
         V16Core::source_credit_lien_amounts_for_effective(effective_credit, credit_rate_num)
+    }
+
+    pub fn kani_source_lien_backing_release_for_face_burn(
+        face_locked_num: u128,
+        backing_reserved_num: u128,
+        face_burn_num: u128,
+    ) -> V16Result<u128> {
+        V16Core::source_lien_backing_release_for_face_burn(
+            face_locked_num,
+            backing_reserved_num,
+            face_burn_num,
+        )
+    }
+
+    pub fn kani_source_lien_fee_after_backing_release(
+        fee_revenue: u128,
+        backing_before: u128,
+        backing_after: u128,
+    ) -> V16Result<u128> {
+        V16Core::source_lien_fee_after_backing_release(fee_revenue, backing_before, backing_after)
+    }
+
+    pub fn kani_source_lien_face_burn_plan(
+        counterparty_face_num: u128,
+        insurance_face_num: u128,
+        counterparty_backing_num: u128,
+        insurance_backing_num: u128,
+        face_burn_num: u128,
+    ) -> V16Result<(u128, u128, u128, u128, u128)> {
+        V16Core::source_lien_face_burn_plan(
+            counterparty_face_num,
+            insurance_face_num,
+            counterparty_backing_num,
+            insurance_backing_num,
+            face_burn_num,
+        )
+    }
+
+    pub fn kani_source_lien_face_burn_partition(
+        counterparty_face_num: u128,
+        insurance_face_num: u128,
+        face_burn_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        V16Core::source_lien_face_burn_partition(
+            counterparty_face_num,
+            insurance_face_num,
+            face_burn_num,
+        )
+    }
+
+    pub fn kani_prepare_account_counterparty_lien_impairment(
+        source: PortfolioSourceDomainV16Account,
+    ) -> V16Result<(PortfolioSourceDomainV16Account, u128)> {
+        V16Core::prepare_account_counterparty_lien_impairment(source)
+    }
+
+    pub fn kani_live_source_backing_reconcile_scan_step(
+        selected: Option<(usize, bool, bool)>,
+        sparse_tail: bool,
+        occupied: bool,
+        domain: usize,
+        counterparty_backing_num: u128,
+        bucket_status: BackingBucketStatusV16,
+        expiry_slot: u64,
+        current_slot: u64,
+    ) -> (Option<(usize, bool, bool)>, bool) {
+        V16Core::kernel_live_source_backing_reconcile_scan_step(
+            selected,
+            sparse_tail,
+            occupied,
+            domain,
+            counterparty_backing_num,
+            bucket_status,
+            expiry_slot,
+            current_slot,
+        )
+    }
+
+    pub fn kani_source_credit_lien_allocation_take(
+        remaining: u128,
+        unliened_face_num: u128,
+        available_backing_num: u128,
+        credit_rate_num: u128,
+    ) -> V16Result<u128> {
+        V16Core::source_credit_lien_allocation_take(
+            remaining,
+            unliened_face_num,
+            available_backing_num,
+            credit_rate_num,
+        )
     }
 
     pub fn kani_counterparty_cure_atoms_from_scaled_backing(amount: u128) -> V16Result<u128> {
@@ -832,6 +1195,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::canonical_retired_asset_slot(old_asset)
     }
 
+    pub fn kani_asset_has_empty_lifecycle_blocker(asset: AssetStateV16) -> bool {
+        Self::asset_has_empty_lifecycle_blocker(asset)
+    }
+
     pub fn kani_convert_source_claim_exposure_guard(
         &self,
         account: &PortfolioV16View<'_>,
@@ -862,6 +1229,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         instruction_bankruptcy_candidate: bool,
     ) -> V16Result<HLockLaneV16> {
         self.h_lock_lane(account, instruction_bankruptcy_candidate)
+    }
+
+    pub fn kani_bankruptcy_hlock_is_only_unrelated_to_account(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        self.bankruptcy_hlock_is_only_unrelated_to_account(account)
+    }
+
+    pub fn kani_mark_attributed_bankruptcy_hlock(&mut self, asset_index: usize) -> V16Result<()> {
+        self.mark_attributed_bankruptcy_hlock(asset_index)
     }
 
     pub fn kani_can_ignore_unrelated_loss_stale_for_trade(
@@ -936,6 +1314,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &PortfolioV16View<'_>,
     ) -> V16Result<()> {
         Self::ensure_no_positive_credit_initial_margin(account)
+    }
+
+    pub fn kani_ensure_trade_final_margin_policy(
+        long_account: &PortfolioV16View<'_>,
+        short_account: &PortfolioV16View<'_>,
+        locked: bool,
+        risk_increasing: bool,
+    ) -> V16Result<()> {
+        Self::ensure_trade_final_margin_policy(long_account, short_account, locked, risk_increasing)
     }
 
     pub fn kani_apply_trade_after_refresh_not_atomic(
@@ -1018,11 +1405,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::resolved_receipt_claimable_against_ledger(receipt, ledger)
     }
 
-    pub fn kani_realize_source_backed_claims_for_resolved_close_not_atomic(
+    pub fn kani_prepare_one_source_domain_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<u128> {
-        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)
+    ) -> V16Result<Option<usize>> {
+        self.prepare_one_source_domain_for_resolved_close_not_atomic(account)
+    }
+
+    pub fn kani_process_one_source_claim_for_resolved_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<Option<usize>> {
+        self.process_one_source_claim_for_resolved_close_not_atomic(account)
     }
 
     pub fn kani_create_resolved_payout_receipt_if_needed(
@@ -1030,6 +1424,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<()> {
         self.create_resolved_payout_receipt_if_needed(account)
+    }
+
+    pub fn kani_resolved_close_terminal_payout_delta(
+        account_capital: u128,
+        resolved_claimable: u128,
+        vault: u128,
+        c_tot: u128,
+    ) -> V16Result<(u128, u128, u128, u128, u128)> {
+        V16Core::resolved_close_terminal_payout_delta(
+            account_capital,
+            resolved_claimable,
+            vault,
+            c_tot,
+        )
     }
 
     pub fn kani_claim_resolved_payout_topup_core_not_atomic(
@@ -1179,6 +1587,7 @@ pub fn kani_eq_market_group_v16_header_account(
         && a.funding_epoch.get() == b.funding_epoch.get()
         && a.slot_last.get() == b.slot_last.get()
         && a.current_slot.get() == b.current_slot.get()
+        && a.bankruptcy_hlock_asset_count.get() == b.bankruptcy_hlock_asset_count.get()
         && a.bankruptcy_hlock_active == b.bankruptcy_hlock_active
         && a.threshold_stress_active == b.threshold_stress_active
         && a.loss_stale_active == b.loss_stale_active
@@ -1292,6 +1701,7 @@ pub fn kani_eq_engine_asset_slot_v16_account(
         && a.insurance_domain_spent_short.get() == b.insurance_domain_spent_short.get()
         && a.pending_domain_loss_barrier_long.get() == b.pending_domain_loss_barrier_long.get()
         && a.pending_domain_loss_barrier_short.get() == b.pending_domain_loss_barrier_short.get()
+        && a.bankruptcy_hlock_active == b.bankruptcy_hlock_active
         && kani_eq_source_credit_state_v16_account(&a.source_credit_long, &b.source_credit_long)
         && kani_eq_source_credit_state_v16_account(&a.source_credit_short, &b.source_credit_short)
         && kani_eq_backing_bucket_v16_account(&a.backing_long, &b.backing_long)
@@ -1350,6 +1760,8 @@ pub fn kani_eq_portfolio_leg_v16_account(
         && a.a_basis.get() == b.a_basis.get()
         && a.k_snap.get() == b.k_snap.get()
         && a.f_snap.get() == b.f_snap.get()
+        && a.k_rem_num.get() == b.k_rem_num.get()
+        && a.f_rem_num.get() == b.f_rem_num.get()
         && a.epoch_snap.get() == b.epoch_snap.get()
         && a.loss_weight.get() == b.loss_weight.get()
         && a.b_snap.get() == b.b_snap.get()
@@ -1649,7 +2061,7 @@ pub enum TradeRejectReasonV16 {
 pub struct ResolvedCloseRankV16 {
     pub b_stale: bool,           // outstanding B settlement
     pub negative_pnl: bool,      // unsettled negative PnL
-    pub active_leg: bool,        // an open leg remains
+    pub active_leg_count: u32,   // exact number of open legs remaining
     pub receipt_claim: bool,     // an unpaid resolved receipt claim
     pub capital: bool,           // residual capital to disburse
     pub recovery_required: bool, // the explicit recovery predicate holds
@@ -1658,7 +2070,11 @@ pub struct ResolvedCloseRankV16 {
 impl ResolvedCloseRankV16 {
     #[cfg_attr(not(kani), allow(dead_code))] // PROOF-ONLY: used by kernel_resolved_close_progress (fidelity model)
     pub fn has_pending(self) -> bool {
-        self.b_stale || self.negative_pnl || self.active_leg || self.receipt_claim || self.capital
+        self.b_stale
+            || self.negative_pnl
+            || self.active_leg_count != 0
+            || self.receipt_claim
+            || self.capital
     }
 }
 
@@ -1683,9 +2099,9 @@ pub enum ResolvedCloseStepV16 {
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgressContinuationV16 {
-    DeclareRecovery, // A4 expired close / A6 recovery-eligible: terminal recovery
+    DeclareRecovery, // A4 expired non-isolated close / A6 recovery-eligible
     CloseResolved,   // A7 resolved winner: terminal realization
-    AdvanceClose,    // A3 pending close residual: close-ledger rank step
+    AdvanceClose,    // A3 frozen recovery-asset residual: close-ledger rank step
     SettleBChunk,    // A2 b-stale leg: B-advance rank step
     Liquidate,       // A5 liquidatable: risk-reduction
     RefreshAccount,  // A1 stale account: protective accrual segment
@@ -1901,14 +2317,14 @@ impl V16Core {
     /// PRODUCTION FIDELITY BUILDER (roadmap 3C step 3, A7 close-rank): map the
     /// real resolved-close per-component signals to the compact rank summary that
     /// kernel_resolved_close_progress classifies. Each rank flag is EXACTLY its
-    /// production predicate — b-stale bit, negative PnL, a live leg (non-empty
-    /// active bitmap), residual capital, an open receipt, and the explicit
+    /// production predicate — b-stale bit, negative PnL, the exact active-bitmap
+    /// population count, residual capital, an open receipt, and the explicit
     /// recovery predicate — so the close-rank summary faithfully represents the
     /// real account/market state (no hidden pending component outside it). Pure.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|r: &ResolvedCloseRankV16| {
         r.b_stale == b_stale
             && r.negative_pnl == (pnl < 0)
-            && r.active_leg == !active_bitmap_is_empty(active_bitmap)
+            && r.active_leg_count == active_bitmap_count_ones(active_bitmap)
             && r.capital == (capital > 0)
             && r.receipt_claim == receipt_present
             && r.recovery_required == recovery_required
@@ -1925,7 +2341,7 @@ impl V16Core {
         ResolvedCloseRankV16 {
             b_stale,
             negative_pnl: pnl < 0,
-            active_leg: !active_bitmap_is_empty(active_bitmap),
+            active_leg_count: active_bitmap_count_ones(active_bitmap),
             capital: capital > 0,
             receipt_claim: receipt_present,
             recovery_required,
@@ -1944,5 +2360,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         request: PermissionlessCrankRequestV16,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.permissionless_crank_not_atomic(account, request)
+    }
+
+    pub fn kani_permissionless_crank_with_skip_post_action_accrual(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        request: PermissionlessCrankRequestV16,
+        skip_post_action_accrual: bool,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.permissionless_crank_impl_not_atomic(account, request, skip_post_action_accrual)
     }
 }

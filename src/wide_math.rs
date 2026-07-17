@@ -1633,7 +1633,26 @@ pub fn wide_signed_mul_div_floor_from_k_pair(
     k_now: i128,
     den: u128,
 ) -> i128 {
+    wide_signed_mul_div_floor_with_carry_from_k_pair(abs_basis, k_then, k_now, den, 0).0
+}
+
+/// Exact signed floor settlement with a persistent Euclidean remainder.
+///
+/// Computes `floor((carry + abs_basis * (k_now - k_then)) / den)` and returns
+/// the quotient plus the new remainder in `[0, den)`. Carrying that remainder
+/// makes any partition of the same K/F interval settle to the same total.
+pub fn wide_signed_mul_div_floor_with_carry_from_k_pair(
+    abs_basis: u128,
+    k_then: i128,
+    k_now: i128,
+    den: u128,
+    carry: u128,
+) -> (i128, u128) {
     assert!(den > 0, "wide_signed_mul_div_floor_from_k_pair: den == 0");
+    assert!(
+        carry < den,
+        "wide_signed_mul_div_floor_from_k_pair: carry >= den"
+    );
     // Compute d = k_now - k_then in wide signed to avoid i128 overflow (spec §4.8)
     let k_now_wide = I256::from_i128(k_now);
     let k_then_wide = I256::from_i128(k_then);
@@ -1641,7 +1660,7 @@ pub fn wide_signed_mul_div_floor_from_k_pair(
         .checked_sub(k_then_wide)
         .expect("K-diff overflow in wide");
     if d.is_zero() || abs_basis == 0 {
-        return 0i128;
+        return (0, carry);
     }
     let abs_d = d.abs_u256();
     let abs_basis_u256 = U256::from_u128(abs_basis);
@@ -1650,27 +1669,48 @@ pub fn wide_signed_mul_div_floor_from_k_pair(
     let p = abs_basis_u256
         .checked_mul(abs_d)
         .expect("wide product overflow");
-    let (q, rem) = div_rem_u256(p, den_u256);
+    let carry_u256 = U256::from_u128(carry);
     if d.is_negative() {
-        // mag = q + 1 if r != 0 else q
-        let mag = if !rem.is_zero() {
-            q.checked_add(U256::ONE).expect("mag overflow")
+        if p <= carry_u256 {
+            let rem = carry_u256
+                .checked_sub(p)
+                .expect("carry subtraction underflow")
+                .try_into_u128()
+                .expect("carry remainder exceeds u128");
+            return (0, rem);
+        }
+        let magnitude = p
+            .checked_sub(carry_u256)
+            .expect("negative magnitude underflow");
+        let (q, rem) = div_rem_u256(magnitude, den_u256);
+        // floor(-m/d) = -ceil(m/d), with a nonnegative Euclidean remainder.
+        let (mag, next_rem) = if !rem.is_zero() {
+            let mag = q.checked_add(U256::ONE).expect("mag overflow");
+            let rem_u128 = rem.try_into_u128().expect("remainder exceeds u128");
+            (mag, den - rem_u128)
         } else {
-            q
+            (q, 0)
         };
         let mag_u128 = mag.try_into_u128().expect("mag exceeds u128");
         assert!(
             mag_u128 <= i128::MAX as u128,
             "wide_signed_mul_div_floor_from_k_pair: mag > i128::MAX"
         );
-        -(mag_u128 as i128)
+        (-(mag_u128 as i128), next_rem)
     } else {
+        let total = p
+            .checked_add(carry_u256)
+            .expect("wide product + carry overflow");
+        let (q, rem) = div_rem_u256(total, den_u256);
         let q_u128 = q.try_into_u128().expect("quotient exceeds u128");
         assert!(
             q_u128 <= i128::MAX as u128,
             "wide_signed_mul_div_floor_from_k_pair: q > i128::MAX"
         );
-        q_u128 as i128
+        (
+            q_u128 as i128,
+            rem.try_into_u128().expect("remainder exceeds u128"),
+        )
     }
 }
 
@@ -2166,5 +2206,41 @@ mod tests {
             mul_div_floor_u256(U256::ONE, U256::ONE, U256::ONE),
             U256::ONE
         );
+    }
+
+    #[test]
+    fn signed_floor_carry_is_partition_invariant() {
+        for delta in [-1i128, 1i128] {
+            let mut carry = 0u128;
+            let mut fragmented_q = 0i128;
+            for _ in 0..10 {
+                let (q, next_carry) =
+                    wide_signed_mul_div_floor_with_carry_from_k_pair(1, 0, delta, 10, carry);
+                fragmented_q += q;
+                carry = next_carry;
+            }
+            let (delayed_q, delayed_carry) =
+                wide_signed_mul_div_floor_with_carry_from_k_pair(1, 0, delta * 10, 10, 0);
+            assert_eq!((fragmented_q, carry), (delayed_q, delayed_carry));
+        }
+    }
+
+    #[test]
+    fn signed_floor_carry_handles_sign_reversal_and_wide_difference() {
+        let (loss_q, loss_rem) = wide_signed_mul_div_floor_with_carry_from_k_pair(1, 0, -1, 10, 0);
+        assert_eq!((loss_q, loss_rem), (-1, 9));
+        let (recovery_q, recovery_rem) =
+            wide_signed_mul_div_floor_with_carry_from_k_pair(1, 0, 1, 10, loss_rem);
+        assert_eq!((recovery_q, recovery_rem), (1, 0));
+
+        let den = u128::MAX;
+        let (q, rem) = wide_signed_mul_div_floor_with_carry_from_k_pair(
+            1,
+            i128::MAX,
+            i128::MIN + 1,
+            den,
+            den - 1,
+        );
+        assert_eq!((q, rem), (0, 0));
     }
 }
