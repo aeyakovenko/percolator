@@ -11675,6 +11675,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &self,
         account: &PortfolioV16View<'_>,
     ) -> V16Result<ActionableSummaryV16> {
+        Ok(self
+            .build_actionable_summary_and_selected_assets(account)?
+            .0)
+    }
+
+    fn build_actionable_summary_and_selected_assets(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<(
+        ActionableSummaryV16,
+        (Option<usize>, Option<usize>, Option<usize>, Option<usize>),
+    )> {
         let mode = decode_market_mode(self.header.mode)?;
         let live = mode == MarketModeV16::Live;
         let resolved = mode == MarketModeV16::Resolved;
@@ -11690,8 +11702,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         );
         let ledger = account.header.close_progress.try_to_runtime()?;
 
-        let (_, _, liquidatable_asset, reset_obligation_asset) =
-            self.auto_crank_selected_assets(account)?;
+        let selected_assets = self.auto_crank_selected_assets(account)?;
+        let liquidatable_asset = selected_assets.2;
+        let reset_obligation_asset = selected_assets.3;
         let has_open_risk = liquidatable_asset.is_some();
         // A close ledger with residual_remaining==0 is already fully booked/covered
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
@@ -11744,14 +11757,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let resolved_winner =
             resolved && account.header.pnl.get() > 0 && self.resolved_positive_payout_ready()?;
 
-        Ok(V16Core::actionable_summary_from_signals(
-            stale,
-            b_stale,
-            pending_close,
-            expired_close,
-            liquidatable,
-            recovery_eligible,
-            resolved_winner,
+        Ok((
+            V16Core::actionable_summary_from_signals(
+                stale,
+                b_stale,
+                pending_close,
+                expired_close,
+                liquidatable,
+                recovery_eligible,
+                resolved_winner,
+            ),
+            selected_assets,
         ))
     }
 
@@ -11871,9 +11887,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         work: AutoCrankWorkV16<'_>,
     ) -> V16Result<AutoCrankResultV16> {
-        let summary = self.build_actionable_summary(&account.as_view())?;
-        let (b_stale_asset, refresh_asset, liquidatable_asset, _) =
-            self.auto_crank_selected_assets(&account.as_view())?;
+        let (summary, (b_stale_asset, refresh_asset, liquidatable_asset, _)) =
+            self.build_actionable_summary_and_selected_assets(&account.as_view())?;
         let recovery_reason = if summary.expired_close {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {
