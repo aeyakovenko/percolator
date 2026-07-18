@@ -14193,10 +14193,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             short_delta,
             trade_preflight.short_lookup,
         )?;
-        // ADL can leave stored basis larger than effective OI. If a matched trade consumes the
-        // final effective unit while basis remains, enter the existing reset epoch so public crank
-        // can clear the economically exhausted residue instead of leaving a Normal-mode zero-OI leg.
-        self.begin_zero_oi_trade_residue_resets(request.asset_index)?;
         self.transfer_trade_residual_reward_credit(
             long_account,
             short_account,
@@ -14405,6 +14401,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_has_source_claims,
             short_has_source_claims,
         )?;
+        // ADL can leave stored basis larger than effective OI. Start resets only after final margin
+        // checks so the reset's risk-epoch advance leaves each affected account certificate stale;
+        // the public auto-crank then selects Refresh and clears the economically exhausted residue.
+        let mut i = 0usize;
+        while i < requests.len() {
+            self.begin_zero_oi_trade_residue_resets(requests[i].asset_index)?;
+            i += 1;
+        }
         Ok(outcome)
     }
 
