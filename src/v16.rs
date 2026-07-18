@@ -5438,6 +5438,7 @@ struct SupportLossApplicationV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SourceCreditConsumptionV16 {
     face_burn: u128,
+    source_face_burn_num: u128,
     counterparty_credit_consumed: u128,
     insurance_credit_consumed: u128,
 }
@@ -8663,6 +8664,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn burn_account_source_claim_bound_num_for_domain(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        slot: usize,
+        domain: usize,
+        burn_num: u128,
+    ) -> V16Result<()> {
+        if burn_num == 0 {
+            return Ok(());
+        }
+        if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP
+            || account.source_domain_slot(domain)? != Some(slot)
+            || Self::source_claim_unliened_num(&account.as_view(), domain)? < burn_num
+        {
+            return Err(V16Error::CounterUnderflow);
+        }
+        let source = &mut account.header.source_domains[slot];
+        source.source_claim_bound_num = V16PodU128::new(
+            source
+                .source_claim_bound_num
+                .get()
+                .checked_sub(burn_num)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        let mut source_credit = self.source_credit_for_domain(domain)?;
+        source_credit.positive_claim_bound_num = source_credit
+            .positive_claim_bound_num
+            .checked_sub(burn_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        source_credit.exact_positive_claim_num = source_credit
+            .exact_positive_claim_num
+            .checked_sub(burn_num.min(source_credit.exact_positive_claim_num))
+            .ok_or(V16Error::CounterUnderflow)?;
+        self.set_source_credit_for_domain(domain, source_credit)?;
+        self.recompute_source_credit_domain_after_mutation(domain)
+    }
+
     fn source_domain_realizable_support_for_face(
         &self,
         domain: usize,
@@ -9392,6 +9430,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if effective_credit == 0 {
             return Ok(SourceCreditConsumptionV16 {
                 face_burn: 0,
+                source_face_burn_num: 0,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
             });
@@ -9424,6 +9463,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         Ok(SourceCreditConsumptionV16 {
             face_burn: V16Core::amount_from_bound_num(required_face_num)?,
+            source_face_burn_num: 0,
             counterparty_credit_consumed,
             insurance_credit_consumed,
         })
@@ -9438,6 +9478,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if effective_credit == 0 {
             return Ok(SourceCreditConsumptionV16 {
                 face_burn: 0,
+                source_face_burn_num: 0,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
             });
@@ -9493,6 +9534,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                             .checked_add(take)
                             .ok_or(V16Error::ArithmeticOverflow)?;
                     }
+                    self.burn_account_source_claim_bound_num_for_domain(
+                        account, slot, d, face_num,
+                    )?;
                     face_burn_num = face_burn_num
                         .checked_add(face_num)
                         .ok_or(V16Error::ArithmeticOverflow)?;
@@ -9504,8 +9548,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if remaining != 0 {
             return Err(V16Error::LockActive);
         }
+        account.compact_source_domains();
         Ok(SourceCreditConsumptionV16 {
             face_burn: V16Core::amount_from_bound_num(face_burn_num)?,
+            source_face_burn_num: face_burn_num,
             counterparty_credit_consumed,
             insurance_credit_consumed,
         })
@@ -9949,7 +9995,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         new_pnl: i128,
     ) -> V16Result<()> {
-        self.set_account_pnl_inner(account, new_pnl, None)
+        self.set_account_pnl_inner(account, new_pnl, None, 0)
     }
 
     fn set_account_pnl_with_source(
@@ -9959,7 +10005,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         source_domain: usize,
     ) -> V16Result<()> {
         self.domain_asset_side(source_domain)?;
-        self.set_account_pnl_inner(account, new_pnl, Some(source_domain))
+        self.set_account_pnl_inner(account, new_pnl, Some(source_domain), 0)
+    }
+
+    fn set_account_pnl_after_source_claim_burn(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        new_pnl: i128,
+        source_face_burn_num: u128,
+    ) -> V16Result<()> {
+        self.set_account_pnl_inner(account, new_pnl, None, source_face_burn_num)
     }
 
     /// Grants source-attributed positive PnL to an account — the first-class
@@ -10000,11 +10055,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         new_pnl: i128,
         source_domain: Option<usize>,
+        preburned_source_claim_num: u128,
     ) -> V16Result<()> {
         validate_non_min_i128(new_pnl)?;
         let old_pos = account.header.pnl.get().max(0) as u128;
         let new_pos = new_pnl.max(0) as u128;
         if new_pos >= old_pos {
+            if preburned_source_claim_num != 0 {
+                return Err(V16Error::InvalidConfig);
+            }
             let increase = new_pos - old_pos;
             let increase_num = V16Core::bound_num_from_amount(increase)?;
             let increase_domain = if increase_num != 0 {
@@ -10061,7 +10120,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             let decrease = old_pos - new_pos;
             let decrease_num = V16Core::bound_num_from_amount(decrease)?;
-            self.burn_account_source_claim_bound_num(account, decrease_num)?;
+            let remaining_source_claim_burn = decrease_num
+                .checked_sub(preburned_source_claim_num)
+                .ok_or(V16Error::CounterUnderflow)?;
+            self.burn_account_source_claim_bound_num(account, remaining_source_claim_burn)?;
             self.header.pnl_pos_tot = V16PodU128::new(
                 self.header
                     .pnl_pos_tot
@@ -10181,13 +10243,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let remaining_loss = loss_abs
             .checked_sub(support_consumed)
             .ok_or(V16Error::ArithmeticOverflow)?;
+        let mut source_face_burn_num = 0u128;
         let mut junior_face_burned = if has_source_claims {
-            self.create_and_consume_account_source_credit_for_effective_not_atomic(
-                account,
-                support_consumed,
-            )?
-            .face_burn
-            .min(old_positive_face)
+            let consumption = self
+                .create_and_consume_account_source_credit_for_effective_not_atomic(
+                    account,
+                    support_consumed,
+                )?;
+            source_face_burn_num = consumption.source_face_burn_num;
+            consumption.face_burn.min(old_positive_face)
         } else if support_consumed == 0 {
             0
         } else {
@@ -10218,7 +10282,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .get()
                 .min(new_pnl.max(0) as u128),
         );
-        self.set_account_pnl(account, new_pnl)?;
+        self.set_account_pnl_after_source_claim_burn(account, new_pnl, source_face_burn_num)?;
         Ok(SupportLossApplicationV16 {
             support_consumed,
             junior_face_burned,
@@ -14564,6 +14628,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     residual,
                     junior_bound,
                 )?,
+                source_face_burn_num: 0,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
             }
@@ -14576,7 +14641,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .get()
             .checked_sub(face_i128)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        self.set_account_pnl(account, new_pnl)?;
+        self.set_account_pnl_after_source_claim_burn(
+            account,
+            new_pnl,
+            consumption.source_face_burn_num,
+        )?;
         account.header.capital = V16PodU128::new(
             account
                 .header
