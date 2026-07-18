@@ -13693,7 +13693,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn begin_zero_oi_trade_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
+    fn begin_zero_oi_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
         let asset = self.asset_state(asset_index)?;
         let reset_long = asset.oi_eff_long_q == 0
             && asset.stored_pos_count_long != 0
@@ -13930,6 +13930,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         self.reduce_position(account, request.asset_index, close_q)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
+        self.begin_zero_oi_residue_resets(request.asset_index)?;
         self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
         self.validate_shape_audit_scan()?;
         self.validate_account_audit_scan(&account.as_view())?;
@@ -13983,6 +13984,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.reduce_position(account, request.asset_index, reduce_q)?;
         self.settle_negative_pnl_from_principal_not_atomic(account)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
+        self.begin_zero_oi_residue_resets(request.asset_index)?;
         self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
         self.validate_shape_audit_scan()?;
         self.validate_account_audit_scan(&account.as_view())?;
@@ -14406,7 +14408,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // the public auto-crank then selects Refresh and clears the economically exhausted residue.
         let mut i = 0usize;
         while i < requests.len() {
-            self.begin_zero_oi_trade_residue_resets(requests[i].asset_index)?;
+            self.begin_zero_oi_residue_resets(requests[i].asset_index)?;
             i += 1;
         }
         Ok(outcome)

@@ -10,7 +10,7 @@ use percolator::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceRequestV16, ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
     V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
@@ -899,6 +899,131 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
     market.validate_shape().unwrap();
     survivor.validate_with_market(&market.as_view()).unwrap();
     liquidated.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
+    const SURVIVOR_Q: u128 = 13 * POS_SCALE;
+    const MATCHED_Q: u128 = 10 * POS_SCALE;
+
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut survivor_header = account_fixture(1, 22);
+    let mut counterparty_header = account_fixture(1, 23);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        market.deposit_not_atomic(&mut survivor, 100).unwrap();
+        market.deposit_not_atomic(&mut counterparty, 100).unwrap();
+    }
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.a_long = ADL_ONE * MATCHED_Q / SURVIVOR_Q;
+    asset.oi_eff_long_q = MATCHED_Q;
+    asset.oi_eff_short_q = MATCHED_Q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = SURVIVOR_Q;
+    asset.loss_weight_sum_short = MATCHED_Q;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    survivor_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: signed_q(SURVIVOR_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: SURVIVOR_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    survivor_header.active_bitmap[0] = V16PodU64::new(1);
+    survivor_header.health_cert.valid = 0;
+    counterparty_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -signed_q(MATCHED_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_short,
+        f_snap: asset.f_short_num,
+        epoch_snap: asset.epoch_short,
+        loss_weight: MATCHED_Q,
+        b_snap: asset.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    counterparty_header.active_bitmap[0] = V16PodU64::new(1);
+    counterparty_header.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+    let counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+    market.validate_shape().unwrap();
+    survivor.validate_with_market(&market.as_view()).unwrap();
+    counterparty
+        .validate_with_market(&market.as_view())
+        .unwrap();
+
+    market
+        .permissionless_auto_crank_not_atomic(
+            &mut survivor,
+            AutoCrankWorkV16 {
+                now_slot: 1,
+                observations: &[AutoCrankObservationV16 {
+                    asset_index: 0,
+                    effective_price: 1,
+                    funding_rate_e9: 0,
+                }],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+    market
+        .rebalance_reduce_position_not_atomic(
+            &mut survivor,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: MATCHED_Q,
+            },
+        )
+        .unwrap();
+
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    let survivor_leg = survivor.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    assert_eq!(survivor_leg.basis_pos_q, signed_q(SURVIVOR_Q - MATCHED_Q));
+    assert!(survivor_leg.active);
+    assert_eq!(after.mode_long, SideModeV16::ResetPending);
+    assert_eq!(after.mode_short, SideModeV16::ResetPending);
+    market
+        .permissionless_auto_crank_not_atomic(
+            &mut survivor,
+            AutoCrankWorkV16 {
+                now_slot: 1,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+    assert!(!survivor.header.legs[0].try_to_runtime().unwrap().active);
+    market.validate_shape().unwrap();
+    survivor.validate_with_market(&market.as_view()).unwrap();
+    counterparty
+        .validate_with_market(&market.as_view())
+        .unwrap();
 }
 
 #[test]
