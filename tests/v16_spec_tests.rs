@@ -3570,3 +3570,74 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+// issue #236 regression: a permissionless global-Recovery escalation must remain
+// windable-down to Resolved. Before the fix, resolve_market_not_atomic rejected Recovery
+// outright, making Recovery a terminal trap that stranded every account's capital +
+// insurance + backing + rent (withdraw is Live-only; CloseResolved/CloseSlab need
+// Resolved). The fix lets a non-Resolved market resolve, so the self-gating Resolved
+// wind-down (barrier-gated payouts, TokenValueFlowProofV16-checked custody) can drain it.
+#[test]
+fn v16_recovery_market_winds_down_to_resolved_issue236() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut victim = account_fixture(1, 21);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut acct = PortfolioV16ViewMut::new(&mut victim);
+        market.deposit_not_atomic(&mut acct, 1_000).unwrap();
+    }
+
+    // Escalate to GLOBAL Recovery (mode byte: 0=Live, 1=Resolved, 2=Recovery). This is
+    // the persisted state a permissionless DeclareRecovery leaves the market in; the
+    // fuzz harness sets the mode byte the same way. The point under test is purely the
+    // resolve transition out of Recovery, so the escalation mechanism is not load-bearing.
+    header.mode = 2;
+    assert_eq!(header.mode, 2, "market is in global Recovery");
+    {
+        // A Recovery market must still be shape-valid.
+        let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.validate_shape().unwrap();
+    }
+
+    let vault_before = header.vault.get();
+    let capital = victim.capital.get();
+    assert_eq!(capital, 1_000);
+
+    // FIX: Recovery -> Resolved (previously Err(LockActive) — terminal).
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.resolve_market_not_atomic(2).unwrap();
+    }
+    assert_eq!(header.mode, 1, "Recovery wound down to Resolved");
+
+    // Idempotency: a second resolve of an already-Resolved market is rejected.
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert_eq!(
+            market.resolve_market_not_atomic(3),
+            Err(V16Error::LockActive)
+        );
+    }
+
+    // The flat solvent account exits via the Resolved path, recovering full capital,
+    // and senior conservation holds.
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut acct = PortfolioV16ViewMut::new(&mut victim);
+        market
+            .close_resolved_account_not_atomic(&mut acct, 0)
+            .unwrap();
+    }
+    assert_eq!(victim.capital.get(), 0, "victim capital paid out");
+    assert_eq!(
+        header.vault.get(),
+        vault_before - capital,
+        "vault drops by exactly the victim's capital (no leak, no over-pay)"
+    );
+    assert!(
+        header.vault.get() >= header.c_tot.get() + header.insurance.get(),
+        "senior conservation holds after wind-down"
+    );
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.validate_shape().unwrap();
+}

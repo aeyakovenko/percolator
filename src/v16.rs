@@ -14698,7 +14698,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     pub fn resolve_market_not_atomic(&mut self, resolved_slot: u64) -> V16Result<()> {
-        if decode_market_mode(self.header.mode)? == MarketModeV16::Recovery {
+        // A permissionless global-Recovery escalation (declare_permissionless_recovery,
+        // reached from the expired-bankrupt-close auto-crank) must NOT be a terminal
+        // trap: Recovery previously rejected resolution outright, so a Recovery market
+        // could never reach Resolved and therefore never wind down (withdraw is
+        // Live-only; CloseResolved/CloseSlab require Resolved) — stranding every
+        // account's capital + insurance + backing + rent. Recovery is a stricter
+        // wind-down state than Live, and the Resolved path is self-gating (winner
+        // payouts require resolved_positive_payout_ready == all loss barriers cleared,
+        // and every custody move is checked by TokenValueFlowProofV16), so admitting
+        // Recovery -> Resolved restores a bounded public wind-down without over-paying
+        // anyone. Only an already-Resolved market is rejected (idempotency: a second
+        // resolve must not re-anchor resolved_slot).
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
         }
         if resolved_slot < self.header.current_slot.get() {
