@@ -13693,6 +13693,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn begin_zero_oi_trade_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
+        let asset = self.asset_state(asset_index)?;
+        let reset_long = asset.oi_eff_long_q == 0
+            && asset.stored_pos_count_long != 0
+            && asset.pending_obligation_count_long == 0
+            && asset.mode_long != SideModeV16::ResetPending;
+        let reset_short = asset.oi_eff_short_q == 0
+            && asset.stored_pos_count_short != 0
+            && asset.pending_obligation_count_short == 0
+            && asset.mode_short != SideModeV16::ResetPending;
+        if reset_long {
+            self.begin_full_drain_reset_inner(asset_index, SideV16::Long)?;
+        }
+        if reset_short {
+            self.begin_full_drain_reset_inner(asset_index, SideV16::Short)?;
+        }
+        Ok(())
+    }
+
     fn reduce_matching_open_interest_for_unilateral_close(
         &mut self,
         asset_index: usize,
@@ -14174,6 +14193,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             short_delta,
             trade_preflight.short_lookup,
         )?;
+        // ADL can leave stored basis larger than effective OI. If a matched trade consumes the
+        // final effective unit while basis remains, enter the existing reset epoch so public crank
+        // can clear the economically exhausted residue instead of leaving a Normal-mode zero-OI leg.
+        self.begin_zero_oi_trade_residue_resets(request.asset_index)?;
         self.transfer_trade_residual_reward_credit(
             long_account,
             short_account,
