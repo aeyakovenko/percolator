@@ -14599,10 +14599,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if released == 0 {
             return Ok(0);
         }
-        if Self::account_has_source_claims(&account.as_view())?
-            && self.account_has_active_source_claim_exposure(&account.as_view())?
-        {
-            return Err(V16Error::LockActive);
+        if Self::account_has_source_claims(&account.as_view())? {
+            if self.account_has_active_source_claim_exposure(&account.as_view())?
+                || Self::valid_source_lien_effective_reserved_sum(&account.as_view())? != 0
+            {
+                return Err(V16Error::LockActive);
+            }
         }
         let converted = if Self::account_has_source_claims(&account.as_view())? {
             self.account_source_realizable_support(&account.as_view(), released)?
