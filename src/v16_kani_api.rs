@@ -1546,18 +1546,17 @@ pub struct TradeGuardSummaryV16 {
     pub fee_bps_in_cap: bool,      // fee_bps <= MAX_MARGIN_BPS
     pub accounts_current: bool,    // both accounts refreshed/certifiable
     pub no_loss_stale_block: bool, // no unrelated loss-stale blocker
-    pub no_adverse_lag: bool,      // no target/effective lag for a risk increase
     pub no_barrier_touch: bool,    // no pending-domain loss-barrier touch
-    pub margin_ok: bool,           // final IM gate
+    pub margin_ok: bool,           // final IM gate, including adverse target lag
     pub locked_lane_ok: bool,      // locked-lane gate
 }
 
 /// NB1 economic-validity predicate (roadmap Phase 2): a trade is economically
 /// valid over its PRODUCTION INPUTS when every user-controllable precondition
 /// holds — asset configured, nonzero size, price within the oracle envelope, fee
-/// within cap, both accounts current, no unrelated loss-stale block, no adverse
-/// target/effective lag on a risk increase, no pending-domain barrier touch, and
-/// the margin / locked-lane gates pass. The scalar conditions are grounded in the
+/// within cap, both accounts current, no unrelated loss-stale block, no pending-
+/// domain barrier touch, and the target-lag-aware margin / locked-lane gates pass.
+/// The scalar conditions are grounded in the
 /// real inputs (size_q, price vs [price_lo,price_hi], fee_bps vs max_fee_bps); the
 /// account/market conditions are the proven leaf predicates. PROOF-ONLY model.
 #[cfg_attr(
@@ -1576,7 +1575,6 @@ pub struct EconomicallyValidTradeV16 {
     pub max_fee_bps: u64,
     pub accounts_current: bool,
     pub not_loss_stale_blocked: bool,
-    pub no_adverse_lag: bool,
     pub no_barrier_touch: bool,
     pub margin_ok: bool,
     pub locked_lane_ok: bool,
@@ -1593,7 +1591,6 @@ impl EconomicallyValidTradeV16 {
             && self.fee_bps <= self.max_fee_bps
             && self.accounts_current
             && self.not_loss_stale_blocked
-            && self.no_adverse_lag
             && self.no_barrier_touch
             && self.margin_ok
             && self.locked_lane_ok
@@ -1610,7 +1607,6 @@ impl EconomicallyValidTradeV16 {
             fee_bps_in_cap: self.fee_bps <= self.max_fee_bps,
             accounts_current: self.accounts_current,
             no_loss_stale_block: self.not_loss_stale_blocked,
-            no_adverse_lag: self.no_adverse_lag,
             no_barrier_touch: self.no_barrier_touch,
             margin_ok: self.margin_ok,
             locked_lane_ok: self.locked_lane_ok,
@@ -1633,7 +1629,6 @@ pub enum TradeRejectReasonV16 {
     FeeBpsOverCap,
     AccountsStale,
     LossStaleBlocked,
-    AdverseLag,
     BarrierTouch,
     MarginFail,
     LockedLaneFail,
@@ -1801,7 +1796,7 @@ impl V16Core {
             // admitted IFF the whole guard stack passes
             Ok(()) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap
                 && guards.accounts_current && guards.no_loss_stale_block
-                && guards.no_adverse_lag && guards.no_barrier_touch && guards.margin_ok && guards.locked_lane_ok,
+                && guards.no_barrier_touch && guards.margin_ok && guards.locked_lane_ok,
             // each rejection: that guard failed AND all earlier guards passed
             Err(TradeRejectReasonV16::InvalidRequest) => !guards.request_valid,
             Err(TradeRejectReasonV16::ZeroSize) => guards.request_valid && !guards.size_nonzero,
@@ -1809,10 +1804,9 @@ impl V16Core {
             Err(TradeRejectReasonV16::FeeBpsOverCap) => guards.request_valid && guards.size_nonzero && guards.price_in_range && !guards.fee_bps_in_cap,
             Err(TradeRejectReasonV16::AccountsStale) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap && !guards.accounts_current,
             Err(TradeRejectReasonV16::LossStaleBlocked) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap && guards.accounts_current && !guards.no_loss_stale_block,
-            Err(TradeRejectReasonV16::AdverseLag) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap && guards.accounts_current && guards.no_loss_stale_block && !guards.no_adverse_lag,
-            Err(TradeRejectReasonV16::BarrierTouch) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap && guards.accounts_current && guards.no_loss_stale_block && guards.no_adverse_lag && !guards.no_barrier_touch,
-            Err(TradeRejectReasonV16::MarginFail) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap && guards.accounts_current && guards.no_loss_stale_block && guards.no_adverse_lag && guards.no_barrier_touch && !guards.margin_ok,
-            Err(TradeRejectReasonV16::LockedLaneFail) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap && guards.accounts_current && guards.no_loss_stale_block && guards.no_adverse_lag && guards.no_barrier_touch && guards.margin_ok && !guards.locked_lane_ok,
+            Err(TradeRejectReasonV16::BarrierTouch) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap && guards.accounts_current && guards.no_loss_stale_block && !guards.no_barrier_touch,
+            Err(TradeRejectReasonV16::MarginFail) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap && guards.accounts_current && guards.no_loss_stale_block && guards.no_barrier_touch && !guards.margin_ok,
+            Err(TradeRejectReasonV16::LockedLaneFail) => guards.request_valid && guards.size_nonzero && guards.price_in_range && guards.fee_bps_in_cap && guards.accounts_current && guards.no_loss_stale_block && guards.no_barrier_touch && guards.margin_ok && !guards.locked_lane_ok,
         }
     }))]
     // PROOF-ONLY FIDELITY MODEL (not production-dispatched): consumed by
@@ -1833,8 +1827,6 @@ impl V16Core {
             Err(TradeRejectReasonV16::AccountsStale)
         } else if !guards.no_loss_stale_block {
             Err(TradeRejectReasonV16::LossStaleBlocked)
-        } else if !guards.no_adverse_lag {
-            Err(TradeRejectReasonV16::AdverseLag)
         } else if !guards.no_barrier_touch {
             Err(TradeRejectReasonV16::BarrierTouch)
         } else if !guards.margin_ok {
@@ -1867,12 +1859,13 @@ impl V16Core {
         Self::kernel_trade_admit(evt.to_guards())
     }
 
-    /// PRODUCTION FIDELITY (roadmap 3C step 2, NB1 preflight leaves): the three
-    /// TradeGuardSummary preflight flags — no_barrier_touch, no_loss_stale_block,
-    /// no_adverse_lag — and the production trade_preflight_risk_gate are the SAME
+    /// PRODUCTION FIDELITY (roadmap 3C step 2, NB1 preflight leaves): the two
+    /// TradeGuardSummary preflight flags — no_barrier_touch and
+    /// no_loss_stale_block — and the production trade_preflight_risk_gate are the SAME
     /// decision: an economically-valid trade clears preflight IFF it touches no
-    /// pending-domain barrier and is not a risk increase under a loss-stale or
-    /// lagged asset. The contract proves the flag-conjunction EQUALS the real
+    /// pending-domain barrier and is not a risk increase under a loss-stale asset.
+    /// Target/effective lag is charged by the final margin gate instead of being
+    /// a blanket admission block. The contract proves the flag-conjunction EQUALS the real
     /// gate's accept decision, so those summary flags faithfully represent the
     /// production preflight (no hidden preflight reject outside them). Pure.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &bool| {
@@ -1892,10 +1885,9 @@ impl V16Core {
         target_effective_lag: bool,
         touches_pending_domain_barrier: bool,
     ) -> bool {
-        // no_barrier_touch && no_loss_stale_block && no_adverse_lag
-        !touches_pending_domain_barrier
-            && !(risk_increasing && asset_loss_stale)
-            && !(risk_increasing && target_effective_lag)
+        // Target lag is deliberately absent: post-trade IM prices its full adverse delta.
+        let _ = target_effective_lag;
+        !touches_pending_domain_barrier && !(risk_increasing && asset_loss_stale)
     }
 
     /// PRODUCTION FIDELITY BUILDER (roadmap 3C step 3, A7 close-rank): map the

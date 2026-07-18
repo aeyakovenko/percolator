@@ -16326,12 +16326,10 @@ fn position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool
 fn trade_preflight_risk_gate(
     risk_increasing: bool,
     asset_loss_stale: bool,
-    target_effective_lag: bool,
+    _target_effective_lag: bool,
     touches_pending_domain_barrier: bool,
 ) -> V16Result<()> {
-    if touches_pending_domain_barrier
-        || (risk_increasing && (asset_loss_stale || target_effective_lag))
-    {
+    if touches_pending_domain_barrier || (risk_increasing && asset_loss_stale) {
         return Err(V16Error::LockActive);
     }
     Ok(())

@@ -2725,7 +2725,6 @@ fn contract_check_kernel_economically_valid_trade_admits() {
         max_fee_bps: kani::any(),
         accounts_current: kani::any(),
         not_loss_stale_blocked: kani::any(),
-        no_adverse_lag: kani::any(),
         no_barrier_touch: kani::any(),
         margin_ok: kani::any(),
         locked_lane_ok: kani::any(),

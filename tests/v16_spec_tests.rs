@@ -1318,6 +1318,44 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
 }
 
 #[test]
+fn v16_trade_target_lag_is_decided_by_post_trade_margin() {
+    fn run(capital: u128) -> Result<(), V16Error> {
+        let (mut header, mut markets) = market_fixture(1, 100);
+        let mut long_header = account_fixture(1, 133);
+        let mut short_header = account_fixture(1, 134);
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, capital)?;
+        market.deposit_not_atomic(&mut short, capital)?;
+        market.set_asset_raw_oracle_target_not_atomic(0, 110)?;
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(10 * POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .map(|_| ())
+    }
+
+    assert_eq!(
+        run(1_100),
+        Ok(()),
+        "full adverse-target margin must keep a sufficiently collateralized trade live"
+    );
+    assert_eq!(
+        run(1_099),
+        Err(V16Error::InvalidConfig),
+        "the adverse target delta must still reject an under-margined short"
+    );
+}
+
+#[test]
 fn v16_public_empty_asset_oracle_anchor_reset_rejects_any_group_position_state() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut other_asset = markets[1].engine.asset.try_to_runtime().unwrap();

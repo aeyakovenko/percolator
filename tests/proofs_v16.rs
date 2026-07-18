@@ -3857,16 +3857,15 @@ fn proof_v16_trade_preflight_risk_gate_blocks_only_unsafe_risk_increase() {
         target_effective_lag,
         pending_barrier,
     );
-    let expected_blocked =
-        pending_barrier || (risk_increasing && (asset_loss_stale || target_effective_lag));
+    let expected_blocked = pending_barrier || (risk_increasing && asset_loss_stale);
 
     kani::cover!(
         expected_blocked && asset_loss_stale && !target_effective_lag && !pending_barrier,
         "trade preflight risk gate blocks risk increase on loss-stale asset"
     );
     kani::cover!(
-        expected_blocked && target_effective_lag && !asset_loss_stale && !pending_barrier,
-        "trade preflight risk gate blocks risk increase on target/effective lag"
+        !expected_blocked && risk_increasing && target_effective_lag && !asset_loss_stale,
+        "trade preflight admits target-lagged risk for the final margin gate"
     );
     kani::cover!(
         !risk_increasing && (asset_loss_stale || target_effective_lag) && !pending_barrier,
