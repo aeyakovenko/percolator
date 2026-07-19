@@ -34,6 +34,25 @@ pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
 pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
 pub const MAX_BACKING_FEE_UTIL_BPS: u64 = 10_000;
 
+/// Admission resource invariant for latent favorable settlement domains.
+/// `occupied + missing_active` is the reserved pre-state; admission adds the
+/// candidate only when its favorable source is not already materialized.
+#[inline]
+fn source_domain_capacity_after_admission(
+    occupied: usize,
+    missing_active: usize,
+    candidate_missing: bool,
+) -> V16Result<usize> {
+    let required = occupied
+        .checked_add(missing_active)
+        .and_then(|v| v.checked_add(usize::from(candidate_missing)))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if required > PORTFOLIO_SOURCE_DOMAIN_CAP {
+        return Err(V16Error::LockActive);
+    }
+    Ok(required)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BackingDomainFeeSplitV16 {
     pub lien_delta_atoms: u128,
@@ -12779,8 +12798,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         let candidate_domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
-        let candidate_missing =
-            usize::from(account.source_domain_slot(candidate_domain)?.is_none());
+        let candidate_missing = account.source_domain_slot(candidate_domain)?.is_none();
 
         let mut occupied = 0usize;
         let mut source_slot = 0usize;
@@ -12812,13 +12830,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             leg_slot += 1;
         }
 
-        let required = occupied
-            .checked_add(missing_active)
-            .and_then(|v| v.checked_add(candidate_missing))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if required > PORTFOLIO_SOURCE_DOMAIN_CAP {
-            return Err(V16Error::LockActive);
-        }
+        source_domain_capacity_after_admission(occupied, missing_active, candidate_missing)?;
         Ok(())
     }
 

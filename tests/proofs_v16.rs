@@ -16,13 +16,14 @@ use percolator::v16::{
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_source_domain_capacity_after_admission, kani_target_effective_lag_adverse_delta,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
+    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -1143,6 +1144,75 @@ fn proof_v16_sparse_source_domain_cap_full_rejects_new_domain() {
         "sparse source-domain cap-full rejection covers symbolic new domain"
     );
     assert_eq!(rejected, Err(V16Error::LockActive));
+}
+
+// High-level admission-to-continuation theorem. Every active leg owns one
+// distinct latent favorable source domain (active-asset uniqueness is proven by
+// `proof_v16_duplicate_asset_legs_reject_before_double_counting_support`), so
+// the reserved resource is `occupied + missing_active`. An accepted candidate
+// must leave enough physical slots to materialize every latent domain in any
+// order.
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+fn proof_v16_source_capacity_admission_closes_all_favorable_domains() {
+    let occupied_raw: u8 = kani::any();
+    let missing_active_raw: u8 = kani::any();
+    let candidate_missing: bool = kani::any();
+    kani::assume(occupied_raw as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    kani::assume(missing_active_raw as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+
+    let occupied = occupied_raw as usize;
+    let missing_active = missing_active_raw as usize;
+    let reserved_before = occupied + missing_active;
+    kani::assume(reserved_before <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    let candidate_reservation = usize::from(candidate_missing);
+    let required = reserved_before + candidate_reservation;
+    let admission =
+        kani_source_domain_capacity_after_admission(occupied, missing_active, candidate_missing);
+
+    if required > PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert_eq!(admission, Err(V16Error::LockActive));
+        assert!(candidate_missing);
+        assert_eq!(reserved_before, PORTFOLIO_SOURCE_DOMAIN_CAP);
+        kani::cover!(
+            occupied == PORTFOLIO_SOURCE_DOMAIN_CAP,
+            "a full historical table rejects a missing candidate domain"
+        );
+        kani::cover!(
+            occupied < PORTFOLIO_SOURCE_DOMAIN_CAP && missing_active > 0,
+            "latent active domains reject over-admission before the table is physically full"
+        );
+        return;
+    }
+
+    let admitted_required = admission.unwrap();
+    assert_eq!(admitted_required, required);
+    let mut materialized = occupied;
+    let mut latent = missing_active + candidate_reservation;
+    while latent != 0 {
+        // Any ordering is equivalent: each distinct latent domain consumes one
+        // free slot and removes one reservation, preserving the union cardinality.
+        assert!(materialized < PORTFOLIO_SOURCE_DOMAIN_CAP);
+        materialized += 1;
+        latent -= 1;
+        assert_eq!(materialized + latent, admitted_required);
+    }
+    assert_eq!(materialized, admitted_required);
+    assert!(materialized <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+
+    kani::cover!(
+        candidate_missing && missing_active > 0 && admitted_required == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "multiple latent domains materialize at the exact capacity boundary"
+    );
+    kani::cover!(
+        !candidate_missing && reserved_before == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "a represented candidate remains admissible at full reserved capacity"
+    );
+    kani::cover!(
+        occupied > 0 && missing_active > 0 && materialized == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "historical and latent domains coexist and fully materialize"
+    );
 }
 
 #[kani::proof]

@@ -195,6 +195,14 @@ pub fn kani_loss_stale_trade_scope_allowed(
     )
 }
 
+pub fn kani_source_domain_capacity_after_admission(
+    occupied: usize,
+    missing_active: usize,
+    candidate_missing: bool,
+) -> V16Result<usize> {
+    source_domain_capacity_after_admission(occupied, missing_active, candidate_missing)
+}
+
 pub fn kani_prepare_asset_recovery_transition(
     asset: AssetStateV16,
     asset_set_epoch: u64,
