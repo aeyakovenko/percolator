@@ -370,6 +370,178 @@ fn proof_v16_public_finalize_side_reset_rejects_each_blocker_without_mutation() 
     }
 }
 
+// Continuation-closure theorem for exact-OI ADL residue. The exact mutable-view
+// helper must move every economically exhausted side with surviving positions
+// into the bounded ResetPending route, independently for long and short, while
+// preserving all value state and every unrelated slot field. The public trade
+// regression binds this helper to the successful trade entrypoint.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_zero_oi_residue_reset_is_complete_independent_and_value_neutral() {
+    let long_oi_raw: u8 = kani::any();
+    let short_oi_raw: u8 = kani::any();
+    let long_stored: u8 = kani::any();
+    let short_stored: u8 = kani::any();
+    let long_pending: u8 = kani::any();
+    let short_pending: u8 = kani::any();
+    let long_mode_raw: u8 = kani::any();
+    let short_mode_raw: u8 = kani::any();
+    let long_epoch_raw: u8 = kani::any();
+    let short_epoch_raw: u8 = kani::any();
+    let risk_epoch_raw: u8 = kani::any();
+    let long_k_raw: i8 = kani::any();
+    let short_k_raw: i8 = kani::any();
+    let long_f_raw: i8 = kani::any();
+    let short_f_raw: i8 = kani::any();
+    let long_b_raw: u8 = kani::any();
+    let short_b_raw: u8 = kani::any();
+    let long_weight_raw: u8 = kani::any();
+    let short_weight_raw: u8 = kani::any();
+    let long_remainder_raw: u8 = kani::any();
+    let short_remainder_raw: u8 = kani::any();
+    let long_dust_raw: u8 = kani::any();
+    let short_dust_raw: u8 = kani::any();
+    kani::assume(long_mode_raw <= 2 && short_mode_raw <= 2);
+
+    let decode_mode = |raw| match raw {
+        0 => SideModeV16::Normal,
+        1 => SideModeV16::DrainOnly,
+        _ => SideModeV16::ResetPending,
+    };
+    let (mut header, mut markets, _) = one_market_direct_view_fixture();
+    header.risk_epoch = V16PodU64::new(risk_epoch_raw as u64);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = long_oi_raw as u128;
+    asset.oi_eff_short_q = short_oi_raw as u128;
+    asset.stored_pos_count_long = long_stored as u64;
+    asset.stored_pos_count_short = short_stored as u64;
+    asset.pending_obligation_count_long = long_pending as u64;
+    asset.pending_obligation_count_short = short_pending as u64;
+    asset.mode_long = decode_mode(long_mode_raw);
+    asset.mode_short = decode_mode(short_mode_raw);
+    asset.epoch_long = long_epoch_raw as u64;
+    asset.epoch_short = short_epoch_raw as u64;
+    asset.k_long = long_k_raw as i128;
+    asset.k_short = short_k_raw as i128;
+    asset.f_long_num = long_f_raw as i128;
+    asset.f_short_num = short_f_raw as i128;
+    asset.b_long_num = long_b_raw as u128;
+    asset.b_short_num = short_b_raw as u128;
+    asset.loss_weight_sum_long = long_weight_raw as u128;
+    asset.loss_weight_sum_short = short_weight_raw as u128;
+    asset.social_loss_remainder_long_num = long_remainder_raw as u128;
+    asset.social_loss_remainder_short_num = short_remainder_raw as u128;
+    asset.social_loss_dust_long_num = long_dust_raw as u128;
+    asset.social_loss_dust_short_num = short_dust_raw as u128;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let asset_before = asset;
+    let reset_long = asset_before.oi_eff_long_q == 0
+        && asset_before.stored_pos_count_long != 0
+        && asset_before.pending_obligation_count_long == 0
+        && asset_before.mode_long != SideModeV16::ResetPending;
+    let reset_short = asset_before.oi_eff_short_q == 0
+        && asset_before.stored_pos_count_short != 0
+        && asset_before.pending_obligation_count_short == 0
+        && asset_before.mode_short != SideModeV16::ResetPending;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.kani_begin_zero_oi_trade_residue_resets(0), Ok(()));
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    if asset_before.oi_eff_long_q == 0
+        && asset_before.stored_pos_count_long != 0
+        && asset_before.pending_obligation_count_long == 0
+    {
+        assert_eq!(after.mode_long, SideModeV16::ResetPending);
+    }
+    if asset_before.oi_eff_short_q == 0
+        && asset_before.stored_pos_count_short != 0
+        && asset_before.pending_obligation_count_short == 0
+    {
+        assert_eq!(after.mode_short, SideModeV16::ResetPending);
+    }
+
+    let mut expected_asset = asset_before;
+    if reset_long {
+        expected_asset.k_epoch_start_long = asset_before.k_long;
+        expected_asset.f_epoch_start_long_num = asset_before.f_long_num;
+        expected_asset.b_epoch_start_long_num = asset_before.b_long_num;
+        expected_asset.k_long = 0;
+        expected_asset.f_long_num = 0;
+        expected_asset.b_long_num = 0;
+        expected_asset.loss_weight_sum_long = 0;
+        expected_asset.a_long = ADL_ONE;
+        expected_asset.social_loss_dust_long_num = asset_before
+            .social_loss_dust_long_num
+            .checked_add(asset_before.social_loss_remainder_long_num)
+            .unwrap();
+        expected_asset.social_loss_remainder_long_num = 0;
+        expected_asset.epoch_long = asset_before.epoch_long + 1;
+        expected_asset.mode_long = SideModeV16::ResetPending;
+    }
+    if reset_short {
+        expected_asset.k_epoch_start_short = asset_before.k_short;
+        expected_asset.f_epoch_start_short_num = asset_before.f_short_num;
+        expected_asset.b_epoch_start_short_num = asset_before.b_short_num;
+        expected_asset.k_short = 0;
+        expected_asset.f_short_num = 0;
+        expected_asset.b_short_num = 0;
+        expected_asset.loss_weight_sum_short = 0;
+        expected_asset.a_short = ADL_ONE;
+        expected_asset.social_loss_dust_short_num = asset_before
+            .social_loss_dust_short_num
+            .checked_add(asset_before.social_loss_remainder_short_num)
+            .unwrap();
+        expected_asset.social_loss_remainder_short_num = 0;
+        expected_asset.epoch_short = asset_before.epoch_short + 1;
+        expected_asset.mode_short = SideModeV16::ResetPending;
+    }
+    assert_eq!(after, expected_asset);
+
+    let reset_count = u64::from(reset_long) + u64::from(reset_short);
+    let mut expected_header = header_before;
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + reset_count);
+    assert!(kani_eq_market_group_v16_header_account(
+        market.header,
+        &expected_header
+    ));
+    let mut expected_slot = slot_before;
+    expected_slot.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &expected_slot
+    ));
+
+    kani::cover!(
+        reset_long && reset_short,
+        "both residue sides reset independently"
+    );
+    kani::cover!(
+        reset_long && !reset_short,
+        "only the long residue side resets"
+    );
+    kani::cover!(
+        !reset_long && reset_short,
+        "only the short residue side resets"
+    );
+    kani::cover!(
+        !reset_long && !reset_short,
+        "a non-residue state is a full no-op"
+    );
+    kani::cover!(
+        reset_long && asset_before.mode_long == SideModeV16::DrainOnly,
+        "a drain-only residue still enters bounded reset cleanup"
+    );
+    kani::cover!(
+        (reset_long && asset_before.social_loss_remainder_long_num != 0)
+            || (reset_short && asset_before.social_loss_remainder_short_num != 0),
+        "reset quarantines nonzero social-loss remainder without losing it"
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
