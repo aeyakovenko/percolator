@@ -512,8 +512,8 @@ impl MarketGroupV16HeaderAccount {
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
-    pub fn kani_begin_zero_oi_trade_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
-        self.begin_zero_oi_trade_residue_resets(asset_index)
+    pub fn kani_begin_zero_oi_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
+        self.begin_zero_oi_residue_resets(asset_index)
     }
 
     pub fn kani_clear_leg(
