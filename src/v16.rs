@@ -12767,6 +12767,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
         side: SideV16,
     ) -> V16Result<()> {
+        // Source entries are compacted by PortfolioV16ViewMut::new. If the first slot beyond the
+        // universally safe occupancy threshold is empty, even the worst case (every configured
+        // active leg needs a distinct missing domain) fits without any scan.
+        let max_active = self.header.config.max_portfolio_assets.get() as usize;
+        if max_active != 0 && max_active <= PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let safe_occupied = PORTFOLIO_SOURCE_DOMAIN_CAP - max_active;
+            if account.header.source_domains[safe_occupied].is_sparse_tail_default() {
+                return Ok(());
+            }
+        }
+
         let candidate_domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
         let candidate_missing =
             usize::from(account.source_domain_slot(candidate_domain)?.is_none());
@@ -12782,15 +12793,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 occupied += 1;
             }
             source_slot += 1;
-        }
-
-        // Below this threshold, even if every active leg still needs a distinct source domain,
-        // the configured active-leg cap guarantees enough room. Keep ordinary and max-leg batch
-        // admission on this constant-time path; only claim-heavy historical portfolios need the
-        // detailed reservation scan below.
-        let max_active = self.header.config.max_portfolio_assets.get() as usize;
-        if occupied <= PORTFOLIO_SOURCE_DOMAIN_CAP.saturating_sub(max_active) {
-            return Ok(());
         }
 
         // Every active leg reserves the one source domain that a favorable K/F move can create.
