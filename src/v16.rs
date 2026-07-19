@@ -12744,6 +12744,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         validate_basis(basis_pos_q)?;
         let asset = self.asset_state(asset_index)?;
         self.require_asset_risk_change_allowed(asset_index, true)?;
+        self.ensure_source_domain_capacity_for_new_exposure(&account.as_view(), asset_index, side)?;
         let a_basis = match side {
             SideV16::Long => asset.a_long,
             SideV16::Short => asset.a_short,
@@ -12757,6 +12758,52 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.header.active_bitmap = bitmap.map(V16PodU64::new);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
+        Ok(())
+    }
+
+    fn ensure_source_domain_capacity_for_new_exposure(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<()> {
+        let candidate_domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
+        let candidate_missing =
+            usize::from(account.source_domain_slot(candidate_domain)?.is_none());
+
+        let mut occupied = 0usize;
+        let mut source_slot = 0usize;
+        while source_slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            if account.header.source_domains[source_slot].is_occupied() {
+                occupied += 1;
+            }
+            source_slot += 1;
+        }
+
+        // Every active leg reserves the one source domain that a favorable K/F move can create.
+        // Without this reservation, a full historical source table can admit a new position and
+        // later make its first profitable settlement fail before any close/reduce path can run.
+        let mut missing_active = 0usize;
+        let mut leg_slot = 0usize;
+        while leg_slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[leg_slot].try_to_runtime()?;
+            if leg.active {
+                let domain =
+                    self.insurance_domain_index(leg.asset_index as usize, opposite_side(leg.side))?;
+                if account.source_domain_slot(domain)?.is_none() {
+                    missing_active += 1;
+                }
+            }
+            leg_slot += 1;
+        }
+
+        let required = occupied
+            .checked_add(missing_active)
+            .and_then(|v| v.checked_add(candidate_missing))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if required > PORTFOLIO_SOURCE_DOMAIN_CAP {
+            return Err(V16Error::LockActive);
+        }
         Ok(())
     }
 
