@@ -169,6 +169,27 @@ pub fn kani_validate_positive_pnl_source_attribution(
     V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)
 }
 
+pub fn kani_prepare_domain_local_source_claim_burn_delta(
+    account_source: PortfolioSourceDomainV16Account,
+    source_credit: SourceCreditStateV16,
+    expected_domain: u32,
+    burn_num: u128,
+) -> V16Result<(PortfolioSourceDomainV16Account, SourceCreditStateV16)> {
+    V16Core::prepare_domain_local_source_claim_burn_delta(
+        account_source,
+        source_credit,
+        expected_domain,
+        burn_num,
+    )
+}
+
+pub fn kani_source_claim_burn_remainder(
+    decrease_num: u128,
+    preburned_source_claim_num: u128,
+) -> V16Result<u128> {
+    V16Core::source_claim_burn_remainder(decrease_num, preburned_source_claim_num)
+}
+
 pub fn kani_expected_source_credit_rate_num_for_state(
     state: SourceCreditStateV16,
 ) -> V16Result<u128> {

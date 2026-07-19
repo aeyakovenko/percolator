@@ -15,7 +15,8 @@ use percolator::v16::{
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
+    kani_prepare_asset_recovery_transition, kani_prepare_domain_local_source_claim_burn_delta,
+    kani_source_claim_burn_remainder, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
     AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
@@ -37,7 +38,8 @@ use percolator::v16::{
 };
 use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
-    kani_eq_portfolio_account_v16_account,
+    kani_eq_portfolio_account_v16_account, kani_eq_portfolio_source_domain_v16_account,
+    kani_eq_source_credit_state_v16_account,
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
@@ -3311,6 +3313,129 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
         "active source-claim exposure reaches convert guard for wide symbolic claim"
     );
     assert!(blocked);
+}
+
+// Source conversion conservation theorem over the exact production burn and
+// pre-burn accounting kernels. Across the complete Kani source-domain table,
+// each backing-selected burn is confined to its named domain, the aggregate
+// claim rank falls exactly once, and the later PnL update can burn only the
+// residual face. The public conversion regression binds these kernels to the
+// zero-copy entrypoint.
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+fn proof_v16_source_conversion_burns_are_domain_local_disjoint_and_complete() {
+    let claim_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let liened_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let impaired_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let burn_raw: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let residual_raw: u8 = kani::any();
+    let mut total_before = 0u128;
+    let mut total_after = 0u128;
+    let mut preburned = 0u128;
+    let mut slot = 0usize;
+
+    while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let claim = claim_raw[slot] as u128;
+        let liened = liened_raw[slot] as u128;
+        let impaired = impaired_raw[slot] as u128;
+        let burn = burn_raw[slot] as u128;
+        kani::assume(claim > 0);
+        kani::assume(liened <= claim);
+        kani::assume(impaired <= claim - liened);
+        kani::assume(burn <= claim - liened - impaired);
+
+        let mut source = PortfolioSourceDomainV16Account::default();
+        source.domain = V16PodU32::new(slot as u32);
+        source.source_claim_market_id = V16PodU64::new((slot / 2 + 1) as u64);
+        source.source_claim_bound_num = V16PodU128::new(claim);
+        source.source_claim_liened_num = V16PodU128::new(liened);
+        source.source_claim_impaired_num = V16PodU128::new(impaired);
+        let credit = SourceCreditStateV16 {
+            positive_claim_bound_num: claim,
+            exact_positive_claim_num: claim,
+            ..SourceCreditStateV16::EMPTY
+        };
+        let source_before = source;
+        let credit_before = credit;
+        let (source_after, credit_after) =
+            kani_prepare_domain_local_source_claim_burn_delta(source, credit, slot as u32, burn)
+                .unwrap();
+
+        let mut expected_source = source_before;
+        expected_source.source_claim_bound_num = V16PodU128::new(claim - burn);
+        let mut expected_credit = credit_before;
+        expected_credit.positive_claim_bound_num = claim - burn;
+        expected_credit.exact_positive_claim_num = claim - burn;
+        assert!(kani_eq_portfolio_source_domain_v16_account(
+            &source_after,
+            &expected_source
+        ));
+        assert!(kani_eq_source_credit_state_v16_account(
+            &SourceCreditStateV16Account::from_runtime(&credit_after),
+            &SourceCreditStateV16Account::from_runtime(&expected_credit)
+        ));
+        assert_eq!(source_after.domain.get(), source_before.domain.get());
+        assert_eq!(
+            source_after.source_claim_liened_num.get(),
+            source_before.source_claim_liened_num.get()
+        );
+        assert_eq!(
+            source_after.source_claim_impaired_num.get(),
+            source_before.source_claim_impaired_num.get()
+        );
+
+        if burn != 0 {
+            assert!(matches!(
+                kani_prepare_domain_local_source_claim_burn_delta(
+                    source_before,
+                    credit_before,
+                    (slot as u32) ^ 1,
+                    burn,
+                ),
+                Err(V16Error::CounterUnderflow)
+            ));
+        }
+        total_before += claim;
+        total_after += source_after.source_claim_bound_num.get();
+        preburned += burn;
+        slot += 1;
+    }
+
+    let residual = residual_raw as u128;
+    let total_decrease = preburned + residual;
+    assert_eq!(total_before - total_after, preburned);
+    assert!(matches!(
+        kani_source_claim_burn_remainder(total_decrease, preburned),
+        Ok(value) if value == residual
+    ));
+    assert_eq!(preburned + residual, total_decrease);
+    assert!(matches!(
+        kani_source_claim_burn_remainder(preburned, preburned + 1),
+        Err(V16Error::CounterUnderflow)
+    ));
+
+    kani::cover!(
+        burn_raw[0] != 0 && burn_raw[1] != 0 && burn_raw[2] != 0 && burn_raw[3] != 0,
+        "all source domains can contribute disjoint conversion support"
+    );
+    kani::cover!(
+        burn_raw[0] == 0 && burn_raw[1] != 0,
+        "a later funded source cannot burn an earlier unfunded claim"
+    );
+    kani::cover!(
+        (liened_raw[0] != 0 || liened_raw[1] != 0 || liened_raw[2] != 0 || liened_raw[3] != 0)
+            && (impaired_raw[0] != 0
+                || impaired_raw[1] != 0
+                || impaired_raw[2] != 0
+                || impaired_raw[3] != 0)
+            && preburned != 0,
+        "valid and impaired locks coexist with domain-local unliened burns"
+    );
+    kani::cover!(
+        residual != 0 && preburned != 0,
+        "source pre-burn and residual PnL burn form one exact partition"
+    );
 }
 
 // Public-path favorable-action freshness: conversion preflight accepts exactly

@@ -984,6 +984,53 @@ impl V16Core {
         Ok(source)
     }
 
+    /// Atomically binds a source-claim burn to the selected domain ledger.
+    #[inline]
+    fn prepare_domain_local_source_claim_burn_delta(
+        mut account_source: PortfolioSourceDomainV16Account,
+        mut source_credit: SourceCreditStateV16,
+        expected_domain: u32,
+        burn_num: u128,
+    ) -> V16Result<(PortfolioSourceDomainV16Account, SourceCreditStateV16)> {
+        if burn_num == 0 {
+            return Ok((account_source, source_credit));
+        }
+        if !account_source.is_occupied() || account_source.domain.get() != expected_domain {
+            return Err(V16Error::CounterUnderflow);
+        }
+        let locked = account_source
+            .source_claim_liened_num
+            .get()
+            .checked_add(account_source.source_claim_impaired_num.get())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let unliened = account_source
+            .source_claim_bound_num
+            .get()
+            .checked_sub(locked)
+            .ok_or(V16Error::CounterUnderflow)?;
+        if burn_num > unliened || burn_num > source_credit.positive_claim_bound_num {
+            return Err(V16Error::CounterUnderflow);
+        }
+        account_source.source_claim_bound_num =
+            V16PodU128::new(account_source.source_claim_bound_num.get() - burn_num);
+        source_credit.positive_claim_bound_num -= burn_num;
+        source_credit.exact_positive_claim_num = source_credit
+            .exact_positive_claim_num
+            .checked_sub(burn_num.min(source_credit.exact_positive_claim_num))
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((account_source, source_credit))
+    }
+
+    #[inline]
+    fn source_claim_burn_remainder(
+        decrease_num: u128,
+        preburned_source_claim_num: u128,
+    ) -> V16Result<u128> {
+        decrease_num
+            .checked_sub(preburned_source_claim_num)
+            .ok_or(V16Error::CounterUnderflow)
+    }
+
     #[cfg_attr(all(kani, feature = "contracts"), kani::requires(new_signed != 0))]
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(PortfolioLegV16, AssetStateV16)>| match result {
         Ok((l, a)) => {
@@ -8674,29 +8721,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if burn_num == 0 {
             return Ok(());
         }
-        if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP
-            || account.source_domain_slot(domain)? != Some(slot)
-            || Self::source_claim_unliened_num(&account.as_view(), domain)? < burn_num
+        if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP || account.source_domain_slot(domain)? != Some(slot)
         {
             return Err(V16Error::CounterUnderflow);
         }
-        let source = &mut account.header.source_domains[slot];
-        source.source_claim_bound_num = V16PodU128::new(
-            source
-                .source_claim_bound_num
-                .get()
-                .checked_sub(burn_num)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        let mut source_credit = self.source_credit_for_domain(domain)?;
-        source_credit.positive_claim_bound_num = source_credit
-            .positive_claim_bound_num
-            .checked_sub(burn_num)
-            .ok_or(V16Error::CounterUnderflow)?;
-        source_credit.exact_positive_claim_num = source_credit
-            .exact_positive_claim_num
-            .checked_sub(burn_num.min(source_credit.exact_positive_claim_num))
-            .ok_or(V16Error::CounterUnderflow)?;
+        let (source, source_credit) = V16Core::prepare_domain_local_source_claim_burn_delta(
+            account.header.source_domains[slot],
+            self.source_credit_for_domain(domain)?,
+            domain as u32,
+            burn_num,
+        )?;
+        account.header.source_domains[slot] = source;
         self.set_source_credit_for_domain(domain, source_credit)?;
         self.recompute_source_credit_domain_after_mutation(domain)
     }
@@ -10120,9 +10155,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             let decrease = old_pos - new_pos;
             let decrease_num = V16Core::bound_num_from_amount(decrease)?;
-            let remaining_source_claim_burn = decrease_num
-                .checked_sub(preburned_source_claim_num)
-                .ok_or(V16Error::CounterUnderflow)?;
+            let remaining_source_claim_burn =
+                V16Core::source_claim_burn_remainder(decrease_num, preburned_source_claim_num)?;
             self.burn_account_source_claim_bound_num(account, remaining_source_claim_burn)?;
             self.header.pnl_pos_tot = V16PodU128::new(
                 self.header
