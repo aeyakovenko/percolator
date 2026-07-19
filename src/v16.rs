@@ -12774,10 +12774,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut occupied = 0usize;
         let mut source_slot = 0usize;
         while source_slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            if account.header.source_domains[source_slot].is_occupied() {
+            let source = account.header.source_domains[source_slot];
+            if source.is_sparse_tail_default() {
+                break;
+            }
+            if source.is_occupied() {
                 occupied += 1;
             }
             source_slot += 1;
+        }
+
+        // Below this threshold, even if every active leg still needs a distinct source domain,
+        // the configured active-leg cap guarantees enough room. Keep ordinary and max-leg batch
+        // admission on this constant-time path; only claim-heavy historical portfolios need the
+        // detailed reservation scan below.
+        let max_active = self.header.config.max_portfolio_assets.get() as usize;
+        if occupied <= PORTFOLIO_SOURCE_DOMAIN_CAP.saturating_sub(max_active) {
+            return Ok(());
         }
 
         // Every active leg reserves the one source domain that a favorable K/F move can create.
