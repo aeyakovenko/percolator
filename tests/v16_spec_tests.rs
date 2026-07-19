@@ -160,6 +160,36 @@ fn v16_view_deposit_and_withdraw_are_the_tested_paths() {
 }
 
 #[test]
+fn v16_last_resolved_portfolio_escheats_unclaimed_residual_to_insurance() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let first_account_header = account_fixture(1, 4);
+    let last_account_header = account_fixture(1, 5);
+    header.materialized_portfolio_count = V16PodU64::new(2);
+    header.vault = V16PodU128::new(100_000);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(2).unwrap();
+    let first_account = PortfolioV16View::new(&first_account_header);
+    market
+        .deregister_empty_materialized_portfolio_not_atomic(&first_account)
+        .unwrap();
+
+    assert_eq!(market.header.materialized_portfolio_count.get(), 1);
+    assert_eq!(market.header.insurance.get(), 0);
+
+    let last_account = PortfolioV16View::new(&last_account_header);
+    market
+        .deregister_empty_materialized_portfolio_not_atomic(&last_account)
+        .unwrap();
+
+    assert_eq!(market.header.materialized_portfolio_count.get(), 0);
+    assert_eq!(market.header.vault.get(), 100_000);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.insurance.get(), 100_000);
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_funding_counter_layout_canary_places_fields_before_fee_state() {
     let width = core::mem::size_of::<V16PodU128>();
 

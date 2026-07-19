@@ -1020,6 +1020,14 @@ If a rounding method would produce `sum(A_j) > X`, the payer MUST be charged the
 
 `SettlementRoundingResidue` is protocol-owned dust. It may be swept only into `UnallocatedProtocolSurplus` through a balanced `TokenValueFlowProof`. It MUST NOT be used as account health, source-credit backing, insurance credit, resolved payout entitlement, hedge collateral, or senior capital. This is the only sanctioned non-fee source of `unallocated_protocol_surplus` growth.
 
+After a market is resolved and its last materialized portfolio is empty and
+deregistered, no user or source claim can remain. Any vault atoms above capital,
+insurance, backing-provider earnings, and recoverable fresh backing are then
+terminal protocol surplus. The engine MUST move that exact residual to insurance
+through a balanced `TokenValueFlowProof`; it MUST preserve the vault and every
+senior class. A wrapper with per-domain insurance budgets MUST assign the delta
+to its canonical terminal-residual insurance domain before allowing withdrawal.
+
 
 For every close ledger entry, residual partition is an equality over quote atoms:
 

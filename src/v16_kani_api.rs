@@ -9,6 +9,22 @@
 use super::*;
 use crate::wide_math::U256;
 
+pub fn kani_terminal_residual_to_insurance_delta(
+    vault: u128,
+    c_tot: u128,
+    insurance: u128,
+    backing_provider_earnings: u128,
+    source_fresh_backing: u128,
+) -> V16Result<(u128, u128)> {
+    V16Core::terminal_residual_to_insurance_delta(
+        vault,
+        c_tot,
+        insurance,
+        backing_provider_earnings,
+        source_fresh_backing,
+    )
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,

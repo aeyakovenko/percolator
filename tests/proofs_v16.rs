@@ -16,13 +16,14 @@ use percolator::v16::{
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_target_effective_lag_adverse_delta, kani_terminal_residual_to_insurance_delta,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
+    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -35,6 +36,7 @@ use percolator::v16::{
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
     PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
 };
+
 use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
     kani_eq_portfolio_account_v16_account,
@@ -44,6 +46,36 @@ use percolator::{
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
+
+#[kani::proof]
+fn proof_v16_terminal_residual_escheat_preserves_every_senior_class() {
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let backing_provider_earnings: u128 = kani::any();
+    let source_fresh_backing: u128 = kani::any();
+    kani::assume(c_tot <= vault);
+    kani::assume(insurance <= vault - c_tot);
+    kani::assume(backing_provider_earnings <= vault - c_tot - insurance);
+    kani::assume(source_fresh_backing <= vault - c_tot - insurance - backing_provider_earnings);
+
+    let senior_before = c_tot + insurance + backing_provider_earnings + source_fresh_backing;
+    let (absorbed, next_insurance) = kani_terminal_residual_to_insurance_delta(
+        vault,
+        c_tot,
+        insurance,
+        backing_provider_earnings,
+        source_fresh_backing,
+    )
+    .unwrap();
+
+    assert_eq!(absorbed, vault - senior_before);
+    assert_eq!(next_insurance, insurance + absorbed);
+    assert_eq!(
+        c_tot + next_insurance + backing_provider_earnings + source_fresh_backing,
+        vault
+    );
+}
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
@@ -624,7 +656,7 @@ fn proof_v16_public_materialized_portfolio_register_is_value_neutral() {
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
-fn proof_v16_public_materialized_portfolio_deregister_is_value_neutral() {
+fn proof_v16_public_live_materialized_portfolio_deregister_is_value_neutral() {
     let count_raw: u8 = kani::any();
     let c_tot_raw: u8 = kani::any();
     let insurance_raw: u8 = kani::any();
@@ -664,6 +696,46 @@ fn proof_v16_public_materialized_portfolio_deregister_is_value_neutral() {
         Ok(()),
         "deregistering an empty portfolio must not mutate account safety shape"
     );
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_last_resolved_portfolio_deregister_escheats_only_terminal_residual() {
+    let insurance_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+
+    let (mut header, mut markets, account_header) = one_market_view_fixture();
+    header.materialized_portfolio_count = V16PodU64::new(1);
+    header.insurance = V16PodU128::new(insurance_raw as u128);
+    header.vault = V16PodU128::new(insurance_raw as u128 + residual_raw as u128);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.resolve_market_not_atomic(1).unwrap();
+    }
+
+    let vault_before = header.vault.get();
+    let insurance_before = header.insurance.get();
+    let risk_epoch_before = header.risk_epoch.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = market.deregister_empty_materialized_portfolio_not_atomic(&account);
+
+    kani::cover!(
+        insurance_raw > 2 && residual_raw > 2,
+        "last resolved deregister covers existing insurance and nontrivial terminal residual"
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(market.header.materialized_portfolio_count.get(), 0);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(
+        market.header.insurance.get(),
+        insurance_before + residual_raw as u128
+    );
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    assert_eq!(market.validate_shape(), Ok(()));
 }
 
 #[kani::proof]

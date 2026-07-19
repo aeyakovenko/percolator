@@ -638,6 +638,28 @@ pub fn active_bitmap_count_ones(bitmap: V16ActiveBitmap) -> u32 {
 struct V16Core;
 
 impl V16Core {
+    fn terminal_residual_to_insurance_delta(
+        vault: u128,
+        c_tot: u128,
+        insurance: u128,
+        backing_provider_earnings: u128,
+        source_fresh_backing: u128,
+    ) -> V16Result<(u128, u128)> {
+        let senior = c_tot
+            .checked_add(insurance)
+            .and_then(|v| v.checked_add(backing_provider_earnings))
+            .and_then(|v| v.checked_add(source_fresh_backing))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if senior > vault {
+            return Err(V16Error::InvalidConfig);
+        }
+        let residual = vault - senior;
+        let next_insurance = insurance
+            .checked_add(residual)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((residual, next_insurance))
+    }
+
     fn loss_stale_trade_scope_allowed(
         market_loss_stale_active: bool,
         trade_asset_loss_stale: bool,
@@ -5061,6 +5083,17 @@ impl TokenValueFlowProofV16 {
         Ok(proof)
     }
 
+    fn terminal_protocol_surplus_to_insurance(
+        amount: u128,
+        vault_before: u128,
+        vault_after: u128,
+    ) -> V16Result<Self> {
+        let mut proof = Self::empty(vault_before, vault_after);
+        proof.debit(TokenValueClassV16::UnallocatedProtocolSurplus, amount)?;
+        proof.credit(TokenValueClassV16::InsuranceCapital, amount)?;
+        Ok(proof)
+    }
+
     fn external_in_to_insurance_capital(
         amount: u128,
         vault_before: u128,
@@ -7112,14 +7145,55 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !account.is_empty_for_dematerialization()? {
             return Err(V16Error::LockActive);
         }
-        self.header.materialized_portfolio_count = V16PodU64::new(
-            self.header
-                .materialized_portfolio_count
-                .get()
-                .checked_sub(1)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
+        let next_count = self
+            .header
+            .materialized_portfolio_count
+            .get()
+            .checked_sub(1)
+            .ok_or(V16Error::CounterUnderflow)?;
+        self.header.materialized_portfolio_count = V16PodU64::new(next_count);
+        if next_count == 0 && decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+            self.absorb_unclaimed_terminal_residual_into_insurance()?;
+        }
         self.validate_shape_audit_scan()
+    }
+
+    fn absorb_unclaimed_terminal_residual_into_insurance(&mut self) -> V16Result<u128> {
+        let payout_ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
+        if self.header.materialized_portfolio_count.get() != 0
+            || self.header.c_tot.get() != 0
+            || self.header.pnl_pos_tot.get() != 0
+            || self.header.pnl_pos_bound_tot_num.get() != 0
+            || self.header.pnl_pos_bound_tot.get() != 0
+            || self.header.pnl_matured_pos_tot.get() != 0
+            || self.header.source_claim_bound_total_num.get() != 0
+            || self
+                .header
+                .source_insurance_credit_reserved_total_atoms
+                .get()
+                != 0
+            || self.header.resolved_payout_blocker_count.get() != 0
+            || self.header.stale_certificate_count.get() != 0
+            || self.header.b_stale_account_count.get() != 0
+            || self.header.negative_pnl_account_count.get() != 0
+            || payout_ledger.terminal_claim_bound_unreceipted_num != 0
+            || payout_ledger.payout_halted
+        {
+            return Err(V16Error::LockActive);
+        }
+
+        let vault = self.header.vault.get();
+        let (absorbed, next_insurance) = V16Core::terminal_residual_to_insurance_delta(
+            vault,
+            self.header.c_tot.get(),
+            self.header.insurance.get(),
+            self.backing_provider_earnings_total(),
+            self.source_fresh_backing_total_atoms(),
+        )?;
+        self.header.insurance = V16PodU128::new(next_insurance);
+        TokenValueFlowProofV16::terminal_protocol_surplus_to_insurance(absorbed, vault, vault)?
+            .validate()?;
+        Ok(absorbed)
     }
 
     #[cfg(kani)]
