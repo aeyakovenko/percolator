@@ -5,8 +5,9 @@ use percolator::{
     MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioV16View,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
-    V16Config, V16Error,
+    V16Config, V16Error, V16PodU128,
 };
+use percolator::{BOUND_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
 use proptest::prelude::*;
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
@@ -63,6 +64,214 @@ fn assert_fuzz_invariants(
         .map(|pnl| pnl as u128)
         .sum::<u128>();
     assert_eq!(market.header.pnl_pos_tot.get(), positive_pnl);
+}
+
+fn source_claim_num(account: &PortfolioAccountV16Account, domain: usize) -> u128 {
+    account
+        .source_domains
+        .iter()
+        .find(|source| {
+            source.source_claim_market_id.get() != 0 && source.domain.get() as usize == domain
+        })
+        .map(|source| source.source_claim_bound_num.get())
+        .unwrap_or(0)
+}
+
+struct TwoDomainBSettlement {
+    other_claim_num: u128,
+    target_claim_num: u128,
+    target_lien_num: u128,
+    target_valid_backing_num: u128,
+    target_valid_insurance_num: u128,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetLienBacking {
+    None,
+    Counterparty,
+    Insurance,
+}
+
+fn settle_two_domain_b_loss(
+    target_claim: u128,
+    other_claim: u128,
+    loss: u128,
+    target_lien: u128,
+    target_lien_backing: TargetLienBacking,
+) -> TwoDomainBSettlement {
+    let (market_id, _, _, owner) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    cfg.public_b_chunk_atoms = loss.max(1);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
+    let mut markets = vec![
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(1u64, EngineAssetSlotV16Account::default()),
+    ];
+    for (asset_index, market) in markets.iter_mut().enumerate() {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                asset_index as u32,
+                &mut market.engine,
+                100,
+                (asset_index + 1) as u64,
+            )
+            .unwrap();
+    }
+    let mut long_header = PortfolioAccountV16Account::default();
+    long_header
+        .init_empty_in_place(ProvenanceHeaderV16Account::from_runtime(
+            &ProvenanceHeaderV16::new(market_id, [9; 32], owner),
+        ))
+        .unwrap();
+    let mut short_header = PortfolioAccountV16Account::default();
+    short_header
+        .init_empty_in_place(ProvenanceHeaderV16Account::from_runtime(
+            &ProvenanceHeaderV16::new(market_id, [10; 32], owner),
+        ))
+        .unwrap();
+
+    let loss_weight = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 10_000).unwrap();
+        market.deposit_not_atomic(&mut short, 10_000).unwrap();
+        match target_lien_backing {
+            TargetLienBacking::None => {}
+            TargetLienBacking::Counterparty => market
+                .deposit_fresh_counterparty_backing_not_atomic(3, 1_000, 100)
+                .unwrap(),
+            TargetLienBacking::Insurance => {
+                market
+                    .deposit_domain_insurance_not_atomic(3, 1_000)
+                    .unwrap();
+                market
+                    .reserve_insurance_credit_not_atomic(3, 1_000 * BOUND_SCALE)
+                    .unwrap();
+            }
+        }
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 1,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut long, 1, other_claim)
+            .unwrap();
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut long, 3, target_claim)
+            .unwrap();
+        if target_lien != 0 {
+            long.header.health_cert.certified_initial_req =
+                V16PodU128::new(long.header.capital.get() + target_lien);
+            long.header.health_cert.valid = 1;
+            market
+                .kani_create_initial_margin_source_lien_if_needed(&mut long)
+                .unwrap();
+            assert_eq!(
+                source_claim_num(&*long.header, 3),
+                target_claim * BOUND_SCALE
+            );
+            let target_source = long
+                .header
+                .source_domains
+                .iter()
+                .find(|source| {
+                    source.source_claim_market_id.get() != 0 && source.domain.get() as usize == 3
+                })
+                .expect("target-domain claim");
+            assert_eq!(
+                target_source.source_claim_liened_num.get(),
+                target_lien * BOUND_SCALE
+            );
+        }
+        long.header
+            .legs
+            .iter()
+            .find_map(|leg| {
+                let leg = leg.try_to_runtime().ok()?;
+                (leg.active && leg.asset_index == 1).then_some(leg.loss_weight)
+            })
+            .unwrap()
+    };
+    let delta_b = loss
+        .checked_mul(SOCIAL_LOSS_DEN)
+        .unwrap()
+        .checked_div(loss_weight)
+        .unwrap();
+    markets[1].engine.asset.b_long_num = V16PodU128::new(delta_b);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let outcome = market
+        .kani_settle_account_b_chunk(&mut long, 1, delta_b)
+        .unwrap();
+    assert_eq!(outcome.loss, loss);
+    let target_source = long_header
+        .source_domains
+        .iter()
+        .find(|source| {
+            source.source_claim_market_id.get() != 0 && source.domain.get() as usize == 3
+        })
+        .copied()
+        .unwrap_or_default();
+    TwoDomainBSettlement {
+        other_claim_num: source_claim_num(&long_header, 1),
+        target_claim_num: source_claim_num(&long_header, 3),
+        target_lien_num: target_source.source_claim_liened_num.get(),
+        target_valid_backing_num: markets[1]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .valid_liened_backing_num,
+        target_valid_insurance_num: markets[1]
+            .engine
+            .insurance_reservation_short
+            .try_to_runtime()
+            .unwrap()
+            .valid_liened_insurance_num,
+    }
+}
+
+#[test]
+fn v16_b_loss_burns_the_matching_source_domain_before_sparse_slot_order() {
+    let after = settle_two_domain_b_loss(100, 100, 50, 0, TargetLienBacking::None);
+    assert_eq!(after.other_claim_num, 100 * BOUND_SCALE);
+    assert_eq!(after.target_claim_num, 50 * BOUND_SCALE);
+}
+
+#[test]
+fn v16_b_loss_falls_back_to_cross_margin_claims_after_its_domain_is_exhausted() {
+    let after = settle_two_domain_b_loss(20, 100, 50, 0, TargetLienBacking::None);
+    assert_eq!(after.target_claim_num, 0);
+    assert_eq!(after.other_claim_num, 70 * BOUND_SCALE);
+}
+
+#[test]
+fn v16_b_loss_preserves_the_unburned_part_of_a_matching_source_lien() {
+    let after = settle_two_domain_b_loss(100, 100, 50, 80, TargetLienBacking::Counterparty);
+    assert_eq!(after.other_claim_num, 100 * BOUND_SCALE);
+    assert_eq!(after.target_claim_num, 50 * BOUND_SCALE);
+    assert_eq!(after.target_lien_num, 50 * BOUND_SCALE);
+    assert_eq!(after.target_valid_backing_num, 50 * BOUND_SCALE);
+}
+
+#[test]
+fn v16_b_loss_preserves_the_unburned_part_of_a_matching_insurance_lien() {
+    let after = settle_two_domain_b_loss(100, 100, 50, 80, TargetLienBacking::Insurance);
+    assert_eq!(after.other_claim_num, 100 * BOUND_SCALE);
+    assert_eq!(after.target_claim_num, 50 * BOUND_SCALE);
+    assert_eq!(after.target_lien_num, 50 * BOUND_SCALE);
+    assert_eq!(after.target_valid_backing_num, 0);
+    assert_eq!(after.target_valid_insurance_num, 50 * BOUND_SCALE);
 }
 
 #[allow(clippy::too_many_arguments)]

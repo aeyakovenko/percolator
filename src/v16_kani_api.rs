@@ -887,6 +887,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_account_pnl(account, new_pnl)
     }
 
+    pub fn kani_settle_account_b_chunk(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        endpoint_delta_budget: u128,
+    ) -> V16Result<AccountBSettlementChunkV16> {
+        self.settle_account_b_chunk(account, asset_index, endpoint_delta_budget)
+    }
+
     pub fn kani_apply_signed_kf_delta_to_pnl(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
