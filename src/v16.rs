@@ -8868,8 +8868,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if burn_num == 0 {
             return Ok(0);
         }
-        if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP || account.source_domain_slot(domain)? != Some(slot)
-        {
+        if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP {
+            return Err(V16Error::CounterUnderflow);
+        }
+        let source = account.header.source_domains[slot];
+        if !source.is_occupied() || source.domain.get() as usize != domain {
             return Err(V16Error::CounterUnderflow);
         }
         let target = burn_num.min(

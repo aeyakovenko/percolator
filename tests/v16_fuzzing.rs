@@ -274,6 +274,47 @@ fn v16_b_loss_preserves_the_unburned_part_of_a_matching_insurance_lien() {
     assert_eq!(after.target_valid_insurance_num, 50 * BOUND_SCALE);
 }
 
+#[test]
+fn v16_source_claim_burn_crosses_a_just_emptied_sparse_slot() {
+    let (market_id, _, _, owner) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
+    let mut markets = vec![
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(1u64, EngineAssetSlotV16Account::default()),
+    ];
+    for (asset_index, market) in markets.iter_mut().enumerate() {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                asset_index as u32,
+                &mut market.engine,
+                100,
+                (asset_index + 1) as u64,
+            )
+            .unwrap();
+    }
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header
+        .init_empty_in_place(ProvenanceHeaderV16Account::from_runtime(
+            &ProvenanceHeaderV16::new(market_id, [11; 32], owner),
+        ))
+        .unwrap();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .add_account_source_positive_pnl_not_atomic(&mut account, 1, 100)
+        .unwrap();
+    market
+        .add_account_source_positive_pnl_not_atomic(&mut account, 3, 100)
+        .unwrap();
+
+    market.kani_set_account_pnl(&mut account, 0).unwrap();
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(source_claim_num(account.header, 1), 0);
+    assert_eq!(source_claim_num(account.header, 3), 0);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_with_svm_rollback(
     header: &mut MarketGroupV16HeaderAccount,
