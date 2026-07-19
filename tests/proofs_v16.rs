@@ -448,7 +448,7 @@ fn proof_v16_zero_oi_residue_reset_is_complete_independent_and_value_neutral() {
         && asset_before.mode_short != SideModeV16::ResetPending;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    assert_eq!(market.kani_begin_zero_oi_trade_residue_resets(0), Ok(()));
+    assert_eq!(market.kani_begin_zero_oi_residue_resets(0), Ok(()));
     let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
     if asset_before.oi_eff_long_q == 0
