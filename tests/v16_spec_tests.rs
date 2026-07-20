@@ -10,10 +10,11 @@ use percolator::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
-    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
-    SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
+    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
+    SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error, V16PodI128, V16PodU128,
+    V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -82,6 +83,20 @@ fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Ac
     let mut account = PortfolioAccountV16Account::default();
     account.init_empty_in_place(header).unwrap();
     account
+}
+
+fn seed_negative_pnl(
+    account: &mut PortfolioAccountV16Account,
+    markets: &[Market<u64>],
+    domain: usize,
+    amount: u128,
+) {
+    let asset_index = domain / 2;
+    let market_id = markets[asset_index].engine.asset.market_id.get();
+    account.pnl = V16PodI128::new(-i128::try_from(amount).unwrap());
+    account.source_domains[0].domain = V16PodU32::new(u32::try_from(domain).unwrap());
+    account.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account.source_domains[0].negative_pnl_atoms = V16PodU128::new(amount);
 }
 
 fn signed_q(q: u128) -> i128 {
@@ -458,7 +473,7 @@ fn v16_view_fee_sync_settles_flat_loss_before_fee() {
     header.current_slot = V16PodU64::new(10);
     header.slot_last = V16PodU64::new(10);
     account_header.capital = V16PodU128::new(100);
-    account_header.pnl = V16PodI128::new(-40);
+    seed_negative_pnl(&mut account_header, &markets, 0, 40);
 
     let mut market_view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account_view = PortfolioV16ViewMut::new(&mut account_header);
@@ -2098,7 +2113,7 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.resolved_payout_blocker_count = V16PodU64::new(4);
 
-    account_header.pnl = V16PodI128::new(-5);
+    seed_negative_pnl(&mut account_header, &markets, 1, 5);
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
         asset_index: 0,
@@ -2135,6 +2150,126 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
         0
     );
     assert!(out.residual_booked > 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_liquidation_uses_recorded_loss_domain_not_selected_leg_domain() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 32);
+    header.vault = V16PodU128::new(5);
+    header.insurance = V16PodU128::new(5);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(5);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(5);
+
+    let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset0.oi_eff_long_q = 2 * POS_SCALE;
+    asset0.oi_eff_short_q = 2 * POS_SCALE;
+    asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.stored_pos_count_long = 2;
+    asset0.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+    let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset1.oi_eff_long_q = 2 * POS_SCALE;
+    asset1.oi_eff_short_q = 2 * POS_SCALE;
+    asset1.loss_weight_sum_long = 2 * POS_SCALE;
+    asset1.loss_weight_sum_short = 2 * POS_SCALE;
+    asset1.stored_pos_count_long = 2;
+    asset1.stored_pos_count_short = 2;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    header.resolved_payout_blocker_count = V16PodU64::new(6);
+
+    // The debt belongs to asset 1's long domain, while liquidation selects an
+    // unrelated asset 0 long leg whose opposite-side insurance is funded.
+    seed_negative_pnl(&mut account_header, &markets, 2, 5);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset0.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset0.k_long,
+        f_snap: asset0.f_long_num,
+        epoch_snap: asset0.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset0.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset0.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let out = market
+        .liquidate_account_not_atomic(&mut account, LiquidationRequestV16 { asset_index: 0 })
+        .expect("recorded asset-1 debt must progress without asset-0 insurance");
+
+    assert_eq!(out.insurance_used, 0);
+    assert_eq!(market.header.insurance.get(), 5);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        0
+    );
+    assert_eq!(market.markets[0].engine.asset.b_short_num.get(), 0);
+    assert!(market.markets[1].engine.asset.b_long_num.get() > 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_close_rotates_finalized_ledger_across_loss_domains() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 33);
+    header.mode = 1; // Resolved
+    header.resolved_slot = header.current_slot;
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.bankruptcy_hlock_active = 1;
+    account_header.pnl = V16PodI128::new(-7);
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = markets[0].engine.asset.market_id;
+    account_header.source_domains[0].negative_pnl_atoms = V16PodU128::new(3);
+    account_header.source_domains[1].domain = V16PodU32::new(2);
+    account_header.source_domains[1].source_claim_market_id = markets[1].engine.asset.market_id;
+    account_header.source_domains[1].negative_pnl_atoms = V16PodU128::new(4);
+    for market_slot in &mut markets {
+        let mut asset = market_slot.engine.asset.try_to_runtime().unwrap();
+        asset.oi_eff_long_q = POS_SCALE;
+        asset.loss_weight_sum_long = POS_SCALE;
+        asset.stored_pos_count_long = 1;
+        market_slot.engine.asset = AssetStateV16Account::from_runtime(&asset);
+    }
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    let first = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("first domain must settle");
+    assert_eq!(first, ResolvedCloseOutcomeV16::ProgressOnly);
+    assert_eq!(account.header.pnl.get(), -4);
+    let first_ledger = account.header.close_progress.try_to_runtime().unwrap();
+    assert!(first_ledger.active && first_ledger.finalized && !first_ledger.canceled);
+    assert_eq!(first_ledger.residual_remaining, 0);
+    assert_eq!(first_ledger.asset_index, 0);
+    assert_eq!(first_ledger.explicit_loss_assigned, 3);
+    assert_eq!(market.markets[0].engine.asset.b_long_num.get(), 0);
+
+    let second = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("finalized ledger must rotate to the second domain");
+    assert_eq!(second, ResolvedCloseOutcomeV16::Closed { payout: 0 });
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    assert_eq!(market.markets[1].engine.asset.b_long_num.get(), 0);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
 }
@@ -2323,7 +2458,7 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
     header.resolved_payout_blocker_count = V16PodU64::new(6);
 
-    account_header.pnl = V16PodI128::new(-5);
+    seed_negative_pnl(&mut account_header, &markets, 1, 5);
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
         asset_index: 0,
@@ -2721,7 +2856,7 @@ fn v16_principal_loss_crystallizes_residual_budget_monotonically() {
     header.c_tot = V16PodU128::new(100);
     header.negative_pnl_account_count = V16PodU64::new(1);
     account_header.capital = V16PodU128::new(100);
-    account_header.pnl = V16PodI128::new(-40);
+    seed_negative_pnl(&mut account_header, &markets, 0, 40);
     account_header.residual_crystallized_loss_atoms_total = V16PodU128::new(7);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -3066,7 +3201,7 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
     header.resolved_payout_blocker_count = V16PodU64::new(6);
 
-    account_header.pnl = V16PodI128::new(-5);
+    seed_negative_pnl(&mut account_header, &markets, 1, 5);
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
         asset_index: 0,
@@ -3173,7 +3308,7 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.resolved_payout_blocker_count = V16PodU64::new(4);
 
-    account_header.pnl = V16PodI128::new(-5);
+    seed_negative_pnl(&mut account_header, &markets, 1, 5);
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
         asset_index: 0,
@@ -3654,7 +3789,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
             asset.stored_pos_count_short = 2;
             markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
             header.resolved_payout_blocker_count = V16PodU64::new(4);
-            account_header.pnl = V16PodI128::new(-5);
+            seed_negative_pnl(&mut account_header, &markets, 1, 5);
             account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
                 active: true,
                 asset_index: 0,

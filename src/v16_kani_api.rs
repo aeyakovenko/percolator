@@ -610,15 +610,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.consume_domain_insurance_for_negative_pnl(asset_index, bankrupt_side, account)
     }
 
-    pub fn kani_preflight_liquidation_residual_durability(
-        &mut self,
-        asset_index: usize,
-        bankrupt_side: SideV16,
-        account: &PortfolioV16View<'_>,
-    ) -> V16Result<()> {
-        self.preflight_liquidation_residual_durability(asset_index, bankrupt_side, account)
-    }
-
     pub fn kani_apply_counterparty_source_credit_lien_delta(
         source: &mut PortfolioSourceDomainV16Account,
         required_face_num: u128,

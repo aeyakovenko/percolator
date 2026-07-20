@@ -27,8 +27,8 @@ pub type V16ActiveBitmap = [u64; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 // Bump whenever the on-chain account/header Pod layout changes (see the
-// PortfolioAccountV16Account size assertion). 17: added funding flow counters.
-pub const V16_LAYOUT_DISCRIMINATOR: u16 = 17;
+// PortfolioAccountV16Account size assertion). 18: persist per-domain negative-PnL provenance.
+pub const V16_LAYOUT_DISCRIMINATOR: u16 = 18;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
 pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
@@ -4075,6 +4075,9 @@ impl<'a> PortfolioV16View<'a> {
         if source_claim_sum_num != 0 {
             V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)?;
         }
+        if self.negative_pnl_sum_atoms()? != pnl.min(0).unsigned_abs() {
+            return Err(V16Error::InvalidLeg);
+        }
         Self::validate_resolved_payout_receipt_static(
             self.header.resolved_payout_receipt.try_to_runtime()?,
         )?;
@@ -4182,6 +4185,9 @@ impl<'a> PortfolioV16View<'a> {
                 return Err(V16Error::HiddenLeg);
             }
             let slot = market.markets[asset_index].engine_slot();
+            if source.negative_pnl_atoms.get() != 0 && source.source_claim_bound_num.get() != 0 {
+                return Err(V16Error::InvalidLeg);
+            }
             let domain_credit = if d % 2 == 0 {
                 slot.source_credit_long.try_to_runtime()?
             } else {
@@ -4266,6 +4272,41 @@ impl<'a> PortfolioV16View<'a> {
             d += 1;
         }
         Ok(sum)
+    }
+
+    fn negative_pnl_sum_atoms(&self) -> V16Result<u128> {
+        let mut sum = 0u128;
+        let mut d = 0usize;
+        while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            sum = sum
+                .checked_add(self.source_domains()[d].negative_pnl_atoms.get())
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            d += 1;
+        }
+        Ok(sum)
+    }
+
+    fn first_negative_pnl_domain(&self) -> V16Result<Option<(usize, u128)>> {
+        self.first_negative_pnl_domain_after_reduction(0)
+    }
+
+    fn first_negative_pnl_domain_after_reduction(
+        &self,
+        mut reduction: u128,
+    ) -> V16Result<Option<(usize, u128)>> {
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = self.source_domains()[slot];
+            let amount = source.negative_pnl_atoms.get();
+            let reduced = amount.min(reduction);
+            reduction -= reduced;
+            let remaining = amount - reduced;
+            if remaining != 0 {
+                return Ok(Some((source.domain.get() as usize, remaining)));
+            }
+            slot += 1;
+        }
+        Ok(None)
     }
 
     fn validate_resolved_payout_receipt_static(receipt: ResolvedPayoutReceiptV16) -> V16Result<()> {
@@ -9232,19 +9273,38 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
         let domain = self.insurance_domain_index(asset_index, opposite_side(bankrupt_side))?;
+        self.consume_attributed_domain_insurance_for_negative_pnl(domain, account)
+    }
+
+    fn consume_attributed_domain_insurance_for_negative_pnl(
+        &mut self,
+        domain: usize,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
         if account.header.pnl.get() >= 0 {
+            return Ok(0);
+        }
+        let attributed = account
+            .as_view()
+            .source_domain(domain)?
+            .negative_pnl_atoms
+            .get();
+        if attributed == 0 {
             return Ok(0);
         }
         self.header.bankruptcy_hlock_active = 1;
         let domain_available = self.available_domain_insurance(domain)?;
         let (_, spent_before) = self.domain_insurance_budget_spent(domain)?;
+        let attributed_pnl = i128::try_from(attributed)
+            .map(|v| -v)
+            .map_err(|_| V16Error::ArithmeticOverflow)?;
         // PRODUCTION KERNEL: insurance-draw core (capped by deficit AND domain
         // budget; conserves pool -> spent).
-        let (used, next_insurance, next_spent, new_pnl) = V16Core::kernel_consume_insurance_layer(
+        let (used, next_insurance, next_spent, _) = V16Core::kernel_consume_insurance_layer(
             domain_available,
             self.header.insurance.get(),
             spent_before,
-            account.header.pnl.get(),
+            attributed_pnl,
         )?;
         if used == 0 {
             return Ok(0);
@@ -9252,7 +9312,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let vault_before = self.header.vault.get();
         self.header.insurance = V16PodU128::new(next_insurance);
         self.set_domain_insurance_spent_core(domain, next_spent)?;
-        self.set_account_pnl(account, new_pnl)?;
+        let used_i128 = i128::try_from(used).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let new_pnl = account
+            .header
+            .pnl
+            .get()
+            .checked_add(used_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        self.set_account_pnl_reducing_loss_domain(account, new_pnl, domain)?;
         TokenValueFlowProofV16::validate_insurance_to_close_insurance_spent(
             used,
             vault_before,
@@ -9262,24 +9329,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(used)
     }
 
-    fn preflight_liquidation_residual_durability(
+    fn preflight_attributed_liquidation_residual_durability(
         &mut self,
         asset_index: usize,
         bankrupt_side: SideV16,
-        account: &PortfolioV16View<'_>,
+        attributed_loss_after_principal: u128,
     ) -> V16Result<()> {
         let domain = self.insurance_domain_index(asset_index, opposite_side(bankrupt_side))?;
-        let residual_after_principal_and_insurance = if account.header.pnl.get() < 0 {
-            account
-                .header
-                .pnl
-                .get()
-                .unsigned_abs()
-                .saturating_sub(account.header.capital.get())
-                .saturating_sub(self.available_domain_insurance(domain)?)
-        } else {
-            0
-        };
+        let residual_after_principal_and_insurance = attributed_loss_after_principal
+            .saturating_sub(self.available_domain_insurance(domain)?);
         if residual_after_principal_and_insurance == 0 {
             return Ok(());
         }
@@ -9949,7 +10007,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         new_pnl: i128,
     ) -> V16Result<()> {
-        self.set_account_pnl_inner(account, new_pnl, None)
+        self.set_account_pnl_inner(account, new_pnl, None, None, None)
     }
 
     fn set_account_pnl_with_source(
@@ -9959,7 +10017,94 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         source_domain: usize,
     ) -> V16Result<()> {
         self.domain_asset_side(source_domain)?;
-        self.set_account_pnl_inner(account, new_pnl, Some(source_domain))
+        self.set_account_pnl_inner(account, new_pnl, Some(source_domain), None, None)
+    }
+
+    fn set_account_pnl_with_loss_source(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        new_pnl: i128,
+        loss_source_domain: usize,
+    ) -> V16Result<()> {
+        self.domain_asset_side(loss_source_domain)?;
+        self.set_account_pnl_inner(account, new_pnl, None, Some(loss_source_domain), None)
+    }
+
+    fn set_account_pnl_reducing_loss_domain(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        new_pnl: i128,
+        loss_source_domain: usize,
+    ) -> V16Result<()> {
+        self.domain_asset_side(loss_source_domain)?;
+        self.set_account_pnl_inner(account, new_pnl, None, None, Some(loss_source_domain))
+    }
+
+    fn increase_account_negative_pnl_attribution(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        if amount == 0 {
+            return Ok(());
+        }
+        self.ensure_account_source_claim_market_id(account, domain)?;
+        let source = account.source_domain_mut_or_insert(domain)?;
+        source.negative_pnl_atoms = V16PodU128::new(
+            source
+                .negative_pnl_atoms
+                .get()
+                .checked_add(amount)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        );
+        Ok(())
+    }
+
+    fn reduce_account_negative_pnl_attribution(
+        account: &mut PortfolioV16ViewMut<'_>,
+        mut amount: u128,
+        specific_domain: Option<usize>,
+    ) -> V16Result<()> {
+        if amount == 0 {
+            return Ok(());
+        }
+        if let Some(domain) = specific_domain {
+            let slot = account
+                .source_domain_slot(domain)?
+                .ok_or(V16Error::InvalidLeg)?;
+            let attributed = account.header.source_domains[slot].negative_pnl_atoms.get();
+            if attributed < amount {
+                return Err(V16Error::InvalidLeg);
+            }
+            account.header.source_domains[slot].negative_pnl_atoms =
+                V16PodU128::new(attributed - amount);
+            account.reset_source_domain_slot_if_empty(slot);
+            account.compact_source_domains();
+            return Ok(());
+        }
+
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && amount != 0 {
+            let attributed = account.header.source_domains[slot].negative_pnl_atoms.get();
+            let reduced = attributed.min(amount);
+            if reduced != 0 {
+                account.header.source_domains[slot].negative_pnl_atoms =
+                    V16PodU128::new(attributed - reduced);
+                amount -= reduced;
+            }
+            slot += 1;
+        }
+        if amount != 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            account.reset_source_domain_slot_if_empty(slot);
+            slot += 1;
+        }
+        account.compact_source_domains();
+        Ok(())
     }
 
     /// Grants source-attributed positive PnL to an account — the first-class
@@ -10000,8 +10145,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         new_pnl: i128,
         source_domain: Option<usize>,
+        negative_source_domain: Option<usize>,
+        negative_reduction_domain: Option<usize>,
     ) -> V16Result<()> {
         validate_non_min_i128(new_pnl)?;
+        let old_pnl = account.header.pnl.get();
         let old_pos = account.header.pnl.get().max(0) as u128;
         let new_pos = new_pnl.max(0) as u128;
         if new_pos >= old_pos {
@@ -10087,7 +10235,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.pnl_pos_bound_tot_num.get(),
         )?);
 
-        let old_negative = account.header.pnl.get() < 0;
+        let old_negative_abs = old_pnl.min(0).unsigned_abs();
+        let new_negative_abs = new_pnl.min(0).unsigned_abs();
+        if new_negative_abs > old_negative_abs {
+            let domain = negative_source_domain.ok_or(V16Error::InvalidLeg)?;
+            self.increase_account_negative_pnl_attribution(
+                account,
+                domain,
+                new_negative_abs - old_negative_abs,
+            )?;
+        } else if old_negative_abs > new_negative_abs {
+            Self::reduce_account_negative_pnl_attribution(
+                account,
+                old_negative_abs - new_negative_abs,
+                negative_reduction_domain,
+            )?;
+        }
+
+        let old_negative = old_pnl < 0;
         let new_negative = new_pnl < 0;
         match (old_negative, new_negative) {
             (false, true) => {
@@ -10143,6 +10308,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         loss_abs: u128,
+        loss_source_domain: usize,
     ) -> V16Result<SupportLossApplicationV16> {
         if loss_abs == 0 {
             return Ok(SupportLossApplicationV16 {
@@ -10159,7 +10325,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .get()
                 .checked_sub(loss_i128)
                 .ok_or(V16Error::ArithmeticOverflow)?;
-            self.set_account_pnl(account, new_pnl)?;
+            self.set_account_pnl_with_loss_source(account, new_pnl, loss_source_domain)?;
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
@@ -10218,7 +10384,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .get()
                 .min(new_pnl.max(0) as u128),
         );
-        self.set_account_pnl(account, new_pnl)?;
+        self.set_account_pnl_with_loss_source(account, new_pnl, loss_source_domain)?;
         Ok(SupportLossApplicationV16 {
             support_consumed,
             junior_face_burned,
@@ -10239,7 +10405,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             });
         }
         if delta < 0 {
-            return self.apply_haircut_bounded_close_loss_to_pnl(account, delta.unsigned_abs());
+            let loss_source_domain = source_domain.ok_or(V16Error::InvalidLeg)?;
+            return self.apply_haircut_bounded_close_loss_to_pnl(
+                account,
+                delta.unsigned_abs(),
+                loss_source_domain,
+            );
         }
         if account.header.pnl.get() >= 0 {
             if source_domain.is_none()
@@ -10587,7 +10758,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.apply_signed_kf_delta_to_pnl(account, net, source_domain)?;
             } else {
                 let negative_before = account.header.pnl.get().min(0).unsigned_abs();
-                self.apply_signed_kf_delta_to_pnl(account, net, None)?;
+                let bankruptcy_domain =
+                    self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
+                self.apply_signed_kf_delta_to_pnl(account, net, Some(bankruptcy_domain))?;
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
                 let loss_source_domain = self.insurance_domain_index(asset_index, leg.side)?;
                 self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
@@ -11135,6 +11308,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
         let leg = account.header.legs[leg_slot].try_to_runtime()?;
+        let loss_source_domain =
+            self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
         let leg = V16Core::kernel_advance_leg_b_snap(
             leg,
             chunk.delta_b,
@@ -11142,7 +11317,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             chunk.remaining_after,
         )?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
-        self.set_account_pnl(account, new_pnl)?;
+        self.set_account_pnl_with_loss_source(account, new_pnl, loss_source_domain)?;
         if chunk.remaining_after != 0 {
             self.mark_account_b_stale(account)?;
         } else if !Self::has_b_stale_leg(&account.as_view())? {
@@ -13258,11 +13433,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             SideV16::Short => asset.loss_weight_sum_short,
         };
         let resolved = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved;
-        // Determine whether a chunk can be booked (and the recovery reason if not).
-        // weight_sum==0 -> no loss-side to absorb (ActiveBankruptClose); engine
-        // chunk 0 / apply None -> no B-headroom (BIndexHeadroomExhausted). The
-        // booked asset is written back only when a chunk is actually booked.
-        let (booked, new_asset, recovery_reason) = if weight_sum == 0 {
+        // Resolved payouts already haircut positive claims to realizable backing, so applying B
+        // there would charge the same terminal shortfall twice. Live markets still book B so
+        // continued trading observes the socialized loss.
+        let (booked, new_asset, recovery_reason) = if resolved || weight_sum == 0 {
             (
                 None,
                 None,
@@ -13575,6 +13749,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // when possible, otherwise close the selected leg fully.
         let (close_q, close_delta) =
             V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, close_request_q)?;
+        let preflight_target = account
+            .as_view()
+            .first_negative_pnl_domain_after_reduction(account.header.capital.get())?;
         if self.position_delta_touches_pending_domain_loss_barrier(
             &account.as_view(),
             request.asset_index,
@@ -13595,11 +13772,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             )?;
             return Err(V16Error::RecoveryRequired);
         }
-        self.preflight_liquidation_residual_durability(
-            request.asset_index,
-            leg.side,
-            &account.as_view(),
-        )?;
+        if let Some((domain, amount)) = preflight_target {
+            let (debt_asset_index, domain_side) = self.domain_asset_side(domain)?;
+            self.preflight_attributed_liquidation_residual_durability(
+                debt_asset_index,
+                opposite_side(domain_side),
+                amount,
+            )?;
+        }
         let fee_notional = liquidation_risk_notional_ceil(close_q, asset.effective_price)?;
         let fee = liquidation_fee_for_close(
             fee_notional,
@@ -13610,61 +13790,66 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         let charged_fee = self.charge_account_fee_not_atomic(account, fee)?;
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
-        let gross_bankruptcy_residual = if account.header.pnl.get() < 0 {
-            account.header.pnl.get().unsigned_abs()
-        } else {
-            0
-        };
-        if gross_bankruptcy_residual != 0 {
-            self.begin_close_progress_ledger(
-                account,
-                request.asset_index,
-                opposite_side(leg.side),
-                gross_bankruptcy_residual,
-            )?;
-        }
-        let insurance_used =
-            self.consume_domain_insurance_for_negative_pnl(request.asset_index, leg.side, account)?;
-        if insurance_used != 0 {
-            self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
-        }
-        let residual = if account.header.pnl.get() < 0 {
-            account.header.pnl.get().unsigned_abs()
-        } else {
-            0
-        };
+        let debt_target = account.as_view().first_negative_pnl_domain()?;
+        let mut insurance_used = 0u128;
         let mut booked = 0u128;
         let mut explicit = 0u128;
-        if residual != 0 {
-            let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
+        if let Some((domain, gross_bankruptcy_residual)) = debt_target {
+            let (debt_asset_index, domain_side) = self.domain_asset_side(domain)?;
+            let bankrupt_side = opposite_side(domain_side);
+            self.begin_close_progress_ledger(
                 account,
-                request.asset_index,
-                leg.side,
-                residual,
+                debt_asset_index,
+                domain_side,
+                gross_bankruptcy_residual,
             )?;
-            booked = outcome.booked_loss;
-            explicit = outcome.explicit_loss;
-            let cleared = booked
-                .checked_add(explicit)
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .min(residual);
-            let cleared_i128 = i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
-            let new_pnl = account
-                .header
-                .pnl
-                .get()
-                .checked_add(cleared_i128)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            self.set_account_pnl(account, new_pnl)?;
-            self.header.bankruptcy_hlock_active = 1;
+            insurance_used =
+                self.consume_attributed_domain_insurance_for_negative_pnl(domain, account)?;
+            if insurance_used != 0 {
+                self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
+            }
+            let residual = account
+                .as_view()
+                .source_domain(domain)?
+                .negative_pnl_atoms
+                .get();
+            if residual != 0 {
+                let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
+                    account,
+                    debt_asset_index,
+                    bankrupt_side,
+                    residual,
+                )?;
+                booked = outcome.booked_loss;
+                explicit = outcome.explicit_loss;
+                let cleared = booked
+                    .checked_add(explicit)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+                    .min(residual);
+                let cleared_i128 =
+                    i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
+                let new_pnl = account
+                    .header
+                    .pnl
+                    .get()
+                    .checked_add(cleared_i128)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.set_account_pnl_reducing_loss_domain(account, new_pnl, domain)?;
+                self.header.bankruptcy_hlock_active = 1;
+            }
         }
-        self.reduce_position(account, request.asset_index, close_q)?;
+        let closed_q = if account.header.pnl.get() < 0 {
+            0
+        } else {
+            self.reduce_position(account, request.asset_index, close_q)?;
+            close_q
+        };
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
         self.validate_shape_audit_scan()?;
         self.validate_account_audit_scan(&account.as_view())?;
         Ok(LiquidationOutcomeV16 {
-            closed_q: close_q,
+            closed_q,
             insurance_used,
             residual_booked: booked,
             explicit_loss: explicit,
@@ -14143,17 +14328,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if old_pnl >= 0 || new_pnl > 0 || new_pnl < old_pnl {
             return Err(V16Error::InvalidConfig);
         }
-        if old_pnl < 0 && new_pnl == 0 {
-            self.header.negative_pnl_account_count = V16PodU64::new(
-                self.header
-                    .negative_pnl_account_count
-                    .get()
-                    .checked_sub(1)
-                    .ok_or(V16Error::CounterUnderflow)?,
-            );
-        }
-        account.header.pnl = V16PodI128::new(new_pnl);
-        Ok(())
+        self.set_account_pnl(account, new_pnl)
     }
 
     fn resolved_bankruptcy_attribution(
@@ -14167,21 +14342,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.validate_configured_asset_index(asset_index)?;
             return Ok(Some((asset_index, opposite_side(ledger.domain_side))));
         }
-
-        let mut out = None;
-        let mut slot = 0usize;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active && !leg.stale && !leg.b_stale {
-                let candidate = (leg.asset_index as usize, leg.side);
-                self.validate_configured_asset_index(candidate.0)?;
-                if out.replace(candidate).is_some() {
-                    return Ok(None);
-                }
-            }
-            slot += 1;
-        }
-        Ok(out)
+        let Some((domain, _)) = account.first_negative_pnl_domain()? else {
+            return Ok(None);
+        };
+        let (asset_index, domain_side) = self.domain_asset_side(domain)?;
+        Ok(Some((asset_index, opposite_side(domain_side))))
     }
 
     fn clear_resolved_unattributed_negative_pnl(
@@ -14191,10 +14356,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() >= 0 {
             return Ok(());
         }
-        self.header.bankruptcy_hlock_active = 1;
-        self.set_account_pnl(account, 0)?;
-        account.header.health_cert.valid = 0;
-        Ok(())
+        Err(V16Error::InvalidLeg)
     }
 
     fn settle_resolved_bankruptcy_negative_pnl(
@@ -14214,8 +14376,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
 
         self.header.bankruptcy_hlock_active = 1;
-        let gross_residual = account.header.pnl.get().unsigned_abs();
-        if !account.header.close_progress.try_to_runtime()?.active {
+        let domain = self.insurance_domain_index(asset_index, opposite_side(bankrupt_side))?;
+        let gross_residual = account
+            .as_view()
+            .source_domain(domain)?
+            .negative_pnl_atoms
+            .get();
+        if gross_residual == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        if !account
+            .header
+            .close_progress
+            .try_to_runtime()?
+            .has_pending_residual()
+        {
             self.begin_close_progress_ledger(
                 account,
                 asset_index,
@@ -14230,11 +14405,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
         }
 
-        let residual = if account.header.pnl.get() < 0 {
-            account.header.pnl.get().unsigned_abs()
-        } else {
-            0
-        };
+        let residual = account
+            .as_view()
+            .source_domain(domain)?
+            .negative_pnl_atoms
+            .get();
         if residual == 0 {
             account.header.health_cert.valid = 0;
             return Ok(());
@@ -14255,7 +14430,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             outcome.booked_loss,
             outcome.explicit_loss,
         )?;
-        self.set_account_pnl(account, new_pnl)?;
+        self.set_account_pnl_reducing_loss_domain(account, new_pnl, domain)?;
         account.header.health_cert.valid = 0;
         Ok(())
     }
@@ -15645,7 +15820,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut positive_pnl_forfeited = 0u128;
         if net < 0 {
             loss_settled = net.unsigned_abs();
-            let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
+            let loss_source_domain =
+                self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
+            let support = self.apply_haircut_bounded_close_loss_to_pnl(
+                account,
+                loss_settled,
+                loss_source_domain,
+            )?;
             support_consumed = support.support_consumed;
             junior_face_burned = support.junior_face_burned;
         } else {
@@ -16106,6 +16287,9 @@ impl ResolvedPayoutReceiptV16Account {
 pub struct PortfolioSourceDomainV16Account {
     pub domain: V16PodU32,
     pub source_claim_market_id: V16PodU64,
+    // Uncovered account debt attributed to this domain. Unlike an active leg, this survives a
+    // risk-reducing full close so bankruptcy settlement cannot be redirected through another leg.
+    pub negative_pnl_atoms: V16PodU128,
     pub source_claim_bound_num: V16PodU128,
     pub source_claim_liened_num: V16PodU128,
     pub source_claim_counterparty_liened_num: V16PodU128,
@@ -16127,7 +16311,8 @@ pub struct PortfolioSourceDomainV16Account {
 impl PortfolioSourceDomainV16Account {
     #[inline]
     pub fn is_occupied(self) -> bool {
-        self.source_claim_bound_num.get() != 0
+        self.negative_pnl_atoms.get() != 0
+            || self.source_claim_bound_num.get() != 0
             || self.source_claim_liened_num.get() != 0
             || self.source_claim_counterparty_liened_num.get() != 0
             || self.source_claim_insurance_liened_num.get() != 0
@@ -16192,7 +16377,7 @@ pub struct PortfolioAccountV16Account {
 // Gated to non-kani: under `cfg(kani)` PORTFOLIO_SOURCE_DOMAIN_CAP is reduced for
 // proof tractability, so the production on-chain layout is the non-kani one.
 #[cfg(not(kani))]
-const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9291);
+const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9803);
 
 impl Default for PortfolioAccountV16Account {
     fn default() -> Self {
