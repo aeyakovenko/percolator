@@ -762,6 +762,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_retire_terminal_unbudgeted_insurance_delta(
+        vault: u128,
+        insurance: u128,
+        budget_remaining: u128,
+        source_reserved_atoms: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        Self::retire_terminal_unbudgeted_insurance_delta(
+            vault,
+            insurance,
+            budget_remaining,
+            source_reserved_atoms,
+        )
+    }
+
     pub fn kani_consume_domain_insurance_for_negative_pnl(
         &mut self,
         asset_index: usize,

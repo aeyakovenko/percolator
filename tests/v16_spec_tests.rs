@@ -2452,6 +2452,38 @@ fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
 }
 
 #[test]
+fn v16_terminal_unbudgeted_insurance_retirement_is_claim_free_and_exact() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(10);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Err(V16Error::LockActive),
+        "live insurance cannot be retired"
+    );
+    market.resolve_market_not_atomic(1).unwrap();
+    market
+        .credit_domain_insurance_budget_not_atomic(0, 1)
+        .unwrap();
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Err(V16Error::LockActive),
+        "a remaining domain claim protects the whole terminal pool"
+    );
+    market.withdraw_domain_insurance_not_atomic(0, 1).unwrap();
+
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Ok(9)
+    );
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
 fn v16_public_domain_insurance_spent_setter_preserves_budget_total() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);

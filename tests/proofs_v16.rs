@@ -11203,6 +11203,43 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
     }
 }
 
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_unbudgeted_insurance_retirement_is_exact_and_claim_safe() {
+    let vault: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let budget_remaining: u128 = kani::any();
+    let source_reserved: u128 = kani::any();
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_retire_terminal_unbudgeted_insurance_delta(
+        vault,
+        insurance,
+        budget_remaining,
+        source_reserved,
+    );
+    let expected_ok = vault == insurance && budget_remaining == 0 && source_reserved == 0;
+    kani::cover!(
+        expected_ok && insurance > 0,
+        "terminal retirement covers a nonzero unbudgeted insurance burn"
+    );
+    kani::cover!(
+        vault == insurance && budget_remaining > 0,
+        "terminal retirement covers a protected domain budget"
+    );
+    kani::cover!(
+        vault == insurance && source_reserved > 0,
+        "terminal retirement covers a protected source reservation"
+    );
+    assert_eq!(result.is_ok(), expected_ok);
+    if let Ok((retired, next_vault, next_insurance)) = result {
+        assert_eq!(retired, insurance);
+        assert_eq!(next_vault, 0);
+        assert_eq!(next_insurance, 0);
+        assert_eq!(vault - next_vault, retired);
+    }
+}
+
 fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i128, i128) {
     let (mut header, mut markets, _) = one_market_view_fixture();
     if positive_funding {

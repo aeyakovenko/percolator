@@ -10107,6 +10107,74 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    // Contract layer: terminal retirement removes only insurance that has no
+    // remaining domain or source-credit claimant. The wrapper pairs this
+    // accounting transition with an SPL-token burn.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| match result {
+        Ok((retired, next_vault, next_insurance)) => *retired == insurance
+            && *next_vault == 0
+            && *next_insurance == 0
+            && vault == insurance
+            && budget_remaining == 0
+            && source_reserved_atoms == 0,
+        Err(_) => true,
+    }))]
+    fn retire_terminal_unbudgeted_insurance_delta(
+        vault: u128,
+        insurance: u128,
+        budget_remaining: u128,
+        source_reserved_atoms: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        if vault != insurance || budget_remaining != 0 || source_reserved_atoms != 0 {
+            return Err(V16Error::LockActive);
+        }
+        Ok((insurance, 0, 0))
+    }
+
+    /// Retires the final unbudgeted insurance surplus from an otherwise empty
+    /// resolved market. No domain budget, source reservation, portfolio, PnL,
+    /// backing claim, or payout receipt may remain.
+    pub fn retire_terminal_unbudgeted_insurance_not_atomic(&mut self) -> V16Result<u128> {
+        self.validate_shape()?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved
+            || self.header.c_tot.get() != 0
+            || self.header.pnl_pos_tot.get() != 0
+            || self.header.pnl_pos_bound_tot_num.get() != 0
+            || self.header.pnl_pos_bound_tot.get() != 0
+            || self.header.pnl_matured_pos_tot.get() != 0
+            || self.header.backing_provider_earnings_total.get() != 0
+            || self.header.source_claim_bound_total_num.get() != 0
+            || self.header.source_fresh_backing_total_num.get() != 0
+            || self.header.resolved_payout_blocker_count.get() != 0
+            || self.header.materialized_portfolio_count.get() != 0
+            || self.header.stale_certificate_count.get() != 0
+            || self.header.b_stale_account_count.get() != 0
+            || self.header.negative_pnl_account_count.get() != 0
+        {
+            return Err(V16Error::LockActive);
+        }
+        let vault_before = self.header.vault.get();
+        let (retired, next_vault, next_insurance) =
+            Self::retire_terminal_unbudgeted_insurance_delta(
+                vault_before,
+                self.header.insurance.get(),
+                self.header.insurance_domain_budget_remaining_total.get(),
+                self.header
+                    .source_insurance_credit_reserved_total_atoms
+                    .get(),
+            )?;
+        self.header.vault = V16PodU128::new(next_vault);
+        self.header.insurance = V16PodU128::new(next_insurance);
+        TokenValueFlowProofV16::insurance_capital_to_external_out(
+            retired,
+            vault_before,
+            next_vault,
+        )?
+        .validate()?;
+        self.validate_shape()?;
+        Ok(retired)
+    }
+
     fn available_domain_insurance(&self, domain: usize) -> V16Result<u128> {
         let (budget, spent) = self.domain_insurance_budget_spent(domain)?;
         let domain_reserved_atoms = V16Core::amount_from_bound_num(
