@@ -14465,6 +14465,62 @@ fn proof_v16_expired_backing_yields_zero_realizable_support_after_expiry() {
     );
 }
 
+// Once the terminal payout ledger exists, expiring Fresh backing changes that
+// principal from a senior provider claim into junior residual. The released
+// atoms must augment the existing snapshot and payout rate; otherwise close
+// order can strand the post-snapshot residual forever.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_post_snapshot_backing_expiry_credits_junior_pool() {
+    let backing_raw: u8 = kani::any();
+    let junior_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume(junior_raw <= 8);
+    kani::assume((1..=8).contains(&claim_raw));
+    let backing = backing_raw as u128;
+    let junior = junior_raw as u128;
+    let claim = claim_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+    let before = ResolvedPayoutLedgerV16 {
+        snapshot_residual: junior,
+        terminal_claim_exact_receipts_num: 0,
+        terminal_claim_bound_unreceipted_num: claim_num,
+        current_payout_rate_num: (junior * BOUND_SCALE).min(claim_num),
+        current_payout_rate_den: claim_num,
+        snapshot_slot: 20,
+        payout_halted: false,
+        finalized: false,
+    };
+    let (ledger, legacy_snapshot) =
+        MarketGroupV16ViewMut::<u64>::kani_kernel_credit_post_snapshot_residual(
+            before, junior, backing,
+        )
+        .unwrap();
+
+    kani::cover!(
+        junior < claim && junior + backing >= claim,
+        "expiry raises a haircut payout rate to full"
+    );
+    kani::cover!(
+        junior + backing < claim,
+        "expiry improves but does not eliminate a haircut"
+    );
+    assert_eq!(legacy_snapshot, junior + backing);
+    assert_eq!(ledger.snapshot_residual, junior + backing);
+    assert_eq!(ledger.terminal_claim_exact_receipts_num, 0);
+    assert_eq!(ledger.terminal_claim_bound_unreceipted_num, claim_num);
+    assert_eq!(ledger.current_payout_rate_den, claim_num);
+    assert_eq!(
+        ledger.current_payout_rate_num,
+        ((junior + backing) * BOUND_SCALE).min(claim_num)
+    );
+    assert_eq!(ledger.snapshot_slot, before.snapshot_slot);
+    assert_eq!(ledger.payout_halted, before.payout_halted);
+    assert_eq!(ledger.finalized, before.finalized);
+}
+
 // First-class engine API for granting source-attributed positive PnL (the
 // wrapper previously shadow-implemented this op host-side). The value-neutral
 // + aggregate-lockstep property is covered concretely by the unit test
