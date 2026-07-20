@@ -530,6 +530,14 @@ impl MarketGroupV16HeaderAccount {
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_kernel_credit_post_snapshot_residual(
+        ledger: ResolvedPayoutLedgerV16,
+        legacy_snapshot: u128,
+        released: u128,
+    ) -> V16Result<(ResolvedPayoutLedgerV16, u128)> {
+        V16Core::kernel_credit_post_snapshot_residual(ledger, legacy_snapshot, released)
+    }
+
     pub fn kani_kernel_unilateral_close_capacity(
         stored_abs: u128,
         oi_eff_long_q: u128,

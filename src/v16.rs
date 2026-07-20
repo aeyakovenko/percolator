@@ -1398,6 +1398,48 @@ impl V16Core {
         (payout, new_vault)
     }
 
+    /// Recompute the resolved payout rate from the ledger's current residual
+    /// and outstanding claim bound. This deliberately contains no wide
+    /// division: receipts apply the resulting fraction when they are paid.
+    pub(crate) fn kernel_recompute_resolved_payout_rate(
+        mut ledger: ResolvedPayoutLedgerV16,
+    ) -> V16Result<ResolvedPayoutLedgerV16> {
+        let total_bound_num = ledger
+            .terminal_claim_exact_receipts_num
+            .checked_add(ledger.terminal_claim_bound_unreceipted_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if total_bound_num == 0 {
+            ledger.current_payout_rate_num = 1;
+            ledger.current_payout_rate_den = 1;
+        } else {
+            ledger.current_payout_rate_num = ledger
+                .snapshot_residual
+                .checked_mul(BOUND_SCALE)
+                .ok_or(V16Error::ArithmeticOverflow)?
+                .min(total_bound_num);
+            ledger.current_payout_rate_den = total_bound_num;
+        }
+        Ok(ledger)
+    }
+
+    /// Credit residual released after terminal snapshot capture into both
+    /// persisted snapshots and immediately raise the common payout rate.
+    pub(crate) fn kernel_credit_post_snapshot_residual(
+        mut ledger: ResolvedPayoutLedgerV16,
+        legacy_snapshot: u128,
+        released: u128,
+    ) -> V16Result<(ResolvedPayoutLedgerV16, u128)> {
+        ledger.snapshot_residual = ledger
+            .snapshot_residual
+            .checked_add(released)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let legacy_snapshot = legacy_snapshot
+            .checked_add(released)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        ledger = Self::kernel_recompute_resolved_payout_rate(ledger)?;
+        Ok((ledger, legacy_snapshot))
+    }
+
     fn resolved_close_terminal_payout_delta(
         account_capital: u128,
         resolved_claimable: u128,
@@ -7912,6 +7954,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         domain: usize,
         now_slot: u64,
     ) -> V16Result<()> {
+        let snapshot_captured = decode_bool(self.header.payout_snapshot_captured)?;
+        let residual_before = if snapshot_captured {
+            self.residual()
+        } else {
+            0
+        };
         let (bucket, source) = V16Core::prepare_counterparty_backing_expiry_delta(
             self.backing_bucket_for_domain(domain)?,
             self.source_credit_for_domain(domain)?,
@@ -7919,7 +7967,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
-        self.refresh_source_credit_domain_after_mutation(domain)
+        self.refresh_source_credit_domain_after_mutation(domain)?;
+        if snapshot_captured {
+            let released = self
+                .residual()
+                .checked_sub(residual_before)
+                .ok_or(V16Error::CounterUnderflow)?;
+            if released != 0 {
+                let (ledger, legacy_snapshot) = V16Core::kernel_credit_post_snapshot_residual(
+                    self.header.resolved_payout_ledger.try_to_runtime()?,
+                    self.header.payout_snapshot.get(),
+                    released,
+                )?;
+                self.header.payout_snapshot = V16PodU128::new(legacy_snapshot);
+                self.header.resolved_payout_ledger =
+                    ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
+            }
+        }
+        Ok(())
     }
 
     fn expire_first_lapsed_source_backing_for_account_not_atomic(
@@ -14758,22 +14823,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn recompute_resolved_payout_rate(&mut self) -> V16Result<()> {
-        let mut ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        let total_bound_num = ledger
-            .terminal_claim_exact_receipts_num
-            .checked_add(ledger.terminal_claim_bound_unreceipted_num)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if total_bound_num == 0 {
-            ledger.current_payout_rate_num = 1;
-            ledger.current_payout_rate_den = 1;
-        } else {
-            ledger.current_payout_rate_num = ledger
-                .snapshot_residual
-                .checked_mul(BOUND_SCALE)
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .min(total_bound_num);
-            ledger.current_payout_rate_den = total_bound_num;
-        }
+        let ledger = V16Core::kernel_recompute_resolved_payout_rate(
+            self.header.resolved_payout_ledger.try_to_runtime()?,
+        )?;
         self.header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
         Ok(())
     }
