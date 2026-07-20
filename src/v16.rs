@@ -710,6 +710,21 @@ impl V16Core {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    fn terminal_source_receipt_migration(
+        original_face: u128,
+        effective_source_payment: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        let remaining_face = original_face
+            .checked_sub(effective_source_payment)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let prior_bound_num = Self::bound_num_from_amount(original_face)?;
+        let removed_num = Self::bound_num_from_amount(effective_source_payment)?;
+        let exact_receipt_num = prior_bound_num
+            .checked_sub(removed_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((remaining_face, prior_bound_num, exact_receipt_num))
+    }
+
     #[inline(always)]
     fn source_credit_lien_amounts_for_effective(
         effective_credit: u128,
@@ -4682,7 +4697,15 @@ fn validate_resolved_payout_receipt_value(receipt: ResolvedPayoutReceiptV16) -> 
         .terminal_positive_claim_face
         .checked_mul(BOUND_SCALE)
         .ok_or(V16Error::ArithmeticOverflow)?;
+    let live_released_num = receipt
+        .live_released_face_at_receipt
+        .checked_mul(BOUND_SCALE)
+        .ok_or(V16Error::ArithmeticOverflow)?;
     if exact_num > receipt.prior_bound_contribution_num
+        || exact_num
+            .checked_add(live_released_num)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            != receipt.prior_bound_contribution_num
         || receipt.paid_effective > receipt.terminal_positive_claim_face
         || receipt.finalized != (receipt.paid_effective == receipt.terminal_positive_claim_face)
     {
@@ -14524,13 +14547,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_bool(account.header.resolved_payout_receipt.present)? {
             return Ok(());
         }
-        self.initialize_resolved_payout_ledger_if_needed()?;
         let terminal_positive_claim_face = account.header.pnl.get().max(0) as u128;
-        let prior_bound_contribution_num =
-            V16Core::bound_num_from_amount(terminal_positive_claim_face)?;
+        let (_, prior_bound_contribution_num, exact_receipt_num) =
+            V16Core::terminal_source_receipt_migration(terminal_positive_claim_face, 0)?;
+        self.create_resolved_payout_receipt_for_face_not_atomic(
+            account,
+            terminal_positive_claim_face,
+            prior_bound_contribution_num,
+            exact_receipt_num,
+            0,
+        )
+    }
+
+    fn create_resolved_payout_receipt_for_face_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        terminal_positive_claim_face: u128,
+        prior_bound_contribution_num: u128,
+        exact_receipt_num: u128,
+        live_released_face_at_receipt: u128,
+    ) -> V16Result<()> {
+        if decode_bool(account.header.resolved_payout_receipt.present)? {
+            return Err(V16Error::InvalidLeg);
+        }
+        self.initialize_resolved_payout_ledger_if_needed()?;
+        if V16Core::bound_num_from_amount(terminal_positive_claim_face)? != exact_receipt_num {
+            return Err(V16Error::InvalidConfig);
+        }
         let mut ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        if V16Core::bound_num_from_amount(terminal_positive_claim_face)?
-            > prior_bound_contribution_num
+        if exact_receipt_num > prior_bound_contribution_num
             || prior_bound_contribution_num > ledger.terminal_claim_bound_unreceipted_num
         {
             ledger.payout_halted = true;
@@ -14544,20 +14589,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::CounterUnderflow)?;
         ledger.terminal_claim_exact_receipts_num = ledger
             .terminal_claim_exact_receipts_num
-            .checked_add(V16Core::bound_num_from_amount(
-                terminal_positive_claim_face,
-            )?)
+            .checked_add(exact_receipt_num)
             .ok_or(V16Error::ArithmeticOverflow)?;
         self.header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
-        account.header.resolved_payout_receipt =
+        account.header.resolved_payout_receipt = if terminal_positive_claim_face == 0 {
+            // The ledger migration already removed the fully source-paid bound.
+            // Do not persist an inert zero-face receipt on the portfolio.
+            ResolvedPayoutReceiptV16Account::default()
+        } else {
             ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
                 present: true,
                 prior_bound_contribution_num,
-                live_released_face_at_receipt: 0,
+                live_released_face_at_receipt,
                 terminal_positive_claim_face,
                 paid_effective: 0,
                 finalized: false,
-            });
+            })
+        };
         self.recompute_resolved_payout_rate()
     }
 
@@ -15112,8 +15160,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Terminal realization for a source-backed winner: realize the account's
     /// outstanding source-credit claims against their domain backing at the
-    /// current credit rate (lien consumption -> capital credit) BEFORE the claim
-    /// face enters the junior receipt pool. A settlement-quality claim is
+    /// current credit rate (lien consumption -> capital credit). Exactly the
+    /// effective value paid by source backing is removed from the terminal
+    /// receipt face; the inverse-rate source face burn is accounting metadata,
+    /// not a forfeiture of the winner's remaining terminal entitlement. A
+    /// settlement-quality claim is
     /// realizable at rate in Live (convert_released_pnl_to_capital); resolution
     /// must not strip that entitlement -- without this step the wind-down
     /// RELEASES the backing to the provider while the winner is haircut from a
@@ -15171,26 +15222,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.account_source_realizable_support(&account.as_view(), pos)? == 0 {
             return Ok(0);
         }
+        // Capture the payout snapshot while the account's full pre-conversion
+        // bound is still in the unreceipted denominator. Source conversion is
+        // residual-neutral, but it can burn more source face than it pays when
+        // the credit rate is below one.
+        self.initialize_resolved_payout_ledger_if_needed()?;
+
         // Terminal: PnL reservations no longer gate realization.
         account.header.reserved_pnl = V16PodU128::new(0);
         let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
-        // If the payout snapshot was captured before this account realized (another
-        // winner closed first), the realized face is still counted in the ledger's
-        // unreceipted bound. Refine it out, or the stale bound dilutes the payout
-        // rate forever and blocks every remaining receipt from reaching the
-        // terminal rate (never finalized, never clearable).
-        if decode_bool(self.header.payout_snapshot_captured)? {
-            let pos_after = account.header.pnl.get().max(0) as u128;
-            let face_burned = pos
-                .checked_sub(pos_after)
-                .ok_or(V16Error::CounterUnderflow)?;
-            let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-            let decrease_num = V16Core::bound_num_from_amount(face_burned)?
-                .min(ledger.terminal_claim_bound_unreceipted_num);
-            if decrease_num != 0 {
-                self.refine_resolved_unreceipted_bound_not_atomic(decrease_num)?;
-            }
-        }
+        let (remaining_terminal_face, prior_bound_contribution_num, exact_receipt_num) =
+            V16Core::terminal_source_receipt_migration(pos, converted)?;
+        self.create_resolved_payout_receipt_for_face_not_atomic(
+            account,
+            remaining_terminal_face,
+            prior_bound_contribution_num,
+            exact_receipt_num,
+            converted,
+        )?;
         Ok(converted)
     }
 
@@ -15234,37 +15283,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()?;
         account.validate_with_market(&self.as_view())?;
         Ok(payout)
-    }
-
-    fn refine_resolved_unreceipted_bound_not_atomic(
-        &mut self,
-        decrease_num: u128,
-    ) -> V16Result<()> {
-        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved
-            || !decode_bool(self.header.payout_snapshot_captured)?
-        {
-            return Err(V16Error::LockActive);
-        }
-        let mut ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        let old_num = ledger.current_payout_rate_num;
-        let old_den = ledger.current_payout_rate_den;
-        ledger.terminal_claim_bound_unreceipted_num = ledger
-            .terminal_claim_bound_unreceipted_num
-            .checked_sub(decrease_num)
-            .ok_or(V16Error::CounterUnderflow)?;
-        self.header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
-        self.recompute_resolved_payout_rate()?;
-        let next = self.header.resolved_payout_ledger.try_to_runtime()?;
-        if !fraction_ge(
-            next.current_payout_rate_num,
-            next.current_payout_rate_den,
-            old_num,
-            old_den,
-        )? {
-            return Err(V16Error::InvalidConfig);
-        }
-        self.as_view().validate_header_aggregate_totals()?;
-        self.validate_shape_audit_scan()
     }
 
     pub fn close_resolved_account_not_atomic(
@@ -16709,19 +16727,6 @@ fn opposite_side(side: SideV16) -> SideV16 {
         SideV16::Long => SideV16::Short,
         SideV16::Short => SideV16::Long,
     }
-}
-
-fn fraction_ge(lhs_num: u128, lhs_den: u128, rhs_num: u128, rhs_den: u128) -> V16Result<bool> {
-    if lhs_den == 0 || rhs_den == 0 {
-        return Err(V16Error::InvalidConfig);
-    }
-    let lhs = U256::from_u128(lhs_num)
-        .checked_mul(U256::from_u128(rhs_den))
-        .ok_or(V16Error::ArithmeticOverflow)?;
-    let rhs = U256::from_u128(rhs_num)
-        .checked_mul(U256::from_u128(lhs_den))
-        .ok_or(V16Error::ArithmeticOverflow)?;
-    Ok(lhs >= rhs)
 }
 
 fn quarantine_remainder(remainder: &mut u128, dust: &mut u128) -> V16Result<()> {

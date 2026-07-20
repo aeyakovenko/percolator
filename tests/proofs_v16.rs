@@ -17,6 +17,7 @@ use percolator::v16::{
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
     kani_source_domain_capacity_after_admission, kani_target_effective_lag_adverse_delta,
+    kani_terminal_source_receipt_migration,
     kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
     kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
     AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
@@ -508,6 +509,64 @@ fn proof_v16_resolved_receipt_bound_migration_is_exact_or_fails_closed() {
         assert!(!receipt.present);
     }
     assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_source_payment_removes_exact_effective_terminal_face() {
+    // The identity is linear; keep the symbolic domain compact so assertion
+    // reachability does not dominate the proof with 128-bit constant products.
+    let original_raw: u8 = kani::any();
+    let source_paid_raw: u8 = kani::any();
+    let original_face = original_raw as u128;
+    let source_paid = source_paid_raw as u128;
+    kani::assume(source_paid <= original_face);
+
+    let (remaining_face, prior_bound_num, exact_receipt_num) =
+        kani_terminal_source_receipt_migration(original_face, source_paid).unwrap();
+    let source_paid_num = source_paid * BOUND_SCALE;
+
+    assert_eq!(remaining_face + source_paid, original_face);
+    assert!(exact_receipt_num <= prior_bound_num);
+    assert_eq!(prior_bound_num - exact_receipt_num, source_paid_num);
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_source_migrated_receipt_payment_is_bounded() {
+    let original_raw: u8 = kani::any();
+    let source_paid_raw: u8 = kani::any();
+    let already_paid_raw: u8 = kani::any();
+    kani::assume(original_raw > 0);
+    kani::assume(source_paid_raw <= original_raw);
+
+    let original_face = original_raw as u128;
+    let source_paid = source_paid_raw as u128;
+    let (remaining_face, prior_bound_num, exact_receipt_num) =
+        kani_terminal_source_receipt_migration(original_face, source_paid).unwrap();
+    kani::assume(already_paid_raw as u128 <= remaining_face);
+    let already_paid = already_paid_raw as u128;
+    let receipt = ResolvedPayoutReceiptV16 {
+        present: true,
+        prior_bound_contribution_num: prior_bound_num,
+        live_released_face_at_receipt: source_paid,
+        terminal_positive_claim_face: remaining_face,
+        paid_effective: already_paid,
+        finalized: already_paid == remaining_face,
+    };
+    let remaining_payment = remaining_face - already_paid;
+    let fully_paid =
+        kani_apply_resolved_payout_receipt_payment(receipt, remaining_payment).unwrap();
+    let overpay = kani_apply_resolved_payout_receipt_payment(receipt, remaining_payment + 1);
+
+    kani::cover!(
+        source_paid > 0 && source_paid < original_face && already_paid < remaining_face,
+        "source-migrated receipt covers partial source support and a later payout"
+    );
+    assert_eq!(exact_receipt_num, remaining_face * BOUND_SCALE);
+    assert_eq!(fully_paid.paid_effective, remaining_face);
+    assert!(fully_paid.finalized);
+    assert_eq!(overpay, Err(V16Error::InvalidLeg));
 }
 
 #[kani::proof]
@@ -8338,18 +8397,16 @@ fn proof_v16_live_positive_kf_delta_without_source_rejects() {
 fn proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim() {
     let terminal_raw: u16 = kani::any();
     let paid_raw: u16 = kani::any();
-    let bound_slack_raw: u16 = kani::any();
     kani::assume(terminal_raw > 0);
     kani::assume(terminal_raw <= 4096);
     kani::assume(paid_raw <= terminal_raw);
     let terminal = terminal_raw as u128;
     let paid = paid_raw as u128;
-    let bound_slack_num = bound_slack_raw as u128 * BOUND_SCALE;
-    let prior_bound = terminal * BOUND_SCALE + bound_slack_num;
+    let prior_bound = terminal * BOUND_SCALE;
     let receipt = ResolvedPayoutReceiptV16 {
         present: true,
         prior_bound_contribution_num: prior_bound,
-        live_released_face_at_receipt: terminal,
+        live_released_face_at_receipt: 0,
         terminal_positive_claim_face: terminal,
         paid_effective: paid,
         finalized: paid == terminal,
@@ -8367,8 +8424,8 @@ fn proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim() {
         "resolved receipt proof covers finalized idempotent zero topup"
     );
     kani::cover!(
-        terminal_raw > 255 && bound_slack_raw > 0,
-        "resolved receipt proof covers widened over-bound terminal receipt"
+        terminal_raw > 255 && paid_raw > 0,
+        "resolved receipt proof covers widened partially-paid terminal receipt"
     );
     assert_eq!(ok_payment.paid_effective, terminal);
     assert!(ok_payment.finalized);
@@ -8405,7 +8462,7 @@ fn proof_v16_resolved_receipt_claimable_is_rate_monotone_and_overpaid_fails_clos
     let receipt = ResolvedPayoutReceiptV16 {
         present: true,
         prior_bound_contribution_num: terminal * BOUND_SCALE,
-        live_released_face_at_receipt: terminal,
+        live_released_face_at_receipt: 0,
         terminal_positive_claim_face: terminal,
         paid_effective: paid,
         finalized: paid == terminal,

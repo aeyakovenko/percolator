@@ -284,6 +284,12 @@ pub fn kani_bound_num_from_amount(amount: u128) -> V16Result<u128> {
 pub fn kani_amount_from_bound_num(bound_num: u128) -> V16Result<u128> {
     V16Core::amount_from_bound_num(bound_num)
 }
+pub fn kani_terminal_source_receipt_migration(
+    original_face: u128,
+    effective_source_payment: u128,
+) -> V16Result<(u128, u128, u128)> {
+    V16Core::terminal_source_receipt_migration(original_face, effective_source_payment)
+}
 
 pub fn kani_position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool> {
     position_delta_increases_risk(current, delta_q)

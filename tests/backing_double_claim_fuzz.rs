@@ -176,20 +176,23 @@ fn resolved_market_with_backed_winner(
 ) {
     let (mut header, mut markets) = resolved_market_with_backing(0, pnl, extra_residual, backing);
     header.source_claim_bound_total_num = V16PodU128::new(pnl * BOUND_SCALE);
-    if backing != 0 {
-        // The claim leans on this domain's backing: rate = backing/claim.
-        let claim_num = pnl * BOUND_SCALE;
-        let backing_num = backing * BOUND_SCALE;
-        markets[0].engine.source_credit_long =
-            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
-                positive_claim_bound_num: claim_num,
-                exact_positive_claim_num: claim_num,
-                fresh_reserved_backing_num: backing_num,
-                credit_rate_num: (backing_num * CREDIT_RATE_SCALE / claim_num)
-                    .min(CREDIT_RATE_SCALE),
-                ..SourceCreditStateV16::EMPTY
-            });
-    }
+    // The claim is source-attributed even when the source currently has zero
+    // backing. This lets tests compare zero, dust, partial, and full backing on
+    // the same valid claim topology.
+    let claim_num = pnl * BOUND_SCALE;
+    let backing_num = backing * BOUND_SCALE;
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: if backing_num == 0 {
+                0
+            } else {
+                (backing_num * CREDIT_RATE_SCALE / claim_num).min(CREDIT_RATE_SCALE)
+            },
+            ..SourceCreditStateV16::EMPTY
+        });
     let mut account_header = winner_account(0, pnl);
     let market_id_engine = markets[0].engine.asset.market_id.get();
     account_header.source_domains[0].domain = V16PodU32::new(0);
@@ -341,12 +344,11 @@ proptest! {
 
 /// Ordering regression: winner A (plain junior claim) closes FIRST and captures
 /// the payout snapshot while winner B's source-backed face is still outstanding.
-/// B then realizes against its backing at terminal. B's realized face must be
-/// refined OUT of the ledger's unreceipted bound — otherwise the stale bound
-/// dilutes the payout rate forever and A's receipt can never reach the terminal
-/// rate (never finalized, never clearable: stranded market).
+/// B then realizes against full backing. Exactly B's effective source payment
+/// must leave the receipt denominator, making the entire junior pool available
+/// to A without double-paying B or stranding value.
 #[test]
-fn realization_after_snapshot_refines_unreceipted_bound() {
+fn source_payment_removes_exact_effective_face_from_payout_bound() {
     let pnl_a = 1_000u128; // plain junior winner
     let pnl_b = 500u128; // source-backed winner
     let backing = pnl_b; // fully backed
@@ -410,8 +412,17 @@ fn realization_after_snapshot_refines_unreceipted_bound() {
     assert_eq!(vault_before_b - market.header.vault.get(), pnl_b);
     assert_eq!(b.header.pnl.get(), 0);
     assert_eq!(b.header.capital.get(), 0);
+    assert!(
+        !b.header
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap()
+            .present,
+        "a fully source-paid claim needs no zero-face receipt"
+    );
 
-    // The refined bound lets A top up to its full honest entitlement and FINALIZE.
+    // Removing B's effective source payment from the bound lets A top up to its
+    // full honest entitlement and FINALIZE.
     let topped = market
         .claim_resolved_payout_topup_not_atomic(&mut a)
         .unwrap();
@@ -487,14 +498,10 @@ fn terminal_close_with_expired_backing_does_not_strand() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(400))]
 
-    /// Review finding 3 (non-monotone payout in backing / dust-grief) is a
-    /// DISTRIBUTION question, not a solvency one. This pins the security
-    /// invariants across the FULL backing range including the dust regime
-    /// (backing from 0 up to the full face) with a non-empty junior pool: the
-    /// close always completes (no DoS), value is conserved (no mint/burn, no
-    /// strand, no LoF), the winner is never paid more than its face plus
-    /// capital, and the shape reconciles. Whatever the realize-vs-pool split,
-    /// none of these can be violated by funding (or not funding) the domain.
+    /// Source backing must be payout-monotone across the FULL backing range,
+    /// including the dust boundary. If source backing pays X effective atoms,
+    /// only X leaves the terminal receipt face; the inverse-rate face consumed
+    /// by source accounting cannot erase the winner's junior-pool entitlement.
     #[test]
     fn backed_winner_close_conserves_across_all_backing_levels(
         pnl in 2u128..=1_000_000u128,
@@ -503,6 +510,18 @@ proptest! {
     ) {
         // backing spans 0 (zero-backed source claim) .. full face.
         let backing = pnl.saturating_mul(backing_frac) / 1000;
+        let claim_num = pnl * BOUND_SCALE;
+        let backing_num = backing * BOUND_SCALE;
+        let rate = if backing == 0 {
+            0
+        } else {
+            (backing_num * CREDIT_RATE_SCALE / claim_num).min(CREDIT_RATE_SCALE)
+        };
+        let realizable = ((claim_num * rate / CREDIT_RATE_SCALE) / BOUND_SCALE)
+            .min(backing)
+            .min(pnl);
+        let expected = realizable + pool.min(pnl - realizable);
+        let zero_backing_payout = pool.min(pnl);
         let (mut header, mut markets, mut account_header) =
             resolved_market_with_backed_winner(pnl, backing, pool);
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -519,17 +538,16 @@ proptest! {
         prop_assert!(closed, "close did not finalize at backing={}", backing);
         let paid = vault_before - market.header.vault.get();
 
-        // No LoF: value conserved (paid out of the vault, nothing minted),
-        // winner never paid above its face (capital is 0 here), vault never
-        // over-drained, and the shape still reconciles.
+        // The source payment and junior payment are disjoint and exact. Adding
+        // backing can never reduce what the same claim receives with no backing.
+        prop_assert_eq!(paid, expected);
+        prop_assert!(paid >= zero_backing_payout);
         prop_assert!(paid <= vault_before);
         prop_assert!(paid <= pnl);
         prop_assert_eq!(account.header.pnl.get(), 0);
         prop_assert_eq!(account.header.capital.get(), 0);
         prop_assert_eq!(market.validate_shape(), Ok(()));
-        // The unclaimed remainder (if any) stays in the vault as junior pool for
-        // other claimants — it is neither stranded-unreconcilable nor lost.
-        prop_assert!(market.header.vault.get() <= vault_before);
+        prop_assert_eq!(market.header.vault.get(), backing + pool - paid);
     }
 }
 
