@@ -907,6 +907,9 @@ impl V16Core {
             return Ok(CREDIT_RATE_SCALE);
         }
         let available = Self::available_backing_num_for_source_credit_state(state)?;
+        if available == 0 {
+            return Ok(0);
+        }
         let rate = U256::from_u128(available)
             .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
             .and_then(|v| v.checked_div(U256::from_u128(state.positive_claim_bound_num)))
@@ -1050,6 +1053,15 @@ impl V16Core {
             source,
             risk_epoch.checked_add(1).ok_or(V16Error::CounterOverflow)?,
         ))
+    }
+
+    #[inline]
+    fn source_claim_domain_first_burn_partition(
+        source_claim_num: u128,
+        burn_num: u128,
+    ) -> (u128, u128) {
+        let source_burn_num = source_claim_num.min(burn_num);
+        (source_burn_num, burn_num - source_burn_num)
     }
 
     #[cfg(any(kani, feature = "fuzz"))]
@@ -9069,23 +9081,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(target)
     }
 
-    fn burn_account_source_claim_bound_num_for_domain_up_to(
+    fn burn_account_source_claim_bound_num_domain_first(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         domain: usize,
         burn_num: u128,
-    ) -> V16Result<u128> {
+    ) -> V16Result<()> {
         if burn_num == 0 {
-            return Ok(0);
+            return Ok(());
         }
         self.domain_asset_side(domain)?;
-        let Some(slot) = account.source_domain_slot(domain)? else {
-            return Ok(0);
+        let slot = account.source_domain_slot(domain)?;
+        let source_claim_num = match slot {
+            Some(slot) => account.header.source_domains[slot]
+                .source_claim_bound_num
+                .get(),
+            None => 0,
         };
-        let burned =
-            self.burn_account_source_claim_at_slot_up_to(account, slot, domain, burn_num)?;
-        account.compact_source_domains();
-        Ok(burned)
+        let (source_burn_num, fallback_burn_num) =
+            V16Core::source_claim_domain_first_burn_partition(source_claim_num, burn_num);
+        if let Some(slot) = slot {
+            self.burn_account_source_claim_at_slot_up_to(account, slot, domain, source_burn_num)?;
+            account.compact_source_domains();
+        }
+        self.burn_account_source_claim_bound_num(account, fallback_burn_num)
     }
 
     fn source_domain_realizable_support_for_face(
@@ -10396,6 +10415,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_account_pnl_inner(account, new_pnl, None, source_face_burn_num)
     }
 
+    fn set_account_pnl_after_domain_first_source_claim_burn(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        new_pnl: i128,
+        source_domain: usize,
+    ) -> V16Result<()> {
+        let old_pos = account.header.pnl.get().max(0) as u128;
+        let new_pos = new_pnl.max(0) as u128;
+        let decrease = old_pos
+            .checked_sub(new_pos)
+            .ok_or(V16Error::InvalidConfig)?;
+        let decrease_num = V16Core::bound_num_from_amount(decrease)?;
+        self.burn_account_source_claim_bound_num_domain_first(
+            account,
+            source_domain,
+            decrease_num,
+        )?;
+        self.set_account_pnl_after_source_claim_burn(account, new_pnl, decrease_num)
+    }
+
     /// Grants source-attributed positive PnL to an account — the first-class
     /// API for crediting a source-backed claim (e.g. an external settlement
     /// feed). Live-mode only. The grant is pure notional attribution: no quote
@@ -11621,15 +11660,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             chunk.remaining_after,
         )?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
-        let positive_pnl_loss = old_pnl.max(0) as u128 - new_pnl.max(0) as u128;
-        let positive_pnl_loss_num = V16Core::bound_num_from_amount(positive_pnl_loss)?;
         let source_domain = self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
-        let source_burn_num = self.burn_account_source_claim_bound_num_for_domain_up_to(
-            account,
-            source_domain,
-            positive_pnl_loss_num,
-        )?;
-        self.set_account_pnl_after_source_claim_burn(account, new_pnl, source_burn_num)?;
+        self.set_account_pnl_after_domain_first_source_claim_burn(account, new_pnl, source_domain)?;
         if chunk.remaining_after != 0 {
             self.mark_account_b_stale(account)?;
         } else if !Self::has_b_stale_leg(&account.as_view())? {

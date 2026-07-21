@@ -239,6 +239,13 @@ pub fn kani_available_backing_num_for_source_credit_state(
     V16Core::available_backing_num_for_source_credit_state(state)
 }
 
+pub fn kani_source_claim_domain_first_burn_partition(
+    source_claim_num: u128,
+    burn_num: u128,
+) -> (u128, u128) {
+    V16Core::source_claim_domain_first_burn_partition(source_claim_num, burn_num)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,
