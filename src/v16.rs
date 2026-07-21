@@ -743,6 +743,24 @@ impl V16Core {
     }
 
     #[inline]
+    fn negative_pnl_accrual_step(attributed: u128, amount: u128) -> V16Result<u128> {
+        attributed
+            .checked_add(amount)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    #[inline]
+    fn negative_pnl_reduction_step(attributed: u128, reduction: u128) -> (u128, u128) {
+        let reduced = attributed.min(reduction);
+        (attributed - reduced, reduction - reduced)
+    }
+
+    #[inline]
+    fn negative_pnl_targeted_reduction(attributed: u128, amount: u128) -> V16Result<u128> {
+        attributed.checked_sub(amount).ok_or(V16Error::InvalidLeg)
+    }
+
+    #[inline]
     fn accrual_activity_for_asset_segment(
         old: AssetStateV16,
         segment_dt: u64,
@@ -4298,9 +4316,9 @@ impl<'a> PortfolioV16View<'a> {
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = self.source_domains()[slot];
             let amount = source.negative_pnl_atoms.get();
-            let reduced = amount.min(reduction);
-            reduction -= reduced;
-            let remaining = amount - reduced;
+            let (remaining, next_reduction) =
+                V16Core::negative_pnl_reduction_step(amount, reduction);
+            reduction = next_reduction;
             if remaining != 0 {
                 return Ok(Some((source.domain.get() as usize, remaining)));
             }
@@ -10051,13 +10069,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         self.ensure_account_source_claim_market_id(account, domain)?;
         let source = account.source_domain_mut_or_insert(domain)?;
-        source.negative_pnl_atoms = V16PodU128::new(
-            source
-                .negative_pnl_atoms
-                .get()
-                .checked_add(amount)
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        );
+        source.negative_pnl_atoms = V16PodU128::new(V16Core::negative_pnl_accrual_step(
+            source.negative_pnl_atoms.get(),
+            amount,
+        )?);
         Ok(())
     }
 
@@ -10074,11 +10089,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .source_domain_slot(domain)?
                 .ok_or(V16Error::InvalidLeg)?;
             let attributed = account.header.source_domains[slot].negative_pnl_atoms.get();
-            if attributed < amount {
-                return Err(V16Error::InvalidLeg);
-            }
-            account.header.source_domains[slot].negative_pnl_atoms =
-                V16PodU128::new(attributed - amount);
+            account.header.source_domains[slot].negative_pnl_atoms = V16PodU128::new(
+                V16Core::negative_pnl_targeted_reduction(attributed, amount)?,
+            );
             account.reset_source_domain_slot_if_empty(slot);
             account.compact_source_domains();
             return Ok(());
@@ -10087,12 +10100,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && amount != 0 {
             let attributed = account.header.source_domains[slot].negative_pnl_atoms.get();
-            let reduced = attributed.min(amount);
-            if reduced != 0 {
+            let (next_attributed, next_amount) =
+                V16Core::negative_pnl_reduction_step(attributed, amount);
+            if next_attributed != attributed {
                 account.header.source_domains[slot].negative_pnl_atoms =
-                    V16PodU128::new(attributed - reduced);
-                amount -= reduced;
+                    V16PodU128::new(next_attributed);
             }
+            amount = next_amount;
             slot += 1;
         }
         if amount != 0 {

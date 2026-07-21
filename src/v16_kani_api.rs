@@ -169,6 +169,18 @@ pub fn kani_validate_positive_pnl_source_attribution(
     V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)
 }
 
+pub fn kani_negative_pnl_accrual_step(attributed: u128, amount: u128) -> V16Result<u128> {
+    V16Core::negative_pnl_accrual_step(attributed, amount)
+}
+
+pub fn kani_negative_pnl_reduction_step(attributed: u128, reduction: u128) -> (u128, u128) {
+    V16Core::negative_pnl_reduction_step(attributed, reduction)
+}
+
+pub fn kani_negative_pnl_targeted_reduction(attributed: u128, amount: u128) -> V16Result<u128> {
+    V16Core::negative_pnl_targeted_reduction(attributed, amount)
+}
+
 pub fn kani_expected_source_credit_rate_num_for_state(
     state: SourceCreditStateV16,
 ) -> V16Result<u128> {
@@ -418,6 +430,17 @@ impl<'a> PortfolioV16View<'a> {
     pub fn kani_active_leg_slot_for_asset(&self, asset_index: usize) -> V16Result<Option<usize>> {
         self.active_leg_slot_for_asset(asset_index)
     }
+
+    pub fn kani_first_negative_pnl_domain(&self) -> V16Result<Option<(usize, u128)>> {
+        self.first_negative_pnl_domain()
+    }
+
+    pub fn kani_first_negative_pnl_domain_after_reduction(
+        &self,
+        reduction: u128,
+    ) -> V16Result<Option<(usize, u128)>> {
+        self.first_negative_pnl_domain_after_reduction(reduction)
+    }
 }
 
 impl<'a> PortfolioV16ViewMut<'a> {
@@ -454,6 +477,14 @@ impl MarketGroupV16HeaderAccount {
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_reduce_account_negative_pnl_attribution(
+        account: &mut PortfolioV16ViewMut<'_>,
+        amount: u128,
+        specific_domain: Option<usize>,
+    ) -> V16Result<()> {
+        Self::reduce_account_negative_pnl_attribution(account, amount, specific_domain)
+    }
+
     pub fn kani_clear_leg(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

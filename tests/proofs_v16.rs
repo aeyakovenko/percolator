@@ -14,15 +14,17 @@ use percolator::v16::{
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
-    kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_negative_pnl_accrual_step, kani_negative_pnl_reduction_step,
+    kani_negative_pnl_targeted_reduction, kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_position_delta_increases_risk, kani_prepare_asset_recovery_transition,
+    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
+    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -90,6 +92,23 @@ fn seed_negative_pnl(
     account.source_domains[0].source_claim_market_id =
         V16PodU64::new(markets[domain / 2].engine.asset.market_id.get());
     account.source_domains[0].negative_pnl_atoms = V16PodU128::new(amount);
+}
+
+fn seed_sparse_negative_pnl_domains(
+    account: &mut PortfolioAccountV16Account,
+    first_is_a: bool,
+    loss_a: u128,
+    loss_b: u128,
+) {
+    let ordered = if first_is_a {
+        [(0u32, loss_a), (2u32, loss_b)]
+    } else {
+        [(2u32, loss_b), (0u32, loss_a)]
+    };
+    for (slot, (domain, loss)) in ordered.into_iter().enumerate() {
+        account.source_domains[slot].domain = V16PodU32::new(domain);
+        account.source_domains[slot].negative_pnl_atoms = V16PodU128::new(loss);
+    }
 }
 
 fn two_market_view_fixture() -> (
@@ -8741,6 +8760,299 @@ fn proof_v16_resolved_bankruptcy_attribution_uses_recorded_loss_domain() {
         "recorded asset-1 debt survives an unrelated asset-0 leg"
     );
     assert_eq!(attribution, Some((1, SideV16::Short)));
+}
+
+// The three production transition theorems below are inductive: accrual creates
+// exact provenance, fungible principal preserves it, and a domain-funded cure
+// frames every unrelated domain. Their shared invariant is
+// sum(domain debt) == |negative PnL|.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_negative_pnl_accrual_is_inductive_and_domain_exact() {
+    let target_before: u128 = kani::any();
+    let unrelated_before: u128 = kani::any();
+    let added: u128 = kani::any();
+    let target_is_a: bool = kani::any();
+    let Some(total_before) = target_before.checked_add(unrelated_before) else {
+        kani::assume(false);
+        return;
+    };
+    let Some(total_after) = total_before.checked_add(added) else {
+        kani::assume(false);
+        return;
+    };
+    let target_after = kani_negative_pnl_accrual_step(target_before, added).unwrap();
+    let (loss_a_after, loss_b_after) = if target_is_a {
+        (target_after, unrelated_before)
+    } else {
+        (unrelated_before, target_after)
+    };
+
+    assert_eq!(target_after.checked_sub(target_before), Some(added));
+    assert_eq!(loss_a_after.checked_add(loss_b_after), Some(total_after));
+
+    kani::cover!(
+        total_before == 0 && added > 0,
+        "first loss creates attributed debt"
+    );
+    kani::cover!(
+        added > 0 && target_before == 0 && unrelated_before > 0,
+        "a new loss domain is inserted beside unrelated debt"
+    );
+    kani::cover!(
+        added > 0 && target_before > 0 && unrelated_before > 0,
+        "an existing loss domain grows while unrelated debt is framed"
+    );
+    kani::cover!(target_is_a && added > 0, "asset-0 debt accrues");
+    kani::cover!(!target_is_a && added > 0, "asset-1 debt accrues");
+    kani::cover!(
+        target_before > u64::MAX as u128 && added > 0,
+        "the theorem covers debt above machine-sized test fixtures"
+    );
+    kani::cover!(
+        total_before > 0 && added == 0,
+        "zero accrual is an exact identity transition"
+    );
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_principal_reduction_is_conservative_across_two_domains() {
+    let first_before: u128 = kani::any();
+    let second_before: u128 = kani::any();
+    let principal: u128 = kani::any();
+    let first_is_a: bool = kani::any();
+    let Some(total_before) = first_before.checked_add(second_before) else {
+        kani::assume(false);
+        return;
+    };
+    kani::assume(principal <= total_before);
+
+    let (first_after, remainder) = kani_negative_pnl_reduction_step(first_before, principal);
+    let (second_after, final_remainder) =
+        kani_negative_pnl_reduction_step(second_before, remainder);
+    let (loss_a_after, loss_b_after) = if first_is_a {
+        (first_after, second_after)
+    } else {
+        (second_after, first_after)
+    };
+    let expected_total_after = total_before - principal;
+
+    assert_eq!(final_remainder, 0);
+    assert!(first_after <= first_before);
+    assert!(second_after <= second_before);
+    assert_eq!(
+        loss_a_after.checked_add(loss_b_after),
+        Some(expected_total_after)
+    );
+    if principal <= first_before {
+        assert_eq!(first_after, first_before - principal);
+        assert_eq!(second_after, second_before);
+    } else {
+        assert_eq!(first_after, 0);
+        assert_eq!(second_after, total_before - principal);
+    }
+
+    kani::cover!(
+        principal > 0 && principal < first_before,
+        "principal partially retires the first domain"
+    );
+    kani::cover!(
+        principal > first_before && principal < total_before,
+        "principal crosses a domain boundary"
+    );
+    kani::cover!(
+        total_before > 0 && principal == total_before,
+        "principal clears all attributed debt"
+    );
+    kani::cover!(first_is_a, "asset-0 debt occupies the first sparse slot");
+    kani::cover!(!first_is_a, "asset-1 debt occupies the first sparse slot");
+    kani::cover!(
+        first_before > u64::MAX as u128 && principal > 0,
+        "the theorem covers full-width principal settlement"
+    );
+}
+
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_domain_cure_reduces_only_its_attributed_debt() {
+    let target_before: u128 = kani::any();
+    let unrelated_before: u128 = kani::any();
+    let cure: u128 = kani::any();
+    let target_is_a: bool = kani::any();
+    let Some(total_before) = target_before.checked_add(unrelated_before) else {
+        kani::assume(false);
+        return;
+    };
+    kani::assume(cure <= target_before);
+    let target_after = kani_negative_pnl_targeted_reduction(target_before, cure).unwrap();
+    let (loss_a_after, loss_b_after) = if target_is_a {
+        (target_after, unrelated_before)
+    } else {
+        (unrelated_before, target_after)
+    };
+    let total_after = total_before - cure;
+
+    assert_eq!(target_after, target_before - cure);
+    assert_eq!(loss_a_after.checked_add(loss_b_after), Some(total_after));
+
+    kani::cover!(
+        target_is_a && cure > 0 && unrelated_before > 0,
+        "asset-0 cure frames live asset-1 debt"
+    );
+    kani::cover!(
+        !target_is_a && cure > 0 && unrelated_before > 0,
+        "asset-1 cure frames live asset-0 debt"
+    );
+    kani::cover!(
+        cure > 0 && cure < target_before,
+        "partial cure preserves target debt"
+    );
+    kani::cover!(
+        cure > 0 && cure == target_before && unrelated_before > 0,
+        "target exhaustion compacts without touching unrelated debt"
+    );
+    kani::cover!(
+        total_before > 0 && total_after == 0,
+        "final cure clears all debt"
+    );
+    kani::cover!(
+        target_before > u64::MAX as u128 && cure > 0,
+        "the theorem covers full-width domain cures"
+    );
+    kani::cover!(
+        total_before > 0 && cure == 0,
+        "zero cure is an exact identity transition"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_sparse_principal_binding_matches_preflight_and_kernel() {
+    let loss_a_raw: u8 = kani::any();
+    let loss_b_raw: u8 = kani::any();
+    let principal_raw: u8 = kani::any();
+    let first_is_a: bool = kani::any();
+    kani::assume((1..=16).contains(&loss_a_raw));
+    kani::assume((1..=16).contains(&loss_b_raw));
+    let loss_a = loss_a_raw as u128;
+    let loss_b = loss_b_raw as u128;
+    let total = loss_a + loss_b;
+    let principal = principal_raw as u128;
+    kani::assume(principal <= total);
+
+    let mut account_header = empty_account_fixture([1; 32], 2);
+    seed_sparse_negative_pnl_domains(&mut account_header, first_is_a, loss_a, loss_b);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let predicted = account
+        .as_view()
+        .kani_first_negative_pnl_domain_after_reduction(principal)
+        .unwrap();
+
+    MarketGroupV16ViewMut::<u64>::kani_reduce_account_negative_pnl_attribution(
+        &mut account,
+        principal,
+        None,
+    )
+    .unwrap();
+
+    let actual = account.as_view().kani_first_negative_pnl_domain().unwrap();
+    let loss_a_after = account
+        .as_view()
+        .kani_source_domain(0)
+        .unwrap()
+        .negative_pnl_atoms
+        .get();
+    let loss_b_after = account
+        .as_view()
+        .kani_source_domain(2)
+        .unwrap()
+        .negative_pnl_atoms
+        .get();
+    assert_eq!(actual, predicted);
+    assert_eq!(loss_a_after + loss_b_after, total - principal);
+    assert!(loss_a_after <= loss_a);
+    assert!(loss_b_after <= loss_b);
+
+    kani::cover!(
+        principal > 0 && principal < if first_is_a { loss_a } else { loss_b },
+        "sparse principal reduction partially consumes the first slot"
+    );
+    kani::cover!(
+        principal > if first_is_a { loss_a } else { loss_b } && principal < total,
+        "sparse principal reduction crosses a slot boundary"
+    );
+    kani::cover!(
+        principal == total,
+        "sparse principal reduction compacts both exhausted domains"
+    );
+    kani::cover!(first_is_a, "asset-0 occupies the first sparse slot");
+    kani::cover!(!first_is_a, "asset-1 occupies the first sparse slot");
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_sparse_targeted_cure_binding_frames_unrelated_domain() {
+    let loss_a_raw: u8 = kani::any();
+    let loss_b_raw: u8 = kani::any();
+    let cure_raw: u8 = kani::any();
+    let first_is_a: bool = kani::any();
+    let target_is_a: bool = kani::any();
+    kani::assume((1..=16).contains(&loss_a_raw));
+    kani::assume((1..=16).contains(&loss_b_raw));
+    kani::assume(cure_raw != 0);
+    let loss_a = loss_a_raw as u128;
+    let loss_b = loss_b_raw as u128;
+    let cure = cure_raw as u128;
+    let (target_domain, target_before, unrelated_domain, unrelated_before) = if target_is_a {
+        (0usize, loss_a, 2usize, loss_b)
+    } else {
+        (2usize, loss_b, 0usize, loss_a)
+    };
+    kani::assume(cure <= target_before);
+
+    let mut account_header = empty_account_fixture([1; 32], 2);
+    seed_sparse_negative_pnl_domains(&mut account_header, first_is_a, loss_a, loss_b);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    MarketGroupV16ViewMut::<u64>::kani_reduce_account_negative_pnl_attribution(
+        &mut account,
+        cure,
+        Some(target_domain),
+    )
+    .unwrap();
+
+    assert_eq!(
+        account
+            .as_view()
+            .kani_source_domain(target_domain)
+            .unwrap()
+            .negative_pnl_atoms
+            .get(),
+        target_before - cure
+    );
+    assert_eq!(
+        account
+            .as_view()
+            .kani_source_domain(unrelated_domain)
+            .unwrap()
+            .negative_pnl_atoms
+            .get(),
+        unrelated_before
+    );
+
+    kani::cover!(target_is_a, "asset-0 debt is cured");
+    kani::cover!(!target_is_a, "asset-1 debt is cured");
+    kani::cover!(cure < target_before, "targeted cure is partial");
+    kani::cover!(
+        cure == target_before && unrelated_before > 0,
+        "target exhaustion compacts while unrelated debt survives"
+    );
+    kani::cover!(
+        first_is_a != target_is_a,
+        "targeting is independent from sparse slot order"
+    );
 }
 
 #[kani::proof]
