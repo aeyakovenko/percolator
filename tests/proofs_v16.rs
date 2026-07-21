@@ -15,14 +15,15 @@ use percolator::v16::{
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_prepare_asset_recovery_transition, kani_source_claim_domain_first_burn_partition,
+    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
+    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -1284,6 +1285,62 @@ fn proof_v16_mutable_view_compacts_persisted_source_domain_tail() {
     let source = view.kani_source_domain(0).unwrap();
     assert_eq!(source.source_claim_market_id.get(), 1);
     assert_eq!(source.source_claim_bound_num.get(), claim_num);
+}
+
+// Domain-isolation theorem for every representable two-domain claim rank. The
+// affected domain is exhausted before fallback can touch an unrelated domain,
+// while the aggregate claim rank falls by exactly the requested B loss.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_source_claim_burn_partition_is_domain_first_conservative_and_isolated() {
+    let source_claim_num: u128 = kani::any();
+    let unrelated_claim_num: u128 = kani::any();
+    let burn_num: u128 = kani::any();
+    let Some(total_claim_num) = source_claim_num.checked_add(unrelated_claim_num) else {
+        kani::assume(false);
+        return;
+    };
+    kani::assume(burn_num <= total_claim_num);
+
+    let (source_burn_num, fallback_burn_num) =
+        kani_source_claim_domain_first_burn_partition(source_claim_num, burn_num);
+    let source_after = source_claim_num.checked_sub(source_burn_num).unwrap();
+    let unrelated_after = unrelated_claim_num.checked_sub(fallback_burn_num).unwrap();
+
+    assert!(source_burn_num <= source_claim_num);
+    assert!(source_burn_num <= burn_num);
+    assert!(fallback_burn_num <= unrelated_claim_num);
+    assert_eq!(
+        source_burn_num.checked_add(fallback_burn_num),
+        Some(burn_num)
+    );
+    assert_eq!(
+        source_after.checked_add(unrelated_after),
+        total_claim_num.checked_sub(burn_num)
+    );
+    if burn_num <= source_claim_num {
+        assert_eq!(fallback_burn_num, 0);
+        assert_eq!(unrelated_after, unrelated_claim_num);
+    } else {
+        assert_eq!(source_after, 0);
+        assert_eq!(fallback_burn_num, burn_num - source_claim_num);
+    }
+
+    kani::cover!(
+        burn_num > 0 && burn_num < source_claim_num && unrelated_claim_num > 0,
+        "partial source burn frames an unrelated claim"
+    );
+    kani::cover!(
+        source_claim_num > 0
+            && unrelated_claim_num > 0
+            && burn_num > source_claim_num
+            && burn_num < total_claim_num,
+        "fallback burns only a strict uncovered remainder"
+    );
+    kani::cover!(
+        total_claim_num > 1 && burn_num == total_claim_num,
+        "the exact aggregate claim rank can be retired"
+    );
 }
 
 #[kani::proof]
