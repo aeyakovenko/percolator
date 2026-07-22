@@ -3086,3 +3086,162 @@ backing_isolation_theorem!(closure_backing_withdraw_asset0_short_isolated, true,
 backing_isolation_theorem!(closure_backing_withdraw_asset1_long_isolated, true, 2);
 #[cfg(all(kani, feature = "closure"))]
 backing_isolation_theorem!(closure_backing_withdraw_asset1_short_isolated, true, 3);
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_two_market_authority_withdraw_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 2])
+{
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+    let mut insurance_total = 0u128;
+    let mut earnings_total = 0u128;
+    let mut asset_index = 0usize;
+    while asset_index < markets.len() {
+        let insurance_long = asset_index as u128 * 4 + 11;
+        let insurance_short = insurance_long + 2;
+        let earnings_long = asset_index as u128 * 4 + 19;
+        let earnings_short = earnings_long + 2;
+        let slot = &mut markets[asset_index].engine;
+        slot.insurance_domain_budget_long = V16PodU128::new(insurance_long);
+        slot.insurance_domain_budget_short = V16PodU128::new(insurance_short);
+        slot.backing_long.utilization_fee_earnings = V16PodU128::new(earnings_long);
+        slot.backing_short.utilization_fee_earnings = V16PodU128::new(earnings_short);
+        insurance_total += insurance_long + insurance_short;
+        earnings_total += earnings_long + earnings_short;
+        asset_index += 1;
+    }
+    header.insurance = V16PodU128::new(insurance_total);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(insurance_total);
+    header.backing_provider_earnings_total = V16PodU128::new(earnings_total);
+    header.vault = V16PodU128::new(header.vault.get() + insurance_total + earnings_total);
+    (header, markets)
+}
+
+// Public withdrawals authorized per domain share one vault. This theorem pins
+// both authorization-facing exit classes to the selected funded domain.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_public_authority_withdrawal_is_domain_isolated<
+    const EARNINGS: bool,
+    const DOMAIN: usize,
+>() {
+    assert!(DOMAIN < 4);
+    let amount = kani::any::<u8>().max(1) as u128;
+    let asset_index = DOMAIN / 2;
+    let is_short = DOMAIN % 2 == 1;
+    let (mut header, mut markets) = closure_two_market_authority_withdraw_fixture();
+
+    header.vault = V16PodU128::new(header.vault.get() + amount);
+    let slot = &mut markets[asset_index].engine;
+    if EARNINGS {
+        header.backing_provider_earnings_total =
+            V16PodU128::new(header.backing_provider_earnings_total.get() + amount);
+        let bucket = if is_short {
+            &mut slot.backing_short
+        } else {
+            &mut slot.backing_long
+        };
+        bucket.utilization_fee_earnings =
+            V16PodU128::new(bucket.utilization_fee_earnings.get() + amount);
+    } else {
+        header.insurance = V16PodU128::new(header.insurance.get() + amount);
+        header.insurance_domain_budget_remaining_total =
+            V16PodU128::new(header.insurance_domain_budget_remaining_total.get() + amount);
+        let budget = if is_short {
+            &mut slot.insurance_domain_budget_short
+        } else {
+            &mut slot.insurance_domain_budget_long
+        };
+        *budget = V16PodU128::new(budget.get() + amount);
+    }
+
+    let h0 = header;
+    let s0 = [markets[0].engine, markets[1].engine];
+    let wrappers0 = [markets[0].wrapper, markets[1].wrapper];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        if EARNINGS {
+            market
+                .withdraw_backing_provider_earnings_not_atomic(DOMAIN, amount)
+                .unwrap();
+        } else {
+            market
+                .withdraw_domain_insurance_not_atomic(DOMAIN, amount)
+                .unwrap();
+        }
+    }
+
+    let mut expected_header = h0;
+    expected_header.vault = V16PodU128::new(h0.vault.get() - amount);
+    if EARNINGS {
+        expected_header.backing_provider_earnings_total =
+            V16PodU128::new(h0.backing_provider_earnings_total.get() - amount);
+    } else {
+        expected_header.insurance = V16PodU128::new(h0.insurance.get() - amount);
+        expected_header.insurance_domain_budget_remaining_total =
+            V16PodU128::new(h0.insurance_domain_budget_remaining_total.get() - amount);
+    }
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+
+    let mut expected_slots = s0;
+    let expected_slot = &mut expected_slots[asset_index];
+    if EARNINGS {
+        let bucket = if is_short {
+            &mut expected_slot.backing_short
+        } else {
+            &mut expected_slot.backing_long
+        };
+        bucket.utilization_fee_earnings =
+            V16PodU128::new(bucket.utilization_fee_earnings.get() - amount);
+    } else {
+        let budget = if is_short {
+            &mut expected_slot.insurance_domain_budget_short
+        } else {
+            &mut expected_slot.insurance_domain_budget_long
+        };
+        *budget = V16PodU128::new(budget.get() - amount);
+    }
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[0],
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[1],
+        &markets[1].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrappers0[0]);
+    assert_eq!(markets[1].wrapper, wrappers0[1]);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! authority_withdrawal_isolation_theorem {
+    ($name:ident, $earnings:literal, $domain:literal) => {
+        #[kani::proof]
+        #[kani::stub(
+            V16Core::expected_source_credit_rate_num_for_state,
+            closure_zero_claim_credit_rate
+        )]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_public_authority_withdrawal_is_domain_isolated::<$earnings, $domain>();
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+authority_withdrawal_isolation_theorem!(closure_insurance_withdraw_asset0_long_isolated, false, 0);
+#[cfg(all(kani, feature = "closure"))]
+authority_withdrawal_isolation_theorem!(closure_insurance_withdraw_asset0_short_isolated, false, 1);
+#[cfg(all(kani, feature = "closure"))]
+authority_withdrawal_isolation_theorem!(closure_insurance_withdraw_asset1_long_isolated, false, 2);
+#[cfg(all(kani, feature = "closure"))]
+authority_withdrawal_isolation_theorem!(closure_insurance_withdraw_asset1_short_isolated, false, 3);
+#[cfg(all(kani, feature = "closure"))]
+authority_withdrawal_isolation_theorem!(closure_earnings_withdraw_asset0_long_isolated, true, 0);
+#[cfg(all(kani, feature = "closure"))]
+authority_withdrawal_isolation_theorem!(closure_earnings_withdraw_asset0_short_isolated, true, 1);
+#[cfg(all(kani, feature = "closure"))]
+authority_withdrawal_isolation_theorem!(closure_earnings_withdraw_asset1_long_isolated, true, 2);
+#[cfg(all(kani, feature = "closure"))]
+authority_withdrawal_isolation_theorem!(closure_earnings_withdraw_asset1_short_isolated, true, 3);
