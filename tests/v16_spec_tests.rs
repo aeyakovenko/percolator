@@ -130,6 +130,86 @@ fn v16_rebalance_reduce_is_bounded_value_neutral_and_peer_independent() {
     );
 }
 
+#[test]
+fn v16_full_refresh_aggregates_cross_asset_spread_independent_of_leg_order() {
+    let (mut header, mut markets) = market_fixture(2, 5);
+    let mut spread_header = account_fixture(2, 254);
+    let mut peer_header = account_fixture(2, 255);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut spread = PortfolioV16ViewMut::new(&mut spread_header);
+        let mut peer = PortfolioV16ViewMut::new(&mut peer_header);
+        market.deposit_not_atomic(&mut spread, 10_000).unwrap();
+        market.deposit_not_atomic(&mut peer, 10_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut spread,
+                &mut peer,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 5,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut spread,
+                &mut peer,
+                TradeRequestV16 {
+                    asset_index: 1,
+                    size_q: -signed_q(POS_SCALE),
+                    exec_price: 5,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market.set_asset_raw_oracle_target_not_atomic(0, 4).unwrap();
+        market.set_asset_raw_oracle_target_not_atomic(1, 6).unwrap();
+    }
+
+    let mut reversed_header = spread_header;
+    reversed_header.legs.swap(0, 1);
+    let header_before = header;
+    let markets_before = markets.clone();
+    let peer_before = peer_header;
+
+    let (forward, reversed) = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let forward = market
+            .full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(&mut spread_header))
+            .unwrap();
+        let reversed = market
+            .full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(&mut reversed_header))
+            .unwrap();
+        (forward, reversed)
+    };
+
+    assert_eq!(forward, reversed);
+    assert_eq!(forward.certified_equity, 10_000);
+    assert_eq!(forward.certified_initial_req, 12);
+    assert_eq!(forward.certified_maintenance_req, 12);
+    assert_eq!(forward.certified_worst_case_loss, 12);
+    assert_eq!(forward.certified_liq_deficit, 0);
+    assert_eq!(forward.active_bitmap_at_cert, [3]);
+    assert_eq!(header, header_before);
+    assert_eq!(markets, markets_before);
+    assert_eq!(peer_header, peer_before);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.validate_shape().unwrap();
+    PortfolioV16View::new(&spread_header)
+        .validate_with_market(&market.as_view())
+        .unwrap();
+    PortfolioV16View::new(&reversed_header)
+        .validate_with_market(&market.as_view())
+        .unwrap();
+    PortfolioV16View::new(&peer_header)
+        .validate_with_market(&market.as_view())
+        .unwrap();
+}
+
 fn market_fixture(
     market_slots: u32,
     init_price: u64,

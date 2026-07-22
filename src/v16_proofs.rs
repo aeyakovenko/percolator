@@ -3900,3 +3900,246 @@ fn closure_terminal_unilateral_rebalance_resets_peer_without_value_movement() {
         assert_eq!(after.epoch_long, asset.epoch_long);
     }
 }
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_health_leg(
+    asset_index: u32,
+    market_id: u64,
+    units: u128,
+    side: SideV16,
+) -> PortfolioLegV16Account {
+    let abs_q = units * POS_SCALE;
+    let basis_pos_q = match side {
+        SideV16::Long => abs_q as i128,
+        SideV16::Short => -(abs_q as i128),
+    };
+    PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index,
+        market_id,
+        side,
+        basis_pos_q,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: abs_q,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    })
+}
+
+// Config decoding and public-profile validation have independent full-width
+// proofs. The certificate composition theorem starts from this exact persisted
+// profile and keeps only the decoded value in its state space.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_health_config_shape_stub(_config: &V16ConfigAccount) -> V16Result<V16Config> {
+    Ok(V16Config::public_user_fund_with_market_slots(2, 2, 0, 10))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_health_equity_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<i128> {
+    assert_eq!(account.header.capital.get(), 100);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    Ok(100)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_health_valid_leg_decode_stub(
+    leg: &PortfolioLegV16Account,
+) -> V16Result<PortfolioLegV16> {
+    if leg.active == 0 {
+        return Ok(PortfolioLegV16::EMPTY);
+    }
+    assert_eq!(leg.active, 1);
+    let side = if leg.side == 0 {
+        SideV16::Long
+    } else {
+        assert_eq!(leg.side, 1);
+        SideV16::Short
+    };
+    Ok(PortfolioLegV16 {
+        active: true,
+        asset_index: leg.asset_index.get(),
+        market_id: leg.market_id.get(),
+        side,
+        basis_pos_q: leg.basis_pos_q.get(),
+        a_basis: leg.a_basis.get(),
+        k_snap: leg.k_snap.get(),
+        f_snap: leg.f_snap.get(),
+        epoch_snap: leg.epoch_snap.get(),
+        loss_weight: leg.loss_weight.get(),
+        b_snap: leg.b_snap.get(),
+        b_rem: leg.b_rem.get(),
+        b_epoch_snap: leg.b_epoch_snap.get(),
+        b_stale: leg.b_stale != 0,
+        stale: leg.stale != 0,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_health_aligned_risk_notional_stub(abs_pos_q: u128, price: u64) -> V16Result<u128> {
+    assert_eq!(abs_pos_q % POS_SCALE, 0);
+    (abs_pos_q / POS_SCALE)
+        .checked_mul(u128::from(price))
+        .ok_or(V16Error::ArithmeticOverflow)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_health_full_margin_stub(
+    config: V16Config,
+    risk_notional: u128,
+    target_lag_penalty: u128,
+) -> V16Result<(u128, u128, u128)> {
+    assert_eq!(config.initial_margin_bps, 10_000);
+    assert_eq!(config.maintenance_margin_bps, 10_000);
+    assert!(risk_notional >= config.min_nonzero_im_req);
+    let total = risk_notional
+        .checked_add(target_lag_penalty)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    Ok((total, total, total))
+}
+
+// Full-refresh certificate theorem at the multi-asset aggregation boundary.
+// Every side pairing and both orders of unequal asset legs across the first and
+// last portfolio slots are symbolic. This proves that the complete production
+// scan reaches every slot and sums each active asset exactly once. Per-leg
+// full-width arithmetic is discharged independently.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_two_asset_health_certificate_is_complete_body(asset0_long: bool, asset1_long: bool) {
+    let reverse_slots: bool = kani::any();
+    let side0 = if asset0_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let side1 = if asset1_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let units0 = 2u128;
+    let units1 = 3u128;
+    let price0 = 5u64;
+    let price1 = 7u64;
+    let lag0 = 1u64;
+    let lag1 = 2u64;
+    let target0 = if asset0_long {
+        price0 - lag0
+    } else {
+        price0 + lag0
+    };
+    let target1 = if asset1_long {
+        price1 - lag1
+    } else {
+        price1 + lag1
+    };
+
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+    let market_id0 = markets[0].engine.asset.market_id.get();
+    let market_id1 = markets[1].engine.asset.market_id.get();
+    let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
+    let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset0.effective_price = price0;
+    asset0.raw_oracle_target_price = target0;
+    asset0.fund_px_last = price0;
+    asset1.effective_price = price1;
+    asset1.raw_oracle_target_price = target1;
+    asset1.fund_px_last = price1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    header.oracle_epoch = V16PodU64::new(3);
+    header.funding_epoch = V16PodU64::new(4);
+    header.risk_epoch = V16PodU64::new(5);
+    header.asset_set_epoch = V16PodU64::new(6);
+
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        [1; 32], [2; 32], [3; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(provenance).unwrap();
+    account_header.capital = V16PodU128::new(100);
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+    let (asset0_slot, asset1_slot) = if reverse_slots {
+        (V16_MAX_PORTFOLIO_ASSETS_N - 1, 0)
+    } else {
+        (0, V16_MAX_PORTFOLIO_ASSETS_N - 1)
+    };
+    account_header.legs[asset0_slot] = closure_health_leg(0, market_id0, units0, side0);
+    account_header.legs[asset1_slot] = closure_health_leg(1, market_id1, units1, side1);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let forward = market
+        .compute_account_health_cert_with_price_override(
+            &PortfolioV16View::new(&account_header),
+            false,
+            None,
+        )
+        .unwrap();
+    let expected_req = units0 * u128::from(price0 + lag0) + units1 * u128::from(price1 + lag1);
+    kani::cover!(!reverse_slots, "forward first/last-slot order is reachable");
+    kani::cover!(reverse_slots, "reversed first/last-slot order is reachable");
+    assert_eq!(forward.certified_equity, 100);
+    assert_eq!(forward.certified_initial_req, expected_req);
+    assert_eq!(forward.certified_maintenance_req, expected_req);
+    assert_eq!(forward.certified_worst_case_loss, expected_req);
+    assert_eq!(forward.certified_liq_deficit, 0);
+    assert_eq!(forward.cert_oracle_epoch, 3);
+    assert_eq!(forward.cert_funding_epoch, 4);
+    assert_eq!(forward.cert_risk_epoch, 5);
+    assert_eq!(forward.cert_asset_set_epoch, 6);
+    assert_eq!(forward.active_bitmap_at_cert, [3]);
+    assert!(forward.valid);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::stub(
+    V16ConfigAccount::try_to_runtime_shape,
+    closure_health_config_shape_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_haircut_equity,
+    closure_health_equity_stub
+)]
+#[kani::stub(
+    PortfolioLegV16Account::try_to_runtime,
+    closure_health_valid_leg_decode_stub
+)]
+#[kani::stub(
+    crate::v16::risk_notional_ceil,
+    closure_health_aligned_risk_notional_stub
+)]
+#[kani::stub(
+    V16Core::health_requirements_from_notional_and_target_lag,
+    closure_health_full_margin_stub
+)]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_two_asset_health_certificate_is_complete() {
+    let asset0_long: bool = kani::any();
+    let asset1_long: bool = kani::any();
+    kani::cover!(
+        asset0_long && asset1_long,
+        "long/long portfolio is reachable"
+    );
+    kani::cover!(
+        asset0_long && !asset1_long,
+        "long/short portfolio is reachable"
+    );
+    kani::cover!(
+        !asset0_long && asset1_long,
+        "short/long portfolio is reachable"
+    );
+    kani::cover!(
+        !asset0_long && !asset1_long,
+        "short/short portfolio is reachable"
+    );
+    closure_two_asset_health_certificate_is_complete_body(asset0_long, asset1_long);
+}
