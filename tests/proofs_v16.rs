@@ -7215,9 +7215,10 @@ fn proof_v16_unrelated_asset_source_state_cannot_change_account_haircut_equity()
 
 // Cross-margin composition over production code: an unbacked first source does
 // not terminate the sparse scan or borrow from the junior pool, while a later
-// partially backed source contributes exactly its own support. Source-credit
-// arithmetic across every backing ratio is proved separately; fixing the two
-// rates here keeps the higher-level two-asset composition tractable.
+// partially backed source contributes exactly its own support in either source
+// slot order. Source-credit arithmetic across every backing ratio is proved
+// separately; fixing the two rates here keeps the higher-level two-asset
+// composition and caller-order-independence theorem tractable.
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
@@ -7267,10 +7268,15 @@ fn proof_v16_multi_asset_haircut_equity_sums_only_domain_backed_support() {
     account_header.source_domains[1].domain = V16PodU32::new(2);
     account_header.source_domains[1].source_claim_market_id = V16PodU64::new(2);
     account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(claim * BOUND_SCALE);
+    let mut reversed_account_header = account_header;
+    reversed_account_header.source_domains[0] = account_header.source_domains[1];
+    reversed_account_header.source_domains[1] = account_header.source_domains[0];
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16View::new(&account_header);
+    let reversed_account = PortfolioV16View::new(&reversed_account_header);
     let equity = market.kani_account_haircut_equity(&account);
+    let reversed_equity = market.kani_account_haircut_equity(&reversed_account);
 
     kani::cover!(
         residual == claim && expected_equity < 0,
@@ -7280,6 +7286,7 @@ fn proof_v16_multi_asset_haircut_equity_sums_only_domain_backed_support() {
         market.kani_residual() == residual
             && total_backing <= total_claim
             && equity == Ok(expected_equity)
+            && reversed_equity == equity
     );
 }
 
