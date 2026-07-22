@@ -5492,3 +5492,372 @@ closure_negative_pnl_insurance_harness!(
     1,
     false
 );
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_aligned_social_loss_book_split(
+    engine_chunk: u128,
+    carried_rem: u128,
+    weight_sum: u128,
+) -> V16Result<(u128, u128)> {
+    assert_eq!(carried_rem, 0);
+    assert_eq!(weight_sum, SOCIAL_LOSS_DEN);
+    Ok((engine_chunk, 0))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_residual_account_shape_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_eq!(account.header.owner, account.header.provenance_header.owner);
+    assert_eq!(
+        account.header.provenance_header.version.get(),
+        V16_ACCOUNT_VERSION
+    );
+    assert_eq!(
+        account.header.provenance_header.layout_discriminator.get(),
+        V16_LAYOUT_DISCRIMINATOR
+    );
+    assert!(account.header.pnl.get() < 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    let mut slot = 0usize;
+    while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        assert!(account.header.legs[slot]
+            .try_to_runtime()
+            .unwrap()
+            .is_empty());
+        slot += 1;
+    }
+    let mut source_slot = 0usize;
+    while source_slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert!(!account.header.source_domains[source_slot].is_occupied());
+        source_slot += 1;
+    }
+
+    let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    if ledger.active {
+        assert!(!ledger.canceled);
+        assert!(ledger.close_id != 0);
+        assert!((ledger.asset_index as usize) < market.markets.len());
+        assert_eq!(
+            ledger.market_id,
+            market.markets[ledger.asset_index as usize]
+                .engine
+                .asset
+                .market_id
+                .get()
+        );
+        let progress = ledger.support_consumed
+            + ledger.insurance_spent
+            + ledger.b_loss_booked
+            + ledger.explicit_loss_assigned;
+        let total = ledger.gross_loss_at_close_start + ledger.drift_consumed;
+        assert!(progress <= total);
+        assert_eq!(ledger.residual_remaining, total - progress);
+        assert_eq!(ledger.finalized, ledger.residual_remaining == 0);
+    } else {
+        assert_eq!(ledger, CloseProgressLedgerV16::EMPTY);
+    }
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_residual_capacity_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    asset_index: usize,
+    bankrupt_side: SideV16,
+    residual_remaining: u128,
+) -> V16Result<u128> {
+    assert!(asset_index < market.markets.len());
+    assert!(residual_remaining > 0);
+    let asset = market.markets[asset_index]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap();
+    let (b_now, weight_sum, remainder) = match opposite_side(bankrupt_side) {
+        SideV16::Long => (
+            asset.b_long_num,
+            asset.loss_weight_sum_long,
+            asset.social_loss_remainder_long_num,
+        ),
+        SideV16::Short => (
+            asset.b_short_num,
+            asset.loss_weight_sum_short,
+            asset.social_loss_remainder_short_num,
+        ),
+    };
+    assert!(b_now <= 5);
+    assert_eq!(weight_sum, SOCIAL_LOSS_DEN);
+    assert_eq!(remainder, 0);
+    let cap = market.header.config.public_b_chunk_atoms.get();
+    assert!(cap > 0);
+    Ok(residual_remaining.min(cap))
+}
+
+// A live residual must remain durable in exactly one asset-side B index. From
+// the protocol's active-close checkpoint, this proves production book/advance
+// composition: B rank and close-ledger rank agree, a partial close retains its
+// sole target-domain barrier, a full close releases it, and no unrelated asset
+// or token stock moves. Close-begin exclusivity is proved independently.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_bankruptcy_residual_booking_is_domain_isolated_body<const PARTIAL: bool>(
+    asset_index: usize,
+    bankrupt_long: bool,
+) {
+    assert!(asset_index < 2);
+    // Arbitrary-width cap/conservation arithmetic is covered by the leaf
+    // contracts. Symbolically scale each distinct close-rank transition while
+    // specializing partial versus finalized state to avoid solver ITE blowup.
+    let magnitude_raw: u8 = kani::any();
+    kani::assume((1..=4).contains(&magnitude_raw));
+    kani::cover!(
+        magnitude_raw == 1,
+        "minimum residual magnitude is reachable"
+    );
+    kani::cover!(
+        magnitude_raw == 4,
+        "maximum residual magnitude is reachable"
+    );
+    let magnitude = magnitude_raw as u128;
+    let (residual, public_chunk) = if PARTIAL {
+        (magnitude * 2, magnitude)
+    } else {
+        (magnitude, magnitude * 2)
+    };
+
+    let bankrupt_side = if bankrupt_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let domain_side = opposite_side(bankrupt_side);
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(public_chunk);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    let mut asset = markets[asset_index].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    asset.b_long_num = 3;
+    asset.b_short_num = 5;
+    markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        header.market_group_id,
+        [9; 32],
+        [8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(provenance).unwrap();
+    account_header.pnl = V16PodI128::new(-(residual as i128));
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            close_id: 1,
+            asset_index: asset_index as u32,
+            market_id: asset.market_id,
+            domain_side,
+            gross_loss_at_close_start: residual,
+            drift_reference_slot: header.current_slot.get(),
+            max_close_slot: header.current_slot.get()
+                + header.config.max_bankrupt_close_lifetime_slots.get(),
+            residual_remaining: residual,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    let target_slot = &mut markets[asset_index].engine;
+    match domain_side {
+        SideV16::Long => target_slot.pending_domain_loss_barrier_long = V16PodU64::new(1),
+        SideV16::Short => target_slot.pending_domain_loss_barrier_short = V16PodU64::new(1),
+    }
+    closure_residual_account_shape_stub(
+        &PortfolioV16View::new(&account_header),
+        &MarketGroupV16View::new(&header, &markets),
+    )
+    .unwrap();
+
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+    let account_before = account_header;
+    let booked = residual.min(public_chunk);
+    let remaining = residual - booked;
+    let outcome = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .book_bankruptcy_residual_chunk_for_account_core(
+                &mut PortfolioV16ViewMut::new(&mut account_header),
+                asset_index,
+                bankrupt_side,
+                residual,
+            )
+            .unwrap()
+    };
+    assert_eq!(outcome.booked_loss, booked);
+    assert_eq!(outcome.explicit_loss, 0);
+    assert_eq!(outcome.delta_b, booked);
+    assert_eq!(outcome.remaining_after, remaining);
+    assert_eq!(outcome.booked_loss + outcome.remaining_after, residual);
+
+    let pending = u64::from(remaining != 0);
+    let mut expected_header = header_before;
+    expected_header.bankruptcy_hlock_active = 1;
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(pending);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+
+    let mut expected_slots = slots_before;
+    let expected_slot = &mut expected_slots[asset_index];
+    let mut expected_asset = asset;
+    match domain_side {
+        SideV16::Long => {
+            expected_asset.b_long_num += booked;
+            expected_slot.pending_domain_loss_barrier_long = V16PodU64::new(pending);
+        }
+        SideV16::Short => {
+            expected_asset.b_short_num += booked;
+            expected_slot.pending_domain_loss_barrier_short = V16PodU64::new(pending);
+        }
+    }
+    expected_slot.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[0],
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[1],
+        &markets[1].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrappers_before[0]);
+    assert_eq!(markets[1].wrapper, wrappers_before[1]);
+
+    let mut expected_account = account_before;
+    expected_account.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: remaining == 0,
+            close_id: 1,
+            asset_index: asset_index as u32,
+            market_id: asset.market_id,
+            domain_side,
+            gross_loss_at_close_start: residual,
+            drift_reference_slot: header_before.current_slot.get(),
+            max_close_slot: header_before.current_slot.get()
+                + header_before.config.max_bankrupt_close_lifetime_slots.get(),
+            b_loss_booked: booked,
+            residual_remaining: remaining,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    expected_account.health_cert.valid = 0;
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        &account_header
+    ));
+    assert_eq!(header.vault.get(), header_before.vault.get());
+    assert_eq!(header.c_tot.get(), header_before.c_tot.get());
+    assert_eq!(header.insurance.get(), header_before.insurance.get());
+    assert_eq!(
+        header.source_fresh_backing_total_num,
+        header_before.source_fresh_backing_total_num
+    );
+    assert_eq!(account_header.pnl.get(), account_before.pnl.get());
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_bankruptcy_residual_harness {
+    ($name:ident, $asset:literal, $long:literal, $partial:literal) => {
+        #[kani::proof]
+        #[kani::stub(
+            V16Core::expected_source_credit_rate_num_for_state,
+            closure_zero_claim_credit_rate
+        )]
+        #[kani::stub(
+            crate::v16::social_loss_book_split,
+            closure_aligned_social_loss_book_split
+        )]
+        #[kani::stub(
+            PortfolioV16View::validate_with_market,
+            closure_residual_account_shape_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::bankruptcy_residual_single_step_capacity,
+            closure_residual_capacity_stub
+        )]
+        #[kani::unwind(80)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_bankruptcy_residual_booking_is_domain_isolated_body::<$partial>($asset, $long);
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_bankruptcy_residual_harness!(
+    closure_bankruptcy_residual_partial_asset0_long_is_isolated,
+    0,
+    true,
+    true
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_bankruptcy_residual_harness!(
+    closure_bankruptcy_residual_partial_asset0_short_is_isolated,
+    0,
+    false,
+    true
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_bankruptcy_residual_harness!(
+    closure_bankruptcy_residual_partial_asset1_long_is_isolated,
+    1,
+    true,
+    true
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_bankruptcy_residual_harness!(
+    closure_bankruptcy_residual_partial_asset1_short_is_isolated,
+    1,
+    false,
+    true
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_bankruptcy_residual_harness!(
+    closure_bankruptcy_residual_full_asset0_long_is_isolated,
+    0,
+    true,
+    false
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_bankruptcy_residual_harness!(
+    closure_bankruptcy_residual_full_asset0_short_is_isolated,
+    0,
+    false,
+    false
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_bankruptcy_residual_harness!(
+    closure_bankruptcy_residual_full_asset1_long_is_isolated,
+    1,
+    true,
+    false
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_bankruptcy_residual_harness!(
+    closure_bankruptcy_residual_full_asset1_short_is_isolated,
+    1,
+    false,
+    false
+);

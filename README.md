@@ -70,6 +70,7 @@ Source-checkable counts in this checkout:
 | Generated source-backed conversion isolation proofs in `src/v16_proofs.rs` | 4 |
 | Generated dead-leg forfeit-settlement isolation proofs in `src/v16_proofs.rs` | 8 |
 | Generated negative-PnL insurance isolation proofs in `src/v16_proofs.rs` | 4 |
+| Generated bankruptcy-residual isolation proofs in `src/v16_proofs.rs` | 8 |
 | Function-contract proofs in `src/v16_proofs.rs` | 51 |
 | Production `kernel_*` helpers in `src/v16.rs` | 17 |
 | Public `*_not_atomic` engine APIs in `src/v16.rs` | 55 |
@@ -84,6 +85,7 @@ rg '^backing_fee_isolation_theorem!' src/v16_proofs.rs | wc -l
 rg '^closure_conversion_harness!' src/v16_proofs.rs | wc -l
 rg '^closure_forfeit_settlement_harness!' src/v16_proofs.rs | wc -l
 rg '^closure_negative_pnl_insurance_harness!' src/v16_proofs.rs | wc -l
+rg '^closure_bankruptcy_residual_harness!' src/v16_proofs.rs | wc -l
 rg '^wrapper_fee_budget_isolation_theorem!' src/v16_proofs.rs | wc -l
 rg '^closure_liquidation_isolation_harness!' src/v16_proofs.rs | wc -l
 rg '^#\[kani::proof_for_contract' src/v16_proofs.rs | wc -l
