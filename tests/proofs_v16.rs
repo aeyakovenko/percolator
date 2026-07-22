@@ -17,14 +17,13 @@ use percolator::v16::{
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
     kani_source_domain_capacity_after_admission, kani_target_effective_lag_adverse_delta,
-    kani_terminal_source_receipt_migration,
-    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
-    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
-    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
-    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
-    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
-    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_terminal_source_receipt_migration, kani_trade_preexisting_oi_reduction_gate,
+    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -8592,6 +8591,158 @@ fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
     // Exact pool drawdown: a resolved payout draws the junior pool by
     // exactly the amount paid (vault falls, senior stack untouched).
     assert_eq!(market.kani_residual(), residual_before - payout);
+}
+
+// Public-route solvency theorem: resolved receipts may consume only the junior
+// residual behind every senior vault class. A shape-valid receipt that asks for
+// more than the current residual must fail the final market invariant; SVM then
+// rolls the instruction back atomically.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_resolved_payout_never_invades_any_senior_stock_class() {
+    let capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let earnings_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 4);
+    kani::assume(insurance_raw <= 4);
+    kani::assume(earnings_raw <= 4);
+    kani::assume(backing_raw <= 4);
+    kani::assume(residual_raw <= 8);
+    kani::assume((1..=8).contains(&claim_raw));
+    let capital = capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let earnings = earnings_raw as u128;
+    let backing = backing_raw as u128;
+    let residual = residual_raw as u128;
+    let claim = claim_raw as u128;
+    let backing_num = backing * BOUND_SCALE;
+    let claim_num = claim * BOUND_SCALE;
+    let senior = capital + insurance + earnings + backing;
+    let vault_before = senior + residual;
+    let payout = claim.min(vault_before);
+    let preserves_senior = payout <= residual;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.mode = 1; // Resolved
+    header.resolved_slot = V16PodU64::new(header.current_slot.get());
+    header.vault = V16PodU128::new(vault_before);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.backing_provider_earnings_total = V16PodU128::new(earnings);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.payout_snapshot_captured = 1;
+    header.payout_snapshot = V16PodU128::new(claim);
+    header.payout_snapshot_pnl_pos_tot = V16PodU128::new(claim);
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: claim,
+            terminal_claim_exact_receipts_num: claim_num,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: claim_num,
+            current_payout_rate_den: claim_num,
+            snapshot_slot: header.current_slot.get(),
+            payout_halted: false,
+            finalized: false,
+        });
+    let bucket = if backing != 0 {
+        BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: backing_num,
+            utilization_fee_earnings: earnings,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        }
+    } else if earnings != 0 {
+        BackingBucketV16 {
+            market_id,
+            utilization_fee_earnings: earnings,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        }
+    } else {
+        BackingBucketV16::empty_for_market(market_id)
+    };
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&bucket);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: backing_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let receipt = ResolvedPayoutReceiptV16 {
+        present: true,
+        prior_bound_contribution_num: claim_num,
+        live_released_face_at_receipt: 0,
+        terminal_positive_claim_face: claim,
+        paid_effective: 0,
+        finalized: false,
+    };
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&receipt);
+
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    let result = market.claim_resolved_payout_topup_not_atomic(&mut account);
+
+    kani::cover!(
+        preserves_senior
+            && payout > 0
+            && capital > 0
+            && insurance > 0
+            && earnings > 0
+            && backing > 0,
+        "payout preserves every simultaneously funded senior class"
+    );
+    kani::cover!(
+        preserves_senior && payout == claim,
+        "junior residual can fully pay a receipt"
+    );
+    kani::cover!(
+        preserves_senior && payout < claim,
+        "an all-junior vault can cap a receipt without invading senior stock"
+    );
+    kani::cover!(
+        !preserves_senior && senior > 0,
+        "senior-invasive payout is rejected for SVM rollback"
+    );
+
+    if preserves_senior {
+        assert_eq!(result, Ok(payout));
+        let mut expected_header = header_before;
+        expected_header.vault = V16PodU128::new(vault_before - payout);
+        assert!(kani_eq_market_group_v16_header_account(
+            &expected_header,
+            market.header
+        ));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &slot_before,
+            &market.markets[0].engine
+        ));
+        let mut expected_account = account_before;
+        expected_account.resolved_payout_receipt = ResolvedPayoutReceiptV16Account::from_runtime(
+            &kani_apply_resolved_payout_receipt_payment(receipt, payout).unwrap(),
+        );
+        assert!(kani_eq_portfolio_account_v16_account(
+            &expected_account,
+            account.header
+        ));
+        assert_eq!(market.kani_residual(), residual - payout);
+        assert_eq!(market.validate_shape(), Ok(()));
+        assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    } else {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    }
 }
 
 #[kani::proof]
