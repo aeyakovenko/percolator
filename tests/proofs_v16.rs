@@ -14197,6 +14197,10 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     acct_header.capital = V16PodU128::new(capital);
     acct_header.pnl = V16PodI128::new(pnl);
 
+    let header_before = header;
+    let market_before = markets[0];
+    let account_before = acct_header;
+
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut acct_header);
 
@@ -14236,6 +14240,29 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     assert_eq!(insurance_after, insurance);
     assert_eq!(c_tot_after, c_tot - paid);
     assert_eq!(account.header.capital.get(), capital - paid);
+
+    let mut expected_header = header_before;
+    expected_header.c_tot = V16PodU128::new(c_tot - paid);
+    expected_header.negative_pnl_account_count = V16PodU64::new(u64::from(paid < loss));
+    expected_header.bankruptcy_hlock_active = u8::from(paid < loss);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market_before.engine,
+        &market.markets[0].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, market_before.wrapper);
+
+    let mut expected_account = account_before;
+    expected_account.capital = V16PodU128::new(capital - paid);
+    expected_account.pnl = V16PodI128::new(expected_pnl);
+    expected_account.residual_crystallized_loss_atoms_total = V16PodU128::new(paid);
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
     if paid < loss {
         assert!(expected_pnl < 0);
         assert_eq!(market.header.bankruptcy_hlock_active, 1);
