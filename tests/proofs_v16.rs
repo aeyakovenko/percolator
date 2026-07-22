@@ -14733,6 +14733,110 @@ fn proof_v16_cure_and_cancel_close_rejects_without_active_close() {
     assert_eq!(account.header.cancel_deposit_escrow.get(), 0);
 }
 
+// A healthy account can atomically cure an untouched forced close. Starting from
+// the exact postcondition proven by `proof_v16_close_begin_takes_barrier_*`, this
+// exercises the production cure body and proves the full economic postcondition:
+// the external deposit is the only vault inflow, capital and C_tot rise by exactly
+// that amount, the junior pool is unchanged, and only the held barrier is released.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_healthy_close_cure_is_conservative_and_releases_only_its_barrier() {
+    let capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let deposit_raw: u8 = kani::any();
+    let gross_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume(surplus_raw <= 8);
+    kani::assume(deposit_raw <= 8);
+    kani::assume((1..=8).contains(&gross_raw));
+    let capital = capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let surplus = surplus_raw as u128;
+    let deposit = deposit_raw as u128;
+    let gross = gross_raw as u128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.last_fee_slot = V16PodU64::new(header.current_slot.get());
+    let cert = HealthCertV16 {
+        certified_equity: capital as i128,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    account_header.health_cert = HealthCertV16Account::from_runtime(&cert);
+    let ledger_before = CloseProgressLedgerV16 {
+        active: true,
+        close_id: 1,
+        asset_index: 0,
+        market_id: markets[0].engine.asset.market_id.get(),
+        domain_side: SideV16::Long,
+        gross_loss_at_close_start: gross,
+        drift_reference_slot: header.current_slot.get(),
+        max_close_slot: header.current_slot.get()
+            + header.config.max_bankrupt_close_lifetime_slots.get(),
+        residual_remaining: gross,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger_before);
+    markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    let vault_before = header.vault.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let residual_before = market.kani_residual();
+
+    let result =
+        market.kani_cure_and_cancel_close_with_cert_not_atomic(&mut account, deposit, cert);
+    let ledger = &account.header.close_progress;
+    kani::cover!(
+        deposit > 0 && capital > 0 && insurance > 0 && surplus > 0,
+        "close cure covers every value class and an external deposit"
+    );
+    let conservative_cure = result == Ok(())
+        && ledger.active == 0
+        && ledger.finalized == 0
+        && ledger.canceled == 1
+        && ledger.gross_loss_at_close_start.get() == gross
+        && ledger.residual_remaining.get() == gross
+        && ledger.support_consumed.get() == 0
+        && ledger.insurance_spent.get() == 0
+        && ledger.b_loss_booked.get() == 0
+        && ledger.explicit_loss_assigned.get() == 0
+        && ledger.quantity_adl_applied_q.get() == 0
+        && ledger.drift_consumed.get() == 0
+        && market.header.vault.get() == vault_before + deposit
+        && market.header.c_tot.get() == capital + deposit
+        && market.header.insurance.get() == insurance
+        && account.header.capital.get() == capital + deposit
+        && account.header.cancel_deposit_escrow.get() == 0
+        && market.kani_residual() == residual_before
+        && market.header.resolved_payout_blocker_count.get() == 0
+        && market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_long
+            .get()
+            == 0
+        && market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_short
+            .get()
+            == 0
+        && account.header.health_cert.valid == 0;
+    assert!(conservative_cure);
+}
+
 // ============ INTRACTABLE-TIER GRIND: realize-body verdict ============
 // CONCLUSIVELY INTRACTABLE (full elimination, 2026-06-10): the terminal-
 // realization full-backing witness exceeds the 900s budget under EVERY

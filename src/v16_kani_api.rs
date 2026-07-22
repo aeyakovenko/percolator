@@ -1052,6 +1052,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<()> {
         self.begin_close_progress_ledger(account, asset_index, domain_side, gross_loss)
     }
+
+    pub fn kani_cure_and_cancel_close_with_cert_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        optional_deposit: u128,
+        cert: HealthCertV16,
+    ) -> V16Result<()> {
+        self.cure_and_cancel_close_with_cert_not_atomic(account, optional_deposit, cert)
+    }
 }
 
 impl PortfolioSourceDomainV16Account {
