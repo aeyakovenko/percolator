@@ -132,6 +132,30 @@ fn one_market_persisted_slot_fixture() -> (MarketGroupV16HeaderAccount, [Market<
     (header, markets)
 }
 
+fn exact_ratio_source_state(claim: u128, backing: u128) -> SourceCreditStateV16 {
+    SourceCreditStateV16 {
+        positive_claim_bound_num: claim * BOUND_SCALE,
+        exact_positive_claim_num: claim * BOUND_SCALE,
+        fresh_reserved_backing_num: backing * BOUND_SCALE,
+        credit_rate_num: backing * (CREDIT_RATE_SCALE / claim),
+        ..SourceCreditStateV16::EMPTY
+    }
+}
+
+fn backing_bucket_fixture(market_id: u64, backing: u128) -> BackingBucketV16 {
+    if backing == 0 {
+        BackingBucketV16::empty_for_market(market_id)
+    } else {
+        BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: backing * BOUND_SCALE,
+            expiry_slot: 100,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        }
+    }
+}
+
 fn one_market_direct_view_fixture() -> (
     MarketGroupV16HeaderAccount,
     [Market<u64>; 1],
@@ -7131,26 +7155,6 @@ fn proof_v16_unrelated_asset_source_state_cannot_change_account_haircut_equity()
     let claim_num = claim * BOUND_SCALE;
     let claimed_backing_num = claimed_backing * BOUND_SCALE;
     let unrelated_backing_num = unrelated_backing * BOUND_SCALE;
-    let source_state = |backing: u128| SourceCreditStateV16 {
-        positive_claim_bound_num: claim_num,
-        exact_positive_claim_num: claim_num,
-        fresh_reserved_backing_num: backing * BOUND_SCALE,
-        credit_rate_num: backing * (CREDIT_RATE_SCALE / claim),
-        ..SourceCreditStateV16::EMPTY
-    };
-    let backing_bucket = |market_id: u64, backing: u128| {
-        if backing == 0 {
-            BackingBucketV16::empty_for_market(market_id)
-        } else {
-            BackingBucketV16 {
-                market_id,
-                fresh_unliened_backing_num: backing * BOUND_SCALE,
-                expiry_slot: 100,
-                status: BackingBucketStatusV16::Fresh,
-                ..BackingBucketV16::EMPTY
-            }
-        }
-    };
 
     let (mut baseline_header, mut baseline_markets, mut account_header) = two_market_view_fixture();
     baseline_header.c_tot = V16PodU128::new(capital);
@@ -7160,10 +7164,11 @@ fn proof_v16_unrelated_asset_source_state_cannot_change_account_haircut_equity()
     baseline_header.pnl_pos_bound_tot = V16PodU128::new(claim);
     baseline_header.source_claim_bound_total_num = V16PodU128::new(claim_num);
     baseline_header.source_fresh_backing_total_num = V16PodU128::new(claimed_backing_num);
-    baseline_markets[0].engine.source_credit_long =
-        SourceCreditStateV16Account::from_runtime(&source_state(claimed_backing));
+    baseline_markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(
+        &exact_ratio_source_state(claim, claimed_backing),
+    );
     baseline_markets[0].engine.backing_long =
-        BackingBucketV16Account::from_runtime(&backing_bucket(1, claimed_backing));
+        BackingBucketV16Account::from_runtime(&backing_bucket_fixture(1, claimed_backing));
     account_header.capital = V16PodU128::new(capital);
     account_header.pnl = V16PodI128::new(claim as i128);
     account_header.fee_credits = V16PodI128::new(-(fee_debt as i128));
@@ -7181,10 +7186,11 @@ fn proof_v16_unrelated_asset_source_state_cannot_change_account_haircut_equity()
     stressed_header.source_claim_bound_total_num = V16PodU128::new(claim_num * 2);
     stressed_header.source_fresh_backing_total_num =
         V16PodU128::new(claimed_backing_num + unrelated_backing_num);
-    stressed_markets[1].engine.source_credit_long =
-        SourceCreditStateV16Account::from_runtime(&source_state(unrelated_backing));
+    stressed_markets[1].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(
+        &exact_ratio_source_state(claim, unrelated_backing),
+    );
     stressed_markets[1].engine.backing_long =
-        BackingBucketV16Account::from_runtime(&backing_bucket(2, unrelated_backing));
+        BackingBucketV16Account::from_runtime(&backing_bucket_fixture(2, unrelated_backing));
 
     let baseline = MarketGroupV16ViewMut::new(&mut baseline_header, &mut baseline_markets);
     let stressed = MarketGroupV16ViewMut::new(&mut stressed_header, &mut stressed_markets);
@@ -7204,6 +7210,76 @@ fn proof_v16_unrelated_asset_source_state_cannot_change_account_haircut_equity()
             && stressed.kani_residual() == residual
             && baseline_equity == stressed_equity
             && baseline_equity == Ok(capital as i128 + claimed_backing as i128 - fee_debt as i128)
+    );
+}
+
+// Cross-margin composition over production code: an unbacked first source does
+// not terminate the sparse scan or borrow from the junior pool, while a later
+// partially backed source contributes exactly its own support. Source-credit
+// arithmetic across every backing ratio is proved separately; fixing the two
+// rates here keeps the higher-level two-asset composition tractable.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_multi_asset_haircut_equity_sums_only_domain_backed_support() {
+    let capital_raw: u8 = kani::any();
+    let fee_debt_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 32);
+    kani::assume(fee_debt_raw <= 32);
+    kani::assume((1..=16).contains(&residual_raw));
+
+    let capital = capital_raw as u128;
+    let fee_debt = fee_debt_raw as u128;
+    let residual = residual_raw as u128;
+    let claim = 16u128;
+    let backing_a = 0u128;
+    let backing_b = 7u128;
+    let total_claim = claim * 2;
+    let total_claim_num = total_claim * BOUND_SCALE;
+    let total_backing = backing_a + backing_b;
+    let total_backing_num = total_backing * BOUND_SCALE;
+    let expected_equity = capital as i128 + total_backing as i128 - fee_debt as i128;
+
+    let (mut header, mut markets, mut account_header) = two_market_view_fixture();
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(capital + total_backing + residual);
+    header.pnl_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_claim);
+    header.source_claim_bound_total_num = V16PodU128::new(total_claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(total_backing_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&exact_ratio_source_state(claim, backing_a));
+    markets[0].engine.backing_long =
+        BackingBucketV16Account::from_runtime(&backing_bucket_fixture(1, backing_a));
+    markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&exact_ratio_source_state(claim, backing_b));
+    markets[1].engine.backing_long =
+        BackingBucketV16Account::from_runtime(&backing_bucket_fixture(2, backing_b));
+
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(total_claim as i128);
+    account_header.fee_credits = V16PodI128::new(-(fee_debt as i128));
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim * BOUND_SCALE);
+    account_header.source_domains[1].domain = V16PodU32::new(2);
+    account_header.source_domains[1].source_claim_market_id = V16PodU64::new(2);
+    account_header.source_domains[1].source_claim_bound_num = V16PodU128::new(claim * BOUND_SCALE);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let equity = market.kani_account_haircut_equity(&account);
+
+    kani::cover!(
+        residual == claim && expected_equity < 0,
+        "unbacked first claim cannot borrow a full-face junior pool beside backed cross-margin"
+    );
+    assert!(
+        market.kani_residual() == residual
+            && total_backing <= total_claim
+            && equity == Ok(expected_equity)
     );
 }
 
