@@ -3245,3 +3245,177 @@ authority_withdrawal_isolation_theorem!(closure_earnings_withdraw_asset0_short_i
 authority_withdrawal_isolation_theorem!(closure_earnings_withdraw_asset1_long_isolated, true, 2);
 #[cfg(all(kani, feature = "closure"))]
 authority_withdrawal_isolation_theorem!(closure_earnings_withdraw_asset1_short_isolated, true, 3);
+
+// Shape validators are proved independently. These stubs keep this theorem on
+// the real fee transition while exact whole-market postconditions close its frame.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_valid_fee_account_stub<'a: 'a, T>(
+    _account: &PortfolioV16View<'a>,
+    _market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_valid_fee_market_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_valid_fee_domain_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    domain: usize,
+) -> V16Result<()> {
+    assert!(domain < market.markets.len() * 2);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_public_backing_fee_split_is_domain_isolated<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let selector: u8 = kani::any();
+    // Zero-share branch behavior is covered by the public leaf proofs. This
+    // closure theorem forces both destinations through the same call.
+    let provider_fee = (selector & 3) as u128 + 1;
+    let insurance_fee = ((selector >> 2) & 3) as u128 + 1;
+    let margin_slack = ((selector >> 4) & 7) as u128 + 1;
+    let total_fee = provider_fee + insurance_fee;
+    let capital = total_fee + margin_slack;
+    let asset_index = DOMAIN / 2;
+    let is_short = DOMAIN % 2 == 1;
+    let (mut header, mut markets) = closure_two_market_authority_withdraw_fixture();
+    header.vault = V16PodU128::new(header.vault.get() + capital);
+    header.c_tot = V16PodU128::new(capital);
+
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        header.market_group_id,
+        [2u8; 32],
+        [3u8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(provenance).unwrap();
+    account_header.capital = V16PodU128::new(capital);
+    account_header.last_fee_slot = header.current_slot;
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: margin_slack,
+        certified_maintenance_req: margin_slack,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let h0 = header;
+    let s0 = [markets[0].engine, markets[1].engine];
+    let wrappers0 = [markets[0].wrapper, markets[1].wrapper];
+    let a0 = account_header;
+    let charged = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market
+            .charge_account_backing_fee_not_atomic(
+                &mut account,
+                DOMAIN,
+                provider_fee,
+                DOMAIN,
+                insurance_fee,
+            )
+            .unwrap()
+    };
+    kani::cover!(
+        selector == u8::MAX,
+        "backing fee isolation reaches maximal provider, insurance, and slack inputs"
+    );
+    assert!(charged == total_fee);
+
+    let mut expected_header = h0;
+    expected_header.c_tot = V16PodU128::new(h0.c_tot.get() - total_fee);
+    expected_header.insurance = V16PodU128::new(h0.insurance.get() + insurance_fee);
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(h0.insurance_domain_budget_remaining_total.get() + insurance_fee);
+    expected_header.backing_provider_earnings_total =
+        V16PodU128::new(h0.backing_provider_earnings_total.get() + provider_fee);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+    assert!(
+        header.c_tot.get() + header.insurance.get() + header.backing_provider_earnings_total.get()
+            == h0.c_tot.get() + h0.insurance.get() + h0.backing_provider_earnings_total.get()
+    );
+
+    let mut expected_slots = s0;
+    let expected_slot = &mut expected_slots[asset_index];
+    let (bucket, budget) = if is_short {
+        (
+            &mut expected_slot.backing_short,
+            &mut expected_slot.insurance_domain_budget_short,
+        )
+    } else {
+        (
+            &mut expected_slot.backing_long,
+            &mut expected_slot.insurance_domain_budget_long,
+        )
+    };
+    bucket.utilization_fee_earnings =
+        V16PodU128::new(bucket.utilization_fee_earnings.get() + provider_fee);
+    *budget = V16PodU128::new(budget.get() + insurance_fee);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[0],
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[1],
+        &markets[1].engine
+    ));
+    assert!(markets[0].wrapper == wrappers0[0]);
+    assert!(markets[1].wrapper == wrappers0[1]);
+
+    let mut expected_account = a0;
+    expected_account.capital = V16PodU128::new(margin_slack);
+    expected_account.health_cert = HealthCertV16Account::from_runtime(
+        &health_cert_after_capital_debit(a0.health_cert.try_to_runtime().unwrap(), total_fee)
+            .unwrap(),
+    );
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        &account_header
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! backing_fee_isolation_theorem {
+    ($name:ident, $domain:literal) => {
+        #[kani::proof]
+        #[kani::stub(
+            V16Core::expected_source_credit_rate_num_for_state,
+            closure_zero_claim_credit_rate
+        )]
+        #[kani::stub(PortfolioV16View::validate_with_market, closure_valid_fee_account_stub)]
+        #[kani::stub(MarketGroupV16ViewMut::validate_shape, closure_valid_fee_market_stub)]
+        #[kani::stub(
+            MarketGroupV16ViewMut::validate_source_domain_ledger,
+            closure_valid_fee_domain_stub
+        )]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_public_backing_fee_split_is_domain_isolated::<$domain>();
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+backing_fee_isolation_theorem!(closure_backing_fee_asset0_long_isolated, 0);
+#[cfg(all(kani, feature = "closure"))]
+backing_fee_isolation_theorem!(closure_backing_fee_asset0_short_isolated, 1);
+#[cfg(all(kani, feature = "closure"))]
+backing_fee_isolation_theorem!(closure_backing_fee_asset1_long_isolated, 2);
+#[cfg(all(kani, feature = "closure"))]
+backing_fee_isolation_theorem!(closure_backing_fee_asset1_short_isolated, 3);
