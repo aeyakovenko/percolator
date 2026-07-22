@@ -4378,3 +4378,558 @@ closure_liquidation_isolation_harness!(closure_liquidation_asset0_short_is_isola
 closure_liquidation_isolation_harness!(closure_liquidation_asset1_long_is_isolated, 1, true);
 #[cfg(all(kani, feature = "closure"))]
 closure_liquidation_isolation_harness!(closure_liquidation_asset1_short_is_isolated, 1, false);
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_conversion_account_shape_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(account.header.pnl.get(), 8);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+        4 * BOUND_SCALE
+    );
+    assert_eq!(account.header.source_domains[0].domain.get(), 0);
+    assert_eq!(
+        account.header.source_domains[1]
+            .source_claim_bound_num
+            .get(),
+        4 * BOUND_SCALE
+    );
+    assert_eq!(account.header.source_domains[1].domain.get(), 2);
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_conversion_small_u256_div(lhs: U256, rhs: U256) -> Option<U256> {
+    assert_eq!(lhs.hi(), 0);
+    assert_eq!(rhs.hi(), 0);
+    assert_ne!(rhs.lo(), 0);
+    Some(U256::from_u128(lhs.lo() / rhs.lo()))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_conversion_support_flow_validate_stub(proof: &TokenValueFlowProofV16) -> V16Result<()> {
+    let insurance_capital = TokenValueClassV16::InsuranceCapital as usize;
+    let account_capital = TokenValueClassV16::AccountCapital as usize;
+    let counterparty = TokenValueClassV16::CloseCounterpartyCreditConsumed as usize;
+    let insurance = TokenValueClassV16::CloseInsuranceSpent as usize;
+    let surplus = TokenValueClassV16::UnallocatedProtocolSurplus as usize;
+    assert_eq!(proof.external_quote_in, 0);
+    assert_eq!(proof.external_quote_out, 0);
+    assert_eq!(proof.vault_before, proof.vault_after);
+
+    let insurance_draw = proof.debits[insurance_capital] != 0;
+    let expected_debit = if insurance_draw {
+        assert_eq!(proof.debits[insurance_capital], proof.credits[insurance]);
+        insurance_capital
+    } else {
+        let source_total = proof.credits[counterparty]
+            .checked_add(proof.credits[insurance])
+            .and_then(|v| v.checked_add(proof.credits[surplus]))
+            .unwrap();
+        assert_eq!(proof.debits[account_capital], source_total);
+        account_capital
+    };
+    let mut class = 0usize;
+    while class < V16_TOKEN_VALUE_CLASS_COUNT {
+        if class != expected_debit {
+            assert_eq!(proof.debits[class], 0);
+        }
+        let expected_credit =
+            class == insurance || (!insurance_draw && (class == counterparty || class == surplus));
+        if !expected_credit {
+            assert_eq!(proof.credits[class], 0);
+        }
+        class += 1;
+    }
+    Ok(())
+}
+
+// A released source-attributed claim is a pure senior-stock relabel: each
+// converted atom comes from exactly one source domain, capital rises by the
+// same total, and neither the vault nor either asset's opposite-side domain is
+// touched. The paired harnesses span counterparty-only, mixed
+// counterparty/insurance, and complete two-domain conversion through the real
+// production core. Exact economic and domain frames make cross-asset leakage,
+// double credit, or an unsupported capital mint direct falsifiers.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_released_pnl_conversion_is_source_isolated_and_fully_funded_body<
+    const RELEASED: u128,
+>() {
+    let maximal_unrelated_frame: bool = kani::any();
+    let released = RELEASED;
+    let frame_raw: u8 = if maximal_unrelated_frame { 3 } else { 0 };
+    let frame = u128::from(frame_raw);
+    let counterparty = released.min(4);
+    let insurance = released - counterparty;
+    let counterparty_remaining = 4 - counterparty;
+    let insurance_remaining = 4 - insurance;
+    let capital = frame + 1;
+
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+    markets[0].wrapper = u64::from(frame_raw);
+    markets[1].wrapper = !u64::from(frame_raw);
+
+    let short0 = 5 + frame;
+    let short1 = 9 + 2 * frame;
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: short0 * BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: short0 * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 2,
+        fresh_unliened_backing_num: short1 * BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[1].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: short1 * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: 4 * BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: 4 * BOUND_SCALE,
+            exact_positive_claim_num: 4 * BOUND_SCALE,
+            fresh_reserved_backing_num: 4 * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_long =
+        BackingBucketV16Account::from_runtime(&BackingBucketV16::empty_for_market(2));
+    markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: 4 * BOUND_SCALE,
+            exact_positive_claim_num: 4 * BOUND_SCALE,
+            insurance_credit_reserved_num: 4 * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: 4 * BOUND_SCALE,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(4);
+
+    header.vault = V16PodU128::new(capital + 22 + 3 * frame);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(4);
+    header.pnl_pos_tot = V16PodU128::new(8);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(8 * BOUND_SCALE);
+    header.pnl_pos_bound_tot = V16PodU128::new(8);
+    header.source_claim_bound_total_num = V16PodU128::new(8 * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new((18 + 3 * frame) * BOUND_SCALE);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(4);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(4);
+
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        header.market_group_id,
+        [9; 32],
+        [8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(provenance).unwrap();
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(8);
+    account_header.reserved_pnl = V16PodU128::new(8 - released);
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(1),
+        source_claim_bound_num: V16PodU128::new(4 * BOUND_SCALE),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    account_header.source_domains[1] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(2),
+        source_claim_market_id: V16PodU64::new(2),
+        source_claim_bound_num: V16PodU128::new(4 * BOUND_SCALE),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+    let account_before = account_header;
+    let converted = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .convert_released_pnl_to_capital_core_not_atomic(&mut PortfolioV16ViewMut::new(
+                &mut account_header,
+            ))
+            .unwrap()
+    };
+    assert_eq!(converted, released);
+
+    let mut expected_header = header_before;
+    expected_header.c_tot = V16PodU128::new(capital + released);
+    expected_header.insurance = V16PodU128::new(insurance_remaining);
+    expected_header.pnl_pos_tot = V16PodU128::new(8 - released);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new((8 - released) * BOUND_SCALE);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(8 - released);
+    expected_header.source_claim_bound_total_num = V16PodU128::new((8 - released) * BOUND_SCALE);
+    expected_header.source_fresh_backing_total_num =
+        V16PodU128::new((18 + 3 * frame - counterparty) * BOUND_SCALE);
+    expected_header.source_insurance_credit_reserved_total_atoms =
+        V16PodU128::new(insurance_remaining);
+    expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(insurance_remaining);
+    expected_header.risk_epoch = V16PodU64::new(2 + 2 * u64::from(insurance != 0));
+    assert_eq!(header.vault.get(), expected_header.vault.get());
+    assert_eq!(header.insurance.get(), expected_header.insurance.get());
+    assert_eq!(header.c_tot.get(), expected_header.c_tot.get());
+    assert_eq!(header.pnl_pos_tot.get(), expected_header.pnl_pos_tot.get());
+    assert_eq!(
+        header.pnl_pos_bound_tot_num.get(),
+        expected_header.pnl_pos_bound_tot_num.get()
+    );
+    assert_eq!(
+        header.pnl_pos_bound_tot.get(),
+        expected_header.pnl_pos_bound_tot.get()
+    );
+    assert_eq!(
+        header.source_claim_bound_total_num.get(),
+        expected_header.source_claim_bound_total_num.get()
+    );
+    assert_eq!(
+        header.source_fresh_backing_total_num.get(),
+        expected_header.source_fresh_backing_total_num.get()
+    );
+    assert_eq!(
+        header.source_insurance_credit_reserved_total_atoms.get(),
+        expected_header
+            .source_insurance_credit_reserved_total_atoms
+            .get()
+    );
+    assert_eq!(
+        header.insurance_domain_budget_remaining_total.get(),
+        expected_header
+            .insurance_domain_budget_remaining_total
+            .get()
+    );
+    assert_eq!(header.risk_epoch.get(), expected_header.risk_epoch.get());
+    assert_eq!(
+        header.backing_provider_earnings_total.get(),
+        header_before.backing_provider_earnings_total.get()
+    );
+    assert_eq!(
+        header.resolved_payout_blocker_count.get(),
+        header_before.resolved_payout_blocker_count.get()
+    );
+    assert_eq!(
+        header.asset_set_epoch.get(),
+        header_before.asset_set_epoch.get()
+    );
+    assert_eq!(header.oracle_epoch.get(), header_before.oracle_epoch.get());
+    assert_eq!(
+        header.funding_epoch.get(),
+        header_before.funding_epoch.get()
+    );
+    assert_eq!(header.mode, header_before.mode);
+    assert_eq!(
+        header.payout_snapshot_captured,
+        header_before.payout_snapshot_captured
+    );
+
+    let mut expected_slots = slots_before;
+    expected_slots[0].backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: counterparty_remaining * BOUND_SCALE,
+        consumed_liened_backing_num: counterparty * BOUND_SCALE,
+        expiry_slot: 10,
+        status: if counterparty_remaining == 0 {
+            BackingBucketStatusV16::Expired
+        } else {
+            BackingBucketStatusV16::Fresh
+        },
+        ..BackingBucketV16::EMPTY
+    });
+    expected_slots[0].source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: counterparty_remaining * BOUND_SCALE,
+            exact_positive_claim_num: counterparty_remaining * BOUND_SCALE,
+            fresh_reserved_backing_num: counterparty_remaining * BOUND_SCALE,
+            spent_backing_num: counterparty * BOUND_SCALE,
+            provider_receivable_num: counterparty * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: 2,
+            ..SourceCreditStateV16::EMPTY
+        });
+    expected_slots[1].source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: insurance_remaining * BOUND_SCALE,
+            exact_positive_claim_num: insurance_remaining * BOUND_SCALE,
+            insurance_credit_reserved_num: insurance_remaining * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: 2 * u64::from(insurance != 0),
+            ..SourceCreditStateV16::EMPTY
+        });
+    expected_slots[1].insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: insurance_remaining * BOUND_SCALE,
+            consumed_insurance_num: insurance * BOUND_SCALE,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    expected_slots[1].insurance_domain_spent_long = V16PodU128::new(insurance);
+    assert!(kani_eq_asset_state_v16_account(
+        &markets[0].engine.asset,
+        &slots_before[0].asset
+    ));
+    assert!(kani_eq_source_credit_state_v16_account(
+        &markets[0].engine.source_credit_long,
+        &expected_slots[0].source_credit_long
+    ));
+    assert!(kani_eq_backing_bucket_v16_account(
+        &markets[0].engine.backing_long,
+        &expected_slots[0].backing_long
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &markets[0].engine.insurance_reservation_long,
+        &slots_before[0].insurance_reservation_long
+    ));
+    assert!(kani_eq_source_credit_state_v16_account(
+        &markets[0].engine.source_credit_short,
+        &slots_before[0].source_credit_short
+    ));
+    assert!(kani_eq_backing_bucket_v16_account(
+        &markets[0].engine.backing_short,
+        &slots_before[0].backing_short
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &markets[0].engine.insurance_reservation_short,
+        &slots_before[0].insurance_reservation_short
+    ));
+    assert_eq!(
+        markets[0].engine.insurance_domain_budget_long.get(),
+        slots_before[0].insurance_domain_budget_long.get()
+    );
+    assert_eq!(
+        markets[0].engine.insurance_domain_budget_short.get(),
+        slots_before[0].insurance_domain_budget_short.get()
+    );
+    assert_eq!(
+        markets[0].engine.insurance_domain_spent_long.get(),
+        slots_before[0].insurance_domain_spent_long.get()
+    );
+    assert_eq!(
+        markets[0].engine.insurance_domain_spent_short.get(),
+        slots_before[0].insurance_domain_spent_short.get()
+    );
+    assert!(kani_eq_asset_state_v16_account(
+        &markets[1].engine.asset,
+        &slots_before[1].asset
+    ));
+    assert!(kani_eq_source_credit_state_v16_account(
+        &markets[1].engine.source_credit_long,
+        &expected_slots[1].source_credit_long
+    ));
+    assert!(kani_eq_backing_bucket_v16_account(
+        &markets[1].engine.backing_long,
+        &slots_before[1].backing_long
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &markets[1].engine.insurance_reservation_long,
+        &expected_slots[1].insurance_reservation_long
+    ));
+    assert_eq!(
+        markets[1].engine.insurance_domain_budget_long.get(),
+        slots_before[1].insurance_domain_budget_long.get()
+    );
+    assert_eq!(
+        markets[1].engine.insurance_domain_spent_long.get(),
+        expected_slots[1].insurance_domain_spent_long.get()
+    );
+    assert!(kani_eq_source_credit_state_v16_account(
+        &markets[1].engine.source_credit_short,
+        &slots_before[1].source_credit_short
+    ));
+    assert!(kani_eq_backing_bucket_v16_account(
+        &markets[1].engine.backing_short,
+        &slots_before[1].backing_short
+    ));
+    assert!(kani_eq_insurance_credit_reservation_v16_account(
+        &markets[1].engine.insurance_reservation_short,
+        &slots_before[1].insurance_reservation_short
+    ));
+    assert_eq!(
+        markets[1].engine.insurance_domain_budget_short.get(),
+        slots_before[1].insurance_domain_budget_short.get()
+    );
+    assert_eq!(
+        markets[1].engine.insurance_domain_spent_short.get(),
+        slots_before[1].insurance_domain_spent_short.get()
+    );
+    assert_eq!(
+        markets[0].engine.pending_domain_loss_barrier_long.get(),
+        slots_before[0].pending_domain_loss_barrier_long.get()
+    );
+    assert_eq!(
+        markets[0].engine.pending_domain_loss_barrier_short.get(),
+        slots_before[0].pending_domain_loss_barrier_short.get()
+    );
+    assert_eq!(
+        markets[1].engine.pending_domain_loss_barrier_long.get(),
+        slots_before[1].pending_domain_loss_barrier_long.get()
+    );
+    assert_eq!(
+        markets[1].engine.pending_domain_loss_barrier_short.get(),
+        slots_before[1].pending_domain_loss_barrier_short.get()
+    );
+    assert_eq!(markets[0].wrapper, wrappers_before[0]);
+    assert_eq!(markets[1].wrapper, wrappers_before[1]);
+
+    let mut expected_account = account_before;
+    expected_account.capital = V16PodU128::new(capital + released);
+    expected_account.pnl = V16PodI128::new((8 - released) as i128);
+    let domain0 = PortfolioSourceDomainV16Account {
+        source_claim_bound_num: V16PodU128::new(counterparty_remaining * BOUND_SCALE),
+        ..account_before.source_domains[0]
+    };
+    let domain2 = PortfolioSourceDomainV16Account {
+        source_claim_bound_num: V16PodU128::new(insurance_remaining * BOUND_SCALE),
+        ..account_before.source_domains[1]
+    };
+    expected_account.source_domains[0] = if counterparty_remaining != 0 {
+        domain0
+    } else if insurance_remaining != 0 {
+        domain2
+    } else {
+        PortfolioSourceDomainV16Account::default()
+    };
+    expected_account.source_domains[1] = if counterparty_remaining != 0 && insurance_remaining != 0
+    {
+        domain2
+    } else {
+        PortfolioSourceDomainV16Account::default()
+    };
+    assert_eq!(account_header.capital.get(), expected_account.capital.get());
+    assert_eq!(account_header.pnl.get(), expected_account.pnl.get());
+    assert_eq!(
+        account_header.reserved_pnl.get(),
+        expected_account.reserved_pnl.get()
+    );
+    let mut source_slot = 0usize;
+    while source_slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert!(kani_eq_portfolio_source_domain_v16_account(
+            &account_header.source_domains[source_slot],
+            &expected_account.source_domains[source_slot]
+        ));
+        source_slot += 1;
+    }
+    let mut bitmap_word = 0usize;
+    while bitmap_word < V16_ACTIVE_BITMAP_WORDS {
+        assert_eq!(
+            account_header.active_bitmap[bitmap_word].get(),
+            account_before.active_bitmap[bitmap_word].get()
+        );
+        bitmap_word += 1;
+    }
+    let mut leg_slot = 0usize;
+    while leg_slot < V16_MAX_PORTFOLIO_ASSETS_N {
+        assert!(kani_eq_portfolio_leg_v16_account(
+            &account_header.legs[leg_slot],
+            &account_before.legs[leg_slot]
+        ));
+        leg_slot += 1;
+    }
+    assert_eq!(
+        account_header.fee_credits.get(),
+        account_before.fee_credits.get()
+    );
+    assert_eq!(
+        account_header.cancel_deposit_escrow.get(),
+        account_before.cancel_deposit_escrow.get()
+    );
+    assert_eq!(account_header.stale_state, account_before.stale_state);
+    assert_eq!(account_header.b_stale_state, account_before.b_stale_state);
+    assert_eq!(account_header.rebalance_lock, account_before.rebalance_lock);
+    assert_eq!(
+        account_header.liquidation_lock,
+        account_before.liquidation_lock
+    );
+    assert!(kani_eq_close_progress_ledger_v16_account(
+        &account_header.close_progress,
+        &account_before.close_progress
+    ));
+    assert!(kani_eq_resolved_payout_receipt_v16_account(
+        &account_header.resolved_payout_receipt,
+        &account_before.resolved_payout_receipt
+    ));
+
+    assert_eq!(header.vault.get(), header_before.vault.get());
+    assert_eq!(
+        header.vault.get(),
+        header
+            .c_tot
+            .get()
+            .checked_add(header.insurance.get())
+            .and_then(|v| v.checked_add(header.source_fresh_backing_total_num.get() / BOUND_SCALE))
+            .unwrap()
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_conversion_harness {
+    ($name:ident, $released:expr) => {
+        #[kani::proof]
+        #[kani::stub(
+            PortfolioV16View::validate_with_market,
+            closure_conversion_account_shape_stub
+        )]
+        #[kani::stub(U256::checked_div, closure_conversion_small_u256_div)]
+        #[kani::stub(
+            TokenValueFlowProofV16::validate,
+            closure_conversion_support_flow_validate_stub
+        )]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_released_pnl_conversion_is_source_isolated_and_fully_funded_body::<$released>();
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_conversion_harness!(
+    closure_released_pnl_partial_counterparty_conversion_is_isolated_and_funded,
+    2
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_conversion_harness!(
+    closure_released_pnl_counterparty_boundary_conversion_is_isolated_and_funded,
+    4
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_conversion_harness!(
+    closure_released_pnl_mixed_cross_source_conversion_is_isolated_and_funded,
+    6
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_conversion_harness!(
+    closure_released_pnl_full_cross_source_conversion_is_isolated_and_funded,
+    8
+);
