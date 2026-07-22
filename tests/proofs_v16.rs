@@ -11203,6 +11203,38 @@ fn proof_v16_credit_account_from_insurance_uses_only_unbudgeted_surplus() {
     }
 }
 
+fn terminal_insurance_retirement_fixture(
+    insurance: u128,
+) -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
+    let (mut header, markets, _) = one_market_direct_view_fixture();
+    header.mode = 1; // Resolved
+    header.resolved_slot = V16PodU64::new(header.current_slot.get());
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
+    (header, markets)
+}
+
+fn assert_terminal_insurance_retirement_rejected_without_mutation(
+    mut header: MarketGroupV16HeaderAccount,
+    mut markets: [Market<u64>; 1],
+) {
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    let result = market.retire_terminal_unbudgeted_insurance_not_atomic();
+
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &market.markets[0].engine
+    ));
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -11238,6 +11270,239 @@ fn proof_v16_terminal_unbudgeted_insurance_retirement_is_exact_and_claim_safe() 
         assert_eq!(next_insurance, 0);
         assert_eq!(vault - next_vault, retired);
     }
+}
+
+// Production-route theorem: when insurance is the only remaining vault stock,
+// retirement removes it exactly and frames every unrelated market field.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_terminal_insurance_retirement_is_exact_and_fully_framed() {
+    let insurance_raw: u64 = kani::any();
+    let insurance = insurance_raw as u128;
+    kani::assume(insurance <= MAX_VAULT_TVL);
+    let (mut header, mut markets) = terminal_insurance_retirement_fixture(insurance);
+    let slot_before = markets[0].engine;
+    let mut expected_header = header;
+    expected_header.vault = V16PodU128::new(0);
+    expected_header.insurance = V16PodU128::new(0);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    assert_eq!(market.validate_shape(), Ok(()));
+    let result = market.retire_terminal_unbudgeted_insurance_not_atomic();
+
+    kani::cover!(
+        insurance == 0,
+        "terminal retirement covers the zero identity"
+    );
+    kani::cover!(
+        insurance > 0,
+        "terminal retirement covers a nonzero full-width insurance balance"
+    );
+    assert_eq!(result, Ok(insurance));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &market.markets[0].engine
+    ));
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+// A terminal burn must not consume any funded senior stock or erase a junior
+// source claim. Each class is a shape-valid persisted state, not malformed
+// input rejected by validation. The bindings are split because a symbolic
+// selector across all four U256 validation shapes exceeds the solver budget.
+fn assert_terminal_insurance_retirement_rejects_funded_claim_class(blocker: u8, amount: u128) {
+    assert!(blocker < 4);
+    let insurance = 9u128;
+    let (mut header, mut markets) = terminal_insurance_retirement_fixture(insurance);
+    let market_id = markets[0].engine.asset.market_id.get();
+
+    match blocker {
+        0 => {
+            header.vault = V16PodU128::new(insurance + amount);
+            header.c_tot = V16PodU128::new(amount);
+        }
+        1 => {
+            let claim_num = amount * BOUND_SCALE;
+            header.pnl_pos_tot = V16PodU128::new(amount);
+            header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+            header.pnl_pos_bound_tot = V16PodU128::new(amount);
+            header.pnl_matured_pos_tot = V16PodU128::new(amount);
+            header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+            markets[0].engine.source_credit_long =
+                SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                    positive_claim_bound_num: claim_num,
+                    exact_positive_claim_num: claim_num,
+                    credit_rate_num: 0,
+                    ..SourceCreditStateV16::EMPTY
+                });
+        }
+        2 => {
+            header.vault = V16PodU128::new(insurance + amount);
+            header.backing_provider_earnings_total = V16PodU128::new(amount);
+            markets[0].engine.backing_long =
+                BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                    market_id,
+                    utilization_fee_earnings: amount,
+                    status: BackingBucketStatusV16::Expired,
+                    ..BackingBucketV16::EMPTY
+                });
+        }
+        _ => {
+            let backing_num = amount * BOUND_SCALE;
+            header.vault = V16PodU128::new(insurance + amount);
+            header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+            markets[0].engine.backing_long =
+                BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                    market_id,
+                    fresh_unliened_backing_num: backing_num,
+                    expiry_slot: 10,
+                    status: BackingBucketStatusV16::Fresh,
+                    ..BackingBucketV16::EMPTY
+                });
+            markets[0].engine.source_credit_long =
+                SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                    fresh_reserved_backing_num: backing_num,
+                    ..SourceCreditStateV16::EMPTY
+                });
+        }
+    }
+
+    assert_terminal_insurance_retirement_rejected_without_mutation(header, markets);
+}
+
+fn symbolic_terminal_claim_amount() -> u128 {
+    let amount_raw: u8 = kani::any();
+    kani::assume((1..=64).contains(&amount_raw));
+    amount_raw as u128
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_terminal_insurance_retirement_rejects_account_capital() {
+    let amount = symbolic_terminal_claim_amount();
+    kani::cover!(amount == 1, "capital blocker covers the minimum atom");
+    kani::cover!(amount == 64, "capital blocker covers the range ceiling");
+    assert_terminal_insurance_retirement_rejects_funded_claim_class(0, amount);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_terminal_insurance_retirement_rejects_positive_source_claim() {
+    let amount = symbolic_terminal_claim_amount();
+    kani::cover!(amount == 1, "source-claim blocker covers the minimum atom");
+    kani::cover!(
+        amount == 64,
+        "source-claim blocker covers the range ceiling"
+    );
+    assert_terminal_insurance_retirement_rejects_funded_claim_class(1, amount);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_terminal_insurance_retirement_rejects_provider_earnings() {
+    let amount = symbolic_terminal_claim_amount();
+    kani::cover!(amount == 1, "earnings blocker covers the minimum atom");
+    kani::cover!(amount == 64, "earnings blocker covers the range ceiling");
+    assert_terminal_insurance_retirement_rejects_funded_claim_class(2, amount);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_terminal_insurance_retirement_rejects_backing_principal() {
+    let amount = symbolic_terminal_claim_amount();
+    kani::cover!(amount == 1, "backing blocker covers the minimum atom");
+    kani::cover!(amount == 64, "backing blocker covers the range ceiling");
+    assert_terminal_insurance_retirement_rejects_funded_claim_class(3, amount);
+}
+
+// Domain budgets, source reservations, close barriers, and materialized
+// portfolios are independently sufficient to block terminal retirement.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_terminal_insurance_retirement_rejects_every_live_reservation_class() {
+    let blocker: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    kani::assume(blocker < 4);
+    kani::assume((1..=8).contains(&amount_raw));
+    let amount = amount_raw as u128;
+    let insurance = amount + 1;
+    let (mut header, mut markets) = terminal_insurance_retirement_fixture(insurance);
+
+    match blocker {
+        0 => {
+            header.insurance_domain_budget_remaining_total = V16PodU128::new(amount);
+            markets[0].engine.insurance_domain_budget_long = V16PodU128::new(amount);
+        }
+        1 => {
+            let reservation_num = amount * BOUND_SCALE;
+            header.insurance_domain_budget_remaining_total = V16PodU128::new(amount);
+            header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(amount);
+            markets[0].engine.insurance_domain_budget_long = V16PodU128::new(amount);
+            markets[0].engine.source_credit_long =
+                SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                    insurance_credit_reserved_num: reservation_num,
+                    ..SourceCreditStateV16::EMPTY
+                });
+            markets[0].engine.insurance_reservation_long =
+                InsuranceCreditReservationV16Account::from_runtime(
+                    &InsuranceCreditReservationV16 {
+                        insurance_credit_reserved_num: reservation_num,
+                        ..InsuranceCreditReservationV16::EMPTY
+                    },
+                );
+        }
+        2 => {
+            header.resolved_payout_blocker_count = V16PodU64::new(1);
+            markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+        }
+        _ => header.materialized_portfolio_count = V16PodU64::new(amount as u64),
+    }
+
+    kani::cover!(
+        blocker == 0,
+        "retirement preserves domain insurance budgets"
+    );
+    kani::cover!(
+        blocker == 1,
+        "retirement preserves source insurance reservations"
+    );
+    kani::cover!(blocker == 2, "retirement preserves pending domain closes");
+    kani::cover!(blocker == 3, "retirement preserves materialized portfolios");
+    assert_terminal_insurance_retirement_rejected_without_mutation(header, markets);
+}
+
+// Readiness counters are O(1) claims that other portfolio accounts still need
+// settlement. A caller cannot retire the vault before any one reaches zero.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_terminal_insurance_retirement_requires_resolved_ready_accounts() {
+    let blocker: u8 = kani::any();
+    kani::assume(blocker < 4);
+    let (mut header, markets) = terminal_insurance_retirement_fixture(7);
+
+    match blocker {
+        0 => header.mode = 0, // Live
+        1 => header.stale_certificate_count = V16PodU64::new(1),
+        2 => header.b_stale_account_count = V16PodU64::new(1),
+        _ => header.negative_pnl_account_count = V16PodU64::new(1),
+    }
+
+    kani::cover!(blocker == 0, "live markets cannot retire insurance");
+    kani::cover!(blocker == 1, "stale accounts block retirement");
+    kani::cover!(blocker == 2, "B-stale accounts block retirement");
+    kani::cover!(blocker == 3, "negative-PnL accounts block retirement");
+    assert_terminal_insurance_retirement_rejected_without_mutation(header, markets);
 }
 
 fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i128, i128) {
