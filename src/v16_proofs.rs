@@ -3273,6 +3273,36 @@ fn closure_valid_fee_domain_stub<'a: 'a, T>(
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn closure_current_empty_account(
+    header: &MarketGroupV16HeaderAccount,
+    capital: u128,
+    margin_req: u128,
+) -> PortfolioAccountV16Account {
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        header.market_group_id,
+        [2u8; 32],
+        [3u8; 32],
+    ));
+    let mut account = PortfolioAccountV16Account::default();
+    account.init_empty_in_place(provenance).unwrap();
+    account.capital = V16PodU128::new(capital);
+    account.last_fee_slot = header.current_slot;
+    account.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: margin_req,
+        certified_maintenance_req: margin_req,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+    account
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn closure_public_backing_fee_split_is_domain_isolated<const DOMAIN: usize>() {
     assert!(DOMAIN < 4);
     let selector: u8 = kani::any();
@@ -3289,27 +3319,7 @@ fn closure_public_backing_fee_split_is_domain_isolated<const DOMAIN: usize>() {
     header.vault = V16PodU128::new(header.vault.get() + capital);
     header.c_tot = V16PodU128::new(capital);
 
-    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
-        header.market_group_id,
-        [2u8; 32],
-        [3u8; 32],
-    ));
-    let mut account_header = PortfolioAccountV16Account::default();
-    account_header.init_empty_in_place(provenance).unwrap();
-    account_header.capital = V16PodU128::new(capital);
-    account_header.last_fee_slot = header.current_slot;
-    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
-        certified_equity: capital as i128,
-        certified_initial_req: margin_slack,
-        certified_maintenance_req: margin_slack,
-        cert_oracle_epoch: header.oracle_epoch.get(),
-        cert_funding_epoch: header.funding_epoch.get(),
-        cert_risk_epoch: header.risk_epoch.get(),
-        cert_asset_set_epoch: header.asset_set_epoch.get(),
-        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
-        valid: true,
-        ..HealthCertV16::default()
-    });
+    let mut account_header = closure_current_empty_account(&header, capital, margin_slack);
 
     let h0 = header;
     let s0 = [markets[0].engine, markets[1].engine];
@@ -3520,3 +3530,77 @@ wrapper_fee_budget_isolation_theorem!(closure_wrapper_fee_budget_asset0_short_is
 wrapper_fee_budget_isolation_theorem!(closure_wrapper_fee_budget_asset1_long_isolated, 2);
 #[cfg(all(kani, feature = "closure"))]
 wrapper_fee_budget_isolation_theorem!(closure_wrapper_fee_budget_asset1_short_isolated, 3);
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::stub(PortfolioV16View::validate_with_market, closure_valid_fee_account_stub)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, closure_valid_fee_market_stub)]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn closure_public_cranker_reward_consumes_only_unbudgeted_insurance() {
+    let selector: u8 = kani::any();
+    let unbudgeted = (selector & 7) as u128 + 1;
+    let requested = ((selector >> 3) & 15) as u128 + 1;
+    let capital = ((selector >> 7) & 1) as u128 + 1;
+    let (mut header, mut markets) = closure_two_market_authority_withdraw_fixture();
+    header.vault = V16PodU128::new(header.vault.get() + unbudgeted + capital);
+    header.insurance = V16PodU128::new(header.insurance.get() + unbudgeted);
+    header.c_tot = V16PodU128::new(capital);
+    let mut account_header = closure_current_empty_account(&header, capital, 0);
+
+    let h0 = header;
+    let s0 = [markets[0].engine, markets[1].engine];
+    let wrappers0 = [markets[0].wrapper, markets[1].wrapper];
+    let a0 = account_header;
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.credit_account_from_insurance_not_atomic(&mut account, requested)
+    };
+    let should_succeed = requested <= unbudgeted;
+
+    kani::cover!(
+        requested < unbudgeted,
+        "cranker reward covers a partial unbudgeted-insurance credit"
+    );
+    kani::cover!(
+        requested == unbudgeted,
+        "cranker reward covers the exact unbudgeted-insurance boundary"
+    );
+    kani::cover!(
+        requested > unbudgeted,
+        "cranker reward covers rejection above unbudgeted insurance"
+    );
+    assert!(result.is_ok() == should_succeed);
+
+    let mut expected_header = h0;
+    let mut expected_account = a0;
+    if should_succeed {
+        expected_header.insurance = V16PodU128::new(h0.insurance.get() - requested);
+        expected_header.c_tot = V16PodU128::new(h0.c_tot.get() + requested);
+        expected_account.capital = V16PodU128::new(a0.capital.get() + requested);
+        expected_account.health_cert.valid = 0;
+    }
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        &account_header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0[0],
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0[1],
+        &markets[1].engine
+    ));
+    assert!(markets[0].wrapper == wrappers0[0]);
+    assert!(markets[1].wrapper == wrappers0[1]);
+    assert!(
+        header.insurance.get() >= header.insurance_domain_budget_remaining_total.get()
+            && header.c_tot.get() + header.insurance.get() == h0.c_tot.get() + h0.insurance.get()
+    );
+}

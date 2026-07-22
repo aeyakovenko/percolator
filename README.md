@@ -61,7 +61,7 @@ Source-checkable counts in this checkout:
 | --- | ---: |
 | Plain Kani proofs in `tests/proofs_v16.rs` | 257 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 11 |
-| Direct plain Kani proofs in `src/v16_proofs.rs` | 38 |
+| Direct plain Kani proofs in `src/v16_proofs.rs` | 39 |
 | Generated backing-isolation proofs in `src/v16_proofs.rs` | 8 |
 | Generated authority-withdrawal isolation proofs in `src/v16_proofs.rs` | 8 |
 | Generated backing-fee isolation proofs in `src/v16_proofs.rs` | 4 |
