@@ -61,7 +61,8 @@ Source-checkable counts in this checkout:
 | --- | ---: |
 | Plain Kani proofs in `tests/proofs_v16.rs` | 257 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 11 |
-| Plain Kani proofs in `src/v16_proofs.rs` | 38 |
+| Direct plain Kani proofs in `src/v16_proofs.rs` | 38 |
+| Generated backing-isolation proofs in `src/v16_proofs.rs` | 8 |
 | Function-contract proofs in `src/v16_proofs.rs` | 51 |
 | Production `kernel_*` helpers in `src/v16.rs` | 17 |
 | Public `*_not_atomic` engine APIs in `src/v16.rs` | 55 |
@@ -70,6 +71,7 @@ Spot-check the inventory directly:
 
 ```bash
 rg '^#\[kani::proof\]' tests/proofs_v16.rs tests/proofs_v16_arithmetic.rs src/v16_proofs.rs | wc -l
+rg '^backing_isolation_theorem!' src/v16_proofs.rs | wc -l
 rg '^#\[kani::proof_for_contract' src/v16_proofs.rs | wc -l
 rg 'pub\(crate\) fn kernel_' src/v16.rs | wc -l
 rg 'pub fn [A-Za-z0-9_]+_not_atomic\(' src/v16.rs | wc -l

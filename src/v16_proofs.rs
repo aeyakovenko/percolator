@@ -10,7 +10,7 @@
 
 use super::*;
 use crate::wide_math::{checked_mul_div_ceil_u256, U256};
-use crate::{BOUND_SCALE, MAX_VAULT_TVL, V16_TOKEN_VALUE_CLASS_COUNT};
+use crate::{BOUND_SCALE, CREDIT_RATE_SCALE, MAX_VAULT_TVL, V16_TOKEN_VALUE_CLASS_COUNT};
 
 // ===================== KANI FUNCTION-CONTRACT LAYER =====================
 // Built ONLY by scripts/contracts_runner.sh (cargo feature `contracts` +
@@ -2770,3 +2770,319 @@ fn contract_check_select_auto_crank_plan() {
         recovery_reason,
     );
 }
+
+#[cfg(all(kani, feature = "closure"))]
+#[allow(dead_code)]
+fn closure_zero_claim_credit_rate(state: SourceCreditStateV16) -> V16Result<u128> {
+    assert_eq!(state.positive_claim_bound_num, 0);
+    assert_eq!(state.exact_positive_claim_num, 0);
+    assert_eq!(state.spent_backing_num, 0);
+    assert_eq!(state.provider_receivable_num, 0);
+    assert_eq!(state.valid_liened_backing_num, 0);
+    assert_eq!(state.impaired_liened_backing_num, 0);
+    assert_eq!(state.insurance_credit_reserved_num, 0);
+    assert_eq!(state.valid_liened_insurance_num, 0);
+    assert_eq!(state.impaired_liened_insurance_num, 0);
+    assert_eq!(state.credit_rate_num, CREDIT_RATE_SCALE);
+    Ok(CREDIT_RATE_SCALE)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_two_market_backing_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 2]) {
+    let market_group_id = [1u8; 32];
+    let config = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&config);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.last_asset_activation_slot = V16PodU64::new(2);
+    header.slot_last = V16PodU64::new(2);
+    header.current_slot = V16PodU64::new(2);
+    let mut markets = [
+        Market::new(11u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(22u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let mut total_backing_atoms = 0u128;
+    let mut asset_index = 0usize;
+    while asset_index < markets.len() {
+        let market_id = asset_index as u64 + 1;
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&AssetStateV16 {
+            market_id,
+            lifecycle: AssetLifecycleV16::Active,
+            raw_oracle_target_price: 100,
+            effective_price: 100,
+            fund_px_last: 100,
+            slot_last: 2,
+            ..AssetStateV16::default()
+        });
+        let long_atoms = asset_index as u128 * 4 + 3;
+        let short_atoms = long_atoms + 2;
+        markets[asset_index].engine.backing_long =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                market_id,
+                fresh_unliened_backing_num: long_atoms * BOUND_SCALE,
+                expiry_slot: 10,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            });
+        markets[asset_index].engine.backing_short =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                market_id,
+                fresh_unliened_backing_num: short_atoms * BOUND_SCALE,
+                expiry_slot: 10,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            });
+        markets[asset_index].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                fresh_reserved_backing_num: long_atoms * BOUND_SCALE,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+        markets[asset_index].engine.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                fresh_reserved_backing_num: short_atoms * BOUND_SCALE,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+        total_backing_atoms += long_atoms + short_atoms;
+        asset_index += 1;
+    }
+    header.vault = V16PodU128::new(total_backing_atoms);
+    header.source_fresh_backing_total_num = V16PodU128::new(total_backing_atoms * BOUND_SCALE);
+    (header, markets)
+}
+
+// Shared assertion body for the public-route theorem matrix below. Amount is
+// symbolic; operation and domain are const-specialized to keep each complete
+// state proof tractable.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_public_backing_value_move_is_domain_isolated<
+    const WITHDRAW: bool,
+    const DOMAIN: usize,
+>() {
+    assert!(DOMAIN < 4);
+    // The public leaf proofs cover arithmetic independently. Here 255 nonzero
+    // values keep the complete funded two-asset frame tractable.
+    let amount_raw = kani::any::<u8>().max(1);
+    let domain = DOMAIN;
+    let amount = amount_raw as u128;
+    let amount_num = amount * BOUND_SCALE;
+    let asset_index = domain / 2;
+    let is_short = domain % 2 == 1;
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+
+    if WITHDRAW {
+        header.vault = V16PodU128::new(header.vault.get() + amount);
+        header.source_fresh_backing_total_num =
+            V16PodU128::new(header.source_fresh_backing_total_num.get() + amount_num);
+        let slot = &mut markets[asset_index].engine;
+        let (bucket, source) = if is_short {
+            (&mut slot.backing_short, &mut slot.source_credit_short)
+        } else {
+            (&mut slot.backing_long, &mut slot.source_credit_long)
+        };
+        bucket.fresh_unliened_backing_num =
+            V16PodU128::new(bucket.fresh_unliened_backing_num.get() + amount_num);
+        source.fresh_reserved_backing_num =
+            V16PodU128::new(source.fresh_reserved_backing_num.get() + amount_num);
+    }
+
+    let h0 = header;
+    let s0 = [markets[0].engine, markets[1].engine];
+    let wrapper0 = [markets[0].wrapper, markets[1].wrapper];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        if WITHDRAW {
+            market
+                .withdraw_fresh_counterparty_backing_not_atomic(domain, amount)
+                .unwrap();
+        } else {
+            market
+                .deposit_fresh_counterparty_backing_not_atomic(domain, amount, 10)
+                .unwrap();
+        }
+    }
+
+    let mut expected_header = h0;
+    expected_header.vault = V16PodU128::new(if WITHDRAW {
+        h0.vault.get() - amount
+    } else {
+        h0.vault.get() + amount
+    });
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(if WITHDRAW {
+        h0.source_fresh_backing_total_num.get() - amount_num
+    } else {
+        h0.source_fresh_backing_total_num.get() + amount_num
+    });
+    expected_header.risk_epoch = V16PodU64::new(h0.risk_epoch.get() + 1);
+    assert_eq!(header.vault.get(), expected_header.vault.get());
+    assert_eq!(header.insurance.get(), h0.insurance.get());
+    assert_eq!(header.c_tot.get(), h0.c_tot.get());
+    assert_eq!(header.pnl_pos_tot.get(), h0.pnl_pos_tot.get());
+    assert_eq!(
+        header.pnl_pos_bound_tot_num.get(),
+        h0.pnl_pos_bound_tot_num.get()
+    );
+    assert_eq!(header.pnl_pos_bound_tot.get(), h0.pnl_pos_bound_tot.get());
+    assert_eq!(
+        header.pnl_matured_pos_tot.get(),
+        h0.pnl_matured_pos_tot.get()
+    );
+    assert_eq!(
+        header.backing_provider_earnings_total.get(),
+        h0.backing_provider_earnings_total.get()
+    );
+    assert_eq!(
+        header.source_claim_bound_total_num.get(),
+        h0.source_claim_bound_total_num.get()
+    );
+    assert_eq!(
+        header.source_fresh_backing_total_num.get(),
+        expected_header.source_fresh_backing_total_num.get()
+    );
+    assert_eq!(
+        header.source_insurance_credit_reserved_total_atoms.get(),
+        h0.source_insurance_credit_reserved_total_atoms.get()
+    );
+    assert_eq!(
+        header.insurance_domain_budget_remaining_total.get(),
+        h0.insurance_domain_budget_remaining_total.get()
+    );
+    assert_eq!(
+        header.resolved_payout_blocker_count.get(),
+        h0.resolved_payout_blocker_count.get()
+    );
+    assert_eq!(
+        header.materialized_portfolio_count.get(),
+        h0.materialized_portfolio_count.get()
+    );
+    assert_eq!(
+        header.stale_certificate_count.get(),
+        h0.stale_certificate_count.get()
+    );
+    assert_eq!(
+        header.b_stale_account_count.get(),
+        h0.b_stale_account_count.get()
+    );
+    assert_eq!(
+        header.negative_pnl_account_count.get(),
+        h0.negative_pnl_account_count.get()
+    );
+    assert_eq!(header.risk_epoch.get(), expected_header.risk_epoch.get());
+    assert_eq!(header.asset_set_epoch.get(), h0.asset_set_epoch.get());
+    assert_eq!(
+        header.asset_activation_count.get(),
+        h0.asset_activation_count.get()
+    );
+    assert_eq!(
+        header.last_asset_activation_slot.get(),
+        h0.last_asset_activation_slot.get()
+    );
+    assert_eq!(header.next_market_id.get(), h0.next_market_id.get());
+    assert_eq!(header.oracle_epoch.get(), h0.oracle_epoch.get());
+    assert_eq!(header.funding_epoch.get(), h0.funding_epoch.get());
+    assert_eq!(header.slot_last.get(), h0.slot_last.get());
+    assert_eq!(header.current_slot.get(), h0.current_slot.get());
+    assert_eq!(header.bankruptcy_hlock_active, h0.bankruptcy_hlock_active);
+    assert_eq!(header.threshold_stress_active, h0.threshold_stress_active);
+    assert_eq!(header.loss_stale_active, h0.loss_stale_active);
+    assert_eq!(header.recovery_reason.present, h0.recovery_reason.present);
+    assert_eq!(header.recovery_reason.value, h0.recovery_reason.value);
+    assert_eq!(header.mode, h0.mode);
+    assert_eq!(header.resolved_slot.get(), h0.resolved_slot.get());
+    assert_eq!(header.payout_snapshot.get(), h0.payout_snapshot.get());
+    assert_eq!(
+        header.payout_snapshot_pnl_pos_tot.get(),
+        h0.payout_snapshot_pnl_pos_tot.get()
+    );
+    assert_eq!(header.payout_snapshot_captured, h0.payout_snapshot_captured);
+    assert!(kani_eq_resolved_payout_ledger_v16_account(
+        &header.resolved_payout_ledger,
+        &h0.resolved_payout_ledger
+    ));
+    let mut expected_slots = s0;
+    let mut expected_bucket = if is_short {
+        s0[asset_index].backing_short.try_to_runtime().unwrap()
+    } else {
+        s0[asset_index].backing_long.try_to_runtime().unwrap()
+    };
+    expected_bucket.fresh_unliened_backing_num = if WITHDRAW {
+        expected_bucket.fresh_unliened_backing_num - amount_num
+    } else {
+        expected_bucket.fresh_unliened_backing_num + amount_num
+    };
+    let mut expected_source = if is_short {
+        s0[asset_index]
+            .source_credit_short
+            .try_to_runtime()
+            .unwrap()
+    } else {
+        s0[asset_index].source_credit_long.try_to_runtime().unwrap()
+    };
+    expected_source.fresh_reserved_backing_num = if WITHDRAW {
+        expected_source.fresh_reserved_backing_num - amount_num
+    } else {
+        expected_source.fresh_reserved_backing_num + amount_num
+    };
+    expected_source.credit_epoch += 1;
+    if is_short {
+        expected_slots[asset_index].backing_short =
+            BackingBucketV16Account::from_runtime(&expected_bucket);
+        expected_slots[asset_index].source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&expected_source);
+    } else {
+        expected_slots[asset_index].backing_long =
+            BackingBucketV16Account::from_runtime(&expected_bucket);
+        expected_slots[asset_index].source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&expected_source);
+    }
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[0],
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[1],
+        &markets[1].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrapper0[0]);
+    assert_eq!(markets[1].wrapper, wrapper0[1]);
+}
+
+// Together these eight harnesses prove both value directions for every source
+// domain in a two-asset slab. Exact stock deltas and complete slot frames make
+// cross-domain leakage or provider-fund lockup direct falsifiers.
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! backing_isolation_theorem {
+    ($name:ident, $withdraw:literal, $domain:literal) => {
+        #[kani::proof]
+        #[kani::stub(
+            V16Core::expected_source_credit_rate_num_for_state,
+            closure_zero_claim_credit_rate
+        )]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_public_backing_value_move_is_domain_isolated::<$withdraw, $domain>();
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+backing_isolation_theorem!(closure_backing_deposit_asset0_long_isolated, false, 0);
+#[cfg(all(kani, feature = "closure"))]
+backing_isolation_theorem!(closure_backing_deposit_asset0_short_isolated, false, 1);
+#[cfg(all(kani, feature = "closure"))]
+backing_isolation_theorem!(closure_backing_deposit_asset1_long_isolated, false, 2);
+#[cfg(all(kani, feature = "closure"))]
+backing_isolation_theorem!(closure_backing_deposit_asset1_short_isolated, false, 3);
+#[cfg(all(kani, feature = "closure"))]
+backing_isolation_theorem!(closure_backing_withdraw_asset0_long_isolated, true, 0);
+#[cfg(all(kani, feature = "closure"))]
+backing_isolation_theorem!(closure_backing_withdraw_asset0_short_isolated, true, 1);
+#[cfg(all(kani, feature = "closure"))]
+backing_isolation_theorem!(closure_backing_withdraw_asset1_long_isolated, true, 2);
+#[cfg(all(kani, feature = "closure"))]
+backing_isolation_theorem!(closure_backing_withdraw_asset1_short_isolated, true, 3);
