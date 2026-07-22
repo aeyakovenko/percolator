@@ -4143,3 +4143,238 @@ fn closure_two_asset_health_certificate_is_complete() {
     );
     closure_two_asset_health_certificate_is_complete_body(asset0_long, asset1_long);
 }
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_liquidation_active_leg_slot_stub<T, U>(
+    account: &PortfolioV16View<'_>,
+    asset_index: usize,
+) -> V16Result<Option<usize>> {
+    assert!(asset_index < 2);
+    assert!(active_bitmap_get(
+        account.header.active_bitmap.map(V16PodU64::get),
+        asset_index
+    ));
+    let leg = account.header.legs[asset_index].try_to_runtime()?;
+    assert!(leg.active);
+    assert_eq!(leg.asset_index as usize, asset_index);
+    Ok(Some(asset_index))
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_liquidation_position_lookup_stub<T, U>(
+    account: &PortfolioV16View<'_>,
+    asset_index: usize,
+    delta_q: i128,
+) -> V16Result<PositionDeltaLookupV16> {
+    assert!(asset_index < 2);
+    assert!(active_bitmap_get(
+        account.header.active_bitmap.map(V16PodU64::get),
+        asset_index
+    ));
+    let existing_slot = asset_index;
+    let leg = account.header.legs[existing_slot].try_to_runtime()?;
+    assert!(leg.active);
+    assert_eq!(leg.asset_index as usize, asset_index);
+    let current_q = signed_position(leg);
+    let next_q = current_q
+        .checked_add(delta_q)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    validate_basis_or_zero(next_q)?;
+    Ok(PositionDeltaLookupV16 {
+        existing_slot: Some(existing_slot),
+        empty_slot: Some(2),
+        current_q,
+        next_q,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_liquidation_zero_kf_settlement_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    leg_slot: usize,
+) -> V16Result<()> {
+    assert!(leg_slot < 2);
+    let leg = account.header.legs[leg_slot].try_to_runtime()?;
+    assert!(leg.active);
+    let asset = market.asset_state(leg.asset_index as usize)?;
+    let (k_now, f_now) = match leg.side {
+        SideV16::Long => (asset.k_long, asset.f_long_num),
+        SideV16::Short => (asset.k_short, asset.f_short_num),
+    };
+    assert_eq!(leg.k_snap, k_now);
+    assert_eq!(leg.f_snap, f_now);
+    account.header.health_cert.valid = 0;
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_liquidation_reduce_is_asset_isolated_body(target_asset: usize, target_long: bool) {
+    assert!(target_asset < 2);
+    let frame_tag: u8 = kani::any();
+    kani::assume(frame_tag <= 3);
+    kani::cover!(frame_tag == 0, "minimum unrelated frame is reachable");
+    kani::cover!(frame_tag == 3, "maximum unrelated frame is reachable");
+    let unrelated_asset = 1 - target_asset;
+    let target_side = if target_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let unrelated_side = opposite_side(target_side);
+
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+    markets[0].wrapper = u64::from(frame_tag);
+    markets[1].wrapper = !u64::from(frame_tag);
+    let capital = u128::from(frame_tag) + 5;
+    header.vault = V16PodU128::new(header.vault.get() + capital);
+    header.c_tot = V16PodU128::new(capital);
+    header.resolved_payout_blocker_count = V16PodU64::new(8);
+    let mut asset_index = 0usize;
+    while asset_index < 2 {
+        let mut asset = markets[asset_index].engine.asset.try_to_runtime().unwrap();
+        asset.effective_price = 5;
+        asset.raw_oracle_target_price = 5;
+        asset.fund_px_last = 5;
+        let lots = if asset_index == target_asset {
+            2
+        } else {
+            u128::from(frame_tag & 3) + 2
+        };
+        asset.oi_eff_long_q = lots * POS_SCALE;
+        asset.oi_eff_short_q = lots * POS_SCALE;
+        asset.stored_pos_count_long = lots as u64;
+        asset.stored_pos_count_short = lots as u64;
+        asset.loss_weight_sum_long = lots * POS_SCALE;
+        asset.loss_weight_sum_short = lots * POS_SCALE;
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        asset_index += 1;
+    }
+
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        header.market_group_id,
+        [9; 32],
+        [8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(provenance).unwrap();
+    account_header.capital = V16PodU128::new(capital);
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+    let mut slot = 0usize;
+    while slot < 2 {
+        let side = if slot == target_asset {
+            target_side
+        } else {
+            unrelated_side
+        };
+        account_header.legs[slot] = closure_health_leg(
+            slot as u32,
+            markets[slot].engine.asset.market_id.get(),
+            1,
+            side,
+        );
+        slot += 1;
+    }
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+    let account_before = account_header;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .reduce_position(
+                &mut PortfolioV16ViewMut::new(&mut account_header),
+                target_asset,
+                POS_SCALE,
+            )
+            .unwrap();
+    }
+
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(7);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+
+    let mut expected_slots = slots_before;
+    let mut target = expected_slots[target_asset].asset.try_to_runtime().unwrap();
+    if target_long {
+        target.oi_eff_long_q -= POS_SCALE;
+        target.stored_pos_count_long -= 1;
+        target.loss_weight_sum_long -= POS_SCALE;
+        target.oi_eff_short_q -= POS_SCALE;
+        target.a_short = ADL_ONE / 2;
+    } else {
+        target.oi_eff_short_q -= POS_SCALE;
+        target.stored_pos_count_short -= 1;
+        target.loss_weight_sum_short -= POS_SCALE;
+        target.oi_eff_long_q -= POS_SCALE;
+        target.a_long = ADL_ONE / 2;
+    }
+    expected_slots[target_asset].asset = AssetStateV16Account::from_runtime(&target);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[target_asset],
+        &markets[target_asset].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slots_before[unrelated_asset],
+        &markets[unrelated_asset].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrappers_before[0]);
+    assert_eq!(markets[1].wrapper, wrappers_before[1]);
+
+    let mut expected_account = account_before;
+    expected_account.legs[target_asset] =
+        PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    expected_account.active_bitmap[0] = V16PodU64::new(1u64 << unrelated_asset);
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        &account_header
+    ));
+}
+
+// Liquidation's production position-reduction stage may mutate the selected
+// asset and its matched side, but every other asset/domain, all value classes,
+// and every wrapper byte are a strict frame. Separate target/side harnesses
+// avoid pointer-alias blowup; each remains symbolic over unrelated exposure.
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_liquidation_isolation_harness {
+    ($name:ident, $target_asset:expr, $target_long:expr) => {
+        #[kani::proof]
+        #[kani::stub(
+            PortfolioLegV16Account::try_to_runtime,
+            closure_health_valid_leg_decode_stub
+        )]
+        #[kani::stub(
+            crate::wide_math::wide_mul_div_floor_u128,
+            closure_rebalance_exact_small_mul_div_floor
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::active_leg_slot_for_asset,
+            closure_liquidation_active_leg_slot_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::position_delta_lookup_for_asset,
+            closure_liquidation_position_lookup_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::settle_leg_kf_effects_at_slot,
+            closure_liquidation_zero_kf_settlement_stub
+        )]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_liquidation_reduce_is_asset_isolated_body($target_asset, $target_long);
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_liquidation_isolation_harness!(closure_liquidation_asset0_long_is_isolated, 0, true);
+#[cfg(all(kani, feature = "closure"))]
+closure_liquidation_isolation_harness!(closure_liquidation_asset0_short_is_isolated, 0, false);
+#[cfg(all(kani, feature = "closure"))]
+closure_liquidation_isolation_harness!(closure_liquidation_asset1_long_is_isolated, 1, true);
+#[cfg(all(kani, feature = "closure"))]
+closure_liquidation_isolation_harness!(closure_liquidation_asset1_short_is_isolated, 1, false);
