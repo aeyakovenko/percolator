@@ -9781,6 +9781,163 @@ fn proof_v16_public_accrual_of_asset_one_preserves_asset_zero_and_value() {
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_two_asset_accrual_economic_state_is_order_independent() {
+    let asset_zero_starts_stale: bool = kani::any();
+    let (mut initial_header, mut initial_markets) = two_market_direct_view_fixture();
+    initial_header.vault = V16PodU128::new(37);
+    initial_header.c_tot = V16PodU128::new(11);
+    initial_header.insurance = V16PodU128::new(13);
+    initial_header.oracle_epoch = V16PodU64::new(7);
+    initial_header.funding_epoch = V16PodU64::new(9);
+    initial_header.resolved_payout_blocker_count = V16PodU64::new(4);
+    initial_markets[0].wrapper = 11;
+    initial_markets[1].wrapper = 22;
+
+    let mut asset_index = 0usize;
+    while asset_index < initial_markets.len() {
+        let mut asset = initial_markets[asset_index]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap();
+        asset.oi_eff_long_q = POS_SCALE;
+        asset.oi_eff_short_q = POS_SCALE;
+        asset.stored_pos_count_long = 1;
+        asset.stored_pos_count_short = 1;
+        asset.loss_weight_sum_long = POS_SCALE;
+        asset.loss_weight_sum_short = POS_SCALE;
+        initial_markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        asset_index += 1;
+    }
+    let asset_zero_initial_slot = if asset_zero_starts_stale { 1 } else { 2 };
+    let mut asset_zero = initial_markets[0].engine.asset.try_to_runtime().unwrap();
+    asset_zero.slot_last = asset_zero_initial_slot;
+    initial_markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset_zero);
+    initial_header.slot_last = V16PodU64::new(asset_zero_initial_slot);
+    initial_header.loss_stale_active = u8::from(asset_zero_starts_stale);
+
+    let mut forward_header = initial_header;
+    let mut forward_markets = initial_markets;
+    let (forward_zero, forward_one) = {
+        let mut market = MarketGroupV16ViewMut::new(&mut forward_header, &mut forward_markets);
+        let zero = market
+            .accrue_asset_to_not_atomic(0, 3, 101, 0, true)
+            .unwrap();
+        let one = market
+            .accrue_asset_to_not_atomic(1, 3, 103, 0, true)
+            .unwrap();
+        (zero, one)
+    };
+
+    let mut reverse_header = initial_header;
+    let mut reverse_markets = initial_markets;
+    let (reverse_one, reverse_zero) = {
+        let mut market = MarketGroupV16ViewMut::new(&mut reverse_header, &mut reverse_markets);
+        let one = market
+            .accrue_asset_to_not_atomic(1, 3, 103, 0, true)
+            .unwrap();
+        let zero = market
+            .accrue_asset_to_not_atomic(0, 3, 101, 0, true)
+            .unwrap();
+        (one, zero)
+    };
+
+    let expected_zero_slot = asset_zero_initial_slot + 1;
+    let expected_zero_outcome = AccrueAssetOutcomeV16 {
+        dt: 1,
+        price_move_active: true,
+        funding_active: false,
+        equity_active: true,
+        loss_stale_after: expected_zero_slot < 3,
+    };
+    let expected_one_outcome = AccrueAssetOutcomeV16 {
+        dt: 1,
+        price_move_active: true,
+        funding_active: false,
+        equity_active: true,
+        loss_stale_after: false,
+    };
+    assert_eq!(forward_zero, expected_zero_outcome);
+    assert_eq!(reverse_zero, expected_zero_outcome);
+    assert_eq!(forward_one, expected_one_outcome);
+    assert_eq!(reverse_one, expected_one_outcome);
+
+    let mut expected_zero = initial_markets[0].engine;
+    let mut expected_zero_asset = expected_zero.asset.try_to_runtime().unwrap();
+    expected_zero_asset.k_long += ADL_ONE as i128;
+    expected_zero_asset.k_short -= ADL_ONE as i128;
+    expected_zero_asset.effective_price = 101;
+    expected_zero_asset.fund_px_last = 101;
+    expected_zero_asset.slot_last = expected_zero_slot;
+    expected_zero.asset = AssetStateV16Account::from_runtime(&expected_zero_asset);
+    let mut expected_one = initial_markets[1].engine;
+    let mut expected_one_asset = expected_one.asset.try_to_runtime().unwrap();
+    expected_one_asset.k_long += 3 * ADL_ONE as i128;
+    expected_one_asset.k_short -= 3 * ADL_ONE as i128;
+    expected_one_asset.effective_price = 103;
+    expected_one_asset.fund_px_last = 103;
+    expected_one_asset.slot_last = 3;
+    expected_one.asset = AssetStateV16Account::from_runtime(&expected_one_asset);
+
+    let mut expected_forward_header = initial_header;
+    expected_forward_header.current_slot = V16PodU64::new(3);
+    expected_forward_header.slot_last = V16PodU64::new(3);
+    expected_forward_header.loss_stale_active = 0;
+    expected_forward_header.oracle_epoch = V16PodU64::new(9);
+    let mut expected_reverse_header = expected_forward_header;
+    expected_reverse_header.slot_last = V16PodU64::new(expected_zero_slot);
+    expected_reverse_header.loss_stale_active = u8::from(expected_zero_slot < 3);
+
+    kani::cover!(
+        asset_zero_starts_stale
+            && forward_header.slot_last != reverse_header.slot_last
+            && forward_header.loss_stale_active != reverse_header.loss_stale_active,
+        "two-asset accrual covers heterogeneous freshness summaries"
+    );
+    kani::cover!(
+        !asset_zero_starts_stale
+            && kani_eq_market_group_v16_header_account(&forward_header, &reverse_header),
+        "two-asset accrual covers fully commuting freshness summaries"
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_forward_header,
+        &forward_header
+    ));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_reverse_header,
+        &reverse_header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_zero,
+        &forward_markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_zero,
+        &reverse_markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_one,
+        &forward_markets[1].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_one,
+        &reverse_markets[1].engine
+    ));
+    assert_eq!(forward_header.vault, initial_header.vault);
+    assert_eq!(forward_header.c_tot, initial_header.c_tot);
+    assert_eq!(forward_header.insurance, initial_header.insurance);
+    assert_eq!(reverse_header.vault, initial_header.vault);
+    assert_eq!(reverse_header.c_tot, initial_header.c_tot);
+    assert_eq!(reverse_header.insurance, initial_header.insurance);
+    assert_eq!(forward_markets[0].wrapper, initial_markets[0].wrapper);
+    assert_eq!(forward_markets[1].wrapper, initial_markets[1].wrapper);
+    assert_eq!(reverse_markets[0].wrapper, initial_markets[0].wrapper);
+    assert_eq!(reverse_markets[1].wrapper, initial_markets[1].wrapper);
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_price_move_cap_rejects_before_accrual_mutation() {
