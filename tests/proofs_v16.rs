@@ -6948,16 +6948,16 @@ fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
     }
 }
 
-// Protocol-owned junior vault residual is not collateral. This full-width
+// Group-wide junior vault residual is not direct account collateral. This full-width
 // relational theorem runs the production equity kernel over identical account
 // state in two initialized markets differing only by a symbolic nonzero
-// residual. Equality to an independent account-only oracle proves residual can
-// neither cure losses nor fund IM/MM; the downstream requirement and margin
-// decision kernels are proved separately.
+// residual. Equality to an independent account-only oracle proves source-free
+// PnL cannot borrow from the group pool to cure losses or fund IM/MM; the
+// downstream requirement and margin decision kernels are proved separately.
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
-fn proof_v16_protocol_residual_never_enters_production_haircut_equity() {
+fn proof_v16_junior_residual_never_enters_unattributed_haircut_equity() {
     let capital: u128 = kani::any();
     let pnl: i128 = kani::any();
     let fee_debt: u128 = kani::any();
@@ -7016,6 +7016,87 @@ fn proof_v16_protocol_residual_never_enters_production_haircut_equity() {
     assert_eq!(senior_equity, expected);
     assert_eq!(residual_equity, expected);
     assert_eq!(residual_equity, senior_equity);
+}
+
+// Source-attributed positive PnL receives only its domain's realizable backing,
+// never the group-wide junior residual. This complements the source-free theorem
+// above by exercising the production sparse-domain lookup, current-ledger check,
+// credit-rate haircut, and account equity composition in representative zero,
+// partial, and full-backing regimes. The source-credit arithmetic is proven for
+// every ratio separately; selecting the three semantic regimes here keeps this
+// higher-level composition theorem tractable without replacing production code.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_junior_residual_never_augments_source_attributed_haircut_equity() {
+    let capital_raw: u8 = kani::any();
+    let backing_case: u8 = kani::any();
+    let fee_debt_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    kani::assume(capital_raw <= 32);
+    kani::assume(backing_case <= 2);
+    kani::assume(fee_debt_raw <= 16);
+    kani::assume((1..=16).contains(&residual_raw));
+
+    let capital = capital_raw as u128;
+    let claim = 16u128;
+    let backing = match backing_case {
+        0 => 0,
+        1 => 7,
+        _ => claim,
+    };
+    let fee_debt = fee_debt_raw as u128;
+    let residual = residual_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+    let backing_num = backing * BOUND_SCALE;
+    let mut source_credit = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: backing_num,
+        ..SourceCreditStateV16::EMPTY
+    };
+    source_credit.credit_rate_num = backing * (CREDIT_RATE_SCALE / claim);
+    let expected_equity = capital as i128 + backing as i128 - fee_debt as i128;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.c_tot = V16PodU128::new(capital);
+    header.vault = V16PodU128::new(capital + backing + residual);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&source_credit);
+    markets[0].engine.backing_long = if backing == 0 {
+        BackingBucketV16Account::from_runtime(&BackingBucketV16::empty_for_market(1))
+    } else {
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: 1,
+            fresh_unliened_backing_num: backing_num,
+            expiry_slot: 100,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        })
+    };
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.fee_credits = V16PodI128::new(-(fee_debt as i128));
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let equity = market.kani_account_haircut_equity(&account);
+
+    kani::cover!(
+        backing > 0 && backing < claim && residual > backing && fee_debt > 0 && expected_equity < 0,
+        "underbacked negative-equity claim cannot borrow a larger junior residual"
+    );
+    assert!(
+        market.kani_residual() == residual && backing <= claim && equity == Ok(expected_equity)
+    );
 }
 
 #[kani::proof]
