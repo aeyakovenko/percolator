@@ -10561,6 +10561,91 @@ fn proof_v16_public_counterparty_lien_create_moves_fresh_to_valid_without_value_
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_sequential_counterparty_lien_kernel_cannot_double_reserve_backing() {
+    let total_raw: u8 = kani::any();
+    let first_raw: u8 = kani::any();
+    let second_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&total_raw));
+    kani::assume((1..=total_raw).contains(&first_raw));
+    kani::assume(second_raw <= 8);
+    let total = total_raw as u128 * BOUND_SCALE;
+    let first = first_raw as u128 * BOUND_SCALE;
+    let second = second_raw as u128 * BOUND_SCALE;
+    let remaining = total - first;
+    let second_fits = second <= remaining;
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: total,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: total,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    kani::cover!(
+        second == 0 && first < total,
+        "sequential reservation covers an idempotent second request"
+    );
+    kani::cover!(
+        second > 0 && second < remaining,
+        "sequential reservation covers two partial reservations"
+    );
+    kani::cover!(
+        second > 0 && second == remaining,
+        "sequential reservation covers exact backing exhaustion"
+    );
+    kani::cover!(
+        second > remaining,
+        "sequential reservation covers over-reservation rejection"
+    );
+    let (bucket_after_first, source_after_first) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            bucket, source, 0, first,
+        )
+        .unwrap();
+    let second_result = MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+        bucket_after_first,
+        source_after_first,
+        0,
+        second,
+    );
+
+    assert_eq!(second_result.is_ok(), second_fits);
+    assert_eq!(bucket_after_first.fresh_unliened_backing_num, remaining);
+    assert_eq!(bucket_after_first.valid_liened_backing_num, first);
+    assert_eq!(source_after_first.fresh_reserved_backing_num, total);
+    assert_eq!(source_after_first.valid_liened_backing_num, first);
+    if second_fits {
+        let (bucket_after_second, source_after_second) = second_result.unwrap();
+        assert_eq!(
+            bucket_after_second.fresh_unliened_backing_num,
+            remaining - second
+        );
+        assert_eq!(bucket_after_second.valid_liened_backing_num, first + second);
+        assert_eq!(source_after_second.valid_liened_backing_num, first + second);
+        assert_eq!(source_after_second.fresh_reserved_backing_num, total);
+        assert_eq!(
+            bucket_after_second.fresh_unliened_backing_num
+                + bucket_after_second.valid_liened_backing_num,
+            total
+        );
+        assert_eq!(
+            source_after_second.valid_liened_backing_num,
+            bucket_after_second.valid_liened_backing_num
+        );
+        assert!(source_after_second.valid_liened_backing_num <= total);
+    } else {
+        assert_eq!(second_result, Err(V16Error::LockActive));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_counterparty_lien_create_delta_is_expiry_gated_and_exact() {
