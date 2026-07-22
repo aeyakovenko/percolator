@@ -5308,3 +5308,187 @@ closure_forfeit_settlement_harness!(
     1,
     false
 );
+
+// The scalar insurance kernel proves the full-domain min/cap arithmetic. This
+// closure theorem proves the production glue around it: the losing leg draws
+// only the opposing-side insurance domain, leaves the vault and every unrelated
+// domain unchanged, and clears no more account liability than insurance paid.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_negative_pnl_insurance_draw_is_domain_isolated_body(
+    asset_index: usize,
+    bankrupt_long: bool,
+) {
+    assert!(asset_index < 2);
+    let deficit_raw: u8 = kani::any();
+    let domain_available_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&deficit_raw));
+    kani::assume(domain_available_raw <= 8);
+    let deficit = deficit_raw as u128;
+    let domain_available = domain_available_raw as u128;
+    kani::cover!(domain_available == 0, "zero-budget draw is reachable");
+    kani::cover!(
+        domain_available > 0 && domain_available < deficit,
+        "domain-capped draw is reachable"
+    );
+    kani::cover!(
+        domain_available == deficit,
+        "exact-deficit draw is reachable"
+    );
+    kani::cover!(
+        domain_available > deficit,
+        "excess-domain-budget draw is reachable"
+    );
+
+    let bankrupt_side = if bankrupt_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let target_domain = asset_index * 2 + usize::from(bankrupt_long);
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+    let mut total_domain_remaining = 0u128;
+    let mut domain = 0usize;
+    while domain < 4 {
+        let spent = 1 + (domain % 2) as u128;
+        let remaining = if domain == target_domain {
+            domain_available
+        } else {
+            2 + domain as u128
+        };
+        let slot = &mut markets[domain / 2].engine;
+        if domain % 2 == 0 {
+            slot.insurance_domain_budget_long = V16PodU128::new(spent + remaining);
+            slot.insurance_domain_spent_long = V16PodU128::new(spent);
+        } else {
+            slot.insurance_domain_budget_short = V16PodU128::new(spent + remaining);
+            slot.insurance_domain_spent_short = V16PodU128::new(spent);
+        }
+        total_domain_remaining += remaining;
+        domain += 1;
+    }
+    let insurance_slack = 3u128;
+    header.insurance = V16PodU128::new(total_domain_remaining + insurance_slack);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(total_domain_remaining);
+    header.vault = V16PodU128::new(header.vault.get() + header.insurance.get());
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        header.market_group_id,
+        [9; 32],
+        [8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(provenance).unwrap();
+    account_header.pnl = V16PodI128::new(-(deficit as i128));
+
+    {
+        let market = MarketGroupV16View::new(&header, &markets);
+        market.validate_shape().unwrap();
+        PortfolioV16View::new(&account_header)
+            .validate_with_market(&market)
+            .unwrap();
+    }
+
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+    let account_before = account_header;
+    let expected_used = deficit.min(domain_available);
+    let used = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .consume_domain_insurance_for_negative_pnl(
+                asset_index,
+                bankrupt_side,
+                &mut PortfolioV16ViewMut::new(&mut account_header),
+            )
+            .unwrap()
+    };
+    assert_eq!(used, expected_used);
+    assert!(used <= deficit);
+    assert!(used <= domain_available);
+    assert_eq!(used + (deficit - used), deficit);
+
+    let mut expected_header = header_before;
+    expected_header.insurance = V16PodU128::new(header_before.insurance.get() - used);
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(header_before.insurance_domain_budget_remaining_total.get() - used);
+    expected_header.negative_pnl_account_count = V16PodU64::new(u64::from(used < deficit));
+    expected_header.bankruptcy_hlock_active = 1;
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+
+    let mut expected_slots = slots_before;
+    let expected_slot = &mut expected_slots[target_domain / 2];
+    if target_domain % 2 == 0 {
+        expected_slot.insurance_domain_spent_long =
+            V16PodU128::new(expected_slot.insurance_domain_spent_long.get() + used);
+    } else {
+        expected_slot.insurance_domain_spent_short =
+            V16PodU128::new(expected_slot.insurance_domain_spent_short.get() + used);
+    }
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[0],
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[1],
+        &markets[1].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrappers_before[0]);
+    assert_eq!(markets[1].wrapper, wrappers_before[1]);
+
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(-((deficit - used) as i128));
+    expected_account.health_cert.valid = 0;
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        &account_header
+    ));
+    assert_eq!(header.vault.get(), header_before.vault.get());
+    assert_eq!(header.c_tot.get(), header_before.c_tot.get());
+    assert_eq!(header.insurance.get() + used, header_before.insurance.get());
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_negative_pnl_insurance_harness {
+    ($name:ident, $asset:literal, $long:literal) => {
+        #[kani::proof]
+        #[kani::stub(
+            V16Core::expected_source_credit_rate_num_for_state,
+            closure_zero_claim_credit_rate
+        )]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_negative_pnl_insurance_draw_is_domain_isolated_body($asset, $long);
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_negative_pnl_insurance_harness!(
+    closure_negative_pnl_insurance_asset0_long_is_isolated,
+    0,
+    true
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_negative_pnl_insurance_harness!(
+    closure_negative_pnl_insurance_asset0_short_is_isolated,
+    0,
+    false
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_negative_pnl_insurance_harness!(
+    closure_negative_pnl_insurance_asset1_long_is_isolated,
+    1,
+    true
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_negative_pnl_insurance_harness!(
+    closure_negative_pnl_insurance_asset1_short_is_isolated,
+    1,
+    false
+);
