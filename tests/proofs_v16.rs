@@ -7099,6 +7099,114 @@ fn proof_v16_junior_residual_never_augments_source_attributed_haircut_equity() {
     );
 }
 
+// Asset isolation at the production health boundary: changing another asset's
+// valid source-claim/backing regime and the matching group aggregates cannot
+// change an account whose sole source claim names this asset. The source-rate
+// arithmetic and ledger constructors are proved separately; this relational
+// theorem checks sparse-domain routing plus account-equity composition while
+// preserving the same junior residual in both whole-market states.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_unrelated_asset_source_state_cannot_change_account_haircut_equity() {
+    let capital_raw: u8 = kani::any();
+    let fee_debt_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    let unrelated_backing_case: u8 = kani::any();
+    kani::assume(capital_raw <= 32);
+    kani::assume(fee_debt_raw <= 16);
+    kani::assume((1..=16).contains(&residual_raw));
+    kani::assume(unrelated_backing_case <= 2);
+
+    let capital = capital_raw as u128;
+    let fee_debt = fee_debt_raw as u128;
+    let residual = residual_raw as u128;
+    let claim = 16u128;
+    let claimed_backing = 7u128;
+    let unrelated_backing = match unrelated_backing_case {
+        0 => 0,
+        1 => 7,
+        _ => claim,
+    };
+    let claim_num = claim * BOUND_SCALE;
+    let claimed_backing_num = claimed_backing * BOUND_SCALE;
+    let unrelated_backing_num = unrelated_backing * BOUND_SCALE;
+    let source_state = |backing: u128| SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: backing * BOUND_SCALE,
+        credit_rate_num: backing * (CREDIT_RATE_SCALE / claim),
+        ..SourceCreditStateV16::EMPTY
+    };
+    let backing_bucket = |market_id: u64, backing: u128| {
+        if backing == 0 {
+            BackingBucketV16::empty_for_market(market_id)
+        } else {
+            BackingBucketV16 {
+                market_id,
+                fresh_unliened_backing_num: backing * BOUND_SCALE,
+                expiry_slot: 100,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            }
+        }
+    };
+
+    let (mut baseline_header, mut baseline_markets, mut account_header) = two_market_view_fixture();
+    baseline_header.c_tot = V16PodU128::new(capital);
+    baseline_header.vault = V16PodU128::new(capital + claimed_backing + residual);
+    baseline_header.pnl_pos_tot = V16PodU128::new(claim);
+    baseline_header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    baseline_header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    baseline_header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    baseline_header.source_fresh_backing_total_num = V16PodU128::new(claimed_backing_num);
+    baseline_markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&source_state(claimed_backing));
+    baseline_markets[0].engine.backing_long =
+        BackingBucketV16Account::from_runtime(&backing_bucket(1, claimed_backing));
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.fee_credits = V16PodI128::new(-(fee_debt as i128));
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let mut stressed_header = baseline_header;
+    let mut stressed_markets = baseline_markets;
+    stressed_header.vault =
+        V16PodU128::new(capital + claimed_backing + unrelated_backing + residual);
+    stressed_header.pnl_pos_tot = V16PodU128::new(claim * 2);
+    stressed_header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num * 2);
+    stressed_header.pnl_pos_bound_tot = V16PodU128::new(claim * 2);
+    stressed_header.source_claim_bound_total_num = V16PodU128::new(claim_num * 2);
+    stressed_header.source_fresh_backing_total_num =
+        V16PodU128::new(claimed_backing_num + unrelated_backing_num);
+    stressed_markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&source_state(unrelated_backing));
+    stressed_markets[1].engine.backing_long =
+        BackingBucketV16Account::from_runtime(&backing_bucket(2, unrelated_backing));
+
+    let baseline = MarketGroupV16ViewMut::new(&mut baseline_header, &mut baseline_markets);
+    let stressed = MarketGroupV16ViewMut::new(&mut stressed_header, &mut stressed_markets);
+    let account = PortfolioV16View::new(&account_header);
+    let baseline_equity = baseline.kani_account_haircut_equity(&account);
+    let stressed_equity = stressed.kani_account_haircut_equity(&account);
+
+    kani::cover!(
+        unrelated_backing > claimed_backing
+            && residual > claimed_backing
+            && fee_debt > 0
+            && (capital as i128 + claimed_backing as i128 - fee_debt as i128) < 0,
+        "better-funded unrelated asset cannot cure the claimed asset's negative equity"
+    );
+    assert!(
+        baseline.kani_residual() == residual
+            && stressed.kani_residual() == residual
+            && baseline_equity == stressed_equity
+            && baseline_equity == Ok(capital as i128 + claimed_backing as i128 - fee_debt as i128)
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
