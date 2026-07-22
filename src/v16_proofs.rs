@@ -3604,3 +3604,299 @@ fn closure_public_cranker_reward_consumes_only_unbudgeted_insurance() {
             && header.c_tot.get() + header.insurance.get() == h0.c_tot.get() + h0.insurance.get()
     );
 }
+
+// The exact U256 divider is discharged independently. This composition uses
+// bounded operands whose native product is exact, so Kani can prove the
+// surrounding market mutation without bit-blasting long division.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_rebalance_exact_small_mul_div_floor(a: u128, b: u128, d: u128) -> u128 {
+    assert!(d != 0);
+    a.checked_mul(b).unwrap() / d
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_rebalance_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(77u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    header.vault = V16PodU128::new(23);
+    header.c_tot = V16PodU128::new(5);
+    header.insurance = V16PodU128::new(7);
+    header.risk_epoch = V16PodU64::new(7);
+    (header, markets)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_assert_rebalance_value_domain_frame(
+    before_header: &MarketGroupV16HeaderAccount,
+    after_header: &MarketGroupV16HeaderAccount,
+    before_slot: &EngineAssetSlotV16Account,
+    after_market: &Market<u64>,
+    expected_risk_epoch: u64,
+) {
+    assert_eq!(after_header.vault, before_header.vault);
+    assert_eq!(after_header.insurance, before_header.insurance);
+    assert_eq!(after_header.c_tot, before_header.c_tot);
+    assert_eq!(after_header.pnl_pos_tot, before_header.pnl_pos_tot);
+    assert_eq!(
+        after_header.pnl_pos_bound_tot_num,
+        before_header.pnl_pos_bound_tot_num
+    );
+    assert_eq!(
+        after_header.pnl_pos_bound_tot,
+        before_header.pnl_pos_bound_tot
+    );
+    assert_eq!(
+        after_header.pnl_matured_pos_tot,
+        before_header.pnl_matured_pos_tot
+    );
+    assert_eq!(
+        after_header.backing_provider_earnings_total,
+        before_header.backing_provider_earnings_total
+    );
+    assert_eq!(
+        after_header.source_claim_bound_total_num,
+        before_header.source_claim_bound_total_num
+    );
+    assert_eq!(
+        after_header.source_fresh_backing_total_num,
+        before_header.source_fresh_backing_total_num
+    );
+    assert_eq!(
+        after_header.source_insurance_credit_reserved_total_atoms,
+        before_header.source_insurance_credit_reserved_total_atoms
+    );
+    assert_eq!(
+        after_header.insurance_domain_budget_remaining_total,
+        before_header.insurance_domain_budget_remaining_total
+    );
+    assert_eq!(
+        after_header.resolved_payout_blocker_count,
+        before_header.resolved_payout_blocker_count
+    );
+    assert_eq!(after_header.risk_epoch.get(), expected_risk_epoch);
+
+    let after_slot = &after_market.engine;
+    assert_eq!(
+        after_slot.source_credit_long,
+        before_slot.source_credit_long
+    );
+    assert_eq!(
+        after_slot.source_credit_short,
+        before_slot.source_credit_short
+    );
+    assert_eq!(after_slot.backing_long, before_slot.backing_long);
+    assert_eq!(after_slot.backing_short, before_slot.backing_short);
+    assert_eq!(
+        after_slot.insurance_reservation_long,
+        before_slot.insurance_reservation_long
+    );
+    assert_eq!(
+        after_slot.insurance_reservation_short,
+        before_slot.insurance_reservation_short
+    );
+    assert_eq!(
+        after_slot.insurance_domain_budget_long,
+        before_slot.insurance_domain_budget_long
+    );
+    assert_eq!(
+        after_slot.insurance_domain_budget_short,
+        before_slot.insurance_domain_budget_short
+    );
+    assert_eq!(
+        after_slot.insurance_domain_spent_long,
+        before_slot.insurance_domain_spent_long
+    );
+    assert_eq!(
+        after_slot.insurance_domain_spent_short,
+        before_slot.insurance_domain_spent_short
+    );
+    assert_eq!(
+        after_slot.pending_domain_loss_barrier_long,
+        before_slot.pending_domain_loss_barrier_long
+    );
+    assert_eq!(
+        after_slot.pending_domain_loss_barrier_short,
+        before_slot.pending_domain_loss_barrier_short
+    );
+    assert_eq!(after_market.wrapper, 77);
+}
+
+// A unilateral partial exit must restore matched OI by changing only the peer
+// side's OI/A pair. In particular, it cannot move token stocks, insurance
+// budgets, source credit, backing, pending-loss barriers, or wrapper bytes.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::wide_math::wide_mul_div_floor_u128,
+    closure_rebalance_exact_small_mul_div_floor
+)]
+fn closure_partial_unilateral_rebalance_is_value_and_domain_neutral() {
+    let closes_short: bool = kani::any();
+    let pre_q = 4 * POS_SCALE;
+    let close_q = 3 * POS_SCALE;
+    let remaining_q = pre_q - close_q;
+    let closed_side = if closes_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let (mut header, mut markets) = closure_rebalance_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = pre_q;
+    asset.oi_eff_short_q = pre_q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = pre_q;
+    asset.loss_weight_sum_short = pre_q;
+    if closes_short {
+        asset.oi_eff_short_q = remaining_q;
+        asset.loss_weight_sum_short = remaining_q;
+    } else {
+        asset.oi_eff_long_q = remaining_q;
+        asset.loss_weight_sum_long = remaining_q;
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.reduce_matching_open_interest_for_unilateral_close(0, closed_side, close_q)
+    };
+
+    kani::cover!(!closes_short, "long partial exit restores peer short OI");
+    kani::cover!(closes_short, "short partial exit restores peer long OI");
+    assert_eq!(result, Ok(()));
+    closure_assert_rebalance_value_domain_frame(
+        &h0,
+        &header,
+        &s0,
+        &markets[0],
+        h0.risk_epoch.get(),
+    );
+
+    let after = markets[0].engine.asset;
+    assert_eq!(after.oi_eff_long_q.get(), remaining_q);
+    assert_eq!(after.oi_eff_short_q.get(), remaining_q);
+    assert_eq!(after.stored_pos_count_long.get(), 1);
+    assert_eq!(after.stored_pos_count_short.get(), 1);
+    assert_eq!(after.loss_weight_sum_long.get(), asset.loss_weight_sum_long);
+    assert_eq!(
+        after.loss_weight_sum_short.get(),
+        asset.loss_weight_sum_short
+    );
+    assert_eq!(after.k_long, s0.asset.k_long);
+    assert_eq!(after.k_short, s0.asset.k_short);
+    assert_eq!(after.f_long_num, s0.asset.f_long_num);
+    assert_eq!(after.f_short_num, s0.asset.f_short_num);
+    assert_eq!(after.b_long_num, s0.asset.b_long_num);
+    assert_eq!(after.b_short_num, s0.asset.b_short_num);
+    if closes_short {
+        assert_eq!(after.a_long.get(), ADL_ONE / 4);
+        assert_eq!(after.a_short.get(), ADL_ONE);
+    } else {
+        assert_eq!(after.a_long.get(), ADL_ONE);
+        assert_eq!(after.a_short.get(), ADL_ONE / 4);
+    }
+}
+
+// A terminal unilateral exit must not wait for the peer account. The peer
+// aggregate is retired into a new ResetPending epoch while every value and
+// domain ledger remains framed; the peer account itself is not an input.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn closure_terminal_unilateral_rebalance_resets_peer_without_value_movement() {
+    let closes_short: bool = kani::any();
+    let close_q = 4 * POS_SCALE;
+    let closed_side = if closes_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let (mut header, mut markets) = closure_rebalance_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    if closes_short {
+        asset.oi_eff_short_q = 0;
+        asset.stored_pos_count_short = 0;
+        asset.loss_weight_sum_short = 0;
+        asset.oi_eff_long_q = close_q;
+        asset.stored_pos_count_long = 1;
+        asset.loss_weight_sum_long = close_q;
+        asset.k_long = 3;
+        asset.f_long_num = 5;
+        asset.b_long_num = 7;
+    } else {
+        asset.oi_eff_long_q = 0;
+        asset.stored_pos_count_long = 0;
+        asset.loss_weight_sum_long = 0;
+        asset.oi_eff_short_q = close_q;
+        asset.stored_pos_count_short = 1;
+        asset.loss_weight_sum_short = close_q;
+        asset.k_short = 3;
+        asset.f_short_num = 5;
+        asset.b_short_num = 7;
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.reduce_matching_open_interest_for_unilateral_close(0, closed_side, close_q)
+    };
+
+    kani::cover!(!closes_short, "terminal long exit resets peer short epoch");
+    kani::cover!(closes_short, "terminal short exit resets peer long epoch");
+    assert_eq!(result, Ok(()));
+    closure_assert_rebalance_value_domain_frame(
+        &h0,
+        &header,
+        &s0,
+        &markets[0],
+        h0.risk_epoch.get() + 1,
+    );
+
+    let after = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    if closes_short {
+        assert_eq!(after.mode_long, SideModeV16::ResetPending);
+        assert_eq!(after.epoch_long, asset.epoch_long + 1);
+        assert_eq!(after.a_long, ADL_ONE);
+        assert_eq!(after.k_epoch_start_long, 3);
+        assert_eq!(after.f_epoch_start_long_num, 5);
+        assert_eq!(after.b_epoch_start_long_num, 7);
+        assert_eq!(after.k_long, 0);
+        assert_eq!(after.f_long_num, 0);
+        assert_eq!(after.b_long_num, 0);
+        assert_eq!(after.loss_weight_sum_long, 0);
+        assert_eq!(after.stored_pos_count_long, 1);
+        assert_eq!(after.mode_short, asset.mode_short);
+        assert_eq!(after.epoch_short, asset.epoch_short);
+    } else {
+        assert_eq!(after.mode_short, SideModeV16::ResetPending);
+        assert_eq!(after.epoch_short, asset.epoch_short + 1);
+        assert_eq!(after.a_short, ADL_ONE);
+        assert_eq!(after.k_epoch_start_short, 3);
+        assert_eq!(after.f_epoch_start_short_num, 5);
+        assert_eq!(after.b_epoch_start_short_num, 7);
+        assert_eq!(after.k_short, 0);
+        assert_eq!(after.f_short_num, 0);
+        assert_eq!(after.b_short_num, 0);
+        assert_eq!(after.loss_weight_sum_short, 0);
+        assert_eq!(after.stored_pos_count_short, 1);
+        assert_eq!(after.mode_long, asset.mode_long);
+        assert_eq!(after.epoch_long, asset.epoch_long);
+    }
+}

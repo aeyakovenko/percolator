@@ -10,7 +10,7 @@ use percolator::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceRequestV16, ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
     V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
@@ -51,6 +51,81 @@ fn v16_recovery_forfeit_detaches_without_counterparty_participation() {
     assert_eq!(asset.oi_eff_short_q, POS_SCALE);
     assert_eq!(
         MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape(),
+        Ok(())
+    );
+}
+
+#[test]
+fn v16_rebalance_reduce_is_bounded_value_neutral_and_peer_independent() {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 252);
+    let mut short_header = account_fixture(1, 253);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        open_one_lot_pair(&mut market, &mut long, &mut short);
+    }
+    let header_before = header;
+    let long_capital_before = long_header.capital;
+    let short_before = short_header;
+    let half = POS_SCALE / 2;
+
+    let partial = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: half,
+                },
+            )
+            .unwrap()
+    };
+    assert_eq!(partial.reduced_q, half);
+    assert_eq!(
+        long_header.legs[0].try_to_runtime().unwrap().basis_pos_q,
+        signed_q(half)
+    );
+    let partial_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(partial_asset.oi_eff_long_q, half);
+    assert_eq!(partial_asset.oi_eff_short_q, half);
+
+    let final_exit = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE * 2,
+                },
+            )
+            .unwrap()
+    };
+    assert_eq!(final_exit.reduced_q, half);
+    assert_eq!(long_header.active_bitmap[0].get(), 0);
+    assert_ne!(short_header.active_bitmap[0].get(), 0);
+    let final_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(final_asset.oi_eff_long_q, 0);
+    assert_eq!(final_asset.oi_eff_short_q, 0);
+    assert_eq!(final_asset.mode_short, SideModeV16::ResetPending);
+    assert_eq!(header.vault, header_before.vault);
+    assert_eq!(header.c_tot, header_before.c_tot);
+    assert_eq!(header.insurance, header_before.insurance);
+    assert_eq!(long_header.capital, long_capital_before);
+    assert_eq!(short_header, short_before);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(
+        PortfolioV16View::new(&long_header).validate_with_market(&market.as_view()),
+        Ok(())
+    );
+    assert_eq!(
+        PortfolioV16View::new(&short_header).validate_with_market(&market.as_view()),
         Ok(())
     );
 }
