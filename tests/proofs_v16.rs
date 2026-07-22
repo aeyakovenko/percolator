@@ -14678,6 +14678,91 @@ fn proof_v16_close_begin_takes_barrier_and_stamps_immutable_identity() {
     );
 }
 
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_close_barriers_are_independent_across_assets() {
+    let first_gross_raw: u8 = kani::any();
+    let second_gross_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&first_gross_raw));
+    kani::assume((1..=8).contains(&second_gross_raw));
+    let first_gross = first_gross_raw as u128;
+    let second_gross = second_gross_raw as u128;
+    let (mut header, mut markets, mut first_header) = two_market_view_fixture();
+    let mut second_header = empty_account_fixture(ids().0, 3);
+    first_header.last_fee_slot = V16PodU64::new(1);
+    second_header.last_fee_slot = V16PodU64::new(1);
+    let vault_before = header.vault;
+    let insurance_before = header.insurance;
+    let c_tot_before = header.c_tot;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut first = PortfolioV16ViewMut::new(&mut first_header);
+    let mut second = PortfolioV16ViewMut::new(&mut second_header);
+
+    kani::cover!(
+        first_gross != second_gross,
+        "independent close barriers cover distinct residuals"
+    );
+    kani::cover!(
+        first_gross == second_gross && first_gross > 1,
+        "independent close barriers cover equal nontrivial residuals"
+    );
+    market
+        .kani_begin_close_progress_ledger(&mut first, 0, SideV16::Long, first_gross)
+        .unwrap();
+    market
+        .kani_begin_close_progress_ledger(&mut second, 1, SideV16::Short, second_gross)
+        .unwrap();
+
+    let first_ledger = first.header.close_progress.try_to_runtime().unwrap();
+    let second_ledger = second.header.close_progress.try_to_runtime().unwrap();
+    assert!(first_ledger.active && second_ledger.active);
+    assert_eq!(first_ledger.asset_index, 0);
+    assert_eq!(second_ledger.asset_index, 1);
+    assert_eq!(first_ledger.domain_side, SideV16::Long);
+    assert_eq!(second_ledger.domain_side, SideV16::Short);
+    assert_eq!(first_ledger.gross_loss_at_close_start, first_gross);
+    assert_eq!(second_ledger.gross_loss_at_close_start, second_gross);
+    assert_eq!(first_ledger.residual_remaining, first_gross);
+    assert_eq!(second_ledger.residual_remaining, second_gross);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_long
+            .get(),
+        1
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .pending_domain_loss_barrier_short
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .pending_domain_loss_barrier_long
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .pending_domain_loss_barrier_short
+            .get(),
+        1
+    );
+    assert_eq!(market.header.resolved_payout_blocker_count.get(), 2);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(first.header.capital.get(), 0);
+    assert_eq!(first.header.pnl.get(), 0);
+    assert_eq!(second.header.capital.get(), 0);
+    assert_eq!(second.header.pnl.get(), 0);
+}
+
 // An account with an ACTIVE close cannot begin another (one close per
 // account): rejects with LockActive before mutation.
 #[kani::proof]
