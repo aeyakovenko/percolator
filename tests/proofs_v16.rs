@@ -6948,6 +6948,76 @@ fn proof_v16_health_cert_capital_debit_preserves_im_or_rejects() {
     }
 }
 
+// Protocol-owned junior vault residual is not collateral. This full-width
+// relational theorem runs the production equity kernel over identical account
+// state in two initialized markets differing only by a symbolic nonzero
+// residual. Equality to an independent account-only oracle proves residual can
+// neither cure losses nor fund IM/MM; the downstream requirement and margin
+// decision kernels are proved separately.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_protocol_residual_never_enters_production_haircut_equity() {
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let fee_debt: u128 = kani::any();
+    let residual: u128 = kani::any();
+    kani::assume(capital <= (i128::MAX as u128).min(MAX_VAULT_TVL));
+    kani::assume(pnl > i128::MIN);
+    kani::assume(fee_debt <= i128::MAX as u128);
+    kani::assume(residual > 0 && residual <= MAX_VAULT_TVL - capital);
+
+    let capital_i128 = capital as i128;
+    let fee_debt_i128 = fee_debt as i128;
+    let expected = if pnl <= 0 {
+        capital_i128
+            .checked_add(pnl)
+            .and_then(|value| value.checked_sub(fee_debt_i128))
+    } else {
+        capital_i128.checked_sub(fee_debt_i128)
+    };
+    kani::assume(expected.is_some());
+    let expected = expected.unwrap();
+
+    let (mut senior_header, mut senior_markets, mut account_header) = one_market_view_fixture();
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(pnl);
+    account_header.fee_credits = V16PodI128::new(-fee_debt_i128);
+    senior_header.c_tot = V16PodU128::new(capital);
+    senior_header.vault = V16PodU128::new(capital);
+
+    let mut residual_header = senior_header;
+    let mut residual_markets = senior_markets;
+    residual_header.vault = V16PodU128::new(capital + residual);
+
+    let senior_market = MarketGroupV16ViewMut::new(&mut senior_header, &mut senior_markets);
+    let residual_market = MarketGroupV16ViewMut::new(&mut residual_header, &mut residual_markets);
+    let account = PortfolioV16View::new(&account_header);
+
+    kani::cover!(
+        pnl > 0 && residual > 1 && fee_debt > 0,
+        "unsupported positive PnL and protocol residual both remain unusable"
+    );
+    kani::cover!(
+        pnl < 0 && fee_debt > 0 && expected < 0,
+        "losses and fee debt can make equity negative despite protocol residual"
+    );
+    kani::cover!(
+        pnl < 0 && expected > 0 && residual > capital,
+        "solvent loss-bearing account covers residual larger than capital"
+    );
+
+    assert_eq!(senior_market.kani_residual(), 0);
+    assert_eq!(residual_market.kani_residual(), residual);
+    let senior_equity = senior_market.kani_account_haircut_equity(&account).unwrap();
+    let residual_equity = residual_market
+        .kani_account_haircut_equity(&account)
+        .unwrap();
+    assert_eq!(senior_equity, expected);
+    assert_eq!(residual_equity, expected);
+    assert_eq!(residual_equity, senior_equity);
+}
+
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]

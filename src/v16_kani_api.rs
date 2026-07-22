@@ -476,6 +476,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.residual()
     }
 
+    pub fn kani_account_haircut_equity(&self, account: &PortfolioV16View<'_>) -> V16Result<i128> {
+        self.account_haircut_equity(account)
+    }
+
     pub fn kani_domain_asset_side(&self, domain: usize) -> V16Result<(usize, SideV16)> {
         self.domain_asset_side(domain)
     }
