@@ -9689,17 +9689,26 @@ fn proof_v16_resolved_residual_booking_without_loss_bearing_side_is_explicit_onl
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
+    let bankrupt_short: bool = kani::any();
     let residual_raw: u8 = kani::any();
     let booked_raw: u8 = kani::any();
-    let rem_raw: u8 = kani::any();
+    let long_b_raw: u8 = kani::any();
+    let short_b_raw: u8 = kani::any();
+    let long_rem_raw: u8 = kani::any();
+    let short_rem_raw: u8 = kani::any();
     kani::assume(residual_raw > 0);
     kani::assume(booked_raw > 0);
     kani::assume(booked_raw <= residual_raw);
     let residual = residual_raw as u128;
     let booked = booked_raw as u128;
-    let rem = rem_raw as u128;
+    let bankrupt_side = if bankrupt_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
 
-    let (_, markets, _) = one_market_view_fixture();
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(booked);
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = POS_SCALE;
     asset.oi_eff_short_q = POS_SCALE;
@@ -9707,38 +9716,53 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
     asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
-    asset.social_loss_remainder_short_num = rem;
-    let b_short_before = asset.b_short_num;
+    asset.b_long_num = long_b_raw as u128;
+    asset.b_short_num = short_b_raw as u128;
+    asset.social_loss_remainder_long_num = long_rem_raw as u128;
+    asset.social_loss_remainder_short_num = short_rem_raw as u128;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].wrapper = kani::any();
+    let header_before = header;
+    let market_before = markets[0];
 
-    let outcome = MarketGroupV16ViewMut::<u64>::kani_apply_bankruptcy_residual_chunk_to_loss_side(
-        &mut asset,
-        SideV16::Short,
-        booked,
-        residual,
-    )
-    .unwrap()
-    .unwrap();
-    let numerator = booked * SOCIAL_LOSS_DEN + rem;
-    let expected_delta_b = numerator / SOCIAL_LOSS_DEN;
-    let expected_rem = numerator % SOCIAL_LOSS_DEN;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let outcome = market
+        .kani_book_bankruptcy_residual_chunk_internal(0, bankrupt_side, residual)
+        .unwrap();
+
+    let mut expected_header = header_before;
+    expected_header.bankruptcy_hlock_active = 1;
+    let mut expected_market = market_before;
+    let mut expected_asset = asset;
+    match bankrupt_side {
+        SideV16::Long => expected_asset.b_short_num += booked,
+        SideV16::Short => expected_asset.b_long_num += booked,
+    }
+    expected_market.engine.asset = AssetStateV16Account::from_runtime(&expected_asset);
 
     kani::cover!(
-        residual > booked && booked > 10,
-        "live residual booking proof covers wide partial booking"
+        !bankrupt_short && residual > booked && booked > 10 && long_b_raw > 0 && short_rem_raw > 0,
+        "long bankruptcy books only to the short loss-bearing domain"
     );
     kani::cover!(
-        rem != 0,
-        "live residual booking proof covers carried social-loss remainder"
+        bankrupt_short && residual > booked && booked > 10 && short_b_raw > 0 && long_rem_raw > 0,
+        "short bankruptcy books only to the long loss-bearing domain"
     );
-    assert!(outcome.booked_loss > 0);
-    assert!(outcome.booked_loss <= residual);
     assert_eq!(outcome.booked_loss, booked);
     assert_eq!(outcome.explicit_loss, 0);
-    assert_eq!(outcome.delta_b, expected_delta_b);
+    assert_eq!(outcome.delta_b, booked);
     assert_eq!(outcome.remaining_after, residual - booked);
-    assert_eq!(asset.b_short_num, b_short_before + expected_delta_b);
-    assert_eq!(asset.social_loss_remainder_short_num, expected_rem);
-    assert_eq!(asset.b_long_num, 0);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert_eq!(market.markets[0].wrapper, expected_market.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_market.engine,
+        &market.markets[0].engine
+    ));
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
