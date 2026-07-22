@@ -1146,6 +1146,82 @@ fn proof_v16_public_force_recovery_of_asset_one_preserves_asset_zero_and_value()
 }
 
 #[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_force_recovery_replay_cannot_reinvalidate_healthy_assets() {
+    let use_drain_only: bool = kani::any();
+    let target_raw: u8 = kani::any();
+    let replay_delay_raw: u8 = kani::any();
+    let value_raw: u8 = kani::any();
+    kani::assume(target_raw > 0);
+    kani::assume(replay_delay_raw <= 8);
+
+    let (mut header, mut markets) = two_market_direct_view_fixture();
+    let capital = value_raw as u128;
+    let insurance = capital + 1;
+    let surplus = capital + 2;
+    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.asset_set_epoch = V16PodU64::new(7);
+    header.risk_epoch = V16PodU64::new(9);
+    markets[0].wrapper = 11;
+    markets[1].wrapper = 22;
+    let mut selected_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    selected_asset.lifecycle = if use_drain_only {
+        AssetLifecycleV16::DrainOnly
+    } else {
+        AssetLifecycleV16::Active
+    };
+    selected_asset.raw_oracle_target_price = target_raw as u64;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+
+    let first_slot = header.current_slot.get();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .force_asset_recovery_not_atomic(1, first_slot)
+            .unwrap();
+    }
+    let header_after_first = header;
+    let slot_zero_after_first = markets[0].engine;
+    let slot_one_after_first = markets[1].engine;
+    let wrapper_zero_after_first = markets[0].wrapper;
+    let wrapper_one_after_first = markets[1].wrapper;
+
+    let replay_slot = first_slot + replay_delay_raw as u64;
+    let replay = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.force_asset_recovery_not_atomic(1, replay_slot)
+    };
+    let recovered_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        use_drain_only && target_raw != 100 && replay_delay_raw > 0 && value_raw > 0,
+        "force-recovery replay covers delayed hostile replay over unrelated senior value"
+    );
+    assert_eq!(replay, Ok(()));
+    assert_eq!(header_after_first.asset_set_epoch.get(), 8);
+    assert_eq!(header_after_first.risk_epoch.get(), 10);
+    assert_eq!(recovered_asset.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(recovered_asset.raw_oracle_target_price, 100);
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_after_first,
+        &header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_zero_after_first,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_one_after_first,
+        &markets[1].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrapper_zero_after_first);
+    assert_eq!(markets[1].wrapper, wrapper_one_after_first);
+}
+
+#[kani::proof]
 #[kani::solver(cadical)]
 fn proof_v16_loss_stale_trade_scope_allows_only_unrelated_current_assets() {
     let market_loss_stale_active: bool = kani::any();
