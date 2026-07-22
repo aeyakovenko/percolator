@@ -186,6 +186,39 @@ fn one_market_direct_view_fixture() -> (
     (header, markets, PortfolioAccountV16Account::default())
 }
 
+fn two_market_direct_view_fixture() -> (MarketGroupV16HeaderAccount, [Market<u64>; 2]) {
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.last_asset_activation_slot = V16PodU64::new(2);
+    header.slot_last = V16PodU64::new(2);
+    header.current_slot = V16PodU64::new(2);
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let mut i = 0usize;
+    while i < markets.len() {
+        let asset = AssetStateV16 {
+            market_id: i as u64 + 1,
+            lifecycle: AssetLifecycleV16::Active,
+            raw_oracle_target_price: 100,
+            effective_price: 100,
+            fund_px_last: 100,
+            slot_last: 2,
+            ..AssetStateV16::default()
+        };
+        markets[i].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        i += 1;
+    }
+    (header, markets)
+}
+
 fn empty_recovery_slot_for_market(
     market_id: u64,
     price: u64,
@@ -1039,6 +1072,77 @@ fn proof_v16_asset_recovery_transition_is_idempotent_after_recovery() {
     assert_eq!(next, asset);
     assert_eq!(next_asset_set_epoch, asset_set_epoch as u64);
     assert_eq!(next_risk_epoch, risk_epoch as u64);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_force_recovery_of_asset_one_preserves_asset_zero_and_value() {
+    let use_drain_only: bool = kani::any();
+    let target_raw: u8 = kani::any();
+    let value_raw: u8 = kani::any();
+    kani::assume(target_raw > 0);
+
+    let lifecycle = if use_drain_only {
+        AssetLifecycleV16::DrainOnly
+    } else {
+        AssetLifecycleV16::Active
+    };
+    let (mut header, mut markets) = two_market_direct_view_fixture();
+    let capital = value_raw as u128;
+    let insurance = capital + 1;
+    let surplus = capital + 2;
+    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.asset_set_epoch = V16PodU64::new(7);
+    header.risk_epoch = V16PodU64::new(9);
+    markets[0].wrapper = 11;
+    markets[1].wrapper = 22;
+    let mut selected_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    selected_asset.lifecycle = lifecycle;
+    selected_asset.raw_oracle_target_price = target_raw as u64;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+
+    let header_before = header;
+    let slot0_before = markets[0].engine;
+    let slot1_before = markets[1].engine;
+    let wrapper0_before = markets[0].wrapper;
+    let wrapper1_before = markets[1].wrapper;
+    let now_slot = header.current_slot.get();
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.force_asset_recovery_not_atomic(1, now_slot)
+    };
+
+    let mut expected_header = header_before;
+    let mut expected_selected = slot1_before;
+    expected_header.asset_set_epoch = V16PodU64::new(header_before.asset_set_epoch.get() + 1);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
+    let mut expected_asset = expected_selected.asset.try_to_runtime().unwrap();
+    expected_asset.lifecycle = AssetLifecycleV16::Recovery;
+    expected_asset.raw_oracle_target_price = expected_asset.effective_price;
+    expected_selected.asset = AssetStateV16Account::from_runtime(&expected_asset);
+
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::DrainOnly && target_raw != 100 && value_raw > 0,
+        "force recovery covers selected-asset transition with unrelated value and wrapper state"
+    );
+    assert_eq!(result, Ok(()));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot0_before,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &markets[1].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrapper0_before);
+    assert_eq!(markets[1].wrapper, wrapper1_before);
 }
 
 #[kani::proof]
