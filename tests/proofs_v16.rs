@@ -11836,6 +11836,152 @@ fn proof_v16_cross_domain_insurance_withdrawals_cannot_spend_each_others_budget(
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_unbudgeted_insurance_credit_commutes_with_domain_withdrawal() {
+    let budget_raw: u8 = kani::any();
+    let spent_raw: u8 = kani::any();
+    let domain_reserved_raw: u8 = kani::any();
+    let other_remaining_raw: u8 = kani::any();
+    let other_reserved_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    let reward_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    kani::assume(budget_raw <= 8);
+    kani::assume(spent_raw <= budget_raw);
+    kani::assume(domain_reserved_raw <= budget_raw - spent_raw);
+    kani::assume(other_remaining_raw <= 8);
+    kani::assume(other_reserved_raw <= other_remaining_raw);
+    kani::assume(surplus_raw <= 8 && reward_raw <= 8);
+    kani::assume(withdraw_raw <= budget_raw - spent_raw - domain_reserved_raw);
+    kani::assume(c_tot_raw <= 8 && capital_raw <= c_tot_raw);
+
+    let budget = budget_raw as u128;
+    let spent = spent_raw as u128;
+    let domain_reserved = domain_reserved_raw as u128;
+    let other_remaining = other_remaining_raw as u128;
+    let other_reserved = other_reserved_raw as u128;
+    let surplus = surplus_raw as u128;
+    let withdraw = withdraw_raw as u128;
+    let reward = reward_raw as u128;
+    let c_tot = c_tot_raw as u128;
+    let capital = capital_raw as u128;
+    let total_remaining = budget - spent + other_remaining;
+    let source_reserved = domain_reserved + other_reserved;
+    let insurance = total_remaining + surplus;
+    let vault = c_tot + insurance;
+    let reward_is_unbudgeted = reward <= surplus;
+
+    let (vault_after_withdraw, insurance_after_withdraw, budget_after_withdraw) =
+        MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+            vault,
+            insurance,
+            source_reserved,
+            budget,
+            spent,
+            domain_reserved,
+            withdraw,
+        )
+        .unwrap();
+    let remaining_after_withdraw = total_remaining - withdraw;
+    let withdraw_then_credit =
+        MarketGroupV16ViewMut::<u64>::kani_credit_account_from_insurance_delta(
+            insurance_after_withdraw,
+            remaining_after_withdraw,
+            c_tot,
+            capital,
+            reward,
+        )
+        .map(|(next_insurance, next_c_tot, next_capital)| {
+            (
+                vault_after_withdraw,
+                next_insurance,
+                next_c_tot,
+                next_capital,
+                budget_after_withdraw,
+            )
+        });
+
+    let credit_then_withdraw =
+        MarketGroupV16ViewMut::<u64>::kani_credit_account_from_insurance_delta(
+            insurance,
+            total_remaining,
+            c_tot,
+            capital,
+            reward,
+        )
+        .and_then(
+            |(insurance_after_credit, c_tot_after_credit, capital_after_credit)| {
+                MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+                    vault,
+                    insurance_after_credit,
+                    source_reserved,
+                    budget,
+                    spent,
+                    domain_reserved,
+                    withdraw,
+                )
+                .map(|(next_vault, next_insurance, next_budget)| {
+                    (
+                        next_vault,
+                        next_insurance,
+                        c_tot_after_credit,
+                        capital_after_credit,
+                        next_budget,
+                    )
+                })
+            },
+        );
+
+    kani::cover!(
+        reward_is_unbudgeted
+            && reward > 0
+            && withdraw > 0
+            && domain_reserved > 0
+            && other_remaining > 0,
+        "insurance credit and domain withdrawal commute with live isolated obligations"
+    );
+    kani::cover!(
+        reward_is_unbudgeted && reward == surplus && reward > 0,
+        "insurance credit can consume exactly all unbudgeted surplus"
+    );
+    kani::cover!(
+        !reward_is_unbudgeted && insurance >= reward && total_remaining > 0,
+        "account credit rejects an otherwise-liquid request that would consume domain budgets"
+    );
+    kani::cover!(
+        reward == 0 && withdraw > 0,
+        "zero account credit is the identity around a domain withdrawal"
+    );
+
+    assert_eq!(withdraw_then_credit.is_ok(), reward_is_unbudgeted);
+    assert_eq!(credit_then_withdraw.is_ok(), reward_is_unbudgeted);
+    if reward_is_unbudgeted {
+        let expected = (
+            vault - withdraw,
+            insurance - withdraw - reward,
+            c_tot + reward,
+            capital + reward,
+            budget - withdraw,
+        );
+        assert_eq!(withdraw_then_credit, Ok(expected));
+        assert_eq!(credit_then_withdraw, Ok(expected));
+        let (next_vault, next_insurance, next_c_tot, next_capital, next_budget) = expected;
+        assert_eq!(next_vault, next_c_tot + next_insurance);
+        assert_eq!(next_capital - capital, reward);
+        assert_eq!(next_c_tot - c_tot, reward);
+        assert_eq!(budget - next_budget, withdraw);
+        assert_eq!(insurance - next_insurance, withdraw + reward);
+        assert_eq!(next_insurance - remaining_after_withdraw, surplus - reward);
+        assert!(next_budget >= spent + domain_reserved);
+        assert!(next_insurance >= remaining_after_withdraw);
+        assert!(next_capital <= next_c_tot);
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
 fn proof_v16_public_domain_insurance_withdraw_capacity_matches_budget_reserved_and_vault_min() {
