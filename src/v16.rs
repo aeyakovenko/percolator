@@ -15471,11 +15471,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     /// Perform at most one preparatory source-domain mutation before terminal
-    /// realization. Source claims cannot be removed piecemeal while their face
-    /// remains positive PnL: the persisted representation requires any nonempty
-    /// source roster to cover the account's full positive PnL. Lien release and
-    /// backing expiry preserve that invariant, so expose those as bounded
-    /// `ProgressOnly` steps and leave the existing aggregate realization intact.
+    /// realization. Scan past already-prepared claims so an earlier domain cannot
+    /// hide a later lien or lapsed backing bucket behind the global payout gate.
+    /// Source claims cannot be removed piecemeal while their face remains positive
+    /// PnL, but lien release and backing expiry preserve that invariant.
     fn prepare_one_source_domain_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -15485,35 +15484,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         account.compact_source_domains();
         let current_slot = self.header.current_slot.get();
-        let source = account.header.source_domains[0];
-        if !source.is_occupied() || source.source_claim_bound_num.get() == 0 {
-            return Err(V16Error::InvalidLeg);
-        }
-        let domain = source.domain.get() as usize;
-        self.domain_asset_side(domain)?;
-        let bucket = self.backing_bucket_for_domain(domain)?;
-        match V16Core::resolved_source_close_phase(
-            source.source_claim_liened_num.get(),
-            bucket.status,
-            bucket.expiry_slot,
-            current_slot,
-        ) {
-            ResolvedSourceClosePhaseV16::ReleaseLien => {
-                self.release_account_source_credit_lien_for_domain_not_atomic(account, domain)?;
-                account.header.health_cert.valid = 0;
-                self.validate_shape()?;
-                account.validate_with_market(&self.as_view())?;
-                Ok(Some(domain))
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
             }
-            ResolvedSourceClosePhaseV16::ExpireBacking => {
-                self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
-                account.header.health_cert.valid = 0;
-                self.validate_shape()?;
-                account.validate_with_market(&self.as_view())?;
-                Ok(Some(domain))
+            if !source.is_occupied() || source.source_claim_bound_num.get() == 0 {
+                return Err(V16Error::InvalidLeg);
             }
-            ResolvedSourceClosePhaseV16::ProcessClaim => Ok(None),
+            let domain = source.domain.get() as usize;
+            self.domain_asset_side(domain)?;
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            match V16Core::resolved_source_close_phase(
+                source.source_claim_liened_num.get(),
+                bucket.status,
+                bucket.expiry_slot,
+                current_slot,
+            ) {
+                ResolvedSourceClosePhaseV16::ReleaseLien => {
+                    self.release_account_source_credit_lien_for_domain_not_atomic(account, domain)?;
+                    account.header.health_cert.valid = 0;
+                    self.validate_shape()?;
+                    account.validate_with_market(&self.as_view())?;
+                    return Ok(Some(domain));
+                }
+                ResolvedSourceClosePhaseV16::ExpireBacking => {
+                    self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
+                    account.header.health_cert.valid = 0;
+                    self.validate_shape()?;
+                    account.validate_with_market(&self.as_view())?;
+                    return Ok(Some(domain));
+                }
+                ResolvedSourceClosePhaseV16::ProcessClaim => {}
+            }
+            slot += 1;
         }
+        Ok(None)
     }
 
     /// Settle exactly one prepared source domain. Realizable source support
@@ -15760,13 +15767,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
-            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
-        }
         if self
             .prepare_one_source_domain_for_resolved_close_not_atomic(account)?
             .is_some()
         {
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
+        if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
         if self

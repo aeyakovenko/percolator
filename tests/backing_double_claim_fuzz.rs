@@ -577,6 +577,86 @@ fn resolved_close_receipts_two_source_domains_one_bounded_step_at_a_time() {
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+#[test]
+fn resolved_close_prepares_lapsed_later_source_domain_before_payout_gate() {
+    let claim_per_domain = 10u128;
+    let total_claim = 2 * claim_per_domain;
+    let backing_num = claim_per_domain * BOUND_SCALE;
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id(), cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    header.mode = 1;
+    header.resolved_slot = V16PodU64::new(10);
+    header.current_slot = V16PodU64::new(10);
+    header.vault = V16PodU128::new(total_claim + claim_per_domain);
+    header.pnl_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_matured_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_claim * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(total_claim * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+
+    let engine_market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: backing_num,
+            exact_positive_claim_num: backing_num,
+            credit_rate_num: 0,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: backing_num,
+            exact_positive_claim_num: backing_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: engine_market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut account_header = winner_account(0, total_claim);
+    for domain in 0..2usize {
+        account_header.source_domains[domain].domain = V16PodU32::new(domain as u32);
+        account_header.source_domains[domain].source_claim_market_id =
+            V16PodU64::new(engine_market_id);
+        account_header.source_domains[domain].source_claim_bound_num = V16PodU128::new(backing_num);
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut account, 0),
+        Ok(ResolvedCloseOutcomeV16::ProgressOnly),
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired,
+        "a prepared first domain must not hide a later lapsed domain behind the payout gate"
+    );
+    assert_eq!(market.header.resolved_payout_blocker_count.get(), 1);
+    assert_eq!(account.header.pnl.get(), total_claim as i128);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(400))]
 
