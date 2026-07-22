@@ -3419,3 +3419,104 @@ backing_fee_isolation_theorem!(closure_backing_fee_asset0_short_isolated, 1);
 backing_fee_isolation_theorem!(closure_backing_fee_asset1_long_isolated, 2);
 #[cfg(all(kani, feature = "closure"))]
 backing_fee_isolation_theorem!(closure_backing_fee_asset1_short_isolated, 3);
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_wrapper_fee_budget_split_is_domain_isolated<const DOMAIN: usize>() {
+    assert!(DOMAIN < 4);
+    let selector: u8 = kani::any();
+    let domain_fee = (selector & 3) as u128 + 1;
+    let redirect = ((selector >> 2) & 7) as u128 + 1;
+    let redirect_long = redirect / 2;
+    let redirect_short = redirect - redirect_long;
+    let total = domain_fee + redirect;
+    let (mut header, mut markets) = closure_two_market_authority_withdraw_fixture();
+    header.vault = V16PodU128::new(header.vault.get() + total);
+    header.insurance = V16PodU128::new(header.insurance.get() + total);
+
+    let h0 = header;
+    let s0 = [markets[0].engine, markets[1].engine];
+    let wrappers0 = [markets[0].wrapper, markets[1].wrapper];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .credit_domain_insurance_budget_not_atomic(DOMAIN, domain_fee)
+            .unwrap();
+        market
+            .credit_domain_insurance_budget_not_atomic(0, redirect_long)
+            .unwrap();
+        market
+            .credit_domain_insurance_budget_not_atomic(1, redirect_short)
+            .unwrap();
+    }
+
+    kani::cover!(
+        selector == u8::MAX,
+        "wrapper fee budget split reaches maximal target and redirect amounts"
+    );
+    kani::cover!(
+        redirect % 2 == 1,
+        "wrapper fee budget split reaches odd asset-zero allocation"
+    );
+
+    let mut expected_header = h0;
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(h0.insurance_domain_budget_remaining_total.get() + total);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+    assert!(
+        header.insurance.get() == header.insurance_domain_budget_remaining_total.get()
+            && header.vault == h0.vault
+            && header.c_tot == h0.c_tot
+    );
+
+    let mut expected_slots = s0;
+    let target_slot = &mut expected_slots[DOMAIN / 2];
+    let target_budget = if DOMAIN % 2 == 1 {
+        &mut target_slot.insurance_domain_budget_short
+    } else {
+        &mut target_slot.insurance_domain_budget_long
+    };
+    *target_budget = V16PodU128::new(target_budget.get() + domain_fee);
+    expected_slots[0].insurance_domain_budget_long =
+        V16PodU128::new(expected_slots[0].insurance_domain_budget_long.get() + redirect_long);
+    expected_slots[0].insurance_domain_budget_short =
+        V16PodU128::new(expected_slots[0].insurance_domain_budget_short.get() + redirect_short);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[0],
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[1],
+        &markets[1].engine
+    ));
+    assert!(markets[0].wrapper == wrappers0[0]);
+    assert!(markets[1].wrapper == wrappers0[1]);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! wrapper_fee_budget_isolation_theorem {
+    ($name:ident, $domain:literal) => {
+        #[kani::proof]
+        #[kani::stub(MarketGroupV16ViewMut::validate_shape, closure_valid_fee_market_stub)]
+        #[kani::stub(
+            MarketGroupV16ViewMut::validate_source_domain_ledger,
+            closure_valid_fee_domain_stub
+        )]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_wrapper_fee_budget_split_is_domain_isolated::<$domain>();
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+wrapper_fee_budget_isolation_theorem!(closure_wrapper_fee_budget_asset0_long_isolated, 0);
+#[cfg(all(kani, feature = "closure"))]
+wrapper_fee_budget_isolation_theorem!(closure_wrapper_fee_budget_asset0_short_isolated, 1);
+#[cfg(all(kani, feature = "closure"))]
+wrapper_fee_budget_isolation_theorem!(closure_wrapper_fee_budget_asset1_long_isolated, 2);
+#[cfg(all(kani, feature = "closure"))]
+wrapper_fee_budget_isolation_theorem!(closure_wrapper_fee_budget_asset1_short_isolated, 3);
