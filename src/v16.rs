@@ -7037,7 +7037,12 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             || asset.f_epoch_start_short_num == i128::MIN
             || asset.oi_eff_long_q > crate::MAX_OI_SIDE_Q
             || asset.oi_eff_short_q > crate::MAX_OI_SIDE_Q
-            || (mode == MarketModeV16::Live && asset.oi_eff_long_q != asset.oi_eff_short_q)
+            || (mode == MarketModeV16::Live
+                && matches!(
+                    asset.lifecycle,
+                    AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+                )
+                && asset.oi_eff_long_q != asset.oi_eff_short_q)
             || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
             || asset.loss_weight_sum_short > SOCIAL_LOSS_DEN
             || (asset.oi_eff_long_q != 0 && asset.loss_weight_sum_long == 0)

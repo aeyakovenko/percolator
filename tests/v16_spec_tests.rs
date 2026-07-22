@@ -25,6 +25,36 @@ fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
 }
 
+#[test]
+fn v16_recovery_forfeit_detaches_without_counterparty_participation() {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 250);
+    let mut short_header = account_fixture(1, 251);
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        open_one_lot_pair(&mut market, &mut long, &mut short);
+        market.force_asset_recovery_not_atomic(0, 1).unwrap();
+        market.forfeit_recovery_leg_not_atomic(&mut long, 0, 1)
+    };
+    assert!(
+        result.as_ref().is_ok_and(|outcome| outcome.detached),
+        "{result:?}"
+    );
+    assert_eq!(long_header.active_bitmap[0].get(), 0);
+    assert_ne!(short_header.active_bitmap[0].get(), 0);
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(header.mode, 0);
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.oi_eff_short_q, POS_SCALE);
+    assert_eq!(
+        MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape(),
+        Ok(())
+    );
+}
+
 fn market_fixture(
     market_slots: u32,
     init_price: u64,

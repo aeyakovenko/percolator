@@ -9,7 +9,7 @@ use percolator::v16::{
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
+    kani_health_requirements_from_base_and_target_lag, kani_kernel_clear_leg_transition,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
@@ -22,11 +22,12 @@ use percolator::v16::{
     BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
     CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
     HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
-    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
+    MarketGroupV16ViewMut, MarketModeV16, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
@@ -1219,6 +1220,175 @@ fn proof_v16_public_force_recovery_replay_cannot_reinvalidate_healthy_assets() {
     ));
     assert_eq!(markets[0].wrapper, wrapper_zero_after_first);
     assert_eq!(markets[1].wrapper, wrapper_one_after_first);
+}
+
+// Recovery-exit theorem, transition layer. This is the exact production
+// clear kernel used by the public forfeit path: one owner strictly removes
+// its selected-side rank while every peer-side field is frozen.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_recovery_clear_is_monotone_and_peer_isolated() {
+    let exit_units_raw: u8 = kani::any();
+    let same_side_units_raw: u8 = kani::any();
+    let peer_units_raw: u8 = kani::any();
+    let remaining_count_raw: u8 = kani::any();
+    let peer_count_raw: u8 = kani::any();
+    let is_short: bool = kani::any();
+    kani::assume((1..=4).contains(&exit_units_raw));
+    kani::assume(same_side_units_raw <= 4);
+    kani::assume(peer_units_raw <= 4);
+    kani::assume(remaining_count_raw <= 3);
+    kani::assume(peer_count_raw <= 4);
+    kani::assume((same_side_units_raw == 0) == (remaining_count_raw == 0));
+    kani::assume((peer_units_raw == 0) == (peer_count_raw == 0));
+
+    let exit_q = u128::from(exit_units_raw) * POS_SCALE;
+    let same_side_q = u128::from(same_side_units_raw) * POS_SCALE;
+    let peer_q = u128::from(peer_units_raw) * POS_SCALE;
+    let side = if is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let mut asset = AssetStateV16 {
+        market_id: 1,
+        lifecycle: AssetLifecycleV16::Recovery,
+        oi_eff_long_q: peer_q,
+        oi_eff_short_q: peer_q,
+        stored_pos_count_long: u64::from(peer_count_raw),
+        stored_pos_count_short: u64::from(peer_count_raw),
+        loss_weight_sum_long: peer_q,
+        loss_weight_sum_short: peer_q,
+        ..AssetStateV16::default()
+    };
+    if is_short {
+        asset.oi_eff_short_q = exit_q + same_side_q;
+        asset.stored_pos_count_short = u64::from(remaining_count_raw) + 1;
+        asset.loss_weight_sum_short = exit_q + same_side_q;
+    } else {
+        asset.oi_eff_long_q = exit_q + same_side_q;
+        asset.stored_pos_count_long = u64::from(remaining_count_raw) + 1;
+        asset.loss_weight_sum_long = exit_q + same_side_q;
+    }
+    let leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: if is_short {
+            -(exit_q as i128)
+        } else {
+            exit_q as i128
+        },
+        a_basis: ADL_ONE,
+        loss_weight: exit_q,
+        ..PortfolioLegV16::EMPTY
+    };
+    let mut expected_asset = asset;
+    if is_short {
+        expected_asset.oi_eff_short_q = same_side_q;
+        expected_asset.stored_pos_count_short = u64::from(remaining_count_raw);
+        expected_asset.loss_weight_sum_short = same_side_q;
+    } else {
+        expected_asset.oi_eff_long_q = same_side_q;
+        expected_asset.stored_pos_count_long = u64::from(remaining_count_raw);
+        expected_asset.loss_weight_sum_long = same_side_q;
+    }
+    let result = kani_kernel_clear_leg_transition(leg, asset);
+
+    kani::cover!(
+        !is_short && exit_units_raw > 1 && same_side_units_raw > 0 && peer_units_raw > 0,
+        "recovery clear covers partial long-side unwind beside live peer risk"
+    );
+    kani::cover!(
+        is_short && exit_units_raw > 1 && same_side_units_raw == 0 && peer_units_raw > 0,
+        "recovery clear covers final short-side detach beside surviving peer risk"
+    );
+    assert_eq!(result, Ok(expected_asset));
+}
+
+// Recovery-exit theorem, admissibility layer. Combined with the public
+// audit-scan regression, this proves independent unwinds may become
+// one-sided only after trading is disabled for the asset.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_asset_validator_requires_balance_exactly_while_trading() {
+    let lifecycle_raw: u8 = kani::any();
+    let mode_raw: u8 = kani::any();
+    let units_raw: u8 = kani::any();
+    let unbalanced: bool = kani::any();
+    let long_survives: bool = kani::any();
+    kani::assume(matches!(lifecycle_raw, 2 | 3 | 5));
+    kani::assume(mode_raw <= 2);
+    kani::assume((1..=4).contains(&units_raw));
+
+    let lifecycle = match lifecycle_raw {
+        2 => AssetLifecycleV16::Active,
+        3 => AssetLifecycleV16::DrainOnly,
+        _ => AssetLifecycleV16::Recovery,
+    };
+    let mode = match mode_raw {
+        0 => MarketModeV16::Live,
+        1 => MarketModeV16::Resolved,
+        _ => MarketModeV16::Recovery,
+    };
+    let q = u128::from(units_raw) * POS_SCALE;
+    let (long_q, short_q) = if unbalanced {
+        if long_survives {
+            (q, 0)
+        } else {
+            (0, q)
+        }
+    } else {
+        (q, q)
+    };
+    let asset = AssetStateV16 {
+        market_id: 1,
+        lifecycle,
+        raw_oracle_target_price: 100,
+        effective_price: 100,
+        fund_px_last: 100,
+        slot_last: 1,
+        oi_eff_long_q: long_q,
+        oi_eff_short_q: short_q,
+        stored_pos_count_long: u64::from(long_q != 0),
+        stored_pos_count_short: u64::from(short_q != 0),
+        loss_weight_sum_long: long_q,
+        loss_weight_sum_short: short_q,
+        ..AssetStateV16::default()
+    };
+    let result = MarketGroupV16View::<u64>::kani_validate_asset_shape_for_view(asset, mode, 1, 2);
+    let trading_requires_balance = mode == MarketModeV16::Live
+        && matches!(
+            lifecycle,
+            AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+        );
+
+    kani::cover!(
+        unbalanced
+            && lifecycle == AssetLifecycleV16::Recovery
+            && mode == MarketModeV16::Live
+            && long_survives
+            && units_raw > 1,
+        "live-slab recovery accepts nontrivial long-only unwind state"
+    );
+    kani::cover!(
+        unbalanced
+            && lifecycle == AssetLifecycleV16::Recovery
+            && mode == MarketModeV16::Live
+            && !long_survives
+            && units_raw > 1,
+        "live-slab recovery accepts nontrivial short-only unwind state"
+    );
+    kani::cover!(
+        unbalanced && trading_requires_balance,
+        "live trading lifecycle rejects one-sided open interest"
+    );
+    kani::cover!(
+        !unbalanced && trading_requires_balance && units_raw > 1,
+        "live trading lifecycle accepts balanced open interest"
+    );
+    assert_eq!(result.is_ok(), !unbalanced || !trading_requires_balance);
 }
 
 #[kani::proof]

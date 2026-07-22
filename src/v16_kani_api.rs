@@ -9,6 +9,14 @@
 use super::*;
 use crate::wide_math::U256;
 
+#[cfg(kani)]
+pub fn kani_kernel_clear_leg_transition(
+    leg: PortfolioLegV16,
+    asset: AssetStateV16,
+) -> V16Result<AssetStateV16> {
+    V16Core::kernel_clear_leg(leg, asset)
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,
@@ -450,6 +458,18 @@ impl MarketGroupV16HeaderAccount {
         slot: &S,
     ) -> V16Result<()> {
         self.validate_dynamic_market_slot_shape_at(slot_index, slot)
+    }
+}
+
+#[cfg(kani)]
+impl<'a, T> MarketGroupV16View<'a, T> {
+    pub fn kani_validate_asset_shape_for_view(
+        asset: AssetStateV16,
+        mode: MarketModeV16,
+        current_slot: u64,
+        next_market_id: u64,
+    ) -> V16Result<()> {
+        Self::validate_asset_shape_for_view(asset, mode, current_slot, next_market_id)
     }
 }
 
