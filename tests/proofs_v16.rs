@@ -18,15 +18,15 @@ use percolator::v16::{
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    AccrueAssetOutcomeV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
@@ -9689,6 +9689,95 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     // Junior-pool isolation: this transition must not move the junior
     // residual pool.
     assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_accrual_of_asset_one_preserves_asset_zero_and_value() {
+    let now_slot_raw: u8 = kani::any();
+    let price_delta_raw: u8 = kani::any();
+    let value_raw: u8 = kani::any();
+    kani::assume((3..=4).contains(&now_slot_raw));
+    kani::assume((1..=5).contains(&price_delta_raw));
+
+    let now_slot = now_slot_raw as u64;
+    let price_delta = price_delta_raw as i128;
+    let price = 100 + price_delta_raw as u64;
+    let (mut header, mut markets) = two_market_direct_view_fixture();
+    let capital = value_raw as u128;
+    let insurance = capital + 1;
+    let surplus = capital + 2;
+    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.oracle_epoch = V16PodU64::new(7);
+    header.funding_epoch = V16PodU64::new(9);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    markets[0].wrapper = 11;
+    markets[1].wrapper = 22;
+    let mut selected_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    selected_asset.oi_eff_long_q = POS_SCALE;
+    selected_asset.oi_eff_short_q = POS_SCALE;
+    selected_asset.stored_pos_count_long = 1;
+    selected_asset.stored_pos_count_short = 1;
+    selected_asset.loss_weight_sum_long = POS_SCALE;
+    selected_asset.loss_weight_sum_short = POS_SCALE;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+
+    let header_before = header;
+    let slot0_before = markets[0].engine;
+    let slot1_before = markets[1].engine;
+    let wrapper0_before = markets[0].wrapper;
+    let wrapper1_before = markets[1].wrapper;
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.accrue_asset_to_not_atomic(1, now_slot, price, 0, true)
+    };
+
+    let mut expected_header = header_before;
+    expected_header.current_slot = V16PodU64::new(now_slot);
+    expected_header.slot_last = V16PodU64::new(3);
+    expected_header.loss_stale_active = u8::from(now_slot > 3);
+    expected_header.oracle_epoch = V16PodU64::new(header_before.oracle_epoch.get() + 1);
+    let mut expected_selected = slot1_before;
+    let mut expected_asset = expected_selected.asset.try_to_runtime().unwrap();
+    let k_delta = price_delta * ADL_ONE as i128;
+    expected_asset.k_long += k_delta;
+    expected_asset.k_short -= k_delta;
+    expected_asset.effective_price = price;
+    expected_asset.fund_px_last = price;
+    expected_asset.slot_last = 3;
+    expected_selected.asset = AssetStateV16Account::from_runtime(&expected_asset);
+
+    kani::cover!(
+        now_slot == 4 && price_delta_raw > 1 && value_raw > 0,
+        "asset-local accrual covers bounded stale catchup over nonzero senior value"
+    );
+    assert_eq!(
+        result,
+        Ok(AccrueAssetOutcomeV16 {
+            dt: 1,
+            price_move_active: true,
+            funding_active: false,
+            equity_active: true,
+            loss_stale_after: now_slot > 3,
+        })
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot0_before,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &markets[1].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrapper0_before);
+    assert_eq!(markets[1].wrapper, wrapper1_before);
 }
 
 #[kani::proof]
