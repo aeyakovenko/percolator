@@ -11675,6 +11675,167 @@ fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conservi
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_cross_domain_insurance_withdrawals_cannot_spend_each_others_budget() {
+    let budget_a_raw: u8 = kani::any();
+    let budget_b_raw: u8 = kani::any();
+    let spent_a_raw: u8 = kani::any();
+    let spent_b_raw: u8 = kani::any();
+    let reserved_a_raw: u8 = kani::any();
+    let reserved_b_raw: u8 = kani::any();
+    let other_remaining_raw: u8 = kani::any();
+    let other_reserved_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let withdraw_a_raw: u8 = kani::any();
+    let withdraw_b_raw: u8 = kani::any();
+    kani::assume(budget_a_raw <= 8 && budget_b_raw <= 8);
+    kani::assume(spent_a_raw <= budget_a_raw && spent_b_raw <= budget_b_raw);
+    kani::assume(reserved_a_raw <= budget_a_raw - spent_a_raw);
+    kani::assume(reserved_b_raw <= budget_b_raw - spent_b_raw);
+    kani::assume(other_remaining_raw <= 8);
+    kani::assume(other_reserved_raw <= other_remaining_raw);
+    kani::assume(surplus_raw <= 8);
+    kani::assume(withdraw_a_raw <= 8 && withdraw_b_raw <= 8);
+
+    let budget_a = budget_a_raw as u128;
+    let budget_b = budget_b_raw as u128;
+    let spent_a = spent_a_raw as u128;
+    let spent_b = spent_b_raw as u128;
+    let reserved_a = reserved_a_raw as u128;
+    let reserved_b = reserved_b_raw as u128;
+    let other_remaining = other_remaining_raw as u128;
+    let other_reserved = other_reserved_raw as u128;
+    let surplus = surplus_raw as u128;
+    let withdraw_a = withdraw_a_raw as u128;
+    let withdraw_b = withdraw_b_raw as u128;
+    let remaining_a = budget_a - spent_a;
+    let remaining_b = budget_b - spent_b;
+    let available_a = remaining_a - reserved_a;
+    let available_b = remaining_b - reserved_b;
+    let total_remaining = remaining_a + remaining_b + other_remaining;
+    let source_reserved = reserved_a + reserved_b + other_reserved;
+    let insurance = total_remaining + surplus;
+    let vault = insurance;
+    let independently_funded = withdraw_a <= available_a && withdraw_b <= available_b;
+
+    let ab = match MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+        vault,
+        insurance,
+        source_reserved,
+        budget_a,
+        spent_a,
+        reserved_a,
+        withdraw_a,
+    ) {
+        Ok((vault_after_a, insurance_after_a, budget_a_after)) => {
+            MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+                vault_after_a,
+                insurance_after_a,
+                source_reserved,
+                budget_b,
+                spent_b,
+                reserved_b,
+                withdraw_b,
+            )
+            .map(|(vault_after_b, insurance_after_b, budget_b_after)| {
+                (
+                    vault_after_b,
+                    insurance_after_b,
+                    budget_a_after,
+                    budget_b_after,
+                )
+            })
+        }
+        Err(error) => Err(error),
+    };
+    let ba = match MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+        vault,
+        insurance,
+        source_reserved,
+        budget_b,
+        spent_b,
+        reserved_b,
+        withdraw_b,
+    ) {
+        Ok((vault_after_b, insurance_after_b, budget_b_after)) => {
+            MarketGroupV16ViewMut::<u64>::kani_withdraw_domain_insurance_delta(
+                vault_after_b,
+                insurance_after_b,
+                source_reserved,
+                budget_a,
+                spent_a,
+                reserved_a,
+                withdraw_a,
+            )
+            .map(|(vault_after_a, insurance_after_a, budget_a_after)| {
+                (
+                    vault_after_a,
+                    insurance_after_a,
+                    budget_a_after,
+                    budget_b_after,
+                )
+            })
+        }
+        Err(error) => Err(error),
+    };
+
+    kani::cover!(
+        independently_funded
+            && withdraw_a > 0
+            && withdraw_b > 0
+            && reserved_a > 0
+            && reserved_b > 0,
+        "cross-domain withdrawal covers two funded domains with live reservations"
+    );
+    kani::cover!(
+        independently_funded
+            && withdraw_a == available_a
+            && withdraw_b == available_b
+            && withdraw_a + withdraw_b > 0,
+        "cross-domain withdrawal covers exact exhaustion of both unreserved budgets"
+    );
+    kani::cover!(
+        available_a == 0 && withdraw_a > 0 && withdraw_b <= available_b,
+        "unfunded attacker domain cannot withdraw victim-domain insurance"
+    );
+    kani::cover!(
+        available_b == 0 && withdraw_b > 0 && withdraw_a <= available_a,
+        "either domain is isolated regardless of execution order"
+    );
+
+    assert_eq!(ab.is_ok(), independently_funded);
+    assert_eq!(ba.is_ok(), independently_funded);
+    if independently_funded {
+        let total_withdrawn = withdraw_a + withdraw_b;
+        let expected = (
+            vault - total_withdrawn,
+            insurance - total_withdrawn,
+            budget_a - withdraw_a,
+            budget_b - withdraw_b,
+        );
+        assert_eq!(ab, Ok(expected));
+        assert_eq!(ba, Ok(expected));
+        let (next_vault, next_insurance, next_budget_a, next_budget_b) = expected;
+        let next_total_remaining =
+            (next_budget_a - spent_a) + (next_budget_b - spent_b) + other_remaining;
+        assert_eq!(vault - next_vault, total_withdrawn);
+        assert_eq!(insurance - next_insurance, total_withdrawn);
+        assert_eq!(total_remaining - next_total_remaining, total_withdrawn);
+        assert_eq!(
+            next_insurance - next_total_remaining,
+            insurance - total_remaining
+        );
+        assert!(next_budget_a >= spent_a + reserved_a);
+        assert!(next_budget_b >= spent_b + reserved_b);
+        assert!(next_insurance >= source_reserved);
+        assert!(total_withdrawn <= available_a + available_b);
+    } else {
+        assert!(withdraw_a > available_a || withdraw_b > available_b);
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
 fn proof_v16_public_domain_insurance_withdraw_capacity_matches_budget_reserved_and_vault_min() {
