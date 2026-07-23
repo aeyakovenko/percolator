@@ -15549,10 +15549,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<Option<usize>> {
-        account.validate_with_market(&self.as_view())?;
         if active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)) {
             return Ok(None);
         }
+        account.validate_with_market(&self.as_view())?;
         let current_slot = self.header.current_slot.get();
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
