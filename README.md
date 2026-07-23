@@ -68,6 +68,8 @@ Source-checkable counts in this checkout:
 | Generated wrapper fee-budget isolation proofs in `src/v16_proofs.rs` | 4 |
 | Generated liquidation isolation proofs in `src/v16_proofs.rs` | 4 |
 | Generated public-rebalance isolation proofs in `src/v16_proofs.rs` | 8 |
+| Generated public scoped-trade isolation proofs in `src/v16_proofs.rs` | 8 |
+| Generated trade-recertification equivalence proofs in `src/v16_proofs.rs` | 2 |
 | Generated pending-obligation exit proofs in `src/v16_proofs.rs` | 8 |
 | Generated pending-obligation refresh lifecycle proofs in `src/v16_proofs.rs` | 8 |
 | Generated source-backed conversion isolation proofs in `src/v16_proofs.rs` | 4 |
@@ -92,6 +94,8 @@ rg '^closure_bankruptcy_residual_harness!' src/v16_proofs.rs | wc -l
 rg '^wrapper_fee_budget_isolation_theorem!' src/v16_proofs.rs | wc -l
 rg '^closure_liquidation_isolation_harness!' src/v16_proofs.rs | wc -l
 rg '^closure_public_rebalance_harness!' src/v16_proofs.rs | wc -l
+rg '^closure_public_scoped_trade_harness!' src/v16_proofs.rs | wc -l
+rg '^closure_trade_recertification_harness!' src/v16_proofs.rs | wc -l
 rg '^closure_pending_obligation_harness!' src/v16_proofs.rs | wc -l
 rg '^closure_pending_clear_harness!' src/v16_proofs.rs | wc -l
 rg '^#\[kani::proof_for_contract' src/v16_proofs.rs | wc -l

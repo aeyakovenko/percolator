@@ -5954,6 +5954,925 @@ closure_public_rebalance_harness!(
 );
 
 #[cfg(all(kani, feature = "closure"))]
+fn closure_trade_config() -> V16Config {
+    let mut config = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    config.max_trading_fee_bps = 100;
+    config
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_trade_config_shape_stub(_config: &V16ConfigAccount) -> V16Result<V16Config> {
+    Ok(closure_trade_config())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_trade_market_tail_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert!(
+        market.markets.len() == 2
+            && market.header.asset_slot_capacity.get() == 2
+            && market.header.config.max_market_slots.get() == 2
+    );
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_trade_hmin_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+    account: Option<&PortfolioV16View<'_>>,
+    bankruptcy_candidate: bool,
+) -> V16Result<HLockLaneV16> {
+    let account = account.ok_or(V16Error::InvalidLeg)?;
+    assert!(
+        !bankruptcy_candidate
+            && market.header.threshold_stress_active == 0
+            && market.header.bankruptcy_hlock_active == 0
+            && market.header.loss_stale_active == 0
+            && market.header.mode == encode_market_mode(MarketModeV16::Live)
+            && account.header.stale_state == 0
+            && account.header.b_stale_state == 0
+            && !account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+    );
+    Ok(HLockLaneV16::HMin)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_trade_current_settlement_stub<'a: 'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<HealthCertV16> {
+    let cert = account.header.health_cert.try_to_runtime()?;
+    assert!(
+        account.header.provenance_header.market_group_id == market.header.market_group_id
+            && account.header.pnl.get() == 0
+            && account.header.fee_credits.get() == 0
+            && account.header.last_fee_slot == market.header.current_slot
+            && account.header.active_bitmap[0].get() == 3
+            && account.header.stale_state == 0
+            && account.header.b_stale_state == 0
+            && cert.valid
+            && cert.cert_oracle_epoch == market.header.oracle_epoch.get()
+            && cert.cert_funding_epoch == market.header.funding_epoch.get()
+            && cert.cert_risk_epoch == market.header.risk_epoch.get()
+            && cert.cert_asset_set_epoch == market.header.asset_set_epoch.get()
+            && cert.active_bitmap_at_cert == [3]
+    );
+    let mut slot = 0usize;
+    while slot < 2 {
+        let leg = account.header.legs[slot].try_to_runtime()?;
+        assert!(
+            leg.active
+                && leg.asset_index as usize == slot
+                && !leg.stale
+                && !leg.b_stale
+                && leg.k_snap == 0
+                && leg.f_snap == 0
+                && leg.b_snap == 0
+        );
+        slot += 1;
+    }
+    Ok(cert)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_trade_zero_residual_credit_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    long_account: &mut PortfolioV16ViewMut<'_>,
+    short_account: &mut PortfolioV16ViewMut<'_>,
+    trade_preflight: &TradePositionPreflightV16,
+    asset_index: usize,
+) -> V16Result<()> {
+    assert!(asset_index < 2);
+    assert!(
+        !trade_preflight.long_has_source_claims
+            && !trade_preflight.short_has_source_claims
+            && long_account
+                .header
+                .residual_crystallized_loss_atoms_total
+                .get()
+                == 0
+            && long_account
+                .header
+                .residual_spent_principal_atoms_total
+                .get()
+                == 0
+            && long_account.header.residual_received_atoms_total.get() == 0
+            && short_account
+                .header
+                .residual_crystallized_loss_atoms_total
+                .get()
+                == 0
+            && short_account
+                .header
+                .residual_spent_principal_atoms_total
+                .get()
+                == 0
+            && short_account.header.residual_received_atoms_total.get() == 0
+    );
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_trade_account<const TARGET_ASSET: usize>(
+    header: &MarketGroupV16HeaderAccount,
+    owner_tag: u8,
+    target_long: bool,
+    position_units: u128,
+) -> PortfolioAccountV16Account {
+    assert!(TARGET_ASSET < 2 && position_units >= 2 && position_units <= 4);
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        header.market_group_id,
+        [owner_tag; 32],
+        [owner_tag + 1; 32],
+    ));
+    let mut account = PortfolioAccountV16Account::default();
+    account.init_empty_in_place(provenance).unwrap();
+    account.capital = V16PodU128::new(10_000);
+    account.last_fee_slot = header.current_slot;
+    account.active_bitmap[0] = V16PodU64::new(3);
+    let target_side = if target_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let unrelated_asset = 1 - TARGET_ASSET;
+    account.legs[TARGET_ASSET] = closure_health_leg(
+        TARGET_ASSET as u32,
+        TARGET_ASSET as u64 + 1,
+        position_units,
+        target_side,
+    );
+    account.legs[unrelated_asset] = closure_health_leg(
+        unrelated_asset as u32,
+        unrelated_asset as u64 + 1,
+        1,
+        opposite_side(target_side),
+    );
+    let requirement = (position_units + 1) * 100;
+    account.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 10_000,
+        certified_initial_req: requirement,
+        certified_maintenance_req: requirement,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: requirement,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: [3],
+        valid: true,
+    });
+    account
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_trade_expected_certificate(
+    header: &MarketGroupV16HeaderAccount,
+    capital: u128,
+    target_units: u128,
+) -> HealthCertV16Account {
+    let requirement = (target_units + 1) * 100;
+    HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: requirement,
+        certified_maintenance_req: requirement,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: requirement,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: [3],
+        valid: true,
+    })
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_trade_recertify_stub {
+    ($name:ident, $asset:expr) => {
+        fn $name<'a: 'a, T>(
+            market: &MarketGroupV16ViewMut<'a, T>,
+            account: &mut PortfolioV16ViewMut<'_>,
+            asset_index: usize,
+            old_abs_q: u128,
+            new_abs_q: u128,
+            price: u64,
+        ) -> V16Result<HealthCertV16> {
+            assert!(
+                asset_index == $asset
+                    && price == 100
+                    && old_abs_q > 0
+                    && new_abs_q > 0
+                    && old_abs_q != new_abs_q
+                    && old_abs_q % POS_SCALE == 0
+                    && new_abs_q % POS_SCALE == 0
+            );
+            let target = account.header.legs[$asset].try_to_runtime()?;
+            let unrelated = account.header.legs[1 - $asset].try_to_runtime()?;
+            assert!(
+                target.active
+                    && target.asset_index as usize == $asset
+                    && target.basis_pos_q.unsigned_abs() == new_abs_q
+                    && unrelated.active
+                    && unrelated.asset_index as usize == 1 - $asset
+                    && unrelated.basis_pos_q.unsigned_abs() == POS_SCALE
+            );
+            let cert_account = closure_trade_expected_certificate(
+                market.header,
+                account.header.capital.get(),
+                new_abs_q / POS_SCALE,
+            );
+            let cert = cert_account.try_to_runtime()?;
+            account.header.health_cert = cert_account;
+            Ok(cert)
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_trade_recertify_stub!(closure_trade_asset0_recertify_stub, 0);
+#[cfg(all(kani, feature = "closure"))]
+closure_trade_recertify_stub!(closure_trade_asset1_recertify_stub, 1);
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_trade_preflight_stub {
+    ($name:ident, $asset:expr) => {
+        fn $name<'a: 'a, T>(
+            market: &MarketGroupV16ViewMut<'a, T>,
+            account_a: &PortfolioV16View<'_>,
+            account_b: &PortfolioV16View<'_>,
+            request: TradeRequestV16,
+        ) -> V16Result<TradePositionPreflightV16> {
+            assert!(
+                request.asset_index == $asset
+                    && request.size_q != 0
+                    && request.exec_price == 100
+                    && request.fee_bps == 100
+                    && market.markets[$asset]
+                        .engine
+                        .asset
+                        .raw_oracle_target_price
+                        .get()
+                        == 100
+                    && market.markets[$asset].engine.asset.effective_price.get() == 100
+                    && market.markets[$asset].engine.asset.slot_last.get()
+                        == market.header.current_slot.get()
+                    && market.markets[$asset]
+                        .engine
+                        .pending_domain_loss_barrier_long
+                        .get()
+                        == 0
+                    && market.markets[$asset]
+                        .engine
+                        .pending_domain_loss_barrier_short
+                        .get()
+                        == 0
+                    && account_a.header.source_domains[0].is_sparse_tail_default()
+                    && account_b.header.source_domains[0].is_sparse_tail_default()
+            );
+            let leg_a = account_a.header.legs[$asset].try_to_runtime()?;
+            let leg_b = account_b.header.legs[$asset].try_to_runtime()?;
+            let current_a = signed_position(leg_a);
+            let current_b = signed_position(leg_b);
+            let delta_a = request.size_q;
+            let delta_b = request
+                .size_q
+                .checked_neg()
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let next_a = current_a
+                .checked_add(delta_a)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let next_b = current_b
+                .checked_add(delta_b)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            assert!(
+                leg_a.active
+                    && leg_b.active
+                    && leg_a.asset_index as usize == $asset
+                    && leg_b.asset_index as usize == $asset
+                    && current_a == -current_b
+                    && next_a == -next_b
+                    && current_a.signum() == next_a.signum()
+                    && current_b.signum() == next_b.signum()
+                    && next_a != 0
+            );
+            let risk_increasing = next_a.unsigned_abs() > current_a.unsigned_abs();
+            Ok(TradePositionPreflightV16 {
+                risk_increasing,
+                long_lookup: PositionDeltaLookupV16 {
+                    existing_slot: Some($asset),
+                    empty_slot: Some(2),
+                    current_q: current_a,
+                    next_q: next_a,
+                },
+                short_lookup: PositionDeltaLookupV16 {
+                    existing_slot: Some($asset),
+                    empty_slot: Some(2),
+                    current_q: current_b,
+                    next_q: next_b,
+                },
+                long_old_abs_q: current_a.unsigned_abs(),
+                short_old_abs_q: current_b.unsigned_abs(),
+                long_new_abs_q: next_a.unsigned_abs(),
+                short_new_abs_q: next_b.unsigned_abs(),
+                long_has_source_claims: false,
+                short_has_source_claims: false,
+            })
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_trade_preflight_stub!(closure_trade_asset0_preflight_stub, 0);
+#[cfg(all(kani, feature = "closure"))]
+closure_trade_preflight_stub!(closure_trade_asset1_preflight_stub, 1);
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_trade_resize_stub {
+    ($name:ident, $asset:expr) => {
+        fn $name<'a: 'a, T>(
+            market: &mut MarketGroupV16ViewMut<'a, T>,
+            account: &mut PortfolioV16ViewMut<'_>,
+            asset_index: usize,
+            delta_q: i128,
+            lookup: PositionDeltaLookupV16,
+        ) -> V16Result<()> {
+            assert!(
+                asset_index == $asset
+                    && lookup.existing_slot == Some($asset)
+                    && lookup.current_q.checked_add(delta_q) == Some(lookup.next_q)
+                    && lookup.current_q != 0
+                    && lookup.next_q != 0
+                    && lookup.current_q.signum() == lookup.next_q.signum()
+            );
+            let mut leg = account.header.legs[$asset].try_to_runtime()?;
+            assert!(
+                leg.active
+                    && leg.asset_index as usize == $asset
+                    && signed_position(leg) == lookup.current_q
+                    && leg.a_basis == ADL_ONE
+                    && leg.loss_weight == lookup.current_q.unsigned_abs()
+            );
+            let old_abs_q = lookup.current_q.unsigned_abs();
+            let new_abs_q = lookup.next_q.unsigned_abs();
+            let mut asset = market.markets[$asset].engine.asset.try_to_runtime()?;
+            match leg.side {
+                SideV16::Long => {
+                    assert_eq!(asset.oi_eff_long_q, old_abs_q);
+                    assert_eq!(asset.loss_weight_sum_long, old_abs_q);
+                    asset.oi_eff_long_q = new_abs_q;
+                    asset.loss_weight_sum_long = new_abs_q;
+                }
+                SideV16::Short => {
+                    assert_eq!(asset.oi_eff_short_q, old_abs_q);
+                    assert_eq!(asset.loss_weight_sum_short, old_abs_q);
+                    asset.oi_eff_short_q = new_abs_q;
+                    asset.loss_weight_sum_short = new_abs_q;
+                }
+            }
+            leg.basis_pos_q = lookup.next_q;
+            leg.loss_weight = new_abs_q;
+            account.header.legs[$asset] = PortfolioLegV16Account::from_runtime(&leg);
+            account.header.health_cert.valid = 0;
+            market.markets[$asset].engine.asset = AssetStateV16Account::from_runtime(&asset);
+            Ok(())
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_trade_resize_stub!(closure_trade_asset0_resize_stub, 0);
+#[cfg(all(kani, feature = "closure"))]
+closure_trade_resize_stub!(closure_trade_asset1_resize_stub, 1);
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_assert_trade_account_exact(
+    actual: &PortfolioAccountV16Account,
+    expected: &PortfolioAccountV16Account,
+) {
+    assert!(kani_eq_provenance_header_v16_account(
+        &actual.provenance_header,
+        &expected.provenance_header
+    ));
+    assert_eq!(actual.owner, expected.owner);
+    assert_eq!(actual.capital, expected.capital);
+    assert_eq!(actual.pnl, expected.pnl);
+    assert_eq!(actual.reserved_pnl, expected.reserved_pnl);
+    assert_eq!(
+        actual.residual_crystallized_loss_atoms_total,
+        expected.residual_crystallized_loss_atoms_total
+    );
+    assert_eq!(
+        actual.residual_spent_principal_atoms_total,
+        expected.residual_spent_principal_atoms_total
+    );
+    assert_eq!(
+        actual.residual_received_atoms_total,
+        expected.residual_received_atoms_total
+    );
+    assert_eq!(
+        actual.funding_long_paid_atoms_total,
+        expected.funding_long_paid_atoms_total
+    );
+    assert_eq!(
+        actual.funding_long_received_atoms_total,
+        expected.funding_long_received_atoms_total
+    );
+    assert_eq!(
+        actual.funding_short_paid_atoms_total,
+        expected.funding_short_paid_atoms_total
+    );
+    assert_eq!(
+        actual.funding_short_received_atoms_total,
+        expected.funding_short_received_atoms_total
+    );
+    assert_eq!(actual.fee_credits, expected.fee_credits);
+    assert_eq!(actual.cancel_deposit_escrow, expected.cancel_deposit_escrow);
+    assert_eq!(actual.last_fee_slot, expected.last_fee_slot);
+    assert_eq!(actual.active_bitmap, expected.active_bitmap);
+    let mut slot = 0usize;
+    while slot < actual.legs.len() {
+        assert!(kani_eq_portfolio_leg_v16_account(
+            &actual.legs[slot],
+            &expected.legs[slot]
+        ));
+        slot += 1;
+    }
+    let mut domain = 0usize;
+    while domain < actual.source_domains.len() {
+        assert!(kani_eq_portfolio_source_domain_v16_account(
+            &actual.source_domains[domain],
+            &expected.source_domains[domain]
+        ));
+        domain += 1;
+    }
+    assert!(kani_eq_health_cert_v16_account(
+        &actual.health_cert,
+        &expected.health_cert
+    ));
+    assert_eq!(actual.stale_state, expected.stale_state);
+    assert_eq!(actual.b_stale_state, expected.b_stale_state);
+    assert_eq!(actual.rebalance_lock, expected.rebalance_lock);
+    assert_eq!(actual.liquidation_lock, expected.liquidation_lock);
+    assert!(kani_eq_close_progress_ledger_v16_account(
+        &actual.close_progress,
+        &expected.close_progress
+    ));
+    assert!(kani_eq_resolved_payout_receipt_v16_account(
+        &actual.resolved_payout_receipt,
+        &expected.resolved_payout_receipt
+    ));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_trade_equity_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<i128> {
+    assert!(
+        account.header.capital.get() == 10_000
+            && account.header.pnl.get() == 0
+            && account.header.fee_credits.get() == 0
+            && account.header.reserved_pnl.get() == 0
+    );
+    Ok(10_000)
+}
+
+// Incremental trade recertification must equal a full two-asset certificate
+// while framing every non-certificate market and account byte.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_trade_recertification_matches_full_portfolio_body<const TARGET_ASSET: usize>() {
+    assert!(TARGET_ASSET < 2);
+    let target_long: bool = kani::any();
+    let old_units_raw: u8 = kani::any();
+    let new_units_raw: u8 = kani::any();
+    kani::assume((2..=4).contains(&old_units_raw));
+    kani::assume((1..=7).contains(&new_units_raw));
+    kani::assume(old_units_raw != new_units_raw);
+    let old_units = u128::from(old_units_raw);
+    let new_units = u128::from(new_units_raw);
+    let old_q = old_units * POS_SCALE;
+    let new_q = new_units * POS_SCALE;
+
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+    header.config = V16ConfigAccount::from_runtime(&closure_trade_config());
+    let mut account = closure_trade_account::<TARGET_ASSET>(&header, 60, target_long, old_units);
+    let mut target_leg = account.legs[TARGET_ASSET].try_to_runtime().unwrap();
+    target_leg.basis_pos_q = if target_long {
+        new_q as i128
+    } else {
+        -(new_q as i128)
+    };
+    target_leg.loss_weight = new_q;
+    account.legs[TARGET_ASSET] = PortfolioLegV16Account::from_runtime(&target_leg);
+
+    let header_before = header;
+    let markets_before = [markets[0], markets[1]];
+    let account_before = account;
+    let cert = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .recertify_account_after_trade_delta(
+            &mut PortfolioV16ViewMut::new(&mut account),
+            TARGET_ASSET,
+            old_q,
+            new_q,
+            100,
+        )
+        .unwrap();
+    kani::cover!(target_long, "long recertification commits");
+    kani::cover!(!target_long, "short recertification commits");
+    kani::cover!(
+        old_units == 4 && new_units == 7,
+        "maximum risk increase commits"
+    );
+    kani::cover!(
+        old_units == 4 && new_units == 1,
+        "maximum risk reduction commits"
+    );
+    let expected_cert = closure_trade_expected_certificate(&header, 10_000, new_units);
+    let mut expected_account = account_before;
+    expected_account.health_cert = expected_cert;
+
+    assert_eq!(HealthCertV16Account::from_runtime(&cert), expected_cert);
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        &header
+    ));
+    assert_eq!(markets_before[0], markets[0]);
+    assert_eq!(markets_before[1], markets[1]);
+    closure_assert_trade_account_exact(&account, &expected_account);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_trade_recertification_harness {
+    ($name:ident, $asset:expr) => {
+        #[kani::proof]
+        #[kani::stub(
+            V16ConfigAccount::try_to_runtime_shape,
+            closure_trade_config_shape_stub
+        )]
+        #[kani::stub(
+            crate::v16::risk_notional_ceil,
+            closure_health_aligned_risk_notional_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::account_haircut_equity,
+            closure_trade_equity_stub
+        )]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_trade_recertification_matches_full_portfolio_body::<$asset>();
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_trade_recertification_harness!(
+    closure_trade_recertification_asset0_matches_full_portfolio,
+    0
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_trade_recertification_harness!(
+    closure_trade_recertification_asset1_matches_full_portfolio,
+    1
+);
+
+// Public scoped-trade composition theorem. Existing proofs discharge dynamic
+// slot shape, config/leg decoding, aligned notional arithmetic, h-lock routing,
+// preflight, position resize, the zero-residual transfer, and validators. The
+// request guard, fee transfer, final IM gate, and complete frame execute
+// production code here.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_public_scoped_trade_is_funded_and_asset_isolated_body<
+    const RISK_INCREASING: bool,
+    const TARGET_ASSET: usize,
+    const TARGET_LONG: bool,
+    const CHECK_SECOND_ACCOUNT: bool,
+>() {
+    assert!(TARGET_ASSET < 2);
+    let target_long = TARGET_LONG;
+    let position_units_raw: u8 = kani::any();
+    let trade_units_raw: u8 = kani::any();
+    kani::assume((2..=4).contains(&position_units_raw));
+    kani::assume(trade_units_raw >= 1 && trade_units_raw < position_units_raw);
+    let position_units = u128::from(position_units_raw);
+    let trade_units = u128::from(trade_units_raw);
+    let position_q = position_units * POS_SCALE;
+    let trade_q = trade_units * POS_SCALE;
+    let next_units = if RISK_INCREASING {
+        position_units + trade_units
+    } else {
+        position_units - trade_units
+    };
+    let next_q = next_units * POS_SCALE;
+    let request_size_q = match (RISK_INCREASING, target_long) {
+        (true, true) | (false, false) => trade_q as i128,
+        (true, false) | (false, true) => -(trade_q as i128),
+    };
+    let unrelated_asset = 1 - TARGET_ASSET;
+
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+    header.config = V16ConfigAccount::from_runtime(&closure_trade_config());
+    header.materialized_portfolio_count = V16PodU64::new(2);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
+    header.vault = V16PodU128::new(header.vault.get() + 20_000);
+    header.c_tot = V16PodU128::new(20_000);
+
+    let mut target = markets[TARGET_ASSET].engine.asset.try_to_runtime().unwrap();
+    target.oi_eff_long_q = position_q;
+    target.oi_eff_short_q = position_q;
+    target.stored_pos_count_long = 1;
+    target.stored_pos_count_short = 1;
+    target.loss_weight_sum_long = position_q;
+    target.loss_weight_sum_short = position_q;
+    markets[TARGET_ASSET].engine.asset = AssetStateV16Account::from_runtime(&target);
+    let mut unrelated = markets[unrelated_asset]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap();
+    unrelated.oi_eff_long_q = POS_SCALE;
+    unrelated.oi_eff_short_q = POS_SCALE;
+    unrelated.stored_pos_count_long = 1;
+    unrelated.stored_pos_count_short = 1;
+    unrelated.loss_weight_sum_long = POS_SCALE;
+    unrelated.loss_weight_sum_short = POS_SCALE;
+    markets[unrelated_asset].engine.asset = AssetStateV16Account::from_runtime(&unrelated);
+
+    let mut account_a =
+        closure_trade_account::<TARGET_ASSET>(&header, 20, target_long, position_units);
+    let mut account_b =
+        closure_trade_account::<TARGET_ASSET>(&header, 40, !target_long, position_units);
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+    let account_a_before = account_a;
+    let account_b_before = account_b;
+
+    let outcome = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut PortfolioV16ViewMut::new(&mut account_a),
+            &mut PortfolioV16ViewMut::new(&mut account_b),
+            TradeRequestV16 {
+                asset_index: TARGET_ASSET,
+                size_q: request_size_q,
+                exec_price: 100,
+                fee_bps: 100,
+            },
+        )
+        .unwrap();
+
+    kani::cover!(
+        position_units == 4 && trade_units == 3,
+        "maximum encoded position and fill commit"
+    );
+
+    let fee = trade_units;
+    assert!(outcome.fee_a == fee && outcome.fee_b == fee);
+    assert_eq!(outcome.notional, trade_units * 100);
+    assert!(next_q > 0 && next_q != position_q);
+
+    let mut expected_header = header_before;
+    expected_header.c_tot = V16PodU128::new(header_before.c_tot.get() - 2 * fee);
+    expected_header.insurance = V16PodU128::new(header_before.insurance.get() + 2 * fee);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+    assert_eq!(header.vault, header_before.vault);
+    assert_eq!(
+        header.c_tot.get() + header.insurance.get(),
+        header_before.c_tot.get() + header_before.insurance.get()
+    );
+    assert_eq!(markets[0].wrapper, wrappers_before[0]);
+    assert_eq!(markets[1].wrapper, wrappers_before[1]);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slots_before[unrelated_asset],
+        &markets[unrelated_asset].engine
+    ));
+
+    let mut expected_target_slot = slots_before[TARGET_ASSET];
+    let mut expected_target = expected_target_slot.asset.try_to_runtime().unwrap();
+    expected_target.oi_eff_long_q = next_q;
+    expected_target.oi_eff_short_q = next_q;
+    expected_target.loss_weight_sum_long = next_q;
+    expected_target.loss_weight_sum_short = next_q;
+    expected_target_slot.asset = AssetStateV16Account::from_runtime(&expected_target);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_target_slot,
+        &markets[TARGET_ASSET].engine
+    ));
+    assert_eq!(
+        markets[TARGET_ASSET].engine.asset.oi_eff_long_q,
+        markets[TARGET_ASSET].engine.asset.oi_eff_short_q
+    );
+
+    let mut expected_a = account_a_before;
+    let mut expected_b = account_b_before;
+    expected_a.capital = V16PodU128::new(10_000 - fee);
+    expected_b.capital = V16PodU128::new(10_000 - fee);
+    let mut leg_a = expected_a.legs[TARGET_ASSET].try_to_runtime().unwrap();
+    let mut leg_b = expected_b.legs[TARGET_ASSET].try_to_runtime().unwrap();
+    leg_a.basis_pos_q = if target_long {
+        next_q as i128
+    } else {
+        -(next_q as i128)
+    };
+    leg_b.basis_pos_q = -leg_a.basis_pos_q;
+    leg_a.loss_weight = next_q;
+    leg_b.loss_weight = next_q;
+    expected_a.legs[TARGET_ASSET] = PortfolioLegV16Account::from_runtime(&leg_a);
+    expected_b.legs[TARGET_ASSET] = PortfolioLegV16Account::from_runtime(&leg_b);
+    expected_a.health_cert = closure_trade_expected_certificate(&header, 10_000 - fee, next_units);
+    expected_b.health_cert = expected_a.health_cert;
+    assert_eq!(account_a.capital, expected_a.capital);
+    assert_eq!(account_b.capital, expected_b.capital);
+    assert!(kani_eq_portfolio_leg_v16_account(
+        &account_a.legs[TARGET_ASSET],
+        &expected_a.legs[TARGET_ASSET]
+    ));
+    assert!(kani_eq_portfolio_leg_v16_account(
+        &account_b.legs[TARGET_ASSET],
+        &expected_b.legs[TARGET_ASSET]
+    ));
+    assert!(kani_eq_health_cert_v16_account(
+        &account_a.health_cert,
+        &expected_a.health_cert
+    ));
+    assert!(kani_eq_health_cert_v16_account(
+        &account_b.health_cert,
+        &expected_b.health_cert
+    ));
+    if CHECK_SECOND_ACCOUNT {
+        closure_assert_trade_account_exact(&account_b, &expected_b);
+    } else {
+        closure_assert_trade_account_exact(&account_a, &expected_a);
+    }
+
+    kani::cover!(
+        outcome.fee_a == fee
+            && account_a.health_cert.valid != 0
+            && account_b.health_cert.valid != 0,
+        "scoped trade commits funded fees and certified isolated state"
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_public_scoped_trade_harness {
+    (
+        $name:ident,
+        $risk_increasing:expr,
+        $target_asset:expr,
+        $target_long:expr,
+        $check_second_account:expr,
+        $preflight_stub:ident,
+        $recertify_stub:ident,
+        $resize_stub:ident
+    ) => {
+        #[kani::proof]
+        #[kani::stub(
+            V16ConfigAccount::try_to_runtime_shape,
+            closure_trade_config_shape_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::validate_unconfigured_market_tail,
+            closure_trade_market_tail_stub
+        )]
+        #[kani::stub(
+            PortfolioLegV16Account::try_to_runtime,
+            closure_health_valid_leg_decode_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::settle_account_for_position_action_and_refresh_not_atomic,
+            closure_trade_current_settlement_stub
+        )]
+        #[kani::stub(MarketGroupV16ViewMut::h_lock_lane, closure_trade_hmin_stub)]
+        #[kani::stub(
+            MarketGroupV16ViewMut::validate_trade_position_preflight,
+            $preflight_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::recertify_account_after_trade_delta,
+            $recertify_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::apply_current_position_delta_with_lookup,
+            $resize_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::transfer_trade_residual_reward_credit,
+            closure_trade_zero_residual_credit_stub
+        )]
+        #[kani::stub(PortfolioV16View::validate_with_market, closure_valid_fee_account_stub)]
+        #[kani::stub(MarketGroupV16ViewMut::validate_shape, closure_valid_fee_market_stub)]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_public_scoped_trade_is_funded_and_asset_isolated_body::<
+                $risk_increasing,
+                $target_asset,
+                $target_long,
+                $check_second_account,
+            >();
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_public_scoped_trade_harness!(
+    closure_public_scoped_trade_increase_asset0_long_is_isolated,
+    true,
+    0,
+    true,
+    false,
+    closure_trade_asset0_preflight_stub,
+    closure_trade_asset0_recertify_stub,
+    closure_trade_asset0_resize_stub
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_public_scoped_trade_harness!(
+    closure_public_scoped_trade_increase_asset0_short_is_isolated,
+    true,
+    0,
+    false,
+    false,
+    closure_trade_asset0_preflight_stub,
+    closure_trade_asset0_recertify_stub,
+    closure_trade_asset0_resize_stub
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_public_scoped_trade_harness!(
+    closure_public_scoped_trade_reduce_asset0_long_is_isolated,
+    false,
+    0,
+    true,
+    true,
+    closure_trade_asset0_preflight_stub,
+    closure_trade_asset0_recertify_stub,
+    closure_trade_asset0_resize_stub
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_public_scoped_trade_harness!(
+    closure_public_scoped_trade_reduce_asset0_short_is_isolated,
+    false,
+    0,
+    false,
+    true,
+    closure_trade_asset0_preflight_stub,
+    closure_trade_asset0_recertify_stub,
+    closure_trade_asset0_resize_stub
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_public_scoped_trade_harness!(
+    closure_public_scoped_trade_increase_asset1_long_is_isolated,
+    true,
+    1,
+    true,
+    false,
+    closure_trade_asset1_preflight_stub,
+    closure_trade_asset1_recertify_stub,
+    closure_trade_asset1_resize_stub
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_public_scoped_trade_harness!(
+    closure_public_scoped_trade_increase_asset1_short_is_isolated,
+    true,
+    1,
+    false,
+    false,
+    closure_trade_asset1_preflight_stub,
+    closure_trade_asset1_recertify_stub,
+    closure_trade_asset1_resize_stub
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_public_scoped_trade_harness!(
+    closure_public_scoped_trade_reduce_asset1_long_is_isolated,
+    false,
+    1,
+    true,
+    true,
+    closure_trade_asset1_preflight_stub,
+    closure_trade_asset1_recertify_stub,
+    closure_trade_asset1_resize_stub
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_public_scoped_trade_harness!(
+    closure_public_scoped_trade_reduce_asset1_short_is_isolated,
+    false,
+    1,
+    false,
+    true,
+    closure_trade_asset1_preflight_stub,
+    closure_trade_asset1_recertify_stub,
+    closure_trade_asset1_resize_stub
+);
+
+#[cfg(all(kani, feature = "closure"))]
 fn closure_conversion_account_shape_stub<'a: 'a, T>(
     account: &PortfolioV16View<'a>,
     market: &MarketGroupV16View<'_, T>,
