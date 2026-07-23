@@ -1982,6 +1982,14 @@ impl V16Core {
 // single public route permissionless_auto_crank_not_atomic). Lets the kani/fuzz
 // suites exercise one caller-chosen primitive action directly.
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    #[cfg(kani)]
+    pub fn kani_declare_permissionless_recovery(
+        &mut self,
+        reason: PermissionlessRecoveryReasonV16,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.declare_permissionless_recovery(reason)
+    }
+
     pub fn kani_permissionless_crank(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -1989,4 +1997,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         self.permissionless_crank_not_atomic(account, request)
     }
+}
+
+#[cfg(kani)]
+pub fn kani_select_auto_crank_plan(
+    summary: ActionableSummaryV16,
+    b_stale_slot: usize,
+    liq_slot: usize,
+    refresh_asset: Option<usize>,
+    recovery_reason: PermissionlessRecoveryReasonV16,
+) -> AutoCrankPlanV16 {
+    V16Core::select_auto_crank_plan(
+        summary,
+        b_stale_slot,
+        liq_slot,
+        refresh_asset,
+        recovery_reason,
+    )
 }

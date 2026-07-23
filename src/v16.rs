@@ -11587,7 +11587,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
-    ///   recovery_eligible— Live liquidation whose residual cannot durably book
+    ///   recovery_eligible— Live close/liquidation whose next step cannot commit
     ///   resolved_winner  — Resolved, positive PnL, resolved payout ready
     /// Assembled via the proven actionable_summary_from_signals kernel. Live-only
     /// flags need cert currentness only where their entrypoint does (liquidate),
@@ -11639,19 +11639,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
         let liquidatable = live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
-        // A liquidation that cannot durably book its uncovered residual must be
-        // classified BEFORE dispatch. Mutating Recovery and then returning Err
-        // cannot make progress because SVM rolls the whole instruction back.
-        let recovery_eligible = if liquidatable {
-            let leg = active_leg.ok_or(V16Error::InvalidLeg)?;
-            self.liquidation_residual_requires_recovery(
-                leg.asset_index as usize,
-                leg.side,
-                account,
-            )?
-        } else {
-            false
-        };
+        // An open close cannot continue after its immutable snapshot slot: the
+        // continuation deliberately returns RecoveryRequired because v16.9 has
+        // no funded drift reserve. Classify that condition before dispatch, just
+        // like an unbookable liquidation residual. Returning the error after
+        // mutating Recovery cannot make progress because SVM rolls it all back.
+        let close_snapshot_stale = live
+            && close_outstanding
+            && has_open_risk
+            && self.header.current_slot.get() > ledger.drift_reference_slot;
+        let recovery_eligible = close_snapshot_stale
+            || if liquidatable {
+                let leg = active_leg.ok_or(V16Error::InvalidLeg)?;
+                self.liquidation_residual_requires_recovery(
+                    leg.asset_index as usize,
+                    leg.side,
+                    account,
+                )?
+            } else {
+                false
+            };
         // resolved_winner routes to close_resolved, which LAZILY captures the
         // payout snapshot itself (initialize_resolved_payout_ledger_if_needed is
         // reached only via close_resolved -> create_resolved_payout_receipt) — so

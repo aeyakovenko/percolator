@@ -3825,6 +3825,117 @@ fn v16_auto_crank_declares_recovery_for_expired_live_close() {
     market.validate_shape().unwrap();
 }
 
+#[test]
+fn v16_auto_crank_declares_recovery_for_stale_live_close_snapshot() {
+    use percolator::{CloseProgressLedgerV16, CloseProgressLedgerV16Account};
+
+    const RESIDUAL: u128 = 4;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 42);
+    header.current_slot = V16PodU64::new(10);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-(RESIDUAL as i128));
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = 2 * POS_SCALE;
+    asset.oi_eff_short_q = 2 * POS_SCALE;
+    asset.stored_pos_count_long = 2;
+    asset.stored_pos_count_short = 2;
+    asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.loss_weight_sum_short = 2 * POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(5);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id: asset.market_id,
+            domain_side: SideV16::Short,
+            gross_loss_at_close_start: RESIDUAL,
+            drift_reference_slot: 9,
+            max_close_slot: 20,
+            residual_remaining: RESIDUAL,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: -(RESIDUAL as i128),
+        certified_initial_req: 1,
+        certified_maintenance_req: 1,
+        certified_liq_deficit: RESIDUAL + 1,
+        certified_worst_case_loss: 1,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+    });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(
+        summary.liquidatable && summary.recovery_eligible,
+        "stale close snapshot must be commit-safely recoverable: {summary:?}"
+    );
+    assert!(!summary.expired_close);
+
+    let vault_before = market.header.vault;
+    let c_tot_before = market.header.c_tot;
+    let insurance_before = market.header.insurance;
+    let asset_before = market.markets[0].engine;
+    let account_before = *account.header;
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
+        }
+    );
+    assert_eq!(market.header.mode, 2);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.markets[0].engine, asset_before);
+    assert_eq!(*account.header, account_before);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
 // ROADMAP 3C step 4 — resolved_winner classification (selector routes it to
 // CloseResolved). KEY regression guard: resolved_winner must NOT gate on
 // payout_snapshot_captured — close_resolved captures the snapshot LAZILY (it is

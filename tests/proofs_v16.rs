@@ -16,16 +16,16 @@ use percolator::v16::{
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AccrueAssetOutcomeV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
-    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
-    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
-    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16View,
-    MarketGroupV16ViewMut, MarketModeV16, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    kani_prepare_asset_recovery_transition, kani_select_auto_crank_plan,
+    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, AccrueAssetOutcomeV16, AssetLifecycleV16,
+    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut, MarketModeV16,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
@@ -41,6 +41,7 @@ use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
     kani_eq_portfolio_account_v16_account,
 };
+use percolator::wide_math::{div_rem_u256, U256};
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
@@ -79,6 +80,76 @@ fn one_market_view_fixture() -> (
     }
     let account_header = empty_account_fixture(market_id, 2);
     (header, markets, account_header)
+}
+
+fn valid_market_shape_stub<'a: 'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+) -> Result<(), V16Error> {
+    Ok(())
+}
+
+fn valid_leg_decode_stub(leg: &PortfolioLegV16Account) -> Result<PortfolioLegV16, V16Error> {
+    if leg.active == 0 {
+        return Ok(PortfolioLegV16::EMPTY);
+    }
+    assert_eq!(leg.active, 1);
+    let side = if leg.side == 0 {
+        SideV16::Long
+    } else {
+        assert_eq!(leg.side, 1);
+        SideV16::Short
+    };
+    Ok(PortfolioLegV16 {
+        active: true,
+        asset_index: leg.asset_index.get(),
+        market_id: leg.market_id.get(),
+        side,
+        basis_pos_q: leg.basis_pos_q.get(),
+        a_basis: leg.a_basis.get(),
+        k_snap: leg.k_snap.get(),
+        f_snap: leg.f_snap.get(),
+        epoch_snap: leg.epoch_snap.get(),
+        loss_weight: leg.loss_weight.get(),
+        b_snap: leg.b_snap.get(),
+        b_rem: leg.b_rem.get(),
+        b_epoch_snap: leg.b_epoch_snap.get(),
+        b_stale: leg.b_stale != 0,
+        stale: leg.stale != 0,
+    })
+}
+
+fn invalid_health_cert_decode_stub(cert: &HealthCertV16Account) -> Result<HealthCertV16, V16Error> {
+    assert_eq!(*cert, HealthCertV16Account::default());
+    Ok(HealthCertV16 {
+        certified_equity: 0,
+        certified_initial_req: 0,
+        certified_maintenance_req: 0,
+        certified_liq_deficit: 0,
+        certified_worst_case_loss: 0,
+        cert_oracle_epoch: 0,
+        cert_funding_epoch: 0,
+        cert_risk_epoch: 0,
+        cert_asset_set_epoch: 0,
+        active_bitmap_at_cert: V16_EMPTY_ACTIVE_BITMAP,
+        valid: false,
+    })
+}
+
+fn exact_low_u256_div_stub(lhs: U256, rhs: U256) -> Option<U256> {
+    assert_eq!(lhs.hi(), 0);
+    assert_eq!(rhs.hi(), 0);
+    assert_ne!(rhs.lo(), 0);
+    Some(U256::from_u128(lhs.lo() / rhs.lo()))
+}
+
+fn exact_low_u256_div_rem_stub(lhs: U256, rhs: U256) -> (U256, U256) {
+    assert_eq!(lhs.hi(), 0);
+    assert_eq!(rhs.hi(), 0);
+    assert_ne!(rhs.lo(), 0);
+    (
+        U256::from_u128(lhs.lo() / rhs.lo()),
+        U256::from_u128(lhs.lo() % rhs.lo()),
+    )
 }
 
 fn one_market_liquidation_residual_shortfall_fixture(
@@ -9789,6 +9860,153 @@ fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
+}
+
+// Commit-safe close-liveness theorem. A Live close with outstanding residual,
+// an open leg, and a snapshot older than the market clock cannot continue. The
+// production classifier and selector must therefore route to the exact recovery
+// transition, rather than a rollback-only continuation, before max_close_slot.
+// This holds for either side and frames all quote stock, asset, and account state.
+#[kani::proof]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_market_shape_stub)]
+#[kani::stub(PortfolioLegV16Account::try_to_runtime, valid_leg_decode_stub)]
+#[kani::stub(HealthCertV16Account::try_to_runtime, invalid_health_cert_decode_stub)]
+#[kani::stub(U256::checked_div, exact_low_u256_div_stub)]
+#[kani::stub(div_rem_u256, exact_low_u256_div_rem_stub)]
+#[kani::unwind(56)]
+#[kani::solver(cadical)]
+fn proof_v16_stale_close_snapshot_routes_to_commit_safe_recovery() {
+    let long: bool = kani::any();
+    let residual_raw: u8 = kani::any();
+    let current_raw: u8 = kani::any();
+    let other_capital_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&residual_raw));
+    kani::assume((2..=16).contains(&current_raw));
+    kani::assume(other_capital_raw <= 16);
+    kani::assume(insurance_raw <= 16);
+    let residual = residual_raw as u128;
+    let current_slot = current_raw as u64;
+    let other_capital = other_capital_raw as u128;
+    let insurance = insurance_raw as u128;
+    let side = if long { SideV16::Long } else { SideV16::Short };
+    let domain_side = if long { SideV16::Short } else { SideV16::Long };
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.current_slot = V16PodU64::new(current_slot);
+    header.vault = V16PodU128::new(other_capital + insurance);
+    header.c_tot = V16PodU128::new(other_capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(5);
+    account_header.pnl = V16PodI128::new(-(residual as i128));
+    account_header.last_fee_slot = V16PodU64::new(current_slot);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = 2 * POS_SCALE;
+    asset.oi_eff_short_q = 2 * POS_SCALE;
+    asset.stored_pos_count_long = 2;
+    asset.stored_pos_count_short = 2;
+    asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.loss_weight_sum_short = 2 * POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    if long {
+        markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+    } else {
+        markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    }
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: if long {
+            POS_SCALE as i128
+        } else {
+            -(POS_SCALE as i128)
+        },
+        a_basis: ADL_ONE,
+        k_snap: if long { asset.k_long } else { asset.k_short },
+        f_snap: if long {
+            asset.f_long_num
+        } else {
+            asset.f_short_num
+        },
+        epoch_snap: if long {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        loss_weight: POS_SCALE,
+        b_snap: if long {
+            asset.b_long_num
+        } else {
+            asset.b_short_num
+        },
+        b_rem: 0,
+        b_epoch_snap: if long {
+            asset.epoch_long
+        } else {
+            asset.epoch_short
+        },
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            canceled: false,
+            close_id: 1,
+            asset_index: 0,
+            market_id: asset.market_id,
+            domain_side,
+            gross_loss_at_close_start: residual,
+            drift_reference_slot: current_slot - 1,
+            max_close_slot: current_slot + 1,
+            residual_remaining: residual,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    account_header.health_cert = HealthCertV16Account::default();
+
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let asset_before = markets[0].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+
+    kani::cover!(
+        long && residual > 3 && current_slot > 8 && other_capital > 0,
+        "stale-close recovery covers a nontrivial long close with unrelated capital"
+    );
+    kani::cover!(
+        !long && residual > 3 && current_slot > 8 && insurance > 0,
+        "stale-close recovery covers a nontrivial short close with unrelated insurance"
+    );
+    assert!(summary.stale);
+    assert!(!summary.liquidatable);
+    assert!(summary.recovery_eligible);
+    assert!(!summary.expired_close);
+
+    let reason = PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress;
+    let plan = kani_select_auto_crank_plan(summary, 0, 0, Some(0), reason);
+    assert_eq!(plan, AutoCrankPlanV16::DeclareRecovery { reason });
+    let outcome = market.kani_declare_permissionless_recovery(reason).unwrap();
+    assert_eq!(
+        outcome,
+        PermissionlessProgressOutcomeV16::RecoveryDeclared(reason)
+    );
+    assert_eq!(market.header.mode, 2);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &asset_before,
+    ));
 }
 
 #[kani::proof]
