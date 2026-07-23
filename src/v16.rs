@@ -15741,6 +15741,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
         }
+        // K/F settlement can consume positive source-backed PnL. Prepare one
+        // lapsed source domain first so valuation cannot reject the bucket
+        // before the bounded terminal expiry transition runs.
+        if self
+            .prepare_one_source_domain_for_resolved_close_not_atomic(account)?
+            .is_some()
+        {
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
         if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
             .settle_account_side_effects_not_atomic(
                 account,
@@ -15764,12 +15773,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || account.header.pnl.get() < 0
             || decode_bool(account.header.b_stale_state)?
             || decode_bool(account.header.stale_state)?
-        {
-            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
-        }
-        if self
-            .prepare_one_source_domain_for_resolved_close_not_atomic(account)?
-            .is_some()
         {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
