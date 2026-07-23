@@ -80,6 +80,65 @@ fn one_market_view_fixture() -> (
     (header, markets, account_header)
 }
 
+fn one_market_liquidation_residual_shortfall_fixture(
+    residual_raw: u8,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+) {
+    assert!((2..=8).contains(&residual_raw));
+    let residual = u128::from(residual_raw);
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(residual - 1);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-(residual as i128));
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = 2 * POS_SCALE;
+    asset.oi_eff_short_q = 2 * POS_SCALE;
+    asset.stored_pos_count_long = 2;
+    asset.stored_pos_count_short = 2;
+    asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.loss_weight_sum_short = 2 * POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: -(residual as i128),
+        certified_initial_req: 1,
+        certified_maintenance_req: 1,
+        certified_liq_deficit: residual + 1,
+        certified_worst_case_loss: 1,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+    });
+    MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .refresh_header_aggregate_totals_for_test()
+        .unwrap();
+    (header, markets, account_header)
+}
+
 fn two_market_view_fixture() -> (
     MarketGroupV16HeaderAccount,
     [Market<u64>; 2],
@@ -10450,7 +10509,7 @@ fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_recovery() {
+fn proof_v16_liquidation_preflight_rejects_insufficient_residual_capacity() {
     let residual_raw: u8 = kani::any();
     kani::assume((2..=8).contains(&residual_raw));
     let residual = residual_raw as u128;
@@ -10490,6 +10549,35 @@ fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_reco
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
+}
+
+// Classifier-completeness half of the public liveness theorem. A current
+// liquidation whose uncovered residual exceeds the bounded B capacity cannot
+// safely dispatch Liquidate: its RecoveryRequired result would roll back on
+// SVM. It must therefore be classified as the higher-priority recovery step.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_classifier_routes_uncommittable_liquidation_to_recovery() {
+    let residual_raw: u8 = kani::any();
+    kani::assume((2..=8).contains(&residual_raw));
+    let (mut header, mut markets, mut account_header) =
+        one_market_liquidation_residual_shortfall_fixture(residual_raw);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+
+    kani::cover!(
+        residual_raw > 2
+            && summary.liquidatable
+            && summary.recovery_eligible
+            && !summary.stale
+            && !summary.b_stale,
+        "symbolic current liquidation exceeds its durable one-step B capacity"
+    );
+    assert!(summary.liquidatable);
+    assert!(!summary.stale && !summary.b_stale);
+    assert!(summary.recovery_eligible);
 }
 
 #[kani::proof]

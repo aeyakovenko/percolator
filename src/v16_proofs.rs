@@ -2733,18 +2733,6 @@ fn contract_check_kernel_economically_valid_trade_admits() {
     let _ = V16Core::kernel_economically_valid_trade_admits(evt);
 }
 
-// ENGINE.MD asset self-selection: the bounded first-match leg scan returns an
-// in-range, actionable, first-matching slot, and is complete (Some IFF any flag
-// set). This is the proof that the engine — not the caller — picks the asset.
-#[cfg(all(kani, feature = "contracts"))]
-#[kani::proof_for_contract(V16Core::first_actionable_slot)]
-#[kani::unwind(17)]
-#[kani::solver(cadical)]
-fn contract_check_first_actionable_slot() {
-    let flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N] = kani::any();
-    let _ = V16Core::first_actionable_slot(flags);
-}
-
 // ENGINE.MD plan selector: totality (actionable -> non-NoAction), priority
 // determinism (recovery > resolved > b-stale > liquidate > refresh), and
 // selected-asset fidelity (SettleBChunk/Liquidate carry the engine-selected

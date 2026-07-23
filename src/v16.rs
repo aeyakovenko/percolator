@@ -1478,60 +1478,6 @@ impl V16Core {
         Ok((reduce_q, delta))
     }
 
-    /// PRODUCTION KERNEL (engine.md asset self-selection): the bounded first-match
-    /// leg/asset scan. Given a per-leg actionability flag array (the caller sets
-    /// `flags[i]` to the production predicate for slot i — e.g. an active b-stale
-    /// leg, or an active leg eligible for liquidation), return the FIRST actionable
-    /// slot, so the engine — not the caller — picks the asset for the selected
-    /// continuation. PROVES (engine.md proof targets): the returned slot is IN
-    /// RANGE and ACTIONABLE (`flags[slot]`), it is the FIRST such slot, and the
-    /// scan is COMPLETE (returns Some IFF any flag is set). Bounded by
-    /// V16_MAX_PORTFOLIO_ASSETS_N (no unbounded loop). Pure.
-    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|r: &Option<usize>| {
-        match r {
-            Some(i) => {
-                *i < V16_MAX_PORTFOLIO_ASSETS_N
-                    && flags[*i]
-                    && {
-                        // first match: every earlier slot is not actionable
-                        let mut j = 0;
-                        let mut earlier_clear = true;
-                        while j < *i {
-                            if flags[j] {
-                                earlier_clear = false;
-                            }
-                            j += 1;
-                        }
-                        earlier_clear
-                    }
-            }
-            None => {
-                // completeness: no slot is actionable
-                let mut j = 0;
-                let mut any = false;
-                while j < V16_MAX_PORTFOLIO_ASSETS_N {
-                    if flags[j] {
-                        any = true;
-                    }
-                    j += 1;
-                }
-                !any
-            }
-        }
-    }))]
-    pub(crate) fn first_actionable_slot(
-        flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N],
-    ) -> Option<usize> {
-        let mut slot = 0usize;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            if flags[slot] {
-                return Some(slot);
-            }
-            slot += 1;
-        }
-        None
-    }
-
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
     /// summary and the ENGINE-selected assets, choose the single highest-priority
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
@@ -9267,12 +9213,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(used)
     }
 
-    fn preflight_liquidation_residual_durability(
-        &mut self,
+    fn liquidation_residual_requires_recovery(
+        &self,
         asset_index: usize,
         bankrupt_side: SideV16,
         account: &PortfolioV16View<'_>,
-    ) -> V16Result<()> {
+    ) -> V16Result<bool> {
         let domain = self.insurance_domain_index(asset_index, opposite_side(bankrupt_side))?;
         let residual_after_principal_and_insurance = if account.header.pnl.get() < 0 {
             account
@@ -9286,14 +9232,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             0
         };
         if residual_after_principal_and_insurance == 0 {
-            return Ok(());
+            return Ok(false);
         }
         let capacity = self.bankruptcy_residual_single_step_capacity(
             asset_index,
             bankrupt_side,
             residual_after_principal_and_insurance,
         )?;
-        if capacity < residual_after_principal_and_insurance {
+        Ok(capacity < residual_after_principal_and_insurance)
+    }
+
+    fn preflight_liquidation_residual_durability(
+        &mut self,
+        asset_index: usize,
+        bankrupt_side: SideV16,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        if self.liquidation_residual_requires_recovery(asset_index, bankrupt_side, account)? {
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
@@ -11599,16 +11554,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
-    ///   recovery_eligible— Resolved, unattributed-insolvent negative-PnL recovery
+    ///   recovery_eligible— Live liquidation whose residual cannot durably book
     ///   resolved_winner  — Resolved, positive PnL, resolved payout ready
     /// Assembled via the proven actionable_summary_from_signals kernel. Live-only
     /// flags need cert currentness only where their entrypoint does (liquidate),
     /// so refresh is selected first for a stale account and the deficit is read
     /// from a fresh cert on the next step.
-    pub fn build_actionable_summary(
+    fn build_actionable_context(
         &self,
         account: &PortfolioV16View<'_>,
-    ) -> V16Result<ActionableSummaryV16> {
+    ) -> V16Result<(ActionableSummaryV16, Option<usize>, Option<PortfolioLegV16>)> {
         let mode = decode_market_mode(self.header.mode)?;
         let live = mode == MarketModeV16::Live;
         let resolved = mode == MarketModeV16::Resolved;
@@ -11623,15 +11578,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.header.active_bitmap.map(V16PodU64::get),
         );
         let ledger = account.header.close_progress.try_to_runtime()?;
+        let (has_b_stale_leg, b_stale_asset, active_leg) =
+            Self::auto_crank_account_selection(account)?;
 
-        let has_open_risk =
-            !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
+        let has_open_risk = active_leg.is_some();
         // A close ledger with residual_remaining==0 is already fully booked/covered
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
         // actionable close work. The `active` flag can linger past that.
         let close_outstanding = ledger.active && ledger.residual_remaining > 0;
         let stale = live && !cert_current;
-        let b_stale = live && Self::has_b_stale_leg(account)?;
+        let b_stale = live && has_b_stale_leg;
         // pending_close is NOT proactively classified: the close-ledger residual is
         // booked ONLY inside the liquidation/resolved path that owns it
         // (book_bankruptcy_residual_chunk_for_account_core) — settle_account_b_chunk
@@ -11650,17 +11606,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
         let liquidatable = live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
-        // Permissionless recovery (declare_permissionless_recovery) is a LIVE-mode
-        // action — it rejects Resolved mode with LockActive. The proactive Live
-        // recovery condition the auto-crank declares is an EXPIRED outstanding
-        // close (expired_close -> DeclareRecovery, reason
-        // ActiveBankruptCloseCannotProgress); every other recovery reason is
-        // declared REACTIVELY inside the dispatched crank op when it detects
-        // non-progress (BIndexHeadroomExhausted, etc.). Resolved bad-debt
-        // wind-down is handled by CloseResolved itself, not by the recovery
-        // selector flag, so recovery_eligible stays in the summary type for the
-        // proven selector but is driven by expired_close.
-        let recovery_eligible = false;
+        // A liquidation that cannot durably book its uncovered residual must be
+        // classified BEFORE dispatch. Mutating Recovery and then returning Err
+        // cannot make progress because SVM rolls the whole instruction back.
+        let recovery_eligible = if liquidatable {
+            let leg = active_leg.ok_or(V16Error::InvalidLeg)?;
+            self.liquidation_residual_requires_recovery(
+                leg.asset_index as usize,
+                leg.side,
+                account,
+            )?
+        } else {
+            false
+        };
         // resolved_winner routes to close_resolved, which LAZILY captures the
         // payout snapshot itself (initialize_resolved_payout_ledger_if_needed is
         // reached only via close_resolved -> create_resolved_payout_receipt) — so
@@ -11671,7 +11629,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let resolved_winner =
             resolved && account.header.pnl.get() > 0 && self.resolved_positive_payout_ready()?;
 
-        Ok(V16Core::actionable_summary_from_signals(
+        let summary = V16Core::actionable_summary_from_signals(
             stale,
             b_stale,
             pending_close,
@@ -11679,7 +11637,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             liquidatable,
             recovery_eligible,
             resolved_winner,
-        ))
+        );
+        Ok((summary, b_stale_asset, active_leg))
+    }
+
+    pub fn build_actionable_summary(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<ActionableSummaryV16> {
+        Ok(self.build_actionable_context(account)?.0)
     }
 
     /// PRODUCTION SELF-CLASSIFYING CRANK (roadmap 3C step 4): the keeper no longer
@@ -11693,34 +11659,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// ENGINE asset self-selection (engine.md): scan the account's bounded legs and
     /// return, for each asset-scoped continuation, the engine-chosen asset_index —
     /// the FIRST active b-stale leg's asset (SettleBChunk), and the FIRST active
-    /// leg's asset (used for both Liquidate and the refresh accrual target). The
-    /// selection is proven in-range / actionable / first-match / complete by the
-    /// first_actionable_slot contract; the slot->asset_index read is by inspection.
-    fn auto_crank_selected_assets(
+    /// leg's asset (used for both Liquidate and the refresh accrual target), in one
+    /// bounded scan of the persisted leg table.
+    fn auto_crank_account_selection(
         account: &PortfolioV16View<'_>,
-    ) -> V16Result<(Option<usize>, Option<usize>)> {
+    ) -> V16Result<(bool, Option<usize>, Option<PortfolioLegV16>)> {
         let bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        let mut active_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
-        let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut has_b_stale_leg = false;
+        let mut b_stale_asset = None;
+        let mut active_leg = None;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
             let active = active_bitmap_get(bitmap, slot) && leg.active;
-            active_flags[slot] = active;
-            b_stale_flags[slot] = active && leg.b_stale;
+            has_b_stale_leg |= leg.active && leg.b_stale;
+            if active && active_leg.is_none() {
+                active_leg = Some(leg);
+            }
+            if active && leg.b_stale && b_stale_asset.is_none() {
+                b_stale_asset = Some(leg.asset_index as usize);
+            }
             slot += 1;
         }
-        let asset_of = |s: Option<usize>| -> V16Result<Option<usize>> {
-            match s {
-                Some(i) => Ok(Some(
-                    account.header.legs[i].try_to_runtime()?.asset_index as usize,
-                )),
-                None => Ok(None),
-            }
-        };
-        let b_stale_asset = asset_of(V16Core::first_actionable_slot(b_stale_flags))?;
-        let active_asset = asset_of(V16Core::first_actionable_slot(active_flags))?;
-        Ok((b_stale_asset, active_asset))
+        Ok((has_b_stale_leg, b_stale_asset, active_leg))
     }
 
     /// THE SINGLE PUBLIC PERMISSIONLESS CRANK (engine.md): the only crank the
@@ -11753,9 +11714,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         work: AutoCrankWorkV16<'_>,
     ) -> V16Result<AutoCrankResultV16> {
-        let summary = self.build_actionable_summary(&account.as_view())?;
-        let (b_stale_asset, active_asset) = Self::auto_crank_selected_assets(&account.as_view())?;
-        let recovery_reason = if summary.expired_close {
+        let (summary, b_stale_asset, active_leg) =
+            self.build_actionable_context(&account.as_view())?;
+        let active_asset = active_leg.map(|leg| leg.asset_index as usize);
+        let recovery_reason = if summary.expired_close || summary.recovery_eligible {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {
             PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
