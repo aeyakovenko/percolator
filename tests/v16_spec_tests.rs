@@ -3118,6 +3118,101 @@ fn v16_resolved_close_expires_lapsed_prospective_kf_sources() {
 }
 
 #[test]
+fn v16_resolved_close_expires_lapsed_prospective_loss_backing_domain() {
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.max_price_move_bps_per_slot = 200;
+    cfg.max_accrual_dt_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    let mut long_header = account_fixture(1, 27);
+    let mut short_header = account_fixture(1, 28);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(0, 93, 8)
+        .unwrap();
+
+    market
+        .accrue_asset_to_not_atomic(0, 2, 98, 0, true)
+        .unwrap();
+    for slot in 3..=9 {
+        market
+            .accrue_asset_to_not_atomic(0, slot, 98, 0, true)
+            .unwrap();
+    }
+    assert_eq!(long.header.pnl.get(), 0);
+    assert!(long
+        .header
+        .source_domains
+        .iter()
+        .all(|source| !source.is_occupied()));
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Fresh
+    );
+    market.resolve_market_not_atomic(9).unwrap();
+
+    let mut long_closed = false;
+    let mut short_closed = false;
+    for _ in 0..16 {
+        if !long_closed {
+            long_closed = matches!(
+                market
+                    .close_resolved_account_not_atomic(&mut long, 0)
+                    .expect("the lapsed prospective loss domain must make bounded progress"),
+                percolator::ResolvedCloseOutcomeV16::Closed { .. }
+            );
+        }
+        if !short_closed {
+            short_closed = matches!(
+                market
+                    .close_resolved_account_not_atomic(&mut short, 0)
+                    .expect("the counterparty must retain a bounded resolved-close path"),
+                percolator::ResolvedCloseOutcomeV16::Closed { .. }
+            );
+        }
+    }
+
+    assert!(long_closed && short_closed);
+    assert!(percolator::active_bitmap_is_empty(
+        long.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert!(percolator::active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(long.header.capital.get(), 0);
+    assert_eq!(short.header.capital.get(), 0);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_grant_source_positive_pnl_attributes_claims_and_aggregates_in_lockstep() {
     let (mut header, mut markets) = market_fixture(1, 1);
     let mut account_header = account_fixture(1, 31);

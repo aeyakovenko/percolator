@@ -41,6 +41,20 @@ pub fn kani_resolved_prospective_source_requires_expiry(
     )
 }
 
+pub fn kani_resolved_prospective_loss_backing_requires_expiry(
+    pending_kf_delta: i128,
+    bucket_status: BackingBucketStatusV16,
+    bucket_expiry_slot: u64,
+    current_slot: u64,
+) -> bool {
+    V16Core::resolved_prospective_loss_backing_requires_expiry(
+        pending_kf_delta,
+        bucket_status,
+        bucket_expiry_slot,
+        current_slot,
+    )
+}
+
 pub fn kani_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> bool {
     V16Core::kernel_auto_crank_lifecycle_dispatchable(lifecycle)
 }

@@ -682,6 +682,25 @@ impl V16Core {
             )
     }
 
+    #[inline]
+    fn resolved_prospective_loss_backing_requires_expiry(
+        pending_kf_delta: i128,
+        bucket_status: BackingBucketStatusV16,
+        bucket_expiry_slot: u64,
+        current_slot: u64,
+    ) -> bool {
+        pending_kf_delta < 0
+            && matches!(
+                Self::resolved_source_close_phase(
+                    0,
+                    bucket_status,
+                    bucket_expiry_slot,
+                    current_slot,
+                ),
+                ResolvedSourceClosePhaseV16::ExpireBacking
+            )
+    }
+
     fn loss_stale_trade_scope_allowed(
         market_loss_stale_active: bool,
         trade_asset_loss_stale: bool,
@@ -15542,9 +15561,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(None)
     }
 
-    /// K/F settlement can create a source claim that is not present in the
-    /// account's source roster yet. Expire one lapsed prospective source before
-    /// settlement so valuation cannot reject that claim and roll the close back.
+    /// K/F settlement can create a positive source claim or reserve newly
+    /// negative PnL as same-side capital backing. Expire one lapsed prospective
+    /// domain before either mutation so settlement cannot roll the close back.
     fn prepare_one_prospective_source_domain_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -15560,31 +15579,39 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if leg.active {
                 let asset_index = leg.asset_index as usize;
                 let asset = self.asset_state(asset_index)?;
-                let domain = self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
+                let (_k_now, _f_now, _k_delta, _f_delta, net) =
+                    Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
+                let source_side = if net > 0 {
+                    opposite_side(leg.side)
+                } else if net < 0 {
+                    leg.side
+                } else {
+                    slot += 1;
+                    continue;
+                };
+                let domain = self.insurance_domain_index(asset_index, source_side)?;
                 let bucket = self.backing_bucket_for_domain(domain)?;
-                if matches!(
-                    V16Core::resolved_source_close_phase(
-                        0,
-                        bucket.status,
-                        bucket.expiry_slot,
-                        current_slot,
-                    ),
-                    ResolvedSourceClosePhaseV16::ExpireBacking
-                ) {
-                    let (_k_now, _f_now, _k_delta, _f_delta, net) =
-                        Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
-                    if V16Core::resolved_prospective_source_requires_expiry(
+                let requires_expiry = if net > 0 {
+                    V16Core::resolved_prospective_source_requires_expiry(
                         net,
                         bucket.status,
                         bucket.expiry_slot,
                         current_slot,
-                    ) {
-                        self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
-                        account.header.health_cert.valid = 0;
-                        self.validate_shape()?;
-                        account.validate_with_market(&self.as_view())?;
-                        return Ok(Some(domain));
-                    }
+                    )
+                } else {
+                    V16Core::resolved_prospective_loss_backing_requires_expiry(
+                        net,
+                        bucket.status,
+                        bucket.expiry_slot,
+                        current_slot,
+                    )
+                };
+                if requires_expiry {
+                    self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
+                    account.header.health_cert.valid = 0;
+                    self.validate_shape()?;
+                    account.validate_with_market(&self.as_view())?;
+                    return Ok(Some(domain));
                 }
             }
             slot += 1;
