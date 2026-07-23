@@ -663,6 +663,25 @@ impl V16Core {
         }
     }
 
+    #[inline]
+    fn resolved_prospective_source_requires_expiry(
+        pending_kf_delta: i128,
+        bucket_status: BackingBucketStatusV16,
+        bucket_expiry_slot: u64,
+        current_slot: u64,
+    ) -> bool {
+        pending_kf_delta > 0
+            && matches!(
+                Self::resolved_source_close_phase(
+                    0,
+                    bucket_status,
+                    bucket_expiry_slot,
+                    current_slot,
+                ),
+                ResolvedSourceClosePhaseV16::ExpireBacking
+            )
+    }
+
     fn loss_stale_trade_scope_allowed(
         market_loss_stale_active: bool,
         trade_asset_loss_stale: bool,
@@ -15523,6 +15542,53 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(None)
     }
 
+    /// K/F settlement can create a source claim that is not present in the
+    /// account's source roster yet. Expire one lapsed prospective source before
+    /// settlement so valuation cannot reject that claim and roll the close back.
+    fn prepare_one_prospective_source_domain_for_resolved_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<Option<usize>> {
+        account.validate_with_market(&self.as_view())?;
+        let current_slot = self.header.current_slot.get();
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                let asset_index = leg.asset_index as usize;
+                let asset = self.asset_state(asset_index)?;
+                let domain = self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
+                let bucket = self.backing_bucket_for_domain(domain)?;
+                if matches!(
+                    V16Core::resolved_source_close_phase(
+                        0,
+                        bucket.status,
+                        bucket.expiry_slot,
+                        current_slot,
+                    ),
+                    ResolvedSourceClosePhaseV16::ExpireBacking
+                ) {
+                    let (_k_now, _f_now, _k_delta, _f_delta, net) =
+                        Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
+                    if V16Core::resolved_prospective_source_requires_expiry(
+                        net,
+                        bucket.status,
+                        bucket.expiry_slot,
+                        current_slot,
+                    ) {
+                        self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
+                        account.header.health_cert.valid = 0;
+                        self.validate_shape()?;
+                        account.validate_with_market(&self.as_view())?;
+                        return Ok(Some(domain));
+                    }
+                }
+            }
+            slot += 1;
+        }
+        Ok(None)
+    }
+
     /// Settle exactly one prepared source domain. Realizable source support
     /// becomes capital; any remaining face moves into the exact resolved payout
     /// receipt. PnL falls by the full processed face, so the remaining source
@@ -15746,6 +15812,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // before the bounded terminal expiry transition runs.
         if self
             .prepare_one_source_domain_for_resolved_close_not_atomic(account)?
+            .is_some()
+        {
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
+        if self
+            .prepare_one_prospective_source_domain_for_resolved_close_not_atomic(account)?
             .is_some()
         {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);

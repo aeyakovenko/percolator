@@ -16,20 +16,20 @@ use percolator::v16::{
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_resolved_source_close_phase,
-    kani_select_auto_crank_plan, kani_should_clear_prior_reset_obligation,
-    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
-    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
-    kani_validate_positive_pnl_source_attribution, ActionableSummaryV16, AssetLifecycleV16,
-    AssetStateV16, AssetStateV16Account, AutoCrankPlanV16, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
+    kani_prepare_asset_recovery_transition, kani_resolved_prospective_source_requires_expiry,
+    kani_resolved_source_close_phase, kani_select_auto_crank_plan,
+    kani_should_clear_prior_reset_obligation, kani_source_credit_state_realizable_support_for_face,
+    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
+    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    ActionableSummaryV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account,
     StockReconciliationProofV16, TokenValueClassV16, TokenValueFlowProofV16, V16Config,
@@ -8764,6 +8764,59 @@ fn proof_v16_resolved_source_close_phase_strictly_decreases_global_rank() {
     assert!(rank_after < rank_before);
     assert!(rank_before >= remaining_domains);
     assert!(rank_before <= 3 * remaining_domains);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_prospective_source_expiry_strictly_decreases_rank() {
+    let pending_kf_delta: i64 = kani::any();
+    let status_raw: u8 = kani::any();
+    let expiry_slot: u8 = kani::any();
+    let current_slot: u8 = kani::any();
+    kani::assume(status_raw <= 3);
+
+    let status = match status_raw {
+        0 => BackingBucketStatusV16::Empty,
+        1 => BackingBucketStatusV16::Fresh,
+        2 => BackingBucketStatusV16::Expired,
+        _ => BackingBucketStatusV16::Impaired,
+    };
+    let pending_positive = pending_kf_delta > 0;
+    let lapsed = status == BackingBucketStatusV16::Fresh && expiry_slot <= current_slot;
+    let requires_expiry = kani_resolved_prospective_source_requires_expiry(
+        pending_kf_delta as i128,
+        status,
+        expiry_slot as u64,
+        current_slot as u64,
+    );
+
+    kani::cover!(
+        requires_expiry,
+        "a pending positive K/F claim selects its lapsed prospective source"
+    );
+    kani::cover!(
+        pending_positive && !lapsed,
+        "a usable prospective source does not require preparatory expiry"
+    );
+    kani::cover!(
+        !pending_positive && lapsed,
+        "a lapsed domain is not touched without a prospective positive claim"
+    );
+
+    assert_eq!(requires_expiry, pending_positive && lapsed);
+    if requires_expiry {
+        let status_after = BackingBucketStatusV16::Expired;
+        let rank_before = u8::from(pending_positive && lapsed);
+        let rank_after = u8::from(
+            pending_positive
+                && status_after == BackingBucketStatusV16::Fresh
+                && expiry_slot <= current_slot,
+        );
+        assert_eq!(rank_before, 1);
+        assert_eq!(rank_after, 0);
+        assert!(rank_after < rank_before);
+    }
 }
 
 #[kani::proof]
