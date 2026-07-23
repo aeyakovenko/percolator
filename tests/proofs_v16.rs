@@ -166,6 +166,33 @@ fn one_market_view_fixture() -> (
     (header, markets, account_header)
 }
 
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_b_settlement_atom_budget_clears_public_scale_gap() {
+    const TARGET_B: u128 = 107_486_458_947_473_684_210_526_315;
+    const LOSS_WEIGHT: u128 = 19_000_000;
+
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(MAX_VAULT_TVL);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let leg = PortfolioLegV16 {
+        active: true,
+        loss_weight: LOSS_WEIGHT,
+        ..PortfolioLegV16::default()
+    };
+    let full_loss = LOSS_WEIGHT.checked_mul(TARGET_B).unwrap() / SOCIAL_LOSS_DEN;
+    assert!(full_loss > 0 && full_loss < MAX_VAULT_TVL);
+
+    let chunk = market
+        .kani_account_b_settlement_chunk_from_leg(leg, TARGET_B, MAX_VAULT_TVL)
+        .unwrap();
+
+    assert_eq!(chunk.delta_b, TARGET_B);
+    assert_eq!(chunk.loss, full_loss);
+    assert!(chunk.loss <= MAX_VAULT_TVL);
+    assert_eq!(chunk.remaining_after, 0);
+}
+
 fn two_market_view_fixture() -> (
     MarketGroupV16HeaderAccount,
     [Market<u64>; 2],
