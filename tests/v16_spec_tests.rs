@@ -2626,6 +2626,150 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
 }
 
 #[test]
+fn v16_multi_domain_fractional_source_support_does_not_block_mark_reversal() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(10_000);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    let mut target_header = account_fixture(2, 50);
+    let mut helper_header = account_fixture(2, 51);
+    let mut target_short_headers = [account_fixture(2, 52), account_fixture(2, 54)];
+    let mut helper_short_headers = [account_fixture(2, 53), account_fixture(2, 55)];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut target = PortfolioV16ViewMut::new(&mut target_header);
+    let mut helper = PortfolioV16ViewMut::new(&mut helper_header);
+    let [target_short_0, target_short_1] = &mut target_short_headers;
+    let [helper_short_0, helper_short_1] = &mut helper_short_headers;
+    let mut target_shorts = [
+        PortfolioV16ViewMut::new(target_short_0),
+        PortfolioV16ViewMut::new(target_short_1),
+    ];
+    let mut helper_shorts = [
+        PortfolioV16ViewMut::new(helper_short_0),
+        PortfolioV16ViewMut::new(helper_short_1),
+    ];
+
+    market.deposit_not_atomic(&mut target, 10_000).unwrap();
+    market.deposit_not_atomic(&mut helper, 10_000).unwrap();
+    for short in &mut target_shorts {
+        market.deposit_not_atomic(short, 102).unwrap();
+    }
+    for short in &mut helper_shorts {
+        market.deposit_not_atomic(short, 200).unwrap();
+    }
+
+    for asset_index in 0..2 {
+        for pair in 0..2 {
+            let (long, short, size_q) = if pair == 0 {
+                (&mut target, &mut target_shorts[asset_index], POS_SCALE)
+            } else {
+                (&mut helper, &mut helper_shorts[asset_index], 2 * POS_SCALE)
+            };
+            market
+                .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                    long,
+                    short,
+                    TradeRequestV16 {
+                        asset_index,
+                        size_q: signed_q(size_q),
+                        exec_price: 100,
+                        fee_bps: 0,
+                    },
+                )
+                .unwrap_or_else(|err| {
+                    panic!("asset {asset_index} pair {pair} opening trade failed: {err:?}")
+                });
+            if pair == 0 {
+                let next_slot = market.header.current_slot.get() + 1;
+                while market.markets[asset_index].engine.asset.slot_last.get() < next_slot {
+                    market
+                        .accrue_asset_to_not_atomic(asset_index, next_slot, 100, 0, true)
+                        .unwrap();
+                }
+                let observations = [AutoCrankObservationV16 {
+                    asset_index,
+                    effective_price: 100,
+                    funding_rate_e9: 0,
+                }];
+                for account in [long, short] {
+                    for _ in 0..4 {
+                        let result = market
+                            .permissionless_auto_crank_not_atomic(
+                                account,
+                                AutoCrankWorkV16 {
+                                    now_slot: next_slot,
+                                    observations: &observations,
+                                    resolved_close_fee_rate_per_slot: 0,
+                                },
+                            )
+                            .unwrap();
+                        if result.selected == AutoCrankPlanV16::NoAction {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for gain_price in [200, 300] {
+        let gain_slot = market.header.current_slot.get() + 1;
+        for asset_index in 0..2 {
+            market
+                .set_asset_raw_oracle_target_not_atomic(asset_index, gain_price)
+                .unwrap();
+            while market.markets[asset_index].engine.asset.slot_last.get() < gain_slot {
+                market
+                    .accrue_asset_to_not_atomic(asset_index, gain_slot, gain_price, 0, true)
+                    .unwrap();
+            }
+        }
+    }
+    for short in &mut target_shorts {
+        market.full_account_refresh_not_atomic(short).unwrap();
+    }
+    for short in &mut helper_shorts {
+        market.full_account_refresh_not_atomic(short).unwrap();
+    }
+    market.full_account_refresh_not_atomic(&mut target).unwrap();
+    market.full_account_refresh_not_atomic(&mut helper).unwrap();
+    assert_eq!(target.header.pnl.get(), 400);
+    let expected_rate = CREDIT_RATE_SCALE * 302 / 600;
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_short
+            .credit_rate_num
+            .get(),
+        expected_rate,
+    );
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .source_credit_short
+            .credit_rate_num
+            .get(),
+        expected_rate,
+    );
+
+    market.set_asset_raw_oracle_target_not_atomic(0, 1).unwrap();
+    let loss_slot = market.header.current_slot.get() + 1;
+    while market.markets[0].engine.asset.slot_last.get() < loss_slot {
+        market
+            .accrue_asset_to_not_atomic(0, loss_slot, 1, 0, true)
+            .unwrap();
+    }
+    let cert = market
+        .full_account_refresh_not_atomic(&mut target)
+        .expect("cross-domain fractional source support must not block K/F settlement");
+
+    assert!(cert.valid);
+    assert_eq!(target.header.pnl.get(), 0);
+    assert_eq!(target.header.capital.get(), 9_901);
+    market.validate_shape().unwrap();
+    target.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_residual_reward_credit_uses_real_principal_not_notional() {
     let (mut header, mut markets) = market_fixture(1, 1_000);
     header.config.initial_margin_bps = V16PodU64::new(500);
