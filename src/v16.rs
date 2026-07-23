@@ -299,6 +299,16 @@ fn liquidation_uncovered_loss_after_principal(pnl: i128, capital: u128) -> u128 
 }
 
 #[inline]
+fn bankrupt_full_close_requires_recovery(
+    pnl: i128,
+    capital: u128,
+    active_bitmap: V16ActiveBitmap,
+) -> bool {
+    liquidation_uncovered_loss_after_principal(pnl, capital) != 0
+        && active_bitmap_count_ones(active_bitmap) > 1
+}
+
+#[inline]
 fn liquidation_close_would_leave_uncovered_loss_with_open_risk(
     pnl: i128,
     capital: u128,
@@ -11648,7 +11658,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && close_outstanding
             && has_open_risk
             && self.header.current_slot.get() > ledger.drift_reference_slot;
+        // Negative-PnL liquidation always closes the selected leg fully. If
+        // principal cannot cover that loss while another leg stays open, the
+        // liquidation entrypoint requires Recovery before mutating the account.
+        // Classify it here so SVM rollback cannot erase that transition.
+        let bankrupt_multi_leg_close = liquidatable
+            && bankrupt_full_close_requires_recovery(
+                account.header.pnl.get(),
+                account.header.capital.get(),
+                account.header.active_bitmap.map(V16PodU64::get),
+            );
         let recovery_eligible = close_snapshot_stale
+            || bankrupt_multi_leg_close
             || if liquidatable {
                 let leg = active_leg.ok_or(V16Error::InvalidLeg)?;
                 self.liquidation_residual_requires_recovery(

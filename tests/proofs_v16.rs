@@ -10009,6 +10009,155 @@ fn proof_v16_stale_close_snapshot_routes_to_commit_safe_recovery() {
     ));
 }
 
+// Commit-safe multi-asset bankruptcy theorem. For any bounded principal and
+// strictly larger realized loss, liquidation full-closes its selected leg. If
+// another leg remains open, the production classifier and selector must commit
+// Recovery before dispatch, even when domain insurance could cover the residual;
+// otherwise the liquidation's RecoveryRequired return is rollback-only on SVM.
+#[kani::proof]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, valid_market_shape_stub)]
+#[kani::stub(PortfolioLegV16Account::try_to_runtime, valid_leg_decode_stub)]
+#[kani::stub(U256::checked_div, exact_low_u256_div_stub)]
+#[kani::stub(div_rem_u256, exact_low_u256_div_rem_stub)]
+#[kani::unwind(56)]
+#[kani::solver(cadical)]
+fn proof_v16_bankrupt_multi_asset_liquidation_routes_to_commit_safe_recovery() {
+    let first_long: bool = kani::any();
+    let second_long: bool = kani::any();
+    let capital_raw: u8 = kani::any();
+    let excess_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&capital_raw));
+    kani::assume((1..=8).contains(&excess_raw));
+    let capital = u128::from(capital_raw);
+    let excess = u128::from(excess_raw);
+    let loss = capital + excess;
+    let first_side = if first_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let second_side = if second_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+
+    let (mut header, mut markets, mut account_header) = two_market_view_fixture();
+    header.vault = V16PodU128::new(capital + excess);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(excess);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(excess);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    account_header.last_fee_slot = header.current_slot;
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+
+    for (asset_index, side) in [(0usize, first_side), (1usize, second_side)] {
+        let mut asset = markets[asset_index].engine.asset.try_to_runtime().unwrap();
+        asset.oi_eff_long_q = POS_SCALE;
+        asset.oi_eff_short_q = POS_SCALE;
+        asset.stored_pos_count_long = 1;
+        asset.stored_pos_count_short = 1;
+        asset.loss_weight_sum_long = POS_SCALE;
+        asset.loss_weight_sum_short = POS_SCALE;
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        account_header.legs[asset_index] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index: asset_index as u32,
+            market_id: asset.market_id,
+            side,
+            basis_pos_q: if side == SideV16::Long {
+                POS_SCALE as i128
+            } else {
+                -(POS_SCALE as i128)
+            },
+            a_basis: ADL_ONE,
+            loss_weight: POS_SCALE,
+            ..PortfolioLegV16::EMPTY
+        });
+    }
+    if first_long {
+        markets[0].engine.insurance_domain_budget_short = V16PodU128::new(excess);
+    } else {
+        markets[0].engine.insurance_domain_budget_long = V16PodU128::new(excess);
+    }
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: -(excess as i128),
+        certified_initial_req: 1,
+        certified_maintenance_req: 1,
+        certified_liq_deficit: excess + 1,
+        certified_worst_case_loss: 1,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+    });
+
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let assets_before = [markets[0].engine, markets[1].engine];
+    let account_capital_before = account_header.capital;
+    let account_pnl_before = account_header.pnl;
+    let account_bitmap_before = account_header.active_bitmap;
+    let account_cert_valid_before = account_header.health_cert.valid;
+    let account_leg_basis_before = [
+        account_header.legs[0].basis_pos_q,
+        account_header.legs[1].basis_pos_q,
+    ];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+
+    kani::cover!(
+        first_long && !second_long && capital > 3 && excess > 3,
+        "recovery routing covers a bankrupt long/short cross-asset spread"
+    );
+    kani::cover!(
+        !first_long && second_long && capital > 3 && excess > 3,
+        "recovery routing covers a bankrupt short/long cross-asset spread"
+    );
+    assert!(!summary.stale && !summary.b_stale && !summary.pending_close);
+    assert!(summary.liquidatable);
+    assert!(summary.recovery_eligible);
+
+    let reason = PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress;
+    let plan = kani_select_auto_crank_plan(summary, 0, 0, Some(0), reason);
+    assert_eq!(plan, AutoCrankPlanV16::DeclareRecovery { reason });
+    let outcome = market.kani_declare_permissionless_recovery(reason).unwrap();
+    assert_eq!(
+        outcome,
+        PermissionlessProgressOutcomeV16::RecoveryDeclared(reason)
+    );
+    assert_eq!(market.header.mode, 2);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &assets_before[0],
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[1].engine,
+        &assets_before[1],
+    ));
+    assert_eq!(account.header.capital, account_capital_before);
+    assert_eq!(account.header.pnl, account_pnl_before);
+    assert_eq!(account.header.active_bitmap, account_bitmap_before);
+    assert_eq!(account.header.health_cert.valid, account_cert_valid_before);
+    assert_eq!(
+        account.header.legs[0].basis_pos_q,
+        account_leg_basis_before[0]
+    );
+    assert_eq!(
+        account.header.legs[1].basis_pos_q,
+        account_leg_basis_before[1]
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
