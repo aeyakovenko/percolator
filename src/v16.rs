@@ -716,6 +716,31 @@ impl V16Core {
         Ok((required_face_num, required_backing_num))
     }
 
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| match result {
+        Ok(value) => *value <= unliened_claim_num / BOUND_SCALE
+            && *value <= available_backing_num / BOUND_SCALE,
+        Err(_) => true,
+    }))]
+    fn source_credit_consumable_atoms(
+        unliened_claim_num: u128,
+        credit_rate_num: u128,
+        available_backing_num: u128,
+    ) -> V16Result<u128> {
+        if credit_rate_num > CREDIT_RATE_SCALE {
+            return Err(V16Error::InvalidConfig);
+        }
+        if unliened_claim_num == 0 || credit_rate_num == 0 {
+            return Ok(0);
+        }
+        let by_claim = U256::from_u128(unliened_claim_num)
+            .checked_mul(U256::from_u128(credit_rate_num))
+            .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+            .and_then(|v| v.checked_div(U256::from_u128(BOUND_SCALE)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(by_claim.min(available_backing_num / BOUND_SCALE))
+    }
+
     #[inline]
     fn validate_bound_num_atom_aligned(bound_num: u128) -> V16Result<()> {
         if bound_num == 0 {
@@ -8727,14 +8752,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .min(remaining_num);
             if claim_num != 0 {
                 self.validate_source_domain_ledger_current(d)?;
-                let credited_num = U256::from_u128(claim_num)
-                    .checked_mul(U256::from_u128(
-                        self.source_credit_for_domain(d)?.credit_rate_num,
-                    ))
-                    .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-                    .ok_or(V16Error::ArithmeticOverflow)?;
+                let consumable = V16Core::source_credit_consumable_atoms(
+                    claim_num,
+                    self.source_credit_for_domain(d)?.credit_rate_num,
+                    self.source_credit_available_backing_num(d)?,
+                )?;
+                let consumable_num = V16Core::bound_num_from_amount(consumable)?;
                 support_num = support_num
-                    .checked_add(credited_num)
+                    .checked_add(U256::from_u128(consumable_num))
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 remaining_num -= claim_num;
             }
@@ -8770,14 +8795,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let claim_num = Self::source_claim_unliened_num(account, d)?.min(remaining_num);
             if claim_num != 0 {
                 self.validate_source_domain_ledger_current(d)?;
-                let credited_num = U256::from_u128(claim_num)
-                    .checked_mul(U256::from_u128(
-                        self.source_credit_for_domain(d)?.credit_rate_num,
-                    ))
-                    .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-                    .ok_or(V16Error::ArithmeticOverflow)?;
+                let consumable = V16Core::source_credit_consumable_atoms(
+                    claim_num,
+                    self.source_credit_for_domain(d)?.credit_rate_num,
+                    self.source_credit_available_backing_num(d)?,
+                )?;
+                let consumable_num = V16Core::bound_num_from_amount(consumable)?;
                 support_num = support_num
-                    .checked_add(credited_num)
+                    .checked_add(U256::from_u128(consumable_num))
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 remaining_num -= claim_num;
             }
@@ -9461,14 +9486,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let unliened = Self::source_claim_unliened_num(&account.as_view(), d)?;
             if rate != 0 && unliened != 0 {
                 self.validate_source_domain_ledger_current(d)?;
-                let soft_num = U256::from_u128(unliened)
-                    .checked_mul(U256::from_u128(rate))
-                    .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-                    .and_then(|v| v.try_into_u128())
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                let by_claim = soft_num / BOUND_SCALE;
-                let by_backing = self.source_credit_available_backing_num(d)? / BOUND_SCALE;
-                let take = remaining.min(by_claim).min(by_backing);
+                let consumable = V16Core::source_credit_consumable_atoms(
+                    unliened,
+                    rate,
+                    self.source_credit_available_backing_num(d)?,
+                )?;
+                let take = remaining.min(consumable);
                 if take != 0 {
                     let (face_num, backing_num) =
                         V16Core::source_credit_lien_amounts_for_effective(take, rate)?;
