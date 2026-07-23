@@ -8,7 +8,7 @@ use percolator::wide_math::{
     mul_div_floor_u256, mul_div_floor_u256_with_rem, wide_signed_mul_div_floor,
     wide_signed_mul_div_floor_from_k_pair, I256, U256,
 };
-use percolator::{ADL_ONE, POS_SCALE};
+use percolator::{ADL_ONE, MAX_OI_SIDE_Q, MIN_A_SIDE, POS_SCALE};
 
 fn small_signed_floor_reference(n: i128, d: u128) -> i128 {
     if n >= 0 {
@@ -61,6 +61,39 @@ fn proof_v16_mul_div_floor_u256_matches_small_reference() {
 
     kani::cover!(a != 0 && b != 0 && d > 1, "nontrivial mul-div floor branch");
     assert_eq!(got.try_into_u128(), Some((a * b) / d));
+}
+
+// A valid unilateral partial close cannot collapse the peer-side A factor to
+// zero. This discharges the rollback-sensitive recovery guard in the production
+// rebalance path over the full configured A/OI ranges, using the exact wide
+// arithmetic helper that computes the persisted candidate.
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_unilateral_rebalance_a_floor_is_strictly_positive() {
+    let a_before: u128 = kani::any();
+    let oi_before: u128 = kani::any();
+    let oi_after: u128 = kani::any();
+    kani::assume((MIN_A_SIDE..=ADL_ONE).contains(&a_before));
+    kani::assume((1..=MAX_OI_SIDE_Q).contains(&oi_before));
+    kani::assume((1..oi_before).contains(&oi_after));
+
+    let candidate = mul_div_floor_u256(
+        U256::from_u128(a_before),
+        U256::from_u128(oi_after),
+        U256::from_u128(oi_before),
+    );
+
+    kani::cover!(
+        a_before == MIN_A_SIDE && oi_before == MAX_OI_SIDE_Q && oi_after == 1,
+        "minimum A and one-unit peer remainder hit the tight positive boundary"
+    );
+    kani::cover!(
+        a_before > MIN_A_SIDE && oi_after + 1 < oi_before,
+        "interior partial close has nontrivial A and OI headroom"
+    );
+    assert!(a_before >= oi_before);
+    assert!(candidate >= U256::ONE);
 }
 
 #[kani::proof]

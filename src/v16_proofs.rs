@@ -10,7 +10,10 @@
 
 use super::*;
 use crate::wide_math::{checked_mul_div_ceil_u256, U256};
-use crate::{BOUND_SCALE, CREDIT_RATE_SCALE, MAX_VAULT_TVL, V16_TOKEN_VALUE_CLASS_COUNT};
+use crate::{
+    BOUND_SCALE, CREDIT_RATE_SCALE, MAX_OI_SIDE_Q, MAX_VAULT_TVL, MIN_A_SIDE,
+    V16_TOKEN_VALUE_CLASS_COUNT,
+};
 
 // ===================== KANI FUNCTION-CONTRACT LAYER =====================
 // Built ONLY by scripts/contracts_runner.sh (cargo feature `contracts` +
@@ -3805,6 +3808,82 @@ fn closure_partial_unilateral_rebalance_is_value_and_domain_neutral() {
     } else {
         assert_eq!(after.a_long.get(), ADL_ONE);
         assert_eq!(after.a_short.get(), ADL_ONE / 4);
+    }
+}
+
+// Composition boundary for the full-range arithmetic theorem in
+// proofs_v16_arithmetic: at the smallest valid A and largest valid peer OI, a
+// one-unit remainder must commit as DrainOnly rather than hit rollback-only
+// RecoveryRequired. This is the tightest valid partial-close state.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn closure_tight_unilateral_rebalance_commits_drain_only_without_value_movement() {
+    let closes_short: bool = kani::any();
+    let pre_q = MAX_OI_SIDE_Q;
+    let remaining_q = 1;
+    let close_q = pre_q - remaining_q;
+    let closed_side = if closes_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let (mut header, mut markets) = closure_rebalance_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = pre_q;
+    asset.oi_eff_short_q = pre_q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = pre_q;
+    asset.loss_weight_sum_short = pre_q;
+    if closes_short {
+        asset.oi_eff_short_q = remaining_q;
+        asset.loss_weight_sum_short = remaining_q;
+        asset.a_long = MIN_A_SIDE;
+    } else {
+        asset.oi_eff_long_q = remaining_q;
+        asset.loss_weight_sum_long = remaining_q;
+        asset.a_short = MIN_A_SIDE;
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.reduce_matching_open_interest_for_unilateral_close(0, closed_side, close_q)
+    };
+
+    kani::cover!(
+        !closes_short,
+        "tight long exit leaves one-unit peer short in DrainOnly"
+    );
+    kani::cover!(
+        closes_short,
+        "tight short exit leaves one-unit peer long in DrainOnly"
+    );
+    assert_eq!(result, Ok(()));
+    closure_assert_rebalance_value_domain_frame(
+        &h0,
+        &header,
+        &s0,
+        &markets[0],
+        h0.risk_epoch.get(),
+    );
+
+    let after = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.oi_eff_long_q, remaining_q);
+    assert_eq!(after.oi_eff_short_q, remaining_q);
+    if closes_short {
+        assert_eq!(after.a_long, 1);
+        assert_eq!(after.mode_long, SideModeV16::DrainOnly);
+        assert_eq!(after.a_short, ADL_ONE);
+    } else {
+        assert_eq!(after.a_long, ADL_ONE);
+        assert_eq!(after.a_short, 1);
+        assert_eq!(after.mode_short, SideModeV16::DrainOnly);
     }
 }
 
