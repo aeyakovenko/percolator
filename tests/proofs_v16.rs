@@ -12221,6 +12221,55 @@ fn proof_v16_source_credit_lien_face_and_backing_use_scaled_units() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
+fn proof_v16_source_credit_support_is_exactly_consumable_per_domain() {
+    let claim_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let rate_numerator_raw: u8 = kani::any();
+    kani::assume((1..=32).contains(&claim_raw));
+    kani::assume(backing_raw <= 32);
+    kani::assume((1..=63).contains(&rate_numerator_raw));
+
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let available_backing_num = backing_raw as u128 * BOUND_SCALE;
+    let rate = CREDIT_RATE_SCALE * rate_numerator_raw as u128 / 63;
+    let consumable = MarketGroupV16ViewMut::<u64>::kani_source_credit_consumable_atoms(
+        claim_num,
+        rate,
+        available_backing_num,
+    )
+    .unwrap();
+
+    kani::cover!(
+        rate_numerator_raw < 63 && consumable > 0 && consumable < claim_raw as u128,
+        "per-domain support proof covers a fractional haircut"
+    );
+    kani::cover!(
+        (backing_raw as u128) < (claim_raw as u128) && consumable == backing_raw as u128,
+        "per-domain support proof covers the backing cap"
+    );
+    assert!(consumable <= claim_raw as u128);
+    assert!(consumable <= backing_raw as u128);
+
+    if consumable != 0 {
+        let (face_num, backing_num) =
+            MarketGroupV16ViewMut::<u64>::kani_source_credit_lien_amounts_for_effective(
+                consumable, rate,
+            )
+            .unwrap();
+        assert!(face_num <= claim_num);
+        assert!(backing_num <= available_backing_num);
+    }
+
+    let next = consumable + 1;
+    let (next_face_num, next_backing_num) =
+        MarketGroupV16ViewMut::<u64>::kani_source_credit_lien_amounts_for_effective(next, rate)
+            .unwrap();
+    assert!(next_face_num > claim_num || next_backing_num > available_backing_num);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
 fn proof_v16_residual_reward_credit_is_capped_by_principal_and_crystallized_loss() {
     let crystallized_raw: u8 = kani::any();
     let spent_raw: u8 = kani::any();

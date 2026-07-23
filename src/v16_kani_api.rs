@@ -692,6 +692,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::source_credit_lien_amounts_for_effective(effective_credit, credit_rate_num)
     }
 
+    pub fn kani_source_credit_consumable_atoms(
+        unliened_claim_num: u128,
+        credit_rate_num: u128,
+        available_backing_num: u128,
+    ) -> V16Result<u128> {
+        V16Core::source_credit_consumable_atoms(
+            unliened_claim_num,
+            credit_rate_num,
+            available_backing_num,
+        )
+    }
+
     pub fn kani_counterparty_cure_atoms_from_scaled_backing(amount: u128) -> V16Result<u128> {
         V16Core::validate_bound_num_atom_aligned(amount)?;
         Ok(amount / BOUND_SCALE)
