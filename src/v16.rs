@@ -12080,15 +12080,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         restarted
     }
 
-    fn canonical_retired_asset_slot(old_asset: AssetStateV16) -> EngineAssetSlotV16Account {
+    fn canonical_retired_asset_state(old_asset: AssetStateV16, retired_slot: u64) -> AssetStateV16 {
         let mut canonical_asset = AssetStateV16::default();
         canonical_asset.market_id = old_asset.market_id;
-        canonical_asset.retired_slot = old_asset.retired_slot;
+        canonical_asset.retired_slot = retired_slot;
         canonical_asset.lifecycle = AssetLifecycleV16::Retired;
         canonical_asset.raw_oracle_target_price = old_asset.raw_oracle_target_price;
         canonical_asset.effective_price = old_asset.effective_price;
         canonical_asset.fund_px_last = old_asset.fund_px_last;
         canonical_asset.slot_last = old_asset.slot_last;
+        canonical_asset
+    }
+
+    fn canonical_retired_asset_slot(old_asset: AssetStateV16) -> EngineAssetSlotV16Account {
+        let canonical_asset =
+            Self::canonical_retired_asset_state(old_asset, old_asset.retired_slot);
         let mut canonical_slot = EngineAssetSlotV16Account::empty_for_market(old_asset.market_id);
         canonical_slot.asset = AssetStateV16Account::from_runtime(&canonical_asset);
         canonical_slot
@@ -12102,11 +12108,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
-    fn require_empty_asset_lifecycle_state(&self, asset_index: usize) -> V16Result<()> {
-        self.require_empty_asset_lifecycle_state_with_spent_policy(asset_index, false)
-    }
-
-    fn require_empty_asset_lifecycle_state_with_spent_policy(
+    fn require_terminal_asset_reclaimable_state(
         &self,
         asset_index: usize,
         allow_terminal_spent_budget: bool,
@@ -12133,24 +12135,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             long_spent != 0 || short_spent != 0
         };
 
+        // Historical indices and sub-atom residue are intentionally omitted:
+        // once every claim-bearing counter below is zero, no account can
+        // observe them, and retire/restart replaces them with canonical state.
         if slot.pending_domain_loss_barrier_long.get() != 0
             || slot.pending_domain_loss_barrier_short.get() != 0
-            || asset.mode_long != SideModeV16::Normal
-            || asset.mode_short != SideModeV16::Normal
-            || !((asset.a_long == ADL_ONE && asset.a_short == ADL_ONE)
-                || (asset.a_long == 0 && asset.a_short == 0))
-            || asset.k_long != 0
-            || asset.k_short != 0
-            || asset.f_long_num != 0
-            || asset.f_short_num != 0
-            || asset.k_epoch_start_long != 0
-            || asset.k_epoch_start_short != 0
-            || asset.f_epoch_start_long_num != 0
-            || asset.f_epoch_start_short_num != 0
-            || asset.b_long_num != 0
-            || asset.b_short_num != 0
-            || asset.b_epoch_start_long_num != 0
-            || asset.b_epoch_start_short_num != 0
             || asset.oi_eff_long_q != 0
             || asset.oi_eff_short_q != 0
             || asset.stored_pos_count_long != 0
@@ -12161,10 +12150,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.pending_obligation_count_short != 0
             || asset.loss_weight_sum_long != 0
             || asset.loss_weight_sum_short != 0
-            || asset.social_loss_remainder_long_num != 0
-            || asset.social_loss_remainder_short_num != 0
-            || asset.social_loss_dust_long_num != 0
-            || asset.social_loss_dust_short_num != 0
             || asset.explicit_unallocated_loss_long != 0
             || asset.explicit_unallocated_loss_short != 0
             || spent_blocks_empty
@@ -15491,18 +15476,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             AssetLifecycleV16::Active
             | AssetLifecycleV16::DrainOnly
             | AssetLifecycleV16::Recovery => {
-                self.require_empty_asset_lifecycle_state(asset_index)?;
+                self.require_terminal_asset_reclaimable_state(asset_index, false)?;
                 let (next_asset_set_epoch, next_risk_epoch) =
                     self.checked_asset_set_epoch_bump()?;
-                asset.lifecycle = AssetLifecycleV16::Retired;
-                asset.retired_slot = now_slot;
+                asset = Self::canonical_retired_asset_state(asset, now_slot);
                 self.set_asset_state(asset_index, asset)?;
                 self.header.current_slot = V16PodU64::new(now_slot);
                 self.commit_asset_set_epoch_bump(next_asset_set_epoch, next_risk_epoch);
                 self.validate_shape()
             }
             AssetLifecycleV16::Retired => {
-                self.require_empty_asset_lifecycle_state(asset_index)?;
+                self.require_terminal_asset_reclaimable_state(asset_index, false)?;
+                let canonical = Self::canonical_retired_asset_state(asset, asset.retired_slot);
+                if canonical != asset {
+                    self.set_asset_state(asset_index, canonical)?;
+                }
                 self.validate_shape()
             }
             _ => Err(V16Error::LockActive),
@@ -15511,9 +15499,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Restarts an empty Recovery/Retired asset with a fresh market_id.
     ///
-    /// Domain insurance budgets are preserved exactly. All position, loss,
-    /// source-credit, backing, reservation, spent, and barrier state must already
-    /// be empty, so stale legs from the old market_id fail closed after restart.
+    /// Domain insurance budgets are preserved exactly. Every claim-bearing
+    /// position, source-credit, backing, reservation, spent, and barrier state
+    /// must be empty; inert historical indices are discarded under a fresh
+    /// market_id, so stale legs fail closed after restart.
     pub fn restart_empty_asset_preserving_insurance_budget_not_atomic(
         &mut self,
         asset_index: usize,
@@ -15536,7 +15525,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::LockActive);
         }
-        self.require_empty_asset_lifecycle_state(asset_index)?;
+        self.require_terminal_asset_reclaimable_state(asset_index, false)?;
 
         let market_id = self.header.next_market_id.get();
         if market_id == 0 {
@@ -15584,7 +15573,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ) {
             return Err(V16Error::LockActive);
         }
-        self.require_empty_asset_lifecycle_state_with_spent_policy(asset_index, true)?;
+        self.require_terminal_asset_reclaimable_state(asset_index, true)?;
         let slot = self.markets[asset_index].engine_slot_mut();
         let (budget_long, spent_long) = Self::clear_terminal_spent_domain_budget_pair(
             slot.insurance_domain_budget_long,
@@ -15625,7 +15614,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::LockActive);
         }
-        self.require_empty_asset_lifecycle_state(asset_index)?;
+        self.require_terminal_asset_reclaimable_state(asset_index, false)?;
 
         *self.markets[asset_index].engine_slot_mut() =
             Self::canonical_retired_asset_slot(old_asset);

@@ -2256,6 +2256,121 @@ fn proof_v16_restart_empty_asset_core_preserves_budgets_and_assigns_fresh_market
     }
 }
 
+// Terminal-slot reclamation theorem. Once every externally observable claim,
+// position, obligation, and barrier is gone, historical K/F/B indices and
+// sub-atom social-loss residue cannot let an abandoned asset consume a finite
+// market slot forever. Both public terminal operations must erase only that
+// inert state while preserving every quote-value and domain-budget stock.
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_asset_with_only_inert_indices_is_reclaimable() {
+    let restart: bool = kani::any();
+    let reset_pending_long: bool = kani::any();
+    let reset_pending_short: bool = kani::any();
+    let index_a: u64 = kani::any();
+    let index_b: u64 = kani::any();
+    let remainder_long: u64 = kani::any();
+    let remainder_short: u64 = kani::any();
+    let dust_long: u64 = kani::any();
+    let dust_short: u64 = kani::any();
+    let budget_long_raw: u8 = kani::any();
+    let budget_short_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let budget_long = budget_long_raw as u128;
+    let budget_short = budget_short_raw as u128;
+    let insurance = budget_long + budget_short + surplus_raw as u128;
+
+    let (mut header, mut markets) = one_market_persisted_slot_fixture();
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget_long + budget_short);
+    markets[0].engine = empty_recovery_slot_for_market(1, 100, 1, budget_long, budget_short);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.k_long = index_a as i128;
+    asset.k_short = -(index_b as i128);
+    asset.f_long_num = index_b as i128;
+    asset.f_short_num = -(index_a as i128);
+    asset.k_epoch_start_long = index_b as i128;
+    asset.k_epoch_start_short = -(index_a as i128);
+    asset.f_epoch_start_long_num = index_a as i128;
+    asset.f_epoch_start_short_num = -(index_b as i128);
+    asset.b_long_num = index_a as u128;
+    asset.b_short_num = index_b as u128;
+    asset.b_epoch_start_long_num = index_b as u128;
+    asset.b_epoch_start_short_num = index_a as u128;
+    asset.social_loss_remainder_long_num = remainder_long as u128;
+    asset.social_loss_remainder_short_num = remainder_short as u128;
+    asset.social_loss_dust_long_num = dust_long as u128;
+    asset.social_loss_dust_short_num = dust_short as u128;
+    asset.mode_long = if reset_pending_long {
+        SideModeV16::ResetPending
+    } else {
+        SideModeV16::Normal
+    };
+    asset.mode_short = if reset_pending_short {
+        SideModeV16::ResetPending
+    } else {
+        SideModeV16::Normal
+    };
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.validate_shape().unwrap();
+    let result = if restart {
+        market.restart_empty_asset_preserving_insurance_budget_not_atomic(0, 200, 2)
+    } else {
+        market.retire_empty_asset_not_atomic(0, 2)
+    };
+
+    kani::cover!(
+        restart && index_a > 255 && remainder_long > 255 && dust_short > 255 && budget_long > 0,
+        "restarts a valid terminal asset with symbolic inert indices and a preserved budget"
+    );
+    kani::cover!(
+        !restart && index_b > 255 && remainder_short > 255 && dust_long > 255 && budget_short > 0,
+        "retires a valid terminal asset with symbolic inert indices and a preserved budget"
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        budget_long
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        budget_short
+    );
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(
+        after.lifecycle,
+        if restart {
+            AssetLifecycleV16::Active
+        } else {
+            AssetLifecycleV16::Retired
+        }
+    );
+    assert_eq!(after.k_long, 0);
+    assert_eq!(after.k_short, 0);
+    assert_eq!(after.f_long_num, 0);
+    assert_eq!(after.f_short_num, 0);
+    assert_eq!(after.b_long_num, 0);
+    assert_eq!(after.b_short_num, 0);
+    assert_eq!(after.social_loss_remainder_long_num, 0);
+    assert_eq!(after.social_loss_remainder_short_num, 0);
+    assert_eq!(after.social_loss_dust_long_num, 0);
+    assert_eq!(after.social_loss_dust_short_num, 0);
+    assert_eq!(after.mode_long, SideModeV16::Normal);
+    assert_eq!(after.mode_short, SideModeV16::Normal);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]

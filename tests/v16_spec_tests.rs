@@ -178,6 +178,17 @@ fn v16_recovery_forfeit_charges_social_loss_dust_carry_and_unblocks_withdrawal()
     assert_eq!(market.header.vault.get(), 1);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
+
+    let old_market_id = market.markets[0].engine.asset.market_id.get();
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(0, 200, 2)
+        .unwrap();
+    let restarted = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(restarted.lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(restarted.market_id, old_market_id);
+    assert_eq!(restarted.b_long_num, 0);
+    assert_eq!(restarted.social_loss_dust_long_num, 0);
+    assert_eq!(market.header.vault.get(), 1);
 }
 
 #[test]
