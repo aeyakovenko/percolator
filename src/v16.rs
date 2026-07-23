@@ -10823,6 +10823,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 return Err(V16Error::BStale);
             }
+            if refreshed.basis_pos_q == 0
+                && !account
+                    .header
+                    .close_progress
+                    .try_to_runtime()?
+                    .has_pending_residual()
+                && !self.has_pending_domain_loss_barrier(asset_index, refreshed.side)?
+            {
+                self.clear_leg_at_slot(account, asset_index, slot)?;
+                slot += 1;
+                continue;
+            }
             let price = if let Some((override_asset, override_price)) = price_override {
                 if override_asset == asset_index {
                     override_price
@@ -12771,8 +12783,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
     ) -> V16Result<()> {
         let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        self.clear_leg_at_slot(account, asset_index, leg_slot)
+    }
+
+    fn clear_leg_at_slot(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        leg_slot: usize,
+    ) -> V16Result<()> {
+        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+            return Err(V16Error::InvalidLeg);
+        }
         let leg = account.header.legs[leg_slot].try_to_runtime()?;
-        if !leg.active || leg.b_stale || leg.stale {
+        if !leg.active || leg.asset_index as usize != asset_index || leg.b_stale || leg.stale {
             return Err(V16Error::InvalidLeg);
         }
         if account

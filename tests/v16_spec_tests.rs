@@ -26,6 +26,64 @@ fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
 }
 
 #[test]
+fn v16_full_refresh_clears_resolved_zero_basis_obligation() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 249);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.stored_pos_count_long = 1;
+    asset.pending_obligation_count_long = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: 0,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 7,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    {
+        let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.validate_shape().unwrap();
+        PortfolioV16View::new(&account_header)
+            .validate_with_market(&market.as_view())
+            .unwrap();
+    }
+
+    let cert = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .full_account_refresh_not_atomic(&mut PortfolioV16ViewMut::new(&mut account_header))
+        .unwrap();
+
+    assert_eq!(cert.active_bitmap_at_cert, V16_EMPTY_ACTIVE_BITMAP);
+    assert_eq!(
+        account_header.active_bitmap,
+        V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new)
+    );
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.stored_pos_count_long, 0);
+    assert_eq!(asset.pending_obligation_count_long, 0);
+    assert_eq!(asset.loss_weight_sum_long, 0);
+    assert_eq!(asset.social_loss_dust_long_num, 7);
+    assert_eq!(header.resolved_payout_blocker_count.get(), 0);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.validate_shape().unwrap();
+    PortfolioV16View::new(&account_header)
+        .validate_with_market(&market.as_view())
+        .unwrap();
+}
+
+#[test]
 fn v16_recovery_forfeit_detaches_without_counterparty_participation() {
     let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
     let mut long_header = account_fixture(1, 250);
