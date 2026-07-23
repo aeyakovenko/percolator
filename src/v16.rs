@@ -10866,7 +10866,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         price_override: Option<(usize, u64)>,
-        b_delta_budget: u128,
+        b_loss_atom_budget: u128,
         allow_b_chunk: bool,
     ) -> V16Result<AccountRefreshCertOutcomeV16> {
         self.validate_account_scalar_preflight(&account.as_view())?;
@@ -10950,7 +10950,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.mark_leg_b_stale(account, asset_index)?;
                 if allow_b_chunk {
                     let chunk =
-                        self.settle_account_b_chunk(account, asset_index, b_delta_budget)?;
+                        self.settle_account_b_chunk(account, asset_index, b_loss_atom_budget)?;
                     if chunk.remaining_after != 0 {
                         return Ok(AccountRefreshCertOutcomeV16::BChunk(chunk));
                     }
@@ -11199,7 +11199,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &self,
         leg: PortfolioLegV16,
         target: u128,
-        endpoint_delta_budget: u128,
+        endpoint_loss_atom_budget: u128,
     ) -> V16Result<AccountBSettlementChunkV16> {
         if target < leg.b_snap {
             return Err(V16Error::RecoveryRequired);
@@ -11213,10 +11213,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 remaining_after: 0,
             });
         }
-        if leg.loss_weight == 0 || endpoint_delta_budget == 0 {
+        if leg.loss_weight == 0 || endpoint_loss_atom_budget == 0 {
             return Err(V16Error::RecoveryRequired);
         }
-        let limit = self.header.config.public_b_chunk_atoms.get();
+        // Both limits are collateral atoms. Convert that atom budget to the
+        // corresponding B-index delta exactly once through loss_weight below.
+        let limit = self
+            .header
+            .config
+            .public_b_chunk_atoms
+            .get()
+            .min(endpoint_loss_atom_budget);
         let max_num = limit
             .checked_add(1)
             .and_then(|v| v.checked_mul(SOCIAL_LOSS_DEN))
@@ -11226,9 +11233,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::RecoveryRequired);
         }
         let max_delta_by_loss = (max_num - leg.b_rem) / leg.loss_weight;
-        let delta_b = b_remaining
-            .min(max_delta_by_loss)
-            .min(endpoint_delta_budget);
+        let delta_b = b_remaining.min(max_delta_by_loss);
         if delta_b == 0 {
             return Err(V16Error::RecoveryRequired);
         }
@@ -11251,7 +11256,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &self,
         account: &PortfolioV16View<'_>,
         asset_index: usize,
-        endpoint_delta_budget: u128,
+        endpoint_loss_atom_budget: u128,
     ) -> V16Result<AccountBSettlementChunkV16> {
         account.validate_with_market(&self.as_view())?;
         let leg = Self::active_leg_for_asset(account, asset_index)?;
@@ -11262,19 +11267,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if target < leg.b_snap {
             return Err(V16Error::RecoveryRequired);
         }
-        self.account_b_settlement_chunk_from_leg(leg, target, endpoint_delta_budget)
+        self.account_b_settlement_chunk_from_leg(leg, target, endpoint_loss_atom_budget)
     }
 
     fn settle_account_b_chunk(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         asset_index: usize,
-        endpoint_delta_budget: u128,
+        endpoint_loss_atom_budget: u128,
     ) -> V16Result<AccountBSettlementChunkV16> {
         let chunk = self.account_b_settlement_chunk(
             &account.as_view(),
             asset_index,
-            endpoint_delta_budget,
+            endpoint_loss_atom_budget,
         )?;
         if chunk.delta_b == 0 {
             if !Self::has_b_stale_leg(&account.as_view())? {
@@ -11310,7 +11315,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn settle_account_side_effects_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-        b_delta_budget: u128,
+        b_loss_atom_budget: u128,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
         let mut slot = 0usize;
@@ -11324,7 +11329,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if target > refreshed.b_snap {
                     self.mark_leg_b_stale(account, asset_index)?;
                     let chunk =
-                        self.settle_account_b_chunk(account, asset_index, b_delta_budget)?;
+                        self.settle_account_b_chunk(account, asset_index, b_loss_atom_budget)?;
                     if chunk.remaining_after != 0 {
                         return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(chunk));
                     }
@@ -15822,12 +15827,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         asset_index: usize,
-        b_delta_budget: u128,
+        b_loss_atom_budget: u128,
     ) -> V16Result<DeadLegForfeitOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
         if asset_index >= self.header.config.max_market_slots.get() as usize
             || asset_index >= self.markets.len()
-            || b_delta_budget == 0
+            || b_loss_atom_budget == 0
         {
             return Err(V16Error::InvalidLeg);
         }
@@ -15872,7 +15877,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let refreshed = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
         if self.b_target_for_leg(asset_index, refreshed)? > refreshed.b_snap {
             self.mark_leg_b_stale(account, asset_index)?;
-            let chunk = self.settle_account_b_chunk(account, asset_index, b_delta_budget)?;
+            let chunk = self.settle_account_b_chunk(account, asset_index, b_loss_atom_budget)?;
             total_loss_settled = total_loss_settled
                 .checked_add(chunk.loss)
                 .ok_or(V16Error::ArithmeticOverflow)?;
