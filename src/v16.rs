@@ -1874,6 +1874,39 @@ impl V16Core {
         Ok(leg)
     }
 
+    /// Fold a closing leg's fractional B loss into the side accumulator. Any
+    /// whole-atom carry is returned to be charged to that account before the
+    /// leg is detached; silently dropping it would under-collect booked loss.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(
+        dust < SOCIAL_LOSS_DEN && remainder < SOCIAL_LOSS_DEN
+    ))]
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
+        Ok((next_dust, carry)) => {
+            *next_dust < SOCIAL_LOSS_DEN
+                && *carry <= 1
+                && carry.checked_mul(SOCIAL_LOSS_DEN)
+                    .and_then(|v| v.checked_add(*next_dust))
+                    == dust.checked_add(remainder)
+        }
+        Err(_) => false,
+    }))]
+    pub(crate) fn kernel_quarantine_social_loss_remainder(
+        dust: u128,
+        remainder: u128,
+    ) -> V16Result<(u128, u128)> {
+        if dust >= SOCIAL_LOSS_DEN || remainder >= SOCIAL_LOSS_DEN {
+            return Err(V16Error::InvalidLeg);
+        }
+        let total = dust
+            .checked_add(remainder)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if total >= SOCIAL_LOSS_DEN {
+            Ok((total - SOCIAL_LOSS_DEN, 1))
+        } else {
+            Ok((total, 0))
+        }
+    }
+
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
@@ -12791,6 +12824,55 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn settle_forfeit_leg_remainder(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<u128> {
+        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
+        if leg.b_rem == 0 {
+            return Ok(0);
+        }
+        let mut asset = self.asset_state(asset_index)?;
+        let prior_reset_epoch = match leg.side {
+            SideV16::Long => {
+                asset.mode_long == SideModeV16::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_long)
+            }
+            SideV16::Short => {
+                asset.mode_short == SideModeV16::ResetPending
+                    && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
+            }
+        };
+        if prior_reset_epoch {
+            return Ok(0);
+        }
+        let dust = match leg.side {
+            SideV16::Long => asset.social_loss_dust_long_num,
+            SideV16::Short => asset.social_loss_dust_short_num,
+        };
+        let (next_dust, carry) = V16Core::kernel_quarantine_social_loss_remainder(dust, leg.b_rem)?;
+        match leg.side {
+            SideV16::Long => asset.social_loss_dust_long_num = next_dust,
+            SideV16::Short => asset.social_loss_dust_short_num = next_dust,
+        }
+        leg.b_rem = 0;
+        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
+        self.set_asset_state(asset_index, asset)?;
+        if carry != 0 {
+            let carry_i128 = i128::try_from(carry).map_err(|_| V16Error::ArithmeticOverflow)?;
+            let pnl = account
+                .header
+                .pnl
+                .get()
+                .checked_sub(carry_i128)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.set_account_pnl(account, pnl)?;
+        }
+        Ok(carry)
+    }
+
     fn clear_resolved_close_leg(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -15683,6 +15765,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && k_target == leg.k_snap
             && f_target == leg.f_snap
             && b_target <= leg.b_snap
+            && leg.b_rem == 0
             && !account
                 .header
                 .close_progress
@@ -15730,6 +15813,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 });
             }
         }
+
+        let remainder_loss = self.settle_forfeit_leg_remainder(account, asset_index)?;
+        total_loss_settled = total_loss_settled
+            .checked_add(remainder_loss)
+            .ok_or(V16Error::ArithmeticOverflow)?;
 
         let principal_used = self.settle_negative_pnl_from_principal_not_atomic(account)?;
         let bankruptcy_residual_after_principal = if account.header.pnl.get() < 0 {

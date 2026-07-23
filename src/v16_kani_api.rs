@@ -17,6 +17,13 @@ pub fn kani_kernel_clear_leg_transition(
     V16Core::kernel_clear_leg(leg, asset)
 }
 
+pub fn kani_kernel_quarantine_social_loss_remainder(
+    dust: u128,
+    remainder: u128,
+) -> V16Result<(u128, u128)> {
+    V16Core::kernel_quarantine_social_loss_remainder(dust, remainder)
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,

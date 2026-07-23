@@ -59,7 +59,7 @@ Source-checkable counts in this checkout:
 
 | Class | Count |
 | --- | ---: |
-| Plain Kani proofs in `tests/proofs_v16.rs` | 260 |
+| Plain Kani proofs in `tests/proofs_v16.rs` | 261 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 11 |
 | Direct plain Kani proofs in `src/v16_proofs.rs` | 42 |
 | Generated backing-isolation proofs in `src/v16_proofs.rs` | 8 |
@@ -73,9 +73,9 @@ Source-checkable counts in this checkout:
 | Generated dead-leg forfeit-settlement isolation proofs in `src/v16_proofs.rs` | 8 |
 | Generated negative-PnL insurance isolation proofs in `src/v16_proofs.rs` | 4 |
 | Generated bankruptcy-residual isolation proofs in `src/v16_proofs.rs` | 8 |
-| Function-contract proofs in `src/v16_proofs.rs` | 50 |
-| Production `kernel_*` helpers in `src/v16.rs` | 17 |
-| Public `*_not_atomic` engine APIs in `src/v16.rs` | 55 |
+| Function-contract proofs in `src/v16_proofs.rs` | 51 |
+| Production `kernel_*` helpers in `src/v16.rs` | 19 |
+| Public `*_not_atomic` engine APIs in `src/v16.rs` | 54 |
 
 Spot-check the inventory directly:
 

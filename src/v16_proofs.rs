@@ -1629,6 +1629,18 @@ fn contract_check_kernel_clear_leg() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_quarantine_social_loss_remainder)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_quarantine_social_loss_remainder() {
+    let dust: u128 = kani::any();
+    let remainder: u128 = kani::any();
+    kani::assume(dust < SOCIAL_LOSS_DEN);
+    kani::assume(remainder < SOCIAL_LOSS_DEN);
+    let _ = V16Core::kernel_quarantine_social_loss_remainder(dust, remainder);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::kernel_advance_leg_b_snap)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]

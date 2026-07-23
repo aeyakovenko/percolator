@@ -10,6 +10,7 @@ use percolator::v16::{
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
     kani_health_requirements_from_base_and_target_lag, kani_kernel_clear_leg_transition,
+    kani_kernel_quarantine_social_loss_remainder,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
@@ -1364,6 +1365,89 @@ fn proof_v16_recovery_clear_is_monotone_and_peer_isolated() {
         "recovery clear covers final short-side detach beside surviving peer risk"
     );
     assert_eq!(result, Ok(expected_asset));
+}
+
+// Recovery liveness at the production transition seam. Every individually
+// valid side dust / account remainder pair must permit a current dead leg to
+// leave; otherwise a prior closer can strand the next user's funds because SVM
+// rollback makes every retry identical. Both sides of the carry boundary are
+// symbolic and reachable.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_recovery_clear_accepts_every_valid_social_loss_dust_pair() {
+    let dust: u128 = kani::any();
+    let remainder: u128 = kani::any();
+    let is_short: bool = kani::any();
+    kani::assume(dust < SOCIAL_LOSS_DEN);
+    kani::assume(remainder < SOCIAL_LOSS_DEN);
+    let side = if is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let mut asset = AssetStateV16 {
+        market_id: 1,
+        lifecycle: AssetLifecycleV16::Recovery,
+        oi_eff_long_q: POS_SCALE,
+        oi_eff_short_q: POS_SCALE,
+        stored_pos_count_long: 1,
+        stored_pos_count_short: 1,
+        loss_weight_sum_long: POS_SCALE,
+        loss_weight_sum_short: POS_SCALE,
+        ..AssetStateV16::default()
+    };
+    if is_short {
+        asset.social_loss_dust_short_num = dust;
+    } else {
+        asset.social_loss_dust_long_num = dust;
+    }
+    let mut leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: if is_short {
+            -(POS_SCALE as i128)
+        } else {
+            POS_SCALE as i128
+        },
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: remainder,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    };
+    let total = dust.checked_add(remainder).unwrap();
+    kani::cover!(
+        total < SOCIAL_LOSS_DEN,
+        "recovery detach covers a non-carrying remainder"
+    );
+    kani::cover!(
+        total >= SOCIAL_LOSS_DEN,
+        "recovery detach covers a carrying remainder"
+    );
+    kani::cover!(!is_short, "recovery detach covers the long side");
+    kani::cover!(is_short, "recovery detach covers the short side");
+    let normalized = kani_kernel_quarantine_social_loss_remainder(dust, remainder);
+    assert!(normalized.is_ok());
+    let (next_dust, carry) = normalized.unwrap();
+    if is_short {
+        asset.social_loss_dust_short_num = next_dust;
+    } else {
+        asset.social_loss_dust_long_num = next_dust;
+    }
+    leg.b_rem = 0;
+    let outcome = kani_kernel_clear_leg_transition(leg, asset);
+
+    assert!(next_dust < SOCIAL_LOSS_DEN);
+    assert_eq!(carry * SOCIAL_LOSS_DEN + next_dust, dust + remainder);
+    assert!(outcome.is_ok());
 }
 
 // Recovery-exit theorem, admissibility layer. Combined with the public

@@ -15,7 +15,7 @@ use percolator::{
     SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
     V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
-use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
+use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
 
 const FUNDING_COUNTER_PRICE: u64 = 1_000_000;
 const FUNDING_COUNTER_RATE_E9: i128 = 10_000;
@@ -111,6 +111,73 @@ fn v16_recovery_forfeit_detaches_without_counterparty_participation() {
         MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape(),
         Ok(())
     );
+}
+
+#[test]
+fn v16_recovery_forfeit_charges_social_loss_dust_carry_and_unblocks_withdrawal() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 254);
+    header.vault = V16PodU128::new(2);
+    header.c_tot = V16PodU128::new(2);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account_header.capital = V16PodU128::new(2);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.b_long_num = 1;
+    asset.social_loss_dust_long_num = SOCIAL_LOSS_DEN - POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+
+    let outcome = market
+        .forfeit_recovery_leg_not_atomic(&mut account, 0, 1)
+        .unwrap();
+
+    assert!(outcome.detached);
+    assert_eq!(outcome.loss_settled, 1);
+    assert_eq!(outcome.principal_used, 1);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.capital.get(), 1);
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.social_loss_dust_long_num, 0);
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.stored_pos_count_long, 0);
+    assert_eq!(asset.loss_weight_sum_long, 0);
+    assert_eq!(market.header.vault.get(), 2);
+    assert_eq!(market.header.c_tot.get(), 1);
+
+    market.withdraw_not_atomic(&mut account, 1).unwrap();
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.vault.get(), 1);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 }
 
 #[test]
