@@ -4145,6 +4145,363 @@ fn closure_two_asset_health_certificate_is_complete() {
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn closure_pending_obligation_loss_weight_stub(
+    abs_basis_q: u128,
+    a_basis: u128,
+) -> V16Result<u128> {
+    assert_eq!(a_basis, ADL_ONE);
+    assert!(abs_basis_q > 0 && abs_basis_q <= MAX_POSITION_ABS_Q);
+    Ok(abs_basis_q)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn closure_pending_obligation_account(
+    header: &MarketGroupV16HeaderAccount,
+    asset_index: usize,
+    market_id: u64,
+    units: u128,
+    side: SideV16,
+    tag: u8,
+) -> PortfolioAccountV16Account {
+    let provenance = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        header.market_group_id,
+        [tag; 32],
+        [tag.wrapping_add(1); 32],
+    ));
+    let mut account = PortfolioAccountV16Account::default();
+    account.init_empty_in_place(provenance).unwrap();
+    account.active_bitmap[0] = V16PodU64::new(1u64 << asset_index);
+    account.legs[asset_index] = closure_health_leg(asset_index as u32, market_id, units, side);
+    account
+}
+
+// A participant reducing through a live domain-loss barrier must retain its
+// entire preexisting loss weight. Partial reductions prove the selected
+// account-stage mutation; opposite-delta symmetry and generic resize arithmetic
+// are independently full-domain proofs. Full reductions compose both account
+// stages because they create a zero-basis obligation while deleting the peer
+// leg. Every unrelated asset and all quote-token stock remain unchanged.
+#[cfg(all(kani, feature = "closure"))]
+fn closure_pending_loss_exit_preserves_obligation_body<const PARTIAL: bool>(
+    asset_index: usize,
+    target_long: bool,
+) {
+    assert!(asset_index < 2);
+    let current_units_raw: u8 = kani::any();
+    kani::assume((2..=8).contains(&current_units_raw));
+    let remaining_units_raw = if PARTIAL { current_units_raw - 1 } else { 0 };
+    if PARTIAL {
+        kani::cover!(current_units_raw == 2, "smallest partial exit is reachable");
+        kani::cover!(
+            current_units_raw == 8 && remaining_units_raw == 7,
+            "widest one-unit reduction is reachable"
+        );
+    } else {
+        kani::cover!(
+            current_units_raw == 2,
+            "full exit creates a zero-basis pending obligation"
+        );
+        kani::cover!(
+            current_units_raw == 8,
+            "full exit reaches the largest modeled obligation"
+        );
+    }
+
+    let current_units = u128::from(current_units_raw);
+    let remaining_units = u128::from(remaining_units_raw);
+    let current_abs = current_units * POS_SCALE;
+    let remaining_abs = remaining_units * POS_SCALE;
+    let target_side = if target_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let peer_side = opposite_side(target_side);
+    let target_current = match target_side {
+        SideV16::Long => current_abs as i128,
+        SideV16::Short => -(current_abs as i128),
+    };
+    let target_next = match target_side {
+        SideV16::Long => remaining_abs as i128,
+        SideV16::Short => -(remaining_abs as i128),
+    };
+    let peer_current = -target_current;
+    let peer_next = -target_next;
+
+    let (mut header, mut markets) = closure_two_market_backing_fixture();
+    markets[0].wrapper = 17;
+    markets[1].wrapper = 29;
+    let mut asset = markets[asset_index].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = current_abs;
+    asset.oi_eff_short_q = current_abs;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = current_abs;
+    asset.loss_weight_sum_short = current_abs;
+    markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    if target_long {
+        markets[asset_index].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+    } else {
+        markets[asset_index]
+            .engine
+            .pending_domain_loss_barrier_short = V16PodU64::new(1);
+    }
+    header.resolved_payout_blocker_count = V16PodU64::new(3);
+
+    let market_id = asset.market_id;
+    let mut target_account = closure_pending_obligation_account(
+        &header,
+        asset_index,
+        market_id,
+        current_units,
+        target_side,
+        9,
+    );
+    let mut peer_account = closure_pending_obligation_account(
+        &header,
+        asset_index,
+        market_id,
+        current_units,
+        peer_side,
+        19,
+    );
+    {
+        let market = MarketGroupV16View::new(&header, &markets);
+        assert!(
+            market.validate_shape() == Ok(()),
+            "pending pre-market shape"
+        );
+        assert!(
+            PortfolioV16View::new(&target_account).validate_with_market(&market) == Ok(()),
+            "pending pre-account shape"
+        );
+    }
+
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+    let target_before = target_account;
+    let peer_before = peer_account;
+    let empty_slot = Some(1 - asset_index);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert!(
+            market.apply_current_position_delta_with_lookup(
+                &mut PortfolioV16ViewMut::new(&mut target_account),
+                asset_index,
+                target_next - target_current,
+                PositionDeltaLookupV16 {
+                    existing_slot: Some(asset_index),
+                    empty_slot,
+                    current_q: target_current,
+                    next_q: target_next,
+                },
+            ) == Ok(()),
+            "pending target reduction"
+        );
+        if !PARTIAL {
+            assert!(
+                market.apply_current_position_delta_with_lookup(
+                    &mut PortfolioV16ViewMut::new(&mut peer_account),
+                    asset_index,
+                    peer_next - peer_current,
+                    PositionDeltaLookupV16 {
+                        existing_slot: Some(asset_index),
+                        empty_slot,
+                        current_q: peer_current,
+                        next_q: peer_next,
+                    },
+                ) == Ok(()),
+                "pending peer reduction"
+            );
+        }
+    }
+
+    let full_exit = !PARTIAL;
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(if full_exit { 2 } else { 3 });
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+
+    let mut expected_slots = slots_before;
+    let mut expected_asset = asset;
+    if target_long {
+        expected_asset.oi_eff_long_q = remaining_abs;
+        expected_asset.loss_weight_sum_long = current_abs;
+        expected_asset.pending_obligation_count_long = u64::from(full_exit);
+        if full_exit {
+            expected_asset.oi_eff_short_q = 0;
+            expected_asset.loss_weight_sum_short = 0;
+            expected_asset.stored_pos_count_short = 0;
+        }
+    } else {
+        expected_asset.oi_eff_short_q = remaining_abs;
+        expected_asset.loss_weight_sum_short = current_abs;
+        expected_asset.pending_obligation_count_short = u64::from(full_exit);
+        if full_exit {
+            expected_asset.oi_eff_long_q = 0;
+            expected_asset.loss_weight_sum_long = 0;
+            expected_asset.stored_pos_count_long = 0;
+        }
+    }
+    expected_slots[asset_index].asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[0],
+        &markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[1],
+        &markets[1].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrappers_before[0]);
+    assert_eq!(markets[1].wrapper, wrappers_before[1]);
+
+    let mut expected_target = target_before;
+    let mut target_leg = expected_target.legs[asset_index].try_to_runtime().unwrap();
+    target_leg.basis_pos_q = target_next;
+    expected_target.legs[asset_index] = PortfolioLegV16Account::from_runtime(&target_leg);
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_target,
+        &target_account
+    ));
+
+    let mut expected_peer = peer_before;
+    if full_exit {
+        expected_peer.legs[asset_index] =
+            PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+        expected_peer.active_bitmap[0] = V16PodU64::new(0);
+    }
+    if !PARTIAL {
+        assert!(kani_eq_portfolio_account_v16_account(
+            &expected_peer,
+            &peer_account
+        ));
+    }
+
+    assert_eq!(
+        target_account.legs[asset_index].loss_weight.get(),
+        current_abs
+    );
+    assert_eq!(
+        target_account.legs[asset_index].basis_pos_q.get(),
+        target_next
+    );
+    assert_eq!(
+        target_account.legs[asset_index].active, 1,
+        "a full exit remains represented until its pending loss is settled"
+    );
+    assert_eq!(header.vault, header_before.vault);
+    assert_eq!(header.c_tot, header_before.c_tot);
+    assert_eq!(header.insurance, header_before.insurance);
+    if PARTIAL {
+        assert!(remaining_abs > 0);
+        assert!(current_abs > remaining_abs);
+        assert!(target_account.legs[asset_index].loss_weight.get() >= remaining_abs);
+        assert!(active_bitmap_get(
+            target_account.active_bitmap.map(V16PodU64::get),
+            asset_index
+        ));
+    } else {
+        let market = MarketGroupV16View::new(&header, &markets);
+        assert!(
+            market.validate_shape() == Ok(()),
+            "pending post-market shape"
+        );
+        assert!(
+            PortfolioV16View::new(&target_account).validate_with_market(&market) == Ok(()),
+            "pending post-account shape"
+        );
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+macro_rules! closure_pending_obligation_harness {
+    ($name:ident, $asset:literal, $long:literal, $partial:literal) => {
+        #[kani::proof]
+        #[kani::stub(
+            V16Core::expected_source_credit_rate_num_for_state,
+            closure_zero_claim_credit_rate
+        )]
+        #[kani::stub(
+            crate::v16::loss_weight_for_basis,
+            closure_pending_obligation_loss_weight_stub
+        )]
+        #[kani::stub(
+            PortfolioLegV16Account::try_to_runtime,
+            closure_health_valid_leg_decode_stub
+        )]
+        #[kani::stub(
+            MarketGroupV16ViewMut::active_leg_slot_for_asset,
+            closure_liquidation_active_leg_slot_stub
+        )]
+        #[kani::unwind(64)]
+        #[kani::solver(cadical)]
+        fn $name() {
+            closure_pending_loss_exit_preserves_obligation_body::<$partial>($asset, $long);
+        }
+    };
+}
+
+#[cfg(all(kani, feature = "closure"))]
+closure_pending_obligation_harness!(
+    closure_pending_obligation_asset0_long_is_preserved,
+    0,
+    true,
+    false
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_pending_obligation_harness!(
+    closure_pending_obligation_asset0_short_is_preserved,
+    0,
+    false,
+    false
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_pending_obligation_harness!(
+    closure_pending_obligation_asset1_long_is_preserved,
+    1,
+    true,
+    false
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_pending_obligation_harness!(
+    closure_pending_obligation_asset1_short_is_preserved,
+    1,
+    false,
+    false
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_pending_obligation_harness!(
+    closure_pending_obligation_partial_asset0_long_is_preserved,
+    0,
+    true,
+    true
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_pending_obligation_harness!(
+    closure_pending_obligation_partial_asset0_short_is_preserved,
+    0,
+    false,
+    true
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_pending_obligation_harness!(
+    closure_pending_obligation_partial_asset1_long_is_preserved,
+    1,
+    true,
+    true
+);
+#[cfg(all(kani, feature = "closure"))]
+closure_pending_obligation_harness!(
+    closure_pending_obligation_partial_asset1_short_is_preserved,
+    1,
+    false,
+    true
+);
+
+#[cfg(all(kani, feature = "closure"))]
 fn closure_liquidation_active_leg_slot_stub<T, U>(
     account: &PortfolioV16View<'_>,
     asset_index: usize,
