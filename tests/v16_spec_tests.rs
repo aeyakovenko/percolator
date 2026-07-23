@@ -4074,6 +4074,7 @@ fn v16_auto_crank_classifies_payout_ready_resolved_winner_without_snapshot() {
 // dispatches the B-chunk settle without requiring oracle observations.
 #[test]
 fn v16_auto_crank_settles_b_stale_leg() {
+    const B_DELTA: u128 = SOCIAL_LOSS_DEN / POS_SCALE;
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 51);
     header.current_slot = V16PodU64::new(10);
@@ -4086,10 +4087,10 @@ fn v16_auto_crank_settles_b_stale_leg() {
     asset0.loss_weight_sum_short = POS_SCALE;
     asset0.stored_pos_count_long = 1;
     asset0.stored_pos_count_short = 1;
+    asset0.b_long_num = B_DELTA;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
 
-    // Active leg flagged b-stale, with b_snap already at the current target so the
-    // settle resolves to a clean delta_b=0 clear (progress: clears the b-stale flag).
+    // One atom of socialized loss is pending on this account's long leg.
     account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
         active: true,
         asset_index: 0,
@@ -4101,7 +4102,7 @@ fn v16_auto_crank_settles_b_stale_leg() {
         f_snap: asset0.f_long_num,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
-        b_snap: asset0.b_long_num,
+        b_snap: 0,
         b_rem: 0,
         b_epoch_snap: asset0.epoch_long,
         b_stale: true,
@@ -4111,6 +4112,8 @@ fn v16_auto_crank_settles_b_stale_leg() {
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 
     let summary = market.build_actionable_summary(&account.as_view()).unwrap();
     assert!(
@@ -4134,11 +4137,22 @@ fn v16_auto_crank_settles_b_stale_leg() {
         r.selected,
         AutoCrankPlanV16::SettleBChunk { asset_index: 0 }
     );
-    assert!(matches!(
-        r.outcome,
-        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountBChunk(_))
-    ));
+    let chunk = match r.outcome {
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountBChunk(chunk)) => {
+            chunk
+        }
+        other => panic!("expected B settlement progress, got {other:?}"),
+    };
+    assert_eq!(chunk.delta_b, B_DELTA);
+    assert_eq!(chunk.loss, 1);
+    assert_eq!(chunk.new_remainder, 0);
+    assert_eq!(chunk.remaining_after, 0);
+    assert_eq!(account.header.pnl.get(), -1);
+    let settled_leg = account.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(settled_leg.b_snap, B_DELTA);
+    assert!(!settled_leg.b_stale);
     market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 }
 
 // ENGINE.MD order-insensitivity: when the engine-selected step needs an

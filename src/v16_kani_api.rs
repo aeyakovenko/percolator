@@ -1983,6 +1983,16 @@ impl V16Core {
 // suites exercise one caller-chosen primitive action directly.
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     #[cfg(kani)]
+    pub fn kani_account_b_settlement_chunk_from_leg(
+        &self,
+        leg: PortfolioLegV16,
+        target: u128,
+        endpoint_delta_budget: u128,
+    ) -> V16Result<AccountBSettlementChunkV16> {
+        self.account_b_settlement_chunk_from_leg(leg, target, endpoint_delta_budget)
+    }
+
+    #[cfg(kani)]
     pub fn kani_declare_permissionless_recovery(
         &mut self,
         reason: PermissionlessRecoveryReasonV16,

@@ -1521,6 +1521,88 @@ fn proof_v16_recovery_clear_accepts_every_valid_social_loss_dust_pair() {
     assert!(outcome.is_ok());
 }
 
+// B-settlement no-DoS theorem. Across symbolic valid loss weights, carried
+// remainders, B-index lag, public loss caps, and endpoint budgets, the exact
+// production chunk calculator is total and advances the well-founded B rank.
+// The quotient/remainder equation also prevents skipped or invented loss.
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_valid_b_settlement_is_total_and_strictly_progresses() {
+    let weight_raw: u8 = kani::any();
+    let remaining_raw: u8 = kani::any();
+    let endpoint_raw: u8 = kani::any();
+    let limit_raw: u8 = kani::any();
+    let remainder_raw: u8 = kani::any();
+    let snap_raw: u8 = kani::any();
+    let is_short: bool = kani::any();
+    kani::assume((1..=8).contains(&weight_raw));
+    kani::assume((1..=8).contains(&remaining_raw));
+    kani::assume((1..=8).contains(&endpoint_raw));
+    kani::assume((1..=8).contains(&limit_raw));
+    kani::assume(remainder_raw < 8);
+    kani::assume(snap_raw <= 8);
+
+    let loss_weight = u128::from(weight_raw) * (SOCIAL_LOSS_DEN / 8);
+    let b_snap = u128::from(snap_raw) * 8;
+    let b_remaining = u128::from(remaining_raw) * 8;
+    let target = b_snap + b_remaining;
+    let endpoint_delta_budget = u128::from(endpoint_raw) * 8;
+    let limit = u128::from(limit_raw);
+    let remainder = u128::from(remainder_raw);
+    let side = if is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(limit);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let leg = PortfolioLegV16 {
+        active: true,
+        side,
+        loss_weight,
+        b_snap,
+        b_rem: remainder,
+        b_stale: true,
+        ..PortfolioLegV16::EMPTY
+    };
+
+    let chunk = market
+        .kani_account_b_settlement_chunk_from_leg(leg, target, endpoint_delta_budget)
+        .unwrap();
+    let max_num = (limit + 1) * SOCIAL_LOSS_DEN - 1;
+    let max_delta_by_loss = (max_num - remainder) / loss_weight;
+    let expected_delta = b_remaining
+        .min(endpoint_delta_budget)
+        .min(max_delta_by_loss);
+    let expected_num = loss_weight * expected_delta + remainder;
+
+    kani::cover!(
+        chunk.remaining_after == 0 && chunk.loss > 1 && chunk.new_remainder > 0,
+        "B settlement fully catches up with nonzero loss and carried remainder"
+    );
+    kani::cover!(
+        chunk.remaining_after > 0 && chunk.delta_b == endpoint_delta_budget,
+        "B settlement makes bounded partial progress at the endpoint budget"
+    );
+    kani::cover!(
+        chunk.remaining_after > 0
+            && chunk.delta_b < endpoint_delta_budget
+            && chunk.delta_b < b_remaining,
+        "B settlement makes bounded partial progress at the public loss cap"
+    );
+    kani::cover!(is_short, "B settlement covers the short side");
+    kani::cover!(!is_short, "B settlement covers the long side");
+    assert!(expected_delta > 0);
+    assert_eq!(chunk.delta_b, expected_delta);
+    assert_eq!(chunk.loss, expected_num / SOCIAL_LOSS_DEN);
+    assert_eq!(chunk.new_remainder, expected_num % SOCIAL_LOSS_DEN);
+    assert_eq!(chunk.remaining_after, b_remaining - expected_delta);
+    assert!(chunk.loss <= limit);
+    assert_eq!(target - (b_snap + chunk.delta_b), chunk.remaining_after);
+    assert!(b_snap + chunk.delta_b > b_snap);
+}
+
 // Recovery-exit theorem, admissibility layer. Combined with the public
 // audit-scan regression, this proves independent unwinds may become
 // one-sided only after trading is disabled for the asset.
