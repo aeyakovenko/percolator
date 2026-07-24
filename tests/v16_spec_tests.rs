@@ -2747,7 +2747,11 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
     let mut account_header = account_fixture(1, 18);
     let claim = 20u128;
     let claim_num = claim * BOUND_SCALE;
-    header.vault = V16PodU128::new(claim);
+    // Keep an unrelated live residual and historical opposite-domain insurance
+    // spend present. Only the claim-free terminal sweep may recredit an overlap.
+    header.vault = V16PodU128::new(claim + 10);
+    header.insurance = V16PodU128::new(5);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(5);
     header.pnl_pos_tot = V16PodU128::new(claim);
     header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
     header.pnl_pos_bound_tot = V16PodU128::new(claim);
@@ -2772,6 +2776,8 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
         status: BackingBucketStatusV16::Fresh,
         ..BackingBucketV16::EMPTY
     });
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(10);
+    markets[0].engine.insurance_domain_spent_short = V16PodU128::new(5);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -2785,6 +2791,15 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
     assert_eq!(converted, claim);
     assert_eq!(account.header.pnl.get(), 0);
     assert_eq!(account.header.capital.get(), claim);
+    assert_eq!(
+        market.header.insurance.get(),
+        5,
+        "live conversion must not recredit historical insurance spend"
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        5
+    );
     assert_eq!(
         account.header.source_domains[0],
         PortfolioSourceDomainV16Account::default()
