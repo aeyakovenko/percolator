@@ -1532,6 +1532,16 @@ impl V16Core {
         None
     }
 
+    #[inline]
+    fn kernel_permissionless_kf_settlement_commits_step(
+        allow_b_chunk: bool,
+        source_domain_count: usize,
+        has_pending_kf: bool,
+        leg_kf_pending: bool,
+    ) -> bool {
+        allow_b_chunk && source_domain_count != 0 && has_pending_kf && leg_kf_pending
+    }
+
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
     /// summary and the ENGINE-selected assets, choose the single highest-priority
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
@@ -1648,6 +1658,16 @@ impl V16Core {
             && cert.cert_risk_epoch == risk_epoch
             && cert.cert_asset_set_epoch == asset_set_epoch
             && cert.active_bitmap_at_cert == account_bitmap
+    }
+
+    #[inline]
+    fn kernel_position_action_reuses_current_certificate(
+        account_stale: bool,
+        account_b_stale: bool,
+        cert_current: bool,
+        has_b_stale_leg: bool,
+    ) -> bool {
+        !account_stale && !account_b_stale && cert_current && !has_b_stale_leg
     }
 
     /// PRODUCTION FIDELITY BUILDER (roadmap 3C step 4, actionable-state
@@ -4906,6 +4926,7 @@ struct PositionDeltaLookupV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AccountRefreshCertOutcomeV16 {
     Certified(HealthCertV16),
+    LegSettled { asset_index: usize },
     BChunk(AccountBSettlementChunkV16),
 }
 
@@ -8377,6 +8398,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(sum)
     }
 
+    fn account_source_domain_count(account: &PortfolioV16View<'_>) -> usize {
+        let mut count = 0usize;
+        while count < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[count];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            count += 1;
+        }
+        count
+    }
+
+    fn account_has_pending_kf_settlement(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                let asset = self.asset_state(leg.asset_index as usize)?;
+                let (target_k, target_f) = Self::kf_target_for_leg_from_asset(asset, leg)?;
+                if leg.k_snap != target_k || leg.f_snap != target_f {
+                    return Ok(true);
+                }
+            }
+            slot += 1;
+        }
+        Ok(false)
+    }
+
     fn account_has_source_claims(account: &PortfolioV16View<'_>) -> V16Result<bool> {
         Ok(Self::account_source_claim_bound_sum_num(account)? != 0)
     }
@@ -10704,6 +10753,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<HealthCertV16> {
         match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
             AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
+            AccountRefreshCertOutcomeV16::LegSettled { .. } => Err(V16Error::Stale),
             AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
         }
     }
@@ -10723,6 +10773,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .as_view()
                 .validate_source_credit_shape_with_market(&self.as_view())?;
             Self::account_source_claim_bound_sum_num(&account.as_view())?
+        };
+        let source_domain_count = if allow_b_chunk {
+            Self::account_source_domain_count(&account.as_view())
+        } else {
+            0
+        };
+        let has_pending_kf = if allow_b_chunk {
+            self.account_has_pending_kf_settlement(&account.as_view())?
+        } else {
+            false
         };
         if source_claim_sum_num != 0 {
             V16Core::validate_positive_pnl_source_attribution(
@@ -10789,7 +10849,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             seen_assets[seen_asset_count] = leg.asset_index;
             seen_asset_count += 1;
+            let (target_k, target_f) = Self::kf_target_for_leg_from_asset(asset, leg)?;
+            let kf_settlement_pending = leg.k_snap != target_k || leg.f_snap != target_f;
             self.settle_leg_kf_effects_at_slot_with_asset(account, slot, asset)?;
+            if V16Core::kernel_permissionless_kf_settlement_commits_step(
+                allow_b_chunk,
+                source_domain_count,
+                has_pending_kf,
+                kf_settlement_pending,
+            ) {
+                self.validate_account_audit_scan(&account.as_view())?;
+                self.validate_shape_audit_scan()?;
+                return Ok(AccountRefreshCertOutcomeV16::LegSettled { asset_index });
+            }
             let mut refreshed = account.header.legs[slot].try_to_runtime()?;
             let target = Self::b_target_for_leg_from_asset(asset, refreshed)?;
             if target > refreshed.b_snap {
@@ -11535,6 +11607,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     true,
                 )? {
                     AccountRefreshCertOutcomeV16::Certified(_) => {}
+                    AccountRefreshCertOutcomeV16::LegSettled { asset_index } => {
+                        self.validate_shape_audit_scan()?;
+                        return Ok(PermissionlessProgressOutcomeV16::AccountLegSettled {
+                            asset_index,
+                        });
+                    }
                     AccountRefreshCertOutcomeV16::BChunk(out) => {
                         self.validate_shape_audit_scan()?;
                         return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
@@ -13535,18 +13613,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let fee_bps = config.liquidation_fee_bps;
         self.require_asset_live_reducible(request.asset_index)?;
-        self.validate_account_scalar_preflight(&account.as_view())?;
+        let cert = self.settle_account_for_position_action_and_refresh_not_atomic(account)?;
         Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
-        match self.refresh_account_and_certify_not_atomic(
-            account,
-            None,
-            self.header.config.public_b_chunk_atoms.get(),
-            false,
-        )? {
-            AccountRefreshCertOutcomeV16::Certified(_) => {}
-            AccountRefreshCertOutcomeV16::BChunk(_) => return Err(V16Error::BStale),
-        }
-        let cert = account.header.health_cert.try_to_runtime()?;
         if cert.certified_liq_deficit == 0 {
             return Err(V16Error::NonProgress);
         }
@@ -13726,17 +13794,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<HealthCertV16> {
         self.validate_account_scalar_preflight(&account.as_view())?;
-        if !decode_bool(account.header.stale_state)?
-            && !decode_bool(account.header.b_stale_state)?
+        let account_stale = decode_bool(account.header.stale_state)?;
+        let account_b_stale = decode_bool(account.header.b_stale_state)?;
+        let cert_current = !account_stale
+            && !account_b_stale
             && self
                 .ensure_favorable_action_current_certificate(&account.as_view())
-                .is_ok()
-            && !Self::has_b_stale_leg(&account.as_view())?
-        {
+                .is_ok();
+        let has_b_stale_leg = if cert_current {
+            Self::has_b_stale_leg(&account.as_view())?
+        } else {
+            true
+        };
+        if V16Core::kernel_position_action_reuses_current_certificate(
+            account_stale,
+            account_b_stale,
+            cert_current,
+            has_b_stale_leg,
+        ) {
             return account.header.health_cert.try_to_runtime();
         }
         match self.refresh_account_and_certify_not_atomic(account, None, 0, false)? {
             AccountRefreshCertOutcomeV16::Certified(cert) => Ok(cert),
+            AccountRefreshCertOutcomeV16::LegSettled { .. } => Err(V16Error::Stale),
             AccountRefreshCertOutcomeV16::BChunk(_) => Err(V16Error::BStale),
         }
     }
@@ -16278,6 +16358,7 @@ impl RiskScoreV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionlessProgressOutcomeV16 {
     AccountCurrent,
+    AccountLegSettled { asset_index: usize },
     AccountBChunk(AccountBSettlementChunkV16),
     ResidualBooked(BResidualBookingOutcomeV16),
     RecoveryDeclared(PermissionlessRecoveryReasonV16),

@@ -58,6 +58,34 @@ pub fn kani_cert_is_current(
     )
 }
 
+pub fn kani_permissionless_kf_settlement_commits_step(
+    allow_b_chunk: bool,
+    source_domain_count: usize,
+    has_pending_kf: bool,
+    leg_kf_pending: bool,
+) -> bool {
+    V16Core::kernel_permissionless_kf_settlement_commits_step(
+        allow_b_chunk,
+        source_domain_count,
+        has_pending_kf,
+        leg_kf_pending,
+    )
+}
+
+pub fn kani_position_action_reuses_current_certificate(
+    account_stale: bool,
+    account_b_stale: bool,
+    cert_current: bool,
+    has_b_stale_leg: bool,
+) -> bool {
+    V16Core::kernel_position_action_reuses_current_certificate(
+        account_stale,
+        account_b_stale,
+        cert_current,
+        has_b_stale_leg,
+    )
+}
+
 pub fn kani_active_bitmap_set(
     bitmap: &mut V16ActiveBitmap,
     leg_slot_index: usize,

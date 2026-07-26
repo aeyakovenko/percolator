@@ -14,7 +14,9 @@ use percolator::v16::{
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
-    kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
+    kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_permissionless_kf_settlement_commits_step,
+    kani_position_action_reuses_current_certificate, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
@@ -235,6 +237,173 @@ fn proof_v16_active_bitmap_set_get_count_is_exact_and_bounds_checked() {
         assert!(!active_bitmap_get(bitmap, slot));
         assert_eq!(after_count, before_count);
     }
+}
+
+#[kani::proof]
+#[kani::unwind(17)]
+#[kani::solver(cadical)]
+fn proof_v16_permissionless_source_kf_refresh_exhausts_exact_pending_rank() {
+    assert!(V16_MAX_PORTFOLIO_ASSETS_N < 64);
+    let raw_pending: u64 = kani::any();
+    let valid_mask = (1u64 << V16_MAX_PORTFOLIO_ASSETS_N) - 1;
+    let mut pending = raw_pending & valid_mask;
+    let initial_count = pending.count_ones();
+    let source_domain_count = (kani::any::<u8>() as usize) % (PORTFOLIO_SOURCE_DOMAIN_CAP + 1);
+    let allow_b_chunk: bool = kani::any();
+    let chunked = allow_b_chunk && source_domain_count != 0;
+    let mut steps = 0u32;
+
+    kani::cover!(
+        chunked && initial_count == V16_MAX_PORTFOLIO_ASSETS_N as u32,
+        "permissionless source refresh covers the maximum stale-leg shape"
+    );
+    kani::cover!(
+        chunked && initial_count >= 2 && pending & 1 == 0,
+        "permissionless source refresh covers sparse stale-leg sets"
+    );
+    kani::cover!(
+        allow_b_chunk && source_domain_count == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "permissionless refresh covers the maximum source-domain shape"
+    );
+    kani::cover!(
+        !allow_b_chunk && source_domain_count != 0 && initial_count != 0,
+        "direct refresh remains unchunked despite source attribution"
+    );
+    kani::cover!(
+        allow_b_chunk && source_domain_count == 0 && initial_count != 0,
+        "source-free permissionless refresh remains unchunked"
+    );
+
+    loop {
+        let has_pending = pending != 0;
+        let mut selected = None;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg_pending = pending & (1u64 << slot) != 0;
+            if kani_permissionless_kf_settlement_commits_step(
+                allow_b_chunk,
+                source_domain_count,
+                has_pending,
+                leg_pending,
+            ) {
+                selected = Some(slot);
+                break;
+            }
+            slot += 1;
+        }
+
+        if !chunked || pending == 0 {
+            assert!(selected.is_none());
+            break;
+        }
+
+        let selected = selected.unwrap();
+        assert_eq!(selected, pending.trailing_zeros() as usize);
+        let after = pending & !(1u64 << selected);
+        assert_eq!(after.count_ones() + 1, pending.count_ones());
+        assert_eq!(after.count_ones() + steps + 1, initial_count);
+        pending = after;
+        steps += 1;
+    }
+
+    if chunked {
+        assert_eq!(pending, 0);
+        assert_eq!(steps, initial_count);
+        assert!(steps <= V16_MAX_PORTFOLIO_ASSETS_N as u32);
+    } else {
+        assert_eq!(pending.count_ones(), initial_count);
+        assert_eq!(steps, 0);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_current_liquidatable_account_reuses_certificate_without_refresh() {
+    let cert = HealthCertV16 {
+        certified_equity: kani::any(),
+        certified_initial_req: kani::any(),
+        certified_maintenance_req: kani::any(),
+        certified_liq_deficit: kani::any(),
+        certified_worst_case_loss: kani::any(),
+        cert_oracle_epoch: kani::any(),
+        cert_funding_epoch: kani::any(),
+        cert_risk_epoch: kani::any(),
+        cert_asset_set_epoch: kani::any(),
+        active_bitmap_at_cert: kani::any(),
+        valid: kani::any(),
+    };
+    let oracle_epoch: u64 = kani::any();
+    let funding_epoch: u64 = kani::any();
+    let risk_epoch: u64 = kani::any();
+    let asset_set_epoch: u64 = kani::any();
+    let account_bitmap = kani::any();
+    let account_stale: bool = kani::any();
+    let account_b_stale: bool = kani::any();
+    let has_b_stale_leg: bool = kani::any();
+    let cert_current = kani_cert_is_current(
+        cert,
+        oracle_epoch,
+        funding_epoch,
+        risk_epoch,
+        asset_set_epoch,
+        account_bitmap,
+    );
+    let reuse = kani_position_action_reuses_current_certificate(
+        account_stale,
+        account_b_stale,
+        cert_current,
+        has_b_stale_leg,
+    );
+
+    kani::cover!(
+        reuse && cert.certified_liq_deficit > 0,
+        "a current liquidatable account takes the certificate fast path"
+    );
+    kani::cover!(
+        !reuse && cert_current,
+        "account or leg staleness blocks certificate reuse"
+    );
+    kani::cover!(
+        !reuse && !cert_current,
+        "an invalid or epoch-mismatched certificate forces refresh"
+    );
+
+    assert_eq!(
+        reuse,
+        !account_stale
+            && !account_b_stale
+            && cert.valid
+            && cert.cert_oracle_epoch == oracle_epoch
+            && cert.cert_funding_epoch == funding_epoch
+            && cert.cert_risk_epoch == risk_epoch
+            && cert.cert_asset_set_epoch == asset_set_epoch
+            && cert.active_bitmap_at_cert == account_bitmap
+            && !has_b_stale_leg
+    );
+
+    let mut alternate_liquidation_state = cert;
+    alternate_liquidation_state.certified_liq_deficit = if cert.certified_liq_deficit == 0 {
+        1
+    } else {
+        0
+    };
+    let alternate_current = kani_cert_is_current(
+        alternate_liquidation_state,
+        oracle_epoch,
+        funding_epoch,
+        risk_epoch,
+        asset_set_epoch,
+        account_bitmap,
+    );
+    let alternate_reuse = kani_position_action_reuses_current_certificate(
+        account_stale,
+        account_b_stale,
+        alternate_current,
+        has_b_stale_leg,
+    );
+    assert_eq!(alternate_current, cert_current);
+    assert_eq!(alternate_reuse, reuse);
 }
 
 #[kani::proof]
