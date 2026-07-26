@@ -4170,8 +4170,7 @@ impl<'a> PortfolioV16View<'a> {
     ) -> V16Result<()> {
         let configured_domains =
             v16_domain_count_for_market_slots(market.header.config.max_market_slots.get())?;
-        let mut seen = [u32::MAX; PORTFOLIO_SOURCE_DOMAIN_CAP];
-        let mut seen_count = 0usize;
+        let mut seen_domains = 0u32;
         let mut slot_index = 0usize;
         while slot_index < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = self.source_domains()[slot_index];
@@ -4187,15 +4186,11 @@ impl<'a> PortfolioV16View<'a> {
             if d >= configured_domains {
                 return Err(V16Error::HiddenLeg);
             }
-            let mut seen_i = 0usize;
-            while seen_i < seen_count {
-                if seen[seen_i] == d_u32 {
-                    return Err(V16Error::HiddenLeg);
-                }
-                seen_i += 1;
+            let domain_bit = 1u32.checked_shl(d_u32).ok_or(V16Error::InvalidConfig)?;
+            if seen_domains & domain_bit != 0 {
+                return Err(V16Error::HiddenLeg);
             }
-            seen[seen_count] = d_u32;
-            seen_count += 1;
+            seen_domains |= domain_bit;
             let asset_index = d / 2;
             let asset = market.markets[asset_index].engine.asset.try_to_runtime()?;
             if source.source_claim_market_id.get() != asset.market_id {
@@ -8432,6 +8427,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn source_claim_unliened_num(account: &PortfolioV16View<'_>, domain: usize) -> V16Result<u128> {
         let source = account.source_domain(domain)?;
+        Self::source_claim_unliened_num_from_source(source)
+    }
+
+    fn source_claim_unliened_num_from_source(
+        source: PortfolioSourceDomainV16Account,
+    ) -> V16Result<u128> {
         let locked = source
             .source_claim_liened_num
             .get()
@@ -8649,7 +8650,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 self.release_account_source_credit_lien_for_domain_not_atomic(account, d)?;
             }
-            let burnable = Self::source_claim_unliened_num(&account.as_view(), d)?;
+            let burnable =
+                Self::source_claim_unliened_num_from_source(account.header.source_domains[slot])?;
             let burn = burnable.min(burn_num);
             if burn != 0 {
                 let source = &mut account.header.source_domains[slot];
@@ -8816,7 +8818,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 continue;
             }
             let d = source.domain.get() as usize;
-            let claim_num = Self::source_claim_unliened_num(account, d)?.min(remaining_num);
+            let claim_num = Self::source_claim_unliened_num_from_source(source)?.min(remaining_num);
             if claim_num != 0 {
                 self.validate_source_domain_ledger_current(d)?;
                 let credited_num = U256::from_u128(claim_num)
@@ -9507,7 +9509,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             let d = source.domain.get() as usize;
             let rate = self.source_credit_for_domain(d)?.credit_rate_num;
-            let unliened = Self::source_claim_unliened_num(&account.as_view(), d)?;
+            let unliened = Self::source_claim_unliened_num_from_source(source)?;
             if rate != 0 && unliened != 0 {
                 self.validate_source_domain_ledger_current(d)?;
                 let soft_num = U256::from_u128(unliened)
@@ -9710,7 +9712,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             let d = source.domain.get() as usize;
             let rate = self.source_credit_for_domain(d)?.credit_rate_num;
-            let unliened = Self::source_claim_unliened_num(&account.as_view(), d)?;
+            let unliened = Self::source_claim_unliened_num_from_source(source)?;
             if rate != 0 && unliened != 0 {
                 self.validate_source_domain_ledger_current(d)?;
                 let soft_num = U256::from_u128(unliened)
