@@ -15396,7 +15396,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() < 0 {
             self.settle_resolved_bankruptcy_negative_pnl(account)?;
         }
-        self.detach_solvent_active_legs_for_resolved_close(account)?;
+        if self.detach_solvent_active_legs_for_resolved_close(account)? {
+            self.validate_shape()?;
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
         if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
             || account.header.pnl.get() < 0
             || decode_bool(account.header.b_stale_state)?
@@ -15473,7 +15476,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn detach_solvent_active_legs_for_resolved_close(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<()> {
+    ) -> V16Result<bool> {
         if account.header.pnl.get() < 0
             || decode_bool(account.header.b_stale_state)?
             || decode_bool(account.header.stale_state)?
@@ -15483,44 +15486,44 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .try_to_runtime()?
                 .has_pending_residual()
         {
-            return Ok(());
+            return Ok(false);
         }
 
         let configured_max = self.header.config.max_market_slots.get() as usize;
+        let mut first_active_asset = None;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
             if leg.active {
                 if leg.b_stale || leg.stale {
-                    return Ok(());
+                    return Ok(false);
                 }
                 let asset_index = leg.asset_index as usize;
                 if asset_index >= configured_max {
                     return Err(V16Error::InvalidLeg);
                 }
                 if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-                    return Ok(());
+                    return Ok(false);
                 }
                 let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
                 if k_target != leg.k_snap || f_target != leg.f_snap {
-                    return Ok(());
+                    return Ok(false);
                 }
                 if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
-                    return Ok(());
+                    return Ok(false);
+                }
+                if first_active_asset.is_none() {
+                    first_active_asset = Some(asset_index);
                 }
             }
             slot += 1;
         }
 
-        let mut slot = 0usize;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active {
-                self.clear_resolved_close_leg(account, leg.asset_index as usize)?;
-            }
-            slot += 1;
+        if let Some(asset_index) = first_active_asset {
+            self.clear_resolved_close_leg(account, asset_index)?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     pub fn deposit_not_atomic(

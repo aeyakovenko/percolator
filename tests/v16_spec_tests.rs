@@ -3163,6 +3163,31 @@ fn v16_resolved_close_chunks_source_bearing_kf_settlement() {
             "each resolved-close call must settle exactly one source-bearing K/F leg"
         );
     }
+    assert_eq!(
+        long.header
+            .active_bitmap
+            .map(V16PodU64::get)
+            .iter()
+            .map(|word| word.count_ones())
+            .sum::<u32>(),
+        3
+    );
+    for expected_before in (1..=3).rev() {
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut long, 0)
+            .unwrap();
+        assert_eq!(outcome, ResolvedCloseOutcomeV16::ProgressOnly);
+        assert_eq!(
+            long.header
+                .active_bitmap
+                .map(V16PodU64::get)
+                .iter()
+                .map(|word| word.count_ones())
+                .sum::<u32>(),
+            expected_before - 1,
+            "each resolved-close call must detach exactly one current active leg"
+        );
+    }
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
 }
