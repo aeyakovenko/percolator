@@ -127,8 +127,15 @@ name = "percolator"
 version = "0.1.1"
 dependencies = [
  "bytemuck",
+ "pinocchio",
  "proptest",
 ]
+
+[[package]]
+name = "pinocchio"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9f716de2190437efa787dd7414f4bcea88d22c2f81bbeecabb7db6d9cc326bd"
 
 [[package]]
 name = "ppv-lite86"
