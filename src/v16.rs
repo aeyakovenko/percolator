@@ -11317,13 +11317,53 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         b_delta_budget: u128,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.settle_account_side_effects_inner_not_atomic(account, b_delta_budget, false)
+    }
+
+    fn settle_account_side_effects_bounded_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        b_delta_budget: u128,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.settle_account_side_effects_inner_not_atomic(account, b_delta_budget, true)
+    }
+
+    fn settle_account_side_effects_inner_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        b_delta_budget: u128,
+        commit_one_source_kf_leg: bool,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
+        let source_domain_count = if commit_one_source_kf_leg {
+            Self::account_source_domain_count(&account.as_view())
+        } else {
+            0
+        };
+        let has_pending_kf = if commit_one_source_kf_leg {
+            self.account_has_pending_kf_settlement(&account.as_view())?
+        } else {
+            false
+        };
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
             if leg.active {
                 let asset_index = leg.asset_index as usize;
+                let asset = self.asset_state(asset_index)?;
+                let (target_k, target_f) = Self::kf_target_for_leg_from_asset(asset, leg)?;
+                let kf_settlement_pending = leg.k_snap != target_k || leg.f_snap != target_f;
                 self.settle_leg_kf_effects_at_slot(account, slot)?;
+                if V16Core::kernel_permissionless_kf_settlement_commits_step(
+                    commit_one_source_kf_leg,
+                    source_domain_count,
+                    has_pending_kf,
+                    kf_settlement_pending,
+                ) {
+                    self.validate_account_audit_scan(&account.as_view())?;
+                    self.validate_shape_audit_scan()?;
+                    return Ok(PermissionlessProgressOutcomeV16::AccountLegSettled { asset_index });
+                }
                 let refreshed = account.header.legs[slot].try_to_runtime()?;
                 let target = self.b_target_for_leg(asset_index, refreshed)?;
                 if target > refreshed.b_snap {
@@ -15368,12 +15408,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
         }
-        if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
-            .settle_account_side_effects_not_atomic(
+        if matches!(
+            self.settle_account_side_effects_bounded_not_atomic(
                 account,
                 self.header.config.public_b_chunk_atoms.get(),
-            )?
-        {
+            )?,
+            PermissionlessProgressOutcomeV16::AccountLegSettled { .. }
+                | PermissionlessProgressOutcomeV16::AccountBChunk(_)
+        ) {
             self.validate_shape()?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }

@@ -10,10 +10,11 @@ use percolator::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
-    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
-    SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
+    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
+    SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error, V16PodI128, V16PodU128,
+    V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -3088,6 +3089,80 @@ fn v16_auto_crank_chunks_source_bearing_kf_refresh() {
         AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent),
     );
     assert!(long.header.health_cert.try_to_runtime().unwrap().valid);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_close_chunks_source_bearing_kf_settlement() {
+    const PRICE: u64 = 1_000_000;
+    let (mut header, mut markets) = market_fixture(14, PRICE);
+    let mut long_header = account_fixture(14, 213);
+    let mut short_header = account_fixture(14, 214);
+    let requests = [0usize, 1, 2].map(|asset_index| TradeRequestV16 {
+        asset_index,
+        size_q: signed_q(POS_SCALE),
+        exec_price: PRICE,
+        fee_bps: 0,
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 10_000_000).unwrap();
+    market.deposit_not_atomic(&mut short, 10_000_000).unwrap();
+    market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, &requests)
+        .unwrap();
+    for domain in 0..11 {
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut long, domain, 1)
+            .unwrap();
+    }
+    for asset_index in 0..3 {
+        market
+            .accrue_asset_to_not_atomic(asset_index, 20, 1_001_000, 0, true)
+            .unwrap();
+    }
+    market.resolve_market_not_atomic(20).unwrap();
+
+    let pending_kf_count = |market: &MarketGroupV16ViewMut<'_, u64>,
+                            account: &PortfolioV16ViewMut<'_>| {
+        account
+            .header
+            .legs
+            .iter()
+            .map(|leg| leg.try_to_runtime().unwrap())
+            .filter(|leg| {
+                if !leg.active {
+                    return false;
+                }
+                let asset = market.markets[leg.asset_index as usize]
+                    .engine
+                    .asset
+                    .try_to_runtime()
+                    .unwrap();
+                let (k_target, f_target) = match leg.side {
+                    SideV16::Long => (asset.k_long, asset.f_long_num),
+                    SideV16::Short => (asset.k_short, asset.f_short_num),
+                };
+                leg.k_snap != k_target || leg.f_snap != f_target
+            })
+            .count()
+    };
+
+    assert_eq!(pending_kf_count(&market, &long), 3);
+    for expected_before in (1..=3).rev() {
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut long, 0)
+            .unwrap();
+        assert_eq!(outcome, ResolvedCloseOutcomeV16::ProgressOnly);
+        assert_eq!(
+            pending_kf_count(&market, &long),
+            expected_before - 1,
+            "each resolved-close call must settle exactly one source-bearing K/F leg"
+        );
+    }
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
 }
