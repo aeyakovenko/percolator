@@ -8421,32 +8421,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(sum)
     }
 
-    fn account_source_domain_count(account: &PortfolioV16View<'_>) -> usize {
-        let mut count = 0usize;
-        while count < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = account.source_domains()[count];
-            if source.has_default_sparse_tag() && !source.is_occupied() {
-                break;
-            }
-            count += 1;
-        }
-        count
-    }
-
-    fn account_has_pending_kf_settlement(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
-        let mut slot = 0usize;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active {
-                let asset = self.asset_state(leg.asset_index as usize)?;
-                let (target_k, target_f) = Self::kf_target_for_leg_from_asset(asset, leg)?;
-                if leg.k_snap != target_k || leg.f_snap != target_f {
-                    return Ok(true);
-                }
-            }
-            slot += 1;
-        }
-        Ok(false)
+    fn account_has_source_domains(account: &PortfolioV16View<'_>) -> bool {
+        account.source_domains()[0].is_occupied()
     }
 
     fn account_has_source_claims(account: &PortfolioV16View<'_>) -> V16Result<bool> {
@@ -10841,16 +10817,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .validate_source_credit_shape_with_market(&self.as_view())?;
             Self::account_source_claim_bound_sum_num(&account.as_view())?
         };
-        let source_domain_count = if allow_b_chunk {
-            Self::account_source_domain_count(&account.as_view())
-        } else {
-            0
-        };
-        let has_pending_kf = if allow_b_chunk {
-            self.account_has_pending_kf_settlement(&account.as_view())?
-        } else {
-            false
-        };
+        let source_domain_count =
+            if allow_b_chunk && Self::account_has_source_domains(&account.as_view()) {
+                1
+            } else {
+                0
+            };
         if source_claim_sum_num != 0 {
             V16Core::validate_positive_pnl_source_attribution(
                 account.header.pnl.get(),
@@ -10922,7 +10894,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if V16Core::kernel_permissionless_kf_settlement_commits_step(
                 allow_b_chunk,
                 source_domain_count,
-                has_pending_kf,
+                kf_settlement_pending,
                 kf_settlement_pending,
             ) {
                 self.validate_account_audit_scan(&account.as_view())?;
@@ -11335,16 +11307,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         commit_one_source_kf_leg: bool,
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
-        let source_domain_count = if commit_one_source_kf_leg {
-            Self::account_source_domain_count(&account.as_view())
-        } else {
-            0
-        };
-        let has_pending_kf = if commit_one_source_kf_leg {
-            self.account_has_pending_kf_settlement(&account.as_view())?
-        } else {
-            false
-        };
+        let source_domain_count =
+            if commit_one_source_kf_leg && Self::account_has_source_domains(&account.as_view()) {
+                1
+            } else {
+                0
+            };
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -11357,7 +11325,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if V16Core::kernel_permissionless_kf_settlement_commits_step(
                     commit_one_source_kf_leg,
                     source_domain_count,
-                    has_pending_kf,
+                    kf_settlement_pending,
                     kf_settlement_pending,
                 ) {
                     self.validate_account_audit_scan(&account.as_view())?;
