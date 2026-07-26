@@ -86,6 +86,32 @@ pub fn kani_position_action_reuses_current_certificate(
     )
 }
 
+pub fn kani_source_credit_take(
+    remaining_effective: u128,
+    effective_by_claim: u128,
+    effective_by_backing: u128,
+) -> u128 {
+    V16Core::kernel_source_credit_take(
+        remaining_effective,
+        effective_by_claim,
+        effective_by_backing,
+    )
+}
+
+pub fn kani_source_credit_rank_after_take(
+    remaining_effective: u128,
+    remaining_face_num: u128,
+    effective_taken: u128,
+    face_num_taken: u128,
+) -> V16Result<(u128, u128)> {
+    V16Core::kernel_source_credit_rank_after_take(
+        remaining_effective,
+        remaining_face_num,
+        effective_taken,
+        face_num_taken,
+    )
+}
+
 pub fn kani_active_bitmap_set(
     bitmap: &mut V16ActiveBitmap,
     leg_slot_index: usize,

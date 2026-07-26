@@ -1542,6 +1542,34 @@ impl V16Core {
         allow_b_chunk && source_domain_count != 0 && has_pending_kf && leg_kf_pending
     }
 
+    #[inline]
+    fn kernel_source_credit_take(
+        remaining_effective: u128,
+        effective_by_claim: u128,
+        effective_by_backing: u128,
+    ) -> u128 {
+        remaining_effective
+            .min(effective_by_claim)
+            .min(effective_by_backing)
+    }
+
+    #[inline]
+    fn kernel_source_credit_rank_after_take(
+        remaining_effective: u128,
+        remaining_face_num: u128,
+        effective_taken: u128,
+        face_num_taken: u128,
+    ) -> V16Result<(u128, u128)> {
+        Ok((
+            remaining_effective
+                .checked_sub(effective_taken)
+                .ok_or(V16Error::CounterUnderflow)?,
+            remaining_face_num
+                .checked_sub(face_num_taken)
+                .ok_or(V16Error::CounterUnderflow)?,
+        ))
+    }
+
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
     /// summary and the ENGINE-selected assets, choose the single highest-priority
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
@@ -8797,6 +8825,50 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    #[cfg(kani)]
+    fn account_unliened_source_realizable_support(
+        &self,
+        account: &PortfolioV16View<'_>,
+        face_claim: u128,
+    ) -> V16Result<u128> {
+        if face_claim == 0 {
+            return Ok(0);
+        }
+        let mut remaining_num = V16Core::bound_num_from_amount(face_claim)?;
+        let mut support_num = U256::ZERO;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining_num != 0 {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if !source.is_occupied() {
+                slot += 1;
+                continue;
+            }
+            let d = source.domain.get() as usize;
+            let claim_num = Self::source_claim_unliened_num_from_source(source)?.min(remaining_num);
+            if claim_num != 0 {
+                self.validate_source_domain_ledger_current(d)?;
+                let credited_num = U256::from_u128(claim_num)
+                    .checked_mul(U256::from_u128(
+                        self.source_credit_for_domain(d)?.credit_rate_num,
+                    ))
+                    .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                support_num = support_num
+                    .checked_add(credited_num)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                remaining_num -= claim_num;
+            }
+            slot += 1;
+        }
+        support_num
+            .checked_div(U256::from_u128(BOUND_SCALE))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
     fn source_credit_available_backing_num(&self, domain: usize) -> V16Result<u128> {
         V16Core::available_backing_num_for_source_credit_state(
             self.source_credit_for_domain(domain)?,
@@ -9446,6 +9518,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let consumed = self.create_and_consume_account_source_credit_up_to_effective_not_atomic(
             account,
             effective_credit,
+            u128::MAX,
         )?;
         let total_consumed = consumed
             .counterparty_credit_consumed
@@ -9461,6 +9534,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         effective_credit: u128,
+        mut remaining_face_num: u128,
     ) -> V16Result<SourceCreditConsumptionV16> {
         if effective_credit == 0 {
             return Ok(SourceCreditConsumptionV16 {
@@ -9485,17 +9559,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             let d = source.domain.get() as usize;
             let rate = self.source_credit_for_domain(d)?.credit_rate_num;
-            let unliened = Self::source_claim_unliened_num_from_source(source)?;
-            if rate != 0 && unliened != 0 {
+            let claim_num =
+                Self::source_claim_unliened_num_from_source(source)?.min(remaining_face_num);
+            if rate != 0 && claim_num != 0 {
                 self.validate_source_domain_ledger_current(d)?;
-                let soft_num = U256::from_u128(unliened)
+                let soft_num = U256::from_u128(claim_num)
                     .checked_mul(U256::from_u128(rate))
                     .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
                     .and_then(|v| v.try_into_u128())
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 let by_claim = soft_num / BOUND_SCALE;
                 let by_backing = self.source_credit_available_backing_num(d)? / BOUND_SCALE;
-                let take = remaining.min(by_claim).min(by_backing);
+                let take = V16Core::kernel_source_credit_take(remaining, by_claim, by_backing);
                 if take != 0 {
                     let (face_num, backing_num) =
                         V16Core::source_credit_lien_amounts_for_effective(take, rate)?;
@@ -9523,7 +9598,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     face_burn_num = face_burn_num
                         .checked_add(face_num)
                         .ok_or(V16Error::ArithmeticOverflow)?;
-                    remaining -= take;
+                    (remaining, remaining_face_num) =
+                        V16Core::kernel_source_credit_rank_after_take(
+                            remaining,
+                            remaining_face_num,
+                            take,
+                            face_num,
+                        )?;
                 }
             }
             slot += 1;
@@ -10193,7 +10274,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let source_consumption = if has_source_claims {
             Some(
                 self.create_and_consume_account_source_credit_up_to_effective_not_atomic(
-                    account, loss_abs,
+                    account,
+                    loss_abs,
+                    V16Core::bound_num_from_amount(old_positive_face)?,
                 )?,
             )
         } else {

@@ -17,7 +17,8 @@ use percolator::v16::{
     kani_pending_domain_loss_barrier_blocks_position_change,
     kani_permissionless_kf_settlement_commits_step,
     kani_position_action_reuses_current_certificate, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
+    kani_prepare_asset_recovery_transition, kani_source_credit_rank_after_take,
+    kani_source_credit_state_realizable_support_for_face, kani_source_credit_take,
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
     AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
@@ -404,6 +405,88 @@ fn proof_v16_current_liquidatable_account_reuses_certificate_without_refresh() {
     );
     assert_eq!(alternate_current, cert_current);
     assert_eq!(alternate_reuse, reuse);
+}
+
+#[kani::proof]
+#[kani::unwind(29)]
+#[kani::solver(cadical)]
+fn proof_v16_fused_source_credit_take_exhausts_exact_effective_rank() {
+    let requested = kani::any::<u16>() as u128;
+    let claim_capacity: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let backing_capacity: [u8; PORTFOLIO_SOURCE_DOMAIN_CAP] = kani::any();
+    let mut remaining = requested;
+    let mut total_capacity = 0u128;
+    let mut consumed = 0u128;
+    let mut slot = 0usize;
+
+    while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        let by_claim = claim_capacity[slot] as u128;
+        let by_backing = backing_capacity[slot] as u128;
+        let capacity = by_claim.min(by_backing);
+        total_capacity += capacity;
+        let take = kani_source_credit_take(remaining, by_claim, by_backing);
+
+        assert!(take <= remaining);
+        assert!(take <= by_claim);
+        assert!(take <= by_backing);
+        remaining -= take;
+        consumed += take;
+        assert_eq!(consumed + remaining, requested);
+        slot += 1;
+    }
+
+    kani::cover!(
+        requested != 0 && total_capacity < requested,
+        "fused source consumption covers backing-exhausted partial support"
+    );
+    kani::cover!(
+        requested != 0 && total_capacity >= requested,
+        "fused source consumption covers fully satisfied support"
+    );
+    kani::cover!(
+        claim_capacity[0] > backing_capacity[0],
+        "fused source consumption is capped by backing"
+    );
+    kani::cover!(
+        backing_capacity[0] > claim_capacity[0],
+        "fused source consumption is capped by claims"
+    );
+
+    assert_eq!(consumed, requested.min(total_capacity));
+    assert_eq!(remaining, requested.saturating_sub(total_capacity));
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_fused_source_credit_take_preserves_face_cap() {
+    let remaining_effective: u128 = kani::any();
+    let remaining_face_num: u128 = kani::any();
+    let effective_taken: u128 = kani::any();
+    let face_num_taken: u128 = kani::any();
+    kani::assume(effective_taken <= remaining_effective);
+    kani::assume(face_num_taken <= remaining_face_num);
+
+    let (next_effective, next_face_num) = kani_source_credit_rank_after_take(
+        remaining_effective,
+        remaining_face_num,
+        effective_taken,
+        face_num_taken,
+    )
+    .unwrap();
+
+    kani::cover!(
+        effective_taken != 0 && face_num_taken != 0,
+        "fused source consumption advances both ranks"
+    );
+    kani::cover!(
+        effective_taken == remaining_effective && face_num_taken < remaining_face_num,
+        "effective demand can finish before the face cap is exhausted"
+    );
+    assert_eq!(next_effective + effective_taken, remaining_effective);
+    assert_eq!(next_face_num + face_num_taken, remaining_face_num);
+    assert!(next_effective <= remaining_effective);
+    assert!(next_face_num <= remaining_face_num);
 }
 
 #[kani::proof]
