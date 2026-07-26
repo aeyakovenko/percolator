@@ -11014,10 +11014,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 slot += 1;
                 continue;
             }
-            let d = source.domain.get() as usize;
             total_charged = total_charged
                 .checked_add(
-                    self.collect_account_backing_utilization_fee_for_domain_not_atomic(account, d)?,
+                    self.collect_account_backing_utilization_fee_for_slot_not_atomic(
+                        account, slot,
+                    )?,
                 )
                 .ok_or(V16Error::ArithmeticOverflow)?;
             slot += 1;
@@ -11038,6 +11039,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Some(slot) => slot,
             None => return Ok(0),
         };
+        self.collect_account_backing_utilization_fee_for_slot_not_atomic(account, slot)
+    }
+
+    fn collect_account_backing_utilization_fee_for_slot_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        slot: usize,
+    ) -> V16Result<u128> {
+        let source = account
+            .header
+            .source_domains
+            .get(slot)
+            .copied()
+            .ok_or(V16Error::InvalidConfig)?;
+        if !source.is_occupied() {
+            return Err(V16Error::InvalidLeg);
+        }
+        let domain = source.domain.get() as usize;
+        self.domain_asset_side(domain)?;
         let lien_backing_num = account.header.source_domains[slot]
             .source_lien_counterparty_backing_num
             .get();
