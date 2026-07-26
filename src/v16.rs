@@ -12973,17 +12973,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn clear_resolved_close_leg(
+    fn clear_resolved_close_leg_at_slot(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-        asset_index: usize,
+        leg_slot: usize,
     ) -> V16Result<()> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
         }
-        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+            return Err(V16Error::InvalidLeg);
+        }
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
         if !leg.active || leg.b_stale || leg.stale {
+            return Err(V16Error::InvalidLeg);
+        }
+        let asset_index = leg.asset_index as usize;
+        if asset_index >= self.header.config.max_market_slots.get() as usize
+            || asset_index >= self.markets.len()
+        {
             return Err(V16Error::InvalidLeg);
         }
         if account
@@ -15489,39 +15497,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(false);
         }
 
-        let configured_max = self.header.config.max_market_slots.get() as usize;
-        let mut first_active_asset = None;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
             if leg.active {
-                if leg.b_stale || leg.stale {
-                    return Ok(false);
-                }
-                let asset_index = leg.asset_index as usize;
-                if asset_index >= configured_max {
-                    return Err(V16Error::InvalidLeg);
-                }
-                if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-                    return Ok(false);
-                }
-                let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
-                if k_target != leg.k_snap || f_target != leg.f_snap {
-                    return Ok(false);
-                }
-                if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
-                    return Ok(false);
-                }
-                if first_active_asset.is_none() {
-                    first_active_asset = Some(asset_index);
-                }
+                self.clear_resolved_close_leg_at_slot(account, slot)?;
+                return Ok(true);
             }
             slot += 1;
-        }
-
-        if let Some(asset_index) = first_active_asset {
-            self.clear_resolved_close_leg(account, asset_index)?;
-            return Ok(true);
         }
         Ok(false)
     }
