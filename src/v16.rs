@@ -15384,6 +15384,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
         }
+        pinocchio::msg!("profile resolved: settle start");
         if matches!(
             self.settle_account_side_effects_bounded_not_atomic(
                 account,
@@ -15395,19 +15396,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.validate_shape()?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        pinocchio::msg!("profile resolved: settle done");
         self.sync_account_fee_to_slot_not_atomic(
             account,
             self.header.resolved_slot.get(),
             fee_rate_per_slot,
         )?;
+        pinocchio::msg!("profile resolved: fee done");
         self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        pinocchio::msg!("profile resolved: negative done");
         if account.header.pnl.get() < 0 {
             self.settle_resolved_bankruptcy_negative_pnl(account)?;
         }
+        pinocchio::msg!("profile resolved: bankruptcy done");
         if self.detach_solvent_active_legs_for_resolved_close(account)? {
+            pinocchio::msg!("profile resolved: detach done");
             self.validate_shape()?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        pinocchio::msg!("profile resolved: no detach");
         if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
             || account.header.pnl.get() < 0
             || decode_bool(account.header.b_stale_state)?
@@ -15418,7 +15425,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        pinocchio::msg!("profile resolved: source realize start");
         self.realize_source_backed_claims_for_resolved_close_not_atomic(account)?;
+        pinocchio::msg!("profile resolved: source realize done");
         let mut payout_receipt = None;
         let pnl_payout = if account.header.pnl.get() > 0
             || decode_bool(account.header.resolved_payout_receipt.present)?
