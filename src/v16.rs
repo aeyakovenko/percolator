@@ -8613,6 +8613,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         mut burn_num: u128,
     ) -> V16Result<()> {
+        pinocchio::msg!("profile: burn claims start");
+        pinocchio::log::sol_log_compute_units();
         if burn_num == 0 {
             return Ok(());
         }
@@ -8675,6 +8677,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 burn_num -= burn;
                 account.reset_source_domain_slot_if_empty(slot);
                 self.recompute_source_credit_domain_after_mutation(d)?;
+                pinocchio::log::sol_log_compute_units();
             }
             if burn_num != 0 {
                 let (impaired_burn, impaired_effective_burn) =
@@ -8711,6 +8714,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         account.compact_source_domains();
+        pinocchio::msg!("profile: burn claims done");
+        pinocchio::log::sol_log_compute_units();
         Ok(())
     }
 
@@ -9485,7 +9490,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         effective_credit: u128,
     ) -> V16Result<SourceCreditConsumptionV16> {
+        pinocchio::msg!("profile: consume claims validate start");
+        pinocchio::log::sol_log_compute_units();
         account.validate_with_market(&self.as_view())?;
+        pinocchio::msg!("profile: consume claims validate done");
+        pinocchio::log::sol_log_compute_units();
         if effective_credit == 0 {
             return Ok(SourceCreditConsumptionV16 {
                 face_burn: 0,
@@ -9548,6 +9557,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         .checked_add(face_num)
                         .ok_or(V16Error::ArithmeticOverflow)?;
                     remaining -= take;
+                    pinocchio::log::sol_log_compute_units();
                 }
             }
             slot += 1;
@@ -10195,6 +10205,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         loss_abs: u128,
     ) -> V16Result<SupportLossApplicationV16> {
+        pinocchio::msg!("profile: haircut loss start");
+        pinocchio::log::sol_log_compute_units();
         if loss_abs == 0 {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
@@ -10228,6 +10240,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.junior_claim_bound(),
             )?
         };
+        pinocchio::msg!("profile: realizable support done");
+        pinocchio::log::sol_log_compute_units();
         let support_consumed = effective_available.min(loss_abs);
         let remaining_loss = loss_abs
             .checked_sub(support_consumed)
@@ -10246,6 +10260,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let junior_bound = self.junior_claim_bound();
             self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?
         };
+        pinocchio::msg!("profile: consume claims done");
+        pinocchio::log::sol_log_compute_units();
         if remaining_loss != 0 {
             junior_face_burned = old_positive_face;
         }
@@ -10269,7 +10285,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .get()
                 .min(new_pnl.max(0) as u128),
         );
+        pinocchio::msg!("profile: set pnl start");
+        pinocchio::log::sol_log_compute_units();
         self.set_account_pnl(account, new_pnl)?;
+        pinocchio::msg!("profile: set pnl done");
+        pinocchio::log::sol_log_compute_units();
         Ok(SupportLossApplicationV16 {
             support_consumed,
             junior_face_burned,
@@ -10767,6 +10787,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         b_delta_budget: u128,
         allow_b_chunk: bool,
     ) -> V16Result<AccountRefreshCertOutcomeV16> {
+        pinocchio::msg!("profile: refresh start");
+        pinocchio::log::sol_log_compute_units();
         self.validate_account_scalar_preflight(&account.as_view())?;
         let source_claim_sum_num = if account.header.source_domains[0].is_sparse_tail_default() {
             0
@@ -10776,6 +10798,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .validate_source_credit_shape_with_market(&self.as_view())?;
             Self::account_source_claim_bound_sum_num(&account.as_view())?
         };
+        pinocchio::msg!("profile: source validation done");
+        pinocchio::log::sol_log_compute_units();
         let source_domain_count = if allow_b_chunk {
             Self::account_source_domain_count(&account.as_view())
         } else {
@@ -10786,6 +10810,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             false
         };
+        pinocchio::msg!("profile: pending scan done");
+        pinocchio::log::sol_log_compute_units();
         if source_claim_sum_num != 0 {
             V16Core::validate_positive_pnl_source_attribution(
                 account.header.pnl.get(),
@@ -10853,7 +10879,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             seen_asset_count += 1;
             let (target_k, target_f) = Self::kf_target_for_leg_from_asset(asset, leg)?;
             let kf_settlement_pending = leg.k_snap != target_k || leg.f_snap != target_f;
+            if kf_settlement_pending {
+                pinocchio::msg!("profile: settle pending leg start");
+                pinocchio::log::sol_log_compute_units();
+            }
             self.settle_leg_kf_effects_at_slot_with_asset(account, slot, asset)?;
+            if kf_settlement_pending {
+                pinocchio::msg!("profile: settle pending leg done");
+                pinocchio::log::sol_log_compute_units();
+            }
             if V16Core::kernel_permissionless_kf_settlement_commits_step(
                 allow_b_chunk,
                 source_domain_count,

@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 bytemuck = { version = "1.23", default-features = false, features = ["derive"] }
+pinocchio = "0.6"
 
 [dev-dependencies]
 proptest = "1.4"
