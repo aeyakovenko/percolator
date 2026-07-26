@@ -1571,6 +1571,23 @@ impl V16Core {
         ))
     }
 
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u32>| match result {
+        Ok(next) => {
+            let bit = 1u32 << domain;
+            *next == processed | bit
+                && next.count_ones() == processed.count_ones() + 1
+                && *next & processed == processed
+        }
+        Err(_) => true,
+    }))]
+    fn kernel_mark_source_domain_processed(processed: u32, domain: u32) -> V16Result<u32> {
+        let bit = 1u32.checked_shl(domain).ok_or(V16Error::InvalidConfig)?;
+        if processed & bit != 0 {
+            return Err(V16Error::LockActive);
+        }
+        Ok(processed | bit)
+    }
+
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
     /// summary and the ENGINE-selected assets, choose the single highest-priority
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
@@ -15293,13 +15310,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let shift = u32::try_from(d).map_err(|_| V16Error::InvalidConfig)?;
                 let domain_bit = 1u32.checked_shl(shift).ok_or(V16Error::InvalidConfig)?;
                 if processed & domain_bit == 0 {
-                    selected = Some((slot, d, domain_bit, source));
+                    selected = Some((slot, d, source));
                     break;
                 }
             }
             slot += 1;
         }
-        let Some((selected_slot, d, domain_bit, source)) = selected else {
+        let Some((selected_slot, d, source)) = selected else {
             account.header.resolved_source_realization_bitmap = V16PodU32::new(0);
             return Ok((false, 0));
         };
@@ -15333,7 +15350,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.header.reserved_pnl = V16PodU128::new(0);
             self.apply_released_pnl_conversion_not_atomic(account, support)?
         };
-        account.header.resolved_source_realization_bitmap = V16PodU32::new(processed | domain_bit);
+        account.header.resolved_source_realization_bitmap = V16PodU32::new(
+            V16Core::kernel_mark_source_domain_processed(processed, d as u32)?,
+        );
 
         // If the payout snapshot was captured before this account realized (another
         // winner closed first), the realized face is still counted in the ledger's

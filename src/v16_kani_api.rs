@@ -112,6 +112,10 @@ pub fn kani_source_credit_rank_after_take(
     )
 }
 
+pub fn kani_mark_source_domain_processed(processed: u32, domain: u32) -> V16Result<u32> {
+    V16Core::kernel_mark_source_domain_processed(processed, domain)
+}
+
 pub fn kani_active_bitmap_set(
     bitmap: &mut V16ActiveBitmap,
     leg_slot_index: usize,

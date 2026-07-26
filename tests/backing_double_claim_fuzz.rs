@@ -215,6 +215,37 @@ fn resolved_market_with_backed_winner(
     (header, markets, account_header)
 }
 
+#[test]
+fn terminal_source_chunk_does_not_revisit_a_recomputed_domain_rate() {
+    // floor(81 * floor(8 / 81)) realizes seven atoms. Revisiting the same
+    // domain after burning that face would raise its rate and incorrectly
+    // consume the eighth provider atom.
+    let pnl = 81u128;
+    let backing = 8u128;
+    let (mut header, mut markets, mut account_header) =
+        resolved_market_with_backed_winner(pnl, backing, 0);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let first = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .unwrap();
+    assert_eq!(first, ResolvedCloseOutcomeV16::ProgressOnly);
+    assert_eq!(account.header.resolved_source_realization_bitmap.get(), 1);
+    assert_eq!(account.header.capital.get(), 7);
+
+    let final_outcome = close_resolved_to_completion(&mut market, &mut account);
+    assert!(matches!(
+        final_outcome,
+        ResolvedCloseOutcomeV16::Closed { payout: 7 }
+    ));
+    assert_eq!(market.header.vault.get(), 1);
+    market
+        .withdraw_fresh_counterparty_backing_not_atomic(0, 1)
+        .unwrap();
+    assert_eq!(market.header.vault.get(), 0);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 

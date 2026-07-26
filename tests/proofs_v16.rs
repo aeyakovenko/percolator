@@ -14,7 +14,7 @@ use percolator::v16::{
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
-    kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_mark_source_domain_processed, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_permissionless_kf_settlement_commits_step,
     kani_position_action_reuses_current_certificate, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_source_credit_rank_after_take,
@@ -47,6 +47,24 @@ use percolator::{
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
+
+#[kani::proof]
+fn proof_v16_terminal_source_domain_step_strictly_decreases_remaining_rank() {
+    let processed: u32 = kani::any();
+    let domain_raw: u8 = kani::any();
+    kani::assume(domain_raw < u32::BITS as u8);
+    let domain = domain_raw as u32;
+    let bit = 1u32 << domain;
+    kani::assume(processed & bit == 0);
+
+    let next = kani_mark_source_domain_processed(processed, domain).unwrap();
+
+    assert_eq!(next, processed | bit);
+    assert_eq!(next.count_ones(), processed.count_ones() + 1);
+    assert_eq!(next & processed, processed);
+    kani::cover!(processed == 0, "terminal source rank covers first domain");
+    kani::cover!(processed != 0, "terminal source rank covers a later domain");
+}
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
