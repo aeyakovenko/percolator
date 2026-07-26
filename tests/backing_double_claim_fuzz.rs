@@ -16,7 +16,8 @@ use percolator::{
     Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     SourceCreditStateV16, SourceCreditStateV16Account, V16Config, V16PodI128, V16PodU128,
-    V16PodU32, V16PodU64, CREDIT_RATE_SCALE,
+    V16PodU32, V16PodU64, CREDIT_RATE_SCALE, PORTFOLIO_SOURCE_DOMAIN_CAP,
+    V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use proptest::prelude::*;
 
@@ -88,6 +89,24 @@ fn winner_account(capital: u128, pnl: u128) -> PortfolioAccountV16Account {
     account_header
 }
 
+fn close_resolved_to_completion(
+    market: &mut MarketGroupV16ViewMut<'_, u64>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> ResolvedCloseOutcomeV16 {
+    // One call can settle one leg, release/expire/realize one source domain,
+    // or finalize the payout.
+    let max_steps = V16_MAX_PORTFOLIO_ASSETS_N + 3 * PORTFOLIO_SOURCE_DOMAIN_CAP + 4;
+    for _ in 0..max_steps {
+        let outcome = market
+            .close_resolved_account_not_atomic(account, 0)
+            .expect("resolved continuation must not revert");
+        if matches!(outcome, ResolvedCloseOutcomeV16::Closed { .. }) {
+            return outcome;
+        }
+    }
+    panic!("resolved close exceeded its finite leg/source-domain rank");
+}
+
 /// Close the winner, then (optionally first) withdraw the provider principal.
 /// Returns (winner_payout, vault_after_everything).
 fn run_order(
@@ -110,9 +129,7 @@ fn run_order(
             .withdraw_fresh_counterparty_backing_not_atomic(0, backing)
             .expect("provider principal must be withdrawable before the winner closes");
     }
-    let outcome = market
-        .close_resolved_account_not_atomic(&mut account, 0)
-        .expect("winner close must not revert");
+    let outcome = close_resolved_to_completion(&mut market, &mut account);
     let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { .. });
     assert!(closed, "winner did not fully close");
     if !provider_first {
@@ -230,9 +247,7 @@ proptest! {
         prop_assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 
         let vault_before = market.header.vault.get();
-        let outcome = market
-            .close_resolved_account_not_atomic(&mut account, 0)
-            .expect("backed winner close must not revert");
+        let outcome = close_resolved_to_completion(&mut market, &mut account);
         let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { payout: _ });
         prop_assert!(closed, "backed winner did not fully close");
         let paid = vault_before - market.header.vault.get();
@@ -325,9 +340,7 @@ proptest! {
         prop_assume!(account.validate_with_market(&market.as_view()) == Ok(()));
 
         let vault_before = market.header.vault.get();
-        let outcome = market
-            .close_resolved_account_not_atomic(&mut account, 0)
-            .expect("liened backed winner close must not revert");
+        let outcome = close_resolved_to_completion(&mut market, &mut account);
         let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { payout: _ });
         prop_assert!(closed, "liened backed winner did not fully close");
         let paid = vault_before - market.header.vault.get();
@@ -400,13 +413,13 @@ fn realization_after_snapshot_refines_unreceipted_bound() {
     assert_eq!(b.validate_with_market(&market.as_view()), Ok(()));
 
     // A closes first: captures the snapshot while B's face is unreceipted.
-    market.close_resolved_account_not_atomic(&mut a, 0).unwrap();
+    close_resolved_to_completion(&mut market, &mut a);
     let a_receipt = a.header.resolved_payout_receipt.try_to_runtime().unwrap();
     assert!(a_receipt.present && !a_receipt.finalized); // diluted by B's face
 
     // B realizes against its backing at terminal close.
     let vault_before_b = market.header.vault.get();
-    market.close_resolved_account_not_atomic(&mut b, 0).unwrap();
+    close_resolved_to_completion(&mut market, &mut b);
     assert_eq!(vault_before_b - market.header.vault.get(), pnl_b);
     assert_eq!(b.header.pnl.get(), 0);
     assert_eq!(b.header.capital.get(), 0);
@@ -457,9 +470,7 @@ fn terminal_close_with_expired_backing_does_not_strand() {
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 
     let vault_before = market.header.vault.get();
-    let outcome = market
-        .close_resolved_account_not_atomic(&mut account, 0)
-        .expect("expired-backing winner close must not revert (liveness)");
+    let outcome = close_resolved_to_completion(&mut market, &mut account);
     let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { payout: _ });
     assert!(closed, "expired-backing winner did not fully close");
     let paid = vault_before - market.header.vault.get();
@@ -511,9 +522,7 @@ proptest! {
         prop_assume!(account.validate_with_market(&market.as_view()) == Ok(()));
 
         let vault_before = market.header.vault.get();
-        let outcome = market
-            .close_resolved_account_not_atomic(&mut account, 0)
-            .expect("backed winner close must not revert at any backing level (no DoS)");
+        let outcome = close_resolved_to_completion(&mut market, &mut account);
         // No DoS: the close fully settles rather than stalling.
         let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { payout: _ });
         prop_assert!(closed, "close did not finalize at backing={}", backing);

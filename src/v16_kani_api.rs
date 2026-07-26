@@ -1077,6 +1077,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
         self.realize_source_backed_claims_for_resolved_close_not_atomic(account)
+            .map(|(_, converted)| converted)
     }
 
     pub fn kani_create_resolved_payout_receipt_if_needed(

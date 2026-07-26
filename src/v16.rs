@@ -27,8 +27,9 @@ pub type V16ActiveBitmap = [u64; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 // Bump whenever the on-chain account/header Pod layout changes (see the
-// PortfolioAccountV16Account size assertion). 17: added funding flow counters.
-pub const V16_LAYOUT_DISCRIMINATOR: u16 = 17;
+// PortfolioAccountV16Account size assertion). 18: added resolved source-domain
+// realization progress.
+pub const V16_LAYOUT_DISCRIMINATOR: u16 = 18;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
 pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
@@ -4123,6 +4124,19 @@ impl<'a> PortfolioV16View<'a> {
         if source_claim_sum_num != 0 {
             V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)?;
         }
+        let configured_domains = v16_domain_count_for_market_slots(config.max_market_slots as u32)?;
+        let terminal_bitmap = self.header.resolved_source_realization_bitmap.get();
+        let valid_domain_mask = if configured_domains == u32::BITS as usize {
+            u32::MAX
+        } else {
+            (1u32 << configured_domains) - 1
+        };
+        if terminal_bitmap & !valid_domain_mask != 0
+            || (terminal_bitmap != 0
+                && decode_market_mode(market.header.mode)? != MarketModeV16::Resolved)
+        {
+            return Err(V16Error::InvalidLeg);
+        }
         Self::validate_resolved_payout_receipt_static(
             self.header.resolved_payout_receipt.try_to_runtime()?,
         )?;
@@ -4407,6 +4421,7 @@ impl<'a> PortfolioV16View<'a> {
             || self.header.reserved_pnl.get() != 0
             || self.header.fee_credits.get() != 0
             || self.header.cancel_deposit_escrow.get() != 0
+            || self.header.resolved_source_realization_bitmap.get() != 0
             || decode_bool(self.header.stale_state)?
             || decode_bool(self.header.b_stale_state)?
             || decode_bool(self.header.rebalance_lock)?
@@ -14733,6 +14748,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if converted == 0 {
             return Err(V16Error::LockActive);
         }
+        self.apply_released_pnl_conversion_not_atomic(account, converted)
+    }
+
+    fn apply_released_pnl_conversion_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        converted: u128,
+    ) -> V16Result<u128> {
+        if converted == 0 || converted > account.header.pnl.get().max(0) as u128 {
+            return Err(V16Error::InvalidConfig);
+        }
         let vault_before = self.header.vault.get();
         let consumption = if Self::account_has_source_claims(&account.as_view())? {
             self.create_and_consume_account_source_credit_for_effective_not_atomic(
@@ -15233,31 +15259,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn realize_source_backed_claims_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<u128> {
+    ) -> V16Result<(bool, u128)> {
         if decode_bool(account.header.resolved_payout_receipt.present)? {
             // The face is already frozen into the receipt pool.
-            return Ok(0);
+            account.header.resolved_source_realization_bitmap = V16PodU32::new(0);
+            return Ok((false, 0));
         }
         if !Self::account_has_source_claims(&account.as_view())? {
-            return Ok(0);
+            account.header.resolved_source_realization_bitmap = V16PodU32::new(0);
+            return Ok((false, 0));
         }
         let pos = account.header.pnl.get().max(0) as u128;
         if pos == 0 {
-            return Ok(0);
+            account.header.resolved_source_realization_bitmap = V16PodU32::new(0);
+            return Ok((false, 0));
         }
-        // Release the account's persisted liens first (the terminal burn would do
-        // this anyway): the conversion consumes only UNLIENED claims, so a still-
-        // liened claim would make the realizable estimate exceed what consumption
-        // can deliver and dead-lock the close with LockActive. In the same sweep,
-        // expire any domain whose backing bucket has lapsed (status Fresh but
-        // expiry_slot <= current_slot): realization is best-effort, and querying
-        // realizable support against a past-expiry bucket would otherwise return
-        // Stale and strand the winner's close. Expiry forfeits the lapsed
-        // principal to the junior pool (the documented expiry semantics), drops
-        // the domain's credit rate to zero, and lets this step fall through to
-        // the junior receipt path instead of reverting.
+
+        // Terminal source realization is permissionless, so each successful call
+        // commits at most one bounded domain step. This prevents a max-shape
+        // portfolio from combining 28 lien releases, expiries, and backing
+        // consumptions in one transaction.
         let current_slot = self.header.current_slot.get();
+        let processed = account.header.resolved_source_realization_bitmap.get();
         let mut slot = 0usize;
+        let mut selected = None;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = account.header.source_domains[slot];
             if source.has_default_sparse_tag() && !source.is_occupied() {
@@ -15265,30 +15290,57 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             if source.is_occupied() {
                 let d = source.domain.get() as usize;
-                if source.source_claim_liened_num.get() != 0 {
-                    self.release_account_source_credit_lien_for_domain_not_atomic(account, d)?;
-                }
-                let bucket = self.backing_bucket_for_domain(d)?;
-                if bucket.status == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot <= current_slot
-                {
-                    self.expire_source_backing_bucket_not_atomic(d, current_slot)?;
+                let shift = u32::try_from(d).map_err(|_| V16Error::InvalidConfig)?;
+                let domain_bit = 1u32.checked_shl(shift).ok_or(V16Error::InvalidConfig)?;
+                if processed & domain_bit == 0 {
+                    selected = Some((slot, d, domain_bit, source));
+                    break;
                 }
             }
             slot += 1;
         }
-        if self.account_source_realizable_support(&account.as_view(), pos)? == 0 {
-            return Ok(0);
+        let Some((selected_slot, d, domain_bit, source)) = selected else {
+            account.header.resolved_source_realization_bitmap = V16PodU32::new(0);
+            return Ok((false, 0));
+        };
+        if source.source_claim_liened_num.get() != 0 {
+            self.release_account_source_credit_lien_for_domain_not_atomic(account, d)?;
+            return Ok((true, 0));
         }
-        // Terminal: PnL reservations no longer gate realization.
-        account.header.reserved_pnl = V16PodU128::new(0);
-        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
+        let bucket = self.backing_bucket_for_domain(d)?;
+        if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= current_slot {
+            self.expire_source_backing_bucket_not_atomic(d, current_slot)?;
+            return Ok((true, 0));
+        }
+
+        let face_atoms =
+            (Self::source_claim_unliened_num_from_source(source)? / BOUND_SCALE).min(pos);
+        let support = if face_atoms == 0 {
+            0
+        } else {
+            self.source_domain_realizable_support_for_face(d, face_atoms)?
+                .min(pos)
+        };
+        let converted = if support == 0 {
+            0
+        } else {
+            // Move the selected domain to the front of the compact source table
+            // so the existing consumption and claim-burn traversals consume the
+            // same domain.
+            if selected_slot != 0 {
+                account.header.source_domains.swap(0, selected_slot);
+            }
+            account.header.reserved_pnl = V16PodU128::new(0);
+            self.apply_released_pnl_conversion_not_atomic(account, support)?
+        };
+        account.header.resolved_source_realization_bitmap = V16PodU32::new(processed | domain_bit);
+
         // If the payout snapshot was captured before this account realized (another
         // winner closed first), the realized face is still counted in the ledger's
         // unreceipted bound. Refine it out, or the stale bound dilutes the payout
         // rate forever and blocks every remaining receipt from reaching the
         // terminal rate (never finalized, never clearable).
-        if decode_bool(self.header.payout_snapshot_captured)? {
+        if converted != 0 && decode_bool(self.header.payout_snapshot_captured)? {
             let pos_after = account.header.pnl.get().max(0) as u128;
             let face_burned = pos
                 .checked_sub(pos_after)
@@ -15300,7 +15352,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.refine_resolved_unreceipted_bound_not_atomic(decrease_num)?;
             }
         }
-        Ok(converted)
+        Ok((true, converted))
     }
 
     fn claim_resolved_payout_topup_core_not_atomic(
@@ -15418,7 +15470,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)?;
+        if self
+            .realize_source_backed_claims_for_resolved_close_not_atomic(account)?
+            .0
+        {
+            self.validate_shape()?;
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
         let mut payout_receipt = None;
         let pnl_payout = if account.header.pnl.get() > 0
             || decode_bool(account.header.resolved_payout_receipt.present)?
@@ -16337,6 +16395,7 @@ pub struct PortfolioAccountV16Account {
     pub fee_credits: V16PodI128,
     pub cancel_deposit_escrow: V16PodU128,
     pub last_fee_slot: V16PodU64,
+    pub resolved_source_realization_bitmap: V16PodU32,
     pub active_bitmap: [V16PodU64; V16_ACTIVE_BITMAP_WORDS],
     pub legs: [PortfolioLegV16Account; V16_MAX_PORTFOLIO_ASSETS_N],
     pub source_domains: [PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
@@ -16355,7 +16414,7 @@ pub struct PortfolioAccountV16Account {
 // Gated to non-kani: under `cfg(kani)` PORTFOLIO_SOURCE_DOMAIN_CAP is reduced for
 // proof tractability, so the production on-chain layout is the non-kani one.
 #[cfg(not(kani))]
-const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9291);
+const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9295);
 
 impl Default for PortfolioAccountV16Account {
     fn default() -> Self {
@@ -16381,6 +16440,7 @@ impl PortfolioAccountV16Account {
         self.fee_credits = V16PodI128::new(0);
         self.cancel_deposit_escrow = V16PodU128::new(0);
         self.last_fee_slot = V16PodU64::new(0);
+        self.resolved_source_realization_bitmap = V16PodU32::new(0);
         self.active_bitmap = [V16PodU64::new(0); V16_ACTIVE_BITMAP_WORDS];
 
         let empty_leg = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
