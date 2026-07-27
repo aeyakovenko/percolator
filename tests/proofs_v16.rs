@@ -3438,11 +3438,11 @@ fn proof_v16_source_conversion_burns_are_domain_local_disjoint_and_complete() {
     );
 }
 
-// Public-path favorable-action freshness: conversion preflight accepts exactly
-// the current/unlocked branch and rejects stale certificates or h-lock lanes
-// before value mutation. This links the cert-currentness/h-lock kernels to the
-// production entrypoint preflight instead of proving only the private leaf
-// predicates.
+// Public-path favorable-action freshness for non-flat accounts: conversion
+// preflight accepts exactly the current/unlocked branch and rejects stale
+// certificates or h-lock lanes before value mutation. Flat accounts have no
+// position risk and use a separate H-lock-only path so bounded conversion can
+// make repeated progress without an otherwise-unrefreshable certificate.
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -3459,6 +3459,26 @@ fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
         header.threshold_stress_active = 1;
     }
 
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    let active_bitmap = account_header.active_bitmap.map(V16PodU64::get);
     account_header.capital = V16PodU128::new(claim);
     account_header.pnl = V16PodI128::new(claim as i128);
     if blocker == 3 {
@@ -3475,9 +3495,9 @@ fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
         cert_risk_epoch: header.risk_epoch.get(),
         cert_asset_set_epoch: header.asset_set_epoch.get(),
         active_bitmap_at_cert: if blocker == 2 {
-            [1u64; V16_ACTIVE_BITMAP_WORDS]
-        } else {
             V16_EMPTY_ACTIVE_BITMAP
+        } else {
+            active_bitmap
         },
         valid: blocker != 0,
     });
@@ -3516,6 +3536,43 @@ fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(account.header.capital, account_capital_before);
     assert_eq!(account.header.pnl, account_pnl_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_flat_convert_preflight_skips_only_certificate_freshness() {
+    let blocker: u8 = kani::any();
+    kani::assume(blocker <= 2);
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    if blocker == 1 {
+        account_header.health_cert.valid = 0;
+    }
+    if blocker == 2 {
+        header.threshold_stress_active = 1;
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = market.kani_preflight_convert_released_pnl_to_capital(&account);
+
+    kani::cover!(
+        blocker == 1 && result == Ok(()),
+        "flat conversion can continue after a prior step invalidates its certificate"
+    );
+    kani::cover!(
+        blocker == 2 && result == Err(V16Error::LockActive),
+        "flat conversion still obeys the market H-lock"
+    );
+    assert_eq!(
+        result,
+        if blocker == 2 {
+            Err(V16Error::LockActive)
+        } else {
+            Ok(())
+        }
+    );
 }
 
 #[kani::proof]

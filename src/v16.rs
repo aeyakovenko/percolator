@@ -9498,7 +9498,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         Ok(SourceCreditConsumptionV16 {
             face_burn: V16Core::amount_from_bound_num(required_face_num)?,
-            source_face_burn_num: 0,
+            source_face_burn_num: required_face_num,
             counterparty_credit_consumed,
             insurance_credit_consumed,
         })
@@ -9590,6 +9590,73 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             counterparty_credit_consumed,
             insurance_credit_consumed,
         })
+    }
+
+    fn create_and_consume_one_account_source_domain_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        mut remaining_face_num: u128,
+    ) -> V16Result<SourceCreditConsumptionV16> {
+        let empty = || SourceCreditConsumptionV16 {
+            face_burn: 0,
+            source_face_burn_num: 0,
+            counterparty_credit_consumed: 0,
+            insurance_credit_consumed: 0,
+        };
+        if remaining_face_num == 0 {
+            return Ok(empty());
+        }
+
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining_face_num != 0 {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if !source.is_occupied() {
+                slot += 1;
+                continue;
+            }
+
+            let domain = source.domain.get() as usize;
+            let claim_num = Self::source_claim_unliened_num(&account.as_view(), domain)?
+                .min(remaining_face_num);
+            remaining_face_num = remaining_face_num
+                .checked_sub(claim_num)
+                .ok_or(V16Error::CounterUnderflow)?;
+            if claim_num == 0 {
+                slot += 1;
+                continue;
+            }
+
+            self.validate_source_domain_ledger_current(domain)?;
+            let rate = self.source_credit_for_domain(domain)?.credit_rate_num;
+            let effective_by_claim = U256::from_u128(claim_num)
+                .checked_mul(U256::from_u128(rate))
+                .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+                .and_then(|v| v.try_into_u128())
+                .ok_or(V16Error::ArithmeticOverflow)?
+                / BOUND_SCALE;
+            let effective_by_backing =
+                self.source_credit_available_backing_num(domain)? / BOUND_SCALE;
+            let effective = effective_by_claim.min(effective_by_backing);
+            if effective == 0 {
+                slot += 1;
+                continue;
+            }
+
+            let consumption =
+                self.consume_source_domain_credit_for_effective_not_atomic(domain, effective)?;
+            self.burn_account_source_claim_bound_num_for_domain(
+                account,
+                slot,
+                domain,
+                consumption.source_face_burn_num,
+            )?;
+            account.compact_source_domains();
+            return Ok(consumption);
+        }
+        Ok(empty())
     }
 
     fn create_source_credit_lien_backing_not_atomic(
@@ -14621,44 +14688,71 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::LockActive);
         }
-        self.ensure_favorable_action_allowed(account)
+        if active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)) {
+            if self.h_lock_lane(Some(account), false)? == HLockLaneV16::HMax {
+                return Err(V16Error::LockActive);
+            }
+            Ok(())
+        } else {
+            self.ensure_favorable_action_allowed(account)
+        }
     }
 
     fn convert_released_pnl_to_capital_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
+        one_source_domain: bool,
     ) -> V16Result<u128> {
         let pos = account.header.pnl.get().max(0) as u128;
         let released = pos.saturating_sub(account.header.reserved_pnl.get());
         if released == 0 {
             return Ok(0);
         }
-        if Self::account_has_source_claims(&account.as_view())? {
+        let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
+        if has_source_claims {
             if self.account_has_active_source_claim_exposure(&account.as_view())?
                 || Self::valid_source_lien_effective_reserved_sum(&account.as_view())? != 0
             {
                 return Err(V16Error::LockActive);
             }
         }
-        let converted = if Self::account_has_source_claims(&account.as_view())? {
-            self.account_source_realizable_support(&account.as_view(), released)?
-        } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
-            0
+
+        let (converted, consumption) = if has_source_claims {
+            if one_source_domain {
+                let consumption = self.create_and_consume_one_account_source_domain_not_atomic(
+                    account,
+                    V16Core::bound_num_from_amount(released)?,
+                )?;
+                let converted = consumption
+                    .counterparty_credit_consumed
+                    .checked_add(consumption.insurance_credit_consumed)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                (converted, consumption)
+            } else {
+                let converted =
+                    self.account_source_realizable_support(&account.as_view(), released)?;
+                if converted == 0 {
+                    return Err(V16Error::LockActive);
+                }
+                let consumption = self
+                    .create_and_consume_account_source_credit_for_effective_not_atomic(
+                        account, converted,
+                    )?;
+                (converted, consumption)
+            }
         } else {
-            self.haircut_effective_support(released, self.residual(), self.junior_claim_bound())?
-        };
-        if converted == 0 {
-            return Err(V16Error::LockActive);
-        }
-        let vault_before = self.header.vault.get();
-        let consumption = if Self::account_has_source_claims(&account.as_view())? {
-            self.create_and_consume_account_source_credit_for_effective_not_atomic(
-                account, converted,
-            )?
-        } else {
+            let converted = if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
+                0
+            } else {
+                self.haircut_effective_support(
+                    released,
+                    self.residual(),
+                    self.junior_claim_bound(),
+                )?
+            };
             let residual = self.residual();
             let junior_bound = self.junior_claim_bound();
-            SourceCreditConsumptionV16 {
+            let consumption = SourceCreditConsumptionV16 {
                 face_burn: self.face_claim_to_burn_for_support(
                     converted,
                     residual,
@@ -14667,8 +14761,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 source_face_burn_num: 0,
                 counterparty_credit_consumed: 0,
                 insurance_credit_consumed: 0,
-            }
+            };
+            (converted, consumption)
         };
+        if converted == 0 {
+            return Err(V16Error::LockActive);
+        }
+        let vault_before = self.header.vault.get();
         let face_i128 =
             i128::try_from(consumption.face_burn).map_err(|_| V16Error::ArithmeticOverflow)?;
         let new_pnl = account
@@ -14725,7 +14824,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
         self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
-        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
+        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account, false)?;
+        if converted != 0 {
+            self.validate_shape()?;
+            account.validate_with_market(&self.as_view())?;
+        }
+        Ok(converted)
+    }
+
+    pub fn convert_released_pnl_to_capital_step_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
+        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account, true)?;
         if converted != 0 {
             self.validate_shape()?;
             account.validate_with_market(&self.as_view())?;
@@ -15204,7 +15316,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         // Terminal: PnL reservations no longer gate realization.
         account.header.reserved_pnl = V16PodU128::new(0);
-        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
+        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account, false)?;
         // If the payout snapshot was captured before this account realized (another
         // winner closed first), the realized face is still counted in the ledger's
         // unreceipted bound. Refine it out, or the stale bound dilutes the payout
