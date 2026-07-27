@@ -11359,8 +11359,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             slot += 1;
         }
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         account.header.health_cert.valid = 0;
+        self.validate_account_audit_scan(&account.as_view())?;
+        self.validate_shape_audit_scan()?;
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
     }
 
@@ -15143,6 +15145,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(charged)
     }
 
+    fn sync_resolved_account_fee_from_validated_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        fee_rate_per_slot: u128,
+    ) -> V16Result<u128> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
+            return Err(V16Error::LockActive);
+        }
+        let fee_anchor = self.header.resolved_slot.get();
+        if fee_anchor < account.header.last_fee_slot.get() {
+            return Err(V16Error::Stale);
+        }
+        if fee_anchor == account.header.last_fee_slot.get() {
+            return Ok(0);
+        }
+        let dt = fee_anchor - account.header.last_fee_slot.get();
+        let raw_fee = U256::from_u128(fee_rate_per_slot)
+            .checked_mul(U256::from_u64(dt))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
+        let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
+        account.header.last_fee_slot = V16PodU64::new(fee_anchor);
+        Ok(charged)
+    }
+
     pub fn withdraw_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -15445,12 +15473,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.validate_shape()?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        self.sync_account_fee_to_slot_not_atomic(
-            account,
-            self.header.resolved_slot.get(),
-            fee_rate_per_slot,
-        )?;
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        self.sync_resolved_account_fee_from_validated_not_atomic(account, fee_rate_per_slot)?;
         if account.header.pnl.get() < 0 {
             self.settle_resolved_bankruptcy_negative_pnl(account)?;
         }
