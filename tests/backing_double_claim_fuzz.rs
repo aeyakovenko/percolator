@@ -231,7 +231,10 @@ fn terminal_source_chunk_does_not_revisit_a_recomputed_domain_rate() {
         .close_resolved_account_not_atomic(&mut account, 0)
         .unwrap();
     assert_eq!(first, ResolvedCloseOutcomeV16::ProgressOnly);
-    assert_eq!(account.header.resolved_source_realization_bitmap.get(), 1);
+    assert_eq!(
+        account.header.source_domains[0].resolved_realization_processed,
+        1
+    );
     assert_eq!(account.header.capital.get(), 7);
 
     let final_outcome = close_resolved_to_completion(&mut market, &mut account);

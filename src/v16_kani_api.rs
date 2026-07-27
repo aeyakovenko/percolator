@@ -112,8 +112,8 @@ pub fn kani_source_credit_rank_after_take(
     )
 }
 
-pub fn kani_mark_source_domain_processed(processed: u32, domain: u32) -> V16Result<u32> {
-    V16Core::kernel_mark_source_domain_processed(processed, domain)
+pub fn kani_mark_source_domain_processed(processed: u8) -> V16Result<u8> {
+    V16Core::kernel_mark_source_domain_processed(processed)
 }
 
 pub fn kani_active_bitmap_set(
@@ -1424,6 +1424,7 @@ pub fn kani_eq_portfolio_source_domain_v16_account(
 ) -> bool {
     a.domain.get() == b.domain.get()
         && a.source_claim_market_id.get() == b.source_claim_market_id.get()
+        && a.resolved_realization_processed == b.resolved_realization_processed
         && a.source_claim_bound_num.get() == b.source_claim_bound_num.get()
         && a.source_claim_liened_num.get() == b.source_claim_liened_num.get()
         && a.source_claim_counterparty_liened_num.get()

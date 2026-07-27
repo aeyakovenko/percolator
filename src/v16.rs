@@ -1571,21 +1571,15 @@ impl V16Core {
         ))
     }
 
-    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u32>| match result {
-        Ok(next) => {
-            let bit = 1u32 << domain;
-            *next == processed | bit
-                && next.count_ones() == processed.count_ones() + 1
-                && *next & processed == processed
-        }
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u8>| match result {
+        Ok(next) => *next == encode_bool(true) && processed == encode_bool(false),
         Err(_) => true,
     }))]
-    fn kernel_mark_source_domain_processed(processed: u32, domain: u32) -> V16Result<u32> {
-        let bit = 1u32.checked_shl(domain).ok_or(V16Error::InvalidConfig)?;
-        if processed & bit != 0 {
+    fn kernel_mark_source_domain_processed(processed: u8) -> V16Result<u8> {
+        if decode_bool(processed)? {
             return Err(V16Error::LockActive);
         }
-        Ok(processed | bit)
+        Ok(encode_bool(true))
     }
 
     /// PRODUCTION KERNEL (engine.md selection semantics): from the actionable
@@ -4113,6 +4107,14 @@ impl<'a> PortfolioV16ViewMut<'a> {
             write += 1;
         }
     }
+
+    fn clear_resolved_source_realization_progress(&mut self) {
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            self.header.source_domains[slot].resolved_realization_processed = encode_bool(false);
+            slot += 1;
+        }
+    }
 }
 
 impl<'a> PortfolioV16View<'a> {
@@ -4140,19 +4142,6 @@ impl<'a> PortfolioV16View<'a> {
         let source_claim_sum_num = self.source_claim_bound_sum_num()?;
         if source_claim_sum_num != 0 {
             V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)?;
-        }
-        let configured_domains = v16_domain_count_for_market_slots(config.max_market_slots as u32)?;
-        let terminal_bitmap = self.header.resolved_source_realization_bitmap.get();
-        let valid_domain_mask = if configured_domains == u32::BITS as usize {
-            u32::MAX
-        } else {
-            (1u32 << configured_domains) - 1
-        };
-        if terminal_bitmap & !valid_domain_mask != 0
-            || (terminal_bitmap != 0
-                && decode_market_mode(market.header.mode)? != MarketModeV16::Resolved)
-        {
-            return Err(V16Error::InvalidLeg);
         }
         Self::validate_resolved_payout_receipt_static(
             self.header.resolved_payout_receipt.try_to_runtime()?,
@@ -4229,27 +4218,40 @@ impl<'a> PortfolioV16View<'a> {
     ) -> V16Result<()> {
         let configured_domains =
             v16_domain_count_for_market_slots(market.header.config.max_market_slots.get())?;
-        let mut seen_domains = 0u32;
+        let market_mode = decode_market_mode(market.header.mode)?;
+        let mut seen = [u32::MAX; PORTFOLIO_SOURCE_DOMAIN_CAP];
+        let mut seen_count = 0usize;
         let mut slot_index = 0usize;
         while slot_index < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = self.source_domains()[slot_index];
+            let realization_processed = decode_bool(source.resolved_realization_processed)?;
             if source.has_default_sparse_tag() && !source.is_occupied() {
+                if realization_processed {
+                    return Err(V16Error::InvalidLeg);
+                }
                 slot_index += 1;
                 continue;
             }
             if !source.is_occupied() {
                 return Err(V16Error::HiddenLeg);
             }
+            if realization_processed && market_mode != MarketModeV16::Resolved {
+                return Err(V16Error::InvalidLeg);
+            }
             let d_u32 = source.domain.get();
             let d = d_u32 as usize;
             if d >= configured_domains {
                 return Err(V16Error::HiddenLeg);
             }
-            let domain_bit = 1u32.checked_shl(d_u32).ok_or(V16Error::InvalidConfig)?;
-            if seen_domains & domain_bit != 0 {
-                return Err(V16Error::HiddenLeg);
+            let mut seen_i = 0usize;
+            while seen_i < seen_count {
+                if seen[seen_i] == d_u32 {
+                    return Err(V16Error::HiddenLeg);
+                }
+                seen_i += 1;
             }
-            seen_domains |= domain_bit;
+            seen[seen_count] = d_u32;
+            seen_count += 1;
             let asset_index = d / 2;
             let asset = market.markets[asset_index].engine.asset.try_to_runtime()?;
             if source.source_claim_market_id.get() != asset.market_id {
@@ -4438,7 +4440,6 @@ impl<'a> PortfolioV16View<'a> {
             || self.header.reserved_pnl.get() != 0
             || self.header.fee_credits.get() != 0
             || self.header.cancel_deposit_escrow.get() != 0
-            || self.header.resolved_source_realization_bitmap.get() != 0
             || decode_bool(self.header.stale_state)?
             || decode_bool(self.header.b_stale_state)?
             || decode_bool(self.header.rebalance_lock)?
@@ -15279,16 +15280,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<(bool, u128)> {
         if decode_bool(account.header.resolved_payout_receipt.present)? {
             // The face is already frozen into the receipt pool.
-            account.header.resolved_source_realization_bitmap = V16PodU32::new(0);
+            account.clear_resolved_source_realization_progress();
             return Ok((false, 0));
         }
         if !Self::account_has_source_claims(&account.as_view())? {
-            account.header.resolved_source_realization_bitmap = V16PodU32::new(0);
+            account.clear_resolved_source_realization_progress();
             return Ok((false, 0));
         }
         let pos = account.header.pnl.get().max(0) as u128;
         if pos == 0 {
-            account.header.resolved_source_realization_bitmap = V16PodU32::new(0);
+            account.clear_resolved_source_realization_progress();
             return Ok((false, 0));
         }
 
@@ -15297,7 +15298,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // portfolio from combining 28 lien releases, expiries, and backing
         // consumptions in one transaction.
         let current_slot = self.header.current_slot.get();
-        let processed = account.header.resolved_source_realization_bitmap.get();
         let mut slot = 0usize;
         let mut selected = None;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -15305,19 +15305,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if source.has_default_sparse_tag() && !source.is_occupied() {
                 break;
             }
-            if source.is_occupied() {
+            if source.is_occupied() && !decode_bool(source.resolved_realization_processed)? {
                 let d = source.domain.get() as usize;
-                let shift = u32::try_from(d).map_err(|_| V16Error::InvalidConfig)?;
-                let domain_bit = 1u32.checked_shl(shift).ok_or(V16Error::InvalidConfig)?;
-                if processed & domain_bit == 0 {
-                    selected = Some((slot, d, source));
-                    break;
-                }
+                selected = Some((slot, d, source));
+                break;
             }
             slot += 1;
         }
         let Some((selected_slot, d, source)) = selected else {
-            account.header.resolved_source_realization_bitmap = V16PodU32::new(0);
+            account.clear_resolved_source_realization_progress();
             return Ok((false, 0));
         };
         if source.source_claim_liened_num.get() != 0 {
@@ -15350,9 +15346,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.header.reserved_pnl = V16PodU128::new(0);
             self.apply_released_pnl_conversion_not_atomic(account, support)?
         };
-        account.header.resolved_source_realization_bitmap = V16PodU32::new(
-            V16Core::kernel_mark_source_domain_processed(processed, d as u32)?,
-        );
+        if let Some(processed_slot) = account.source_domain_slot(d)? {
+            let processed =
+                account.header.source_domains[processed_slot].resolved_realization_processed;
+            account.header.source_domains[processed_slot].resolved_realization_processed =
+                V16Core::kernel_mark_source_domain_processed(processed)?;
+        }
 
         // If the payout snapshot was captured before this account realized (another
         // winner closed first), the realized face is still counted in the ledger's
@@ -16346,6 +16345,7 @@ impl ResolvedPayoutReceiptV16Account {
 pub struct PortfolioSourceDomainV16Account {
     pub domain: V16PodU32,
     pub source_claim_market_id: V16PodU64,
+    pub resolved_realization_processed: u8,
     pub source_claim_bound_num: V16PodU128,
     pub source_claim_liened_num: V16PodU128,
     pub source_claim_counterparty_liened_num: V16PodU128,
@@ -16414,7 +16414,6 @@ pub struct PortfolioAccountV16Account {
     pub fee_credits: V16PodI128,
     pub cancel_deposit_escrow: V16PodU128,
     pub last_fee_slot: V16PodU64,
-    pub resolved_source_realization_bitmap: V16PodU32,
     pub active_bitmap: [V16PodU64; V16_ACTIVE_BITMAP_WORDS],
     pub legs: [PortfolioLegV16Account; V16_MAX_PORTFOLIO_ASSETS_N],
     pub source_domains: [PortfolioSourceDomainV16Account; PORTFOLIO_SOURCE_DOMAIN_CAP],
@@ -16433,7 +16432,7 @@ pub struct PortfolioAccountV16Account {
 // Gated to non-kani: under `cfg(kani)` PORTFOLIO_SOURCE_DOMAIN_CAP is reduced for
 // proof tractability, so the production on-chain layout is the non-kani one.
 #[cfg(not(kani))]
-const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9295);
+const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9323);
 
 impl Default for PortfolioAccountV16Account {
     fn default() -> Self {
@@ -16459,7 +16458,6 @@ impl PortfolioAccountV16Account {
         self.fee_credits = V16PodI128::new(0);
         self.cancel_deposit_escrow = V16PodU128::new(0);
         self.last_fee_slot = V16PodU64::new(0);
-        self.resolved_source_realization_bitmap = V16PodU32::new(0);
         self.active_bitmap = [V16PodU64::new(0); V16_ACTIVE_BITMAP_WORDS];
 
         let empty_leg = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);

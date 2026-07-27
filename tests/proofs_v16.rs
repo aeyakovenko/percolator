@@ -50,20 +50,16 @@ use percolator::{
 
 #[kani::proof]
 fn proof_v16_terminal_source_domain_step_strictly_decreases_remaining_rank() {
-    let processed: u32 = kani::any();
-    let domain_raw: u8 = kani::any();
-    kani::assume(domain_raw < u32::BITS as u8);
-    let domain = domain_raw as u32;
-    let bit = 1u32 << domain;
-    kani::assume(processed & bit == 0);
+    let processed: u8 = kani::any();
+    kani::assume(processed == 0);
 
-    let next = kani_mark_source_domain_processed(processed, domain).unwrap();
+    let next = kani_mark_source_domain_processed(processed).unwrap();
 
-    assert_eq!(next, processed | bit);
-    assert_eq!(next.count_ones(), processed.count_ones() + 1);
-    assert_eq!(next & processed, processed);
-    kani::cover!(processed == 0, "terminal source rank covers first domain");
-    kani::cover!(processed != 0, "terminal source rank covers a later domain");
+    assert_eq!(next, 1);
+    let remaining_before = if processed == 0 { 1u8 } else { 0 };
+    let remaining_after = if next == 0 { 1u8 } else { 0 };
+    assert_eq!(remaining_after, remaining_before - 1);
+    kani::cover!(next == 1, "terminal source entry rank reaches processed");
 }
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
