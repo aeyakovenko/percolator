@@ -195,6 +195,14 @@ pub fn kani_loss_stale_trade_scope_allowed(
     )
 }
 
+pub fn kani_fee_sync_target_lag_blocked(
+    live: bool,
+    nonflat: bool,
+    target_effective_lag: bool,
+) -> bool {
+    V16Core::fee_sync_target_lag_blocked(live, nonflat, target_effective_lag)
+}
+
 pub fn kani_prepare_asset_recovery_transition(
     asset: AssetStateV16,
     asset_set_epoch: u64,

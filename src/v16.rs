@@ -638,6 +638,13 @@ pub fn active_bitmap_count_ones(bitmap: V16ActiveBitmap) -> u32 {
 struct V16Core;
 
 impl V16Core {
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|blocked: &bool| {
+        *blocked == (live && nonflat && target_effective_lag)
+    }))]
+    fn fee_sync_target_lag_blocked(live: bool, nonflat: bool, target_effective_lag: bool) -> bool {
+        live && nonflat && target_effective_lag
+    }
+
     fn loss_stale_trade_scope_allowed(
         market_loss_stale_active: bool,
         trade_asset_loss_stale: bool,
@@ -14869,17 +14876,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         fee_rate_per_slot: u128,
     ) -> V16Result<u128> {
         account.validate_with_market(&self.as_view())?;
-        if decode_market_mode(self.header.mode)? == MarketModeV16::Recovery {
+        let market_mode = decode_market_mode(self.header.mode)?;
+        if market_mode == MarketModeV16::Recovery {
             return Err(V16Error::LockActive);
         }
         if now_slot < account.header.last_fee_slot.get() {
             return Err(V16Error::Stale);
         }
         let nonflat = !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
-        let fee_anchor = if decode_market_mode(self.header.mode)? == MarketModeV16::Live && nonflat
-        {
+        let target_effective_lag = if market_mode == MarketModeV16::Live && nonflat {
+            self.account_has_target_effective_lag(&account.as_view())?
+        } else {
+            false
+        };
+        if V16Core::fee_sync_target_lag_blocked(
+            market_mode == MarketModeV16::Live,
+            nonflat,
+            target_effective_lag,
+        ) {
+            return Err(V16Error::LockActive);
+        }
+        let fee_anchor = if market_mode == MarketModeV16::Live && nonflat {
             self.account_fee_anchor_for_loss_currentness(&account.as_view(), now_slot)?
-        } else if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+        } else if market_mode == MarketModeV16::Resolved {
             self.header.resolved_slot.get()
         } else {
             now_slot
@@ -14892,7 +14911,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_mul(U256::from_u64(dt))
             .ok_or(V16Error::ArithmeticOverflow)?;
         let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
-        if decode_market_mode(self.header.mode)? == MarketModeV16::Live && nonflat {
+        if market_mode == MarketModeV16::Live && nonflat {
             if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
                 .settle_account_side_effects_not_atomic(
                     account,

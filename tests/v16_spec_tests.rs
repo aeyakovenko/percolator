@@ -499,12 +499,21 @@ fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
             )
             .unwrap();
         market
+            .set_asset_raw_oracle_target_not_atomic(0, 50)
+            .unwrap();
+        market
             .accrue_asset_to_not_atomic(0, 2, 50, 0, true)
             .unwrap();
     }
     assert_eq!(long_header.pnl.get(), 0);
     assert_eq!(long_header.capital.get(), 100);
     assert_eq!(header.insurance.get(), 0);
+    let accrued_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(
+        accrued_asset.raw_oracle_target_price,
+        accrued_asset.effective_price,
+        "control must fully apply its authenticated target before fee sync"
+    );
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
@@ -521,6 +530,50 @@ fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
     assert_eq!(market.header.insurance.get(), 50);
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_fee_sync_rejects_target_effective_lag_before_charging() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 16);
+    let mut short_header = account_fixture(1, 17);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 100).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 9, 100, 0, true)
+            .unwrap();
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, 50)
+            .unwrap();
+    }
+
+    let header_before = header;
+    let markets_before = markets.clone();
+    let account_before = long_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let result = market.sync_account_fee_to_slot_not_atomic(&mut long, 10, 10);
+
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(market.header, &header_before);
+    assert_eq!(market.markets, markets_before.as_slice());
+    assert_eq!(long.header, &account_before);
 }
 
 #[test]

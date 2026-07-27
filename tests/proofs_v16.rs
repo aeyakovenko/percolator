@@ -8,8 +8,8 @@ use percolator::v16::{
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
-    kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
-    kani_health_requirements_from_base_and_target_lag,
+    kani_expected_source_credit_rate_num_for_state, kani_fee_sync_target_lag_blocked,
+    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
@@ -9570,6 +9570,23 @@ fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
     assert_eq!(market.header.c_tot.get(), capital - loss - expected_fee);
     assert_eq!(market.header.insurance.get(), expected_fee);
     assert_eq!(market.header.vault.get(), capital);
+}
+
+#[kani::proof]
+fn proof_v16_fee_sync_target_lag_guard_is_exact() {
+    let live: bool = kani::any();
+    let nonflat: bool = kani::any();
+    let target_effective_lag: bool = kani::any();
+    let blocked = kani_fee_sync_target_lag_blocked(live, nonflat, target_effective_lag);
+    kani::cover!(
+        blocked,
+        "fee-sync target-lag guard covers a blocked live nonflat account"
+    );
+    kani::cover!(
+        !blocked && live,
+        "fee-sync target-lag guard covers a live admissible account"
+    );
+    assert_eq!(blocked, live && nonflat && target_effective_lag);
 }
 
 #[kani::proof]
