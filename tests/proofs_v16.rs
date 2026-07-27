@@ -2951,6 +2951,7 @@ fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        kf_epoch_snap: asset.kf_epoch_long,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset.b_long_num,
@@ -3265,6 +3266,7 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
         b_snap: 0,
@@ -3399,6 +3401,7 @@ fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
 fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
     let claim_raw: u8 = kani::any();
     kani::assume(claim_raw > 0);
+    let source_side_stale: bool = kani::any();
     let claim = claim_raw as u128;
     let claim_num = claim * BOUND_SCALE;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
@@ -3434,6 +3437,10 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
         status: BackingBucketStatusV16::Fresh,
         ..BackingBucketV16::EMPTY
     });
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.stored_pos_count_long = u64::from(source_side_stale);
+    asset.stale_account_count_long = u64::from(source_side_stale);
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     account_header.source_domains[0].domain = V16PodU32::new(0);
     account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
     account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
@@ -3441,15 +3448,10 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
     // passed instruction_candidate = false, so h_lock_lane returns HMax on the
     // bankruptcy bit BEFORE reading any of the source-backed fixture — the entire
     // source-credit/backing/cert state above was inert and assert_eq!(lane, HMax)
-    // could not fail for ANY implementation. Fix: make the bankruptcy bit AND the
-    // instruction-candidate flag symbolic and assert the EXACT discriminant
-    // lane == HMax  <=>  (bit OR candidate). The HMin arm is the real content: it
-    // proves the source-backed positive-PnL fixture triggers NONE of the
-    // account-side hmax conditions (stale, b-stale, loss-stale live leg, pending
-    // close residual, domain loss barrier), so the bankruptcy bit / candidate is
-    // the operative discriminant before any source-backed value exit. (Fixture
-    // mode is Live and threshold_stress_active is 0, so those market-side
-    // disjuncts are inactive.)
+    // could not fail for ANY implementation. Keep the bankruptcy bit and
+    // instruction candidate symbolic, and include the source-side cohort state in
+    // the exact discriminant. The HMin arm proves no unrelated account-side
+    // condition selects HMax for a current source-backed claim.
     let hlock_active: bool = kani::any();
     let instruction_candidate: bool = kani::any();
     header.bankruptcy_hlock_active = if hlock_active { 1 } else { 0 };
@@ -3474,9 +3476,17 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
     );
     kani::cover!(
         claim > 1 && !hlock_active && !instruction_candidate,
-        "source-backed positive PnL alone does NOT force hmax (HMin arm)"
+        "source-backed positive PnL exercises both stale and current source-side lanes"
     );
-    let expected = if hlock_active || instruction_candidate {
+    kani::cover!(
+        claim > 1 && source_side_stale && !hlock_active && !instruction_candidate,
+        "a stale source-side cohort alone selects hmax"
+    );
+    kani::cover!(
+        claim > 1 && !source_side_stale && !hlock_active && !instruction_candidate,
+        "a current source-backed claim alone stays on hmin"
+    );
+    let expected = if hlock_active || instruction_candidate || source_side_stale {
         HLockLaneV16::HMax
     } else {
         HLockLaneV16::HMin
@@ -3495,11 +3505,13 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
 fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate() {
     let threshold_stress_active: bool = kani::any();
     let bankruptcy_hlock_active: bool = kani::any();
+    let has_negative_pnl: bool = kani::any();
     let recovery_mode: bool = kani::any();
     let instruction_bankruptcy_candidate: bool = kani::any();
     let (mut header, mut markets) = one_market_only_fixture();
     header.threshold_stress_active = threshold_stress_active as u8;
     header.bankruptcy_hlock_active = bankruptcy_hlock_active as u8;
+    header.negative_pnl_account_count = V16PodU64::new(u64::from(has_negative_pnl));
     header.mode = if recovery_mode { 2 } else { 0 };
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
@@ -3508,6 +3520,7 @@ fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate(
         .unwrap();
     let expected = if threshold_stress_active
         || bankruptcy_hlock_active
+        || has_negative_pnl
         || recovery_mode
         || instruction_bankruptcy_candidate
     {
@@ -3523,6 +3536,10 @@ fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate(
     kani::cover!(
         lane == HLockLaneV16::HMax && threshold_stress_active,
         "global h-lock lane covers threshold stress h_max branch"
+    );
+    kani::cover!(
+        lane == HLockLaneV16::HMax && has_negative_pnl,
+        "global h-lock lane covers unresolved negative-PnL h_max branch"
     );
     kani::cover!(
         lane == HLockLaneV16::HMax && bankruptcy_hlock_active,
@@ -6991,6 +7008,7 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         // exact ceil(abs * SOCIAL_WEIGHT_SCALE / a_basis); with a_basis == ADL_ONE
         // == SOCIAL_WEIGHT_SCALE this is abs itself, so validate_active_leg passes
@@ -7053,6 +7071,7 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
         b_snap: 0,
@@ -8706,6 +8725,7 @@ fn proof_v16_resolved_two_active_legs_are_unattributed_for_bankruptcy() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        kf_epoch_snap: asset0.kf_epoch_long,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset0.b_long_num,
@@ -8729,6 +8749,7 @@ fn proof_v16_resolved_two_active_legs_are_unattributed_for_bankruptcy() {
         a_basis: ADL_ONE,
         k_snap: asset1.k_short,
         f_snap: asset1.f_short_num,
+        kf_epoch_snap: asset1.kf_epoch_short,
         epoch_snap: asset1.epoch_short,
         loss_weight: POS_SCALE,
         b_snap: asset1.b_short_num,
@@ -9230,6 +9251,16 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     assert_eq!(outcome.loss_stale_after, expected_asset_slot < now_slot);
     assert_eq!(asset_after.slot_last, expected_asset_slot);
     assert_eq!(asset_after.effective_price, price);
+    assert_eq!(
+        asset_after.stale_account_count_long,
+        asset_after.stored_pos_count_long
+    );
+    assert_eq!(
+        asset_after.stale_account_count_short,
+        asset_after.stored_pos_count_short
+    );
+    assert_eq!(asset_after.kf_epoch_long, asset.kf_epoch_long + 1);
+    assert_eq!(asset_after.kf_epoch_short, asset.kf_epoch_short + 1);
     assert_eq!(market.header.current_slot.get(), now_slot);
     assert_eq!(market.header.slot_last.get(), expected_asset_slot);
     assert_eq!(
@@ -9243,6 +9274,44 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     // Junior-pool isolation: this transition must not move the junior
     // residual pool.
     assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_reset_pending_accrual_preserves_frozen_stale_work() {
+    let prior_stale: bool = kani::any();
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.mode_long = SideModeV16::ResetPending;
+    asset.stored_pos_count_long = 1;
+    asset.stale_account_count_long = u64::from(prior_stale);
+    asset.epoch_long = 2;
+    asset.k_epoch_start_long = asset.k_long;
+    asset.f_epoch_start_long_num = asset.f_long_num;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .accrue_asset_to_not_atomic(0, 2, 101, 0, true)
+        .unwrap();
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+
+    kani::cover!(
+        !prior_stale,
+        "post-reset accrual does not invent stale work for a settled prior-epoch leg"
+    );
+    kani::cover!(
+        prior_stale,
+        "post-reset accrual preserves real prior-epoch stale work"
+    );
+    assert_eq!(after.effective_price, 101);
+    assert_eq!(after.k_long, asset.k_long);
+    assert_eq!(after.f_long_num, asset.f_long_num);
+    assert_eq!(after.kf_epoch_long, asset.kf_epoch_long);
+    assert_eq!(after.mode_long, SideModeV16::ResetPending);
+    assert_eq!(after.stored_pos_count_long, 1);
+    assert_eq!(after.stale_account_count_long, u64::from(prior_stale));
 }
 
 #[kani::proof]
@@ -9979,6 +10048,8 @@ fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i
         markets[0].engine.asset.f_long_num = V16PodI128::new((ADL_ONE as i128) * units);
         markets[0].engine.asset.f_short_num = V16PodI128::new(-(ADL_ONE as i128) * units);
     }
+    markets[0].engine.asset.kf_epoch_long = V16PodU64::new(1);
+    markets[0].engine.asset.kf_epoch_short = V16PodU64::new(1);
     let leg = PortfolioLegV16 {
         active: true,
         asset_index: 0,
@@ -9988,6 +10059,7 @@ fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
         b_snap: 0,

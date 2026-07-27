@@ -27,8 +27,9 @@ pub type V16ActiveBitmap = [u64; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 // Bump whenever the on-chain account/header Pod layout changes (see the
-// PortfolioAccountV16Account size assertion). 17: added funding flow counters.
-pub const V16_LAYOUT_DISCRIMINATOR: u16 = 17;
+// PortfolioAccountV16Account size assertion). 18: added monotonic K/F cohort
+// generations to assets and legs.
+pub const V16_LAYOUT_DISCRIMINATOR: u16 = 18;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
 pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
@@ -998,6 +999,7 @@ impl V16Core {
                 && l.a_basis == leg.a_basis
                 && l.k_snap == leg.k_snap
                 && l.f_snap == leg.f_snap
+                && l.kf_epoch_snap == leg.kf_epoch_snap
                 && l.epoch_snap == leg.epoch_snap
                 && l.b_snap == leg.b_snap
                 && l.b_rem == leg.b_rem
@@ -1037,6 +1039,8 @@ impl V16Core {
                 && a.k_short == asset.k_short
                 && a.f_long_num == asset.f_long_num
                 && a.f_short_num == asset.f_short_num
+                && a.kf_epoch_long == asset.kf_epoch_long
+                && a.kf_epoch_short == asset.kf_epoch_short
                 && a.k_epoch_start_long == asset.k_epoch_start_long
                 && a.k_epoch_start_short == asset.k_epoch_start_short
                 && a.f_epoch_start_long_num == asset.f_epoch_start_long_num
@@ -1907,6 +1911,7 @@ impl V16Core {
                 && l.a_basis == leg.a_basis
                 && l.k_snap == leg.k_snap
                 && l.f_snap == leg.f_snap
+                && l.kf_epoch_snap == leg.kf_epoch_snap
                 && l.epoch_snap == leg.epoch_snap
                 && l.loss_weight == leg.loss_weight
                 && l.b_epoch_snap == leg.b_epoch_snap
@@ -1993,6 +1998,8 @@ impl V16Core {
                 && a.k_short == asset.k_short
                 && a.f_long_num == asset.f_long_num
                 && a.f_short_num == asset.f_short_num
+                && a.kf_epoch_long == asset.kf_epoch_long
+                && a.kf_epoch_short == asset.kf_epoch_short
                 && a.k_epoch_start_long == asset.k_epoch_start_long
                 && a.k_epoch_start_short == asset.k_epoch_start_short
                 && a.f_epoch_start_long_num == asset.f_epoch_start_long_num
@@ -2112,7 +2119,9 @@ impl V16Core {
                 && l.b_rem == 0 && !l.b_stale && !l.stale
                 && (match side {
                     SideV16::Long => l.a_basis == asset.a_long && l.k_snap == asset.k_long
-                        && l.f_snap == asset.f_long_num && l.b_snap == asset.b_long_num
+                        && l.f_snap == asset.f_long_num
+                        && l.kf_epoch_snap == asset.kf_epoch_long
+                        && l.b_snap == asset.b_long_num
                         && l.epoch_snap == asset.epoch_long && l.b_epoch_snap == asset.epoch_long
                         && a.oi_eff_long_q == asset.oi_eff_long_q.wrapping_add(abs_q)
                         && a.loss_weight_sum_long == asset.loss_weight_sum_long.wrapping_add(loss_weight)
@@ -2120,7 +2129,9 @@ impl V16Core {
                                 && a.oi_eff_short_q == asset.oi_eff_short_q
                         && a.loss_weight_sum_short == asset.loss_weight_sum_short,
                     SideV16::Short => l.a_basis == asset.a_short && l.k_snap == asset.k_short
-                        && l.f_snap == asset.f_short_num && l.b_snap == asset.b_short_num
+                        && l.f_snap == asset.f_short_num
+                        && l.kf_epoch_snap == asset.kf_epoch_short
+                        && l.b_snap == asset.b_short_num
                         && l.epoch_snap == asset.epoch_short && l.b_epoch_snap == asset.epoch_short
                         && a.oi_eff_short_q == asset.oi_eff_short_q.wrapping_add(abs_q)
                         && a.loss_weight_sum_short == asset.loss_weight_sum_short.wrapping_add(loss_weight)
@@ -2141,6 +2152,8 @@ impl V16Core {
                 && a.k_short == asset.k_short
                 && a.f_long_num == asset.f_long_num
                 && a.f_short_num == asset.f_short_num
+                && a.kf_epoch_long == asset.kf_epoch_long
+                && a.kf_epoch_short == asset.kf_epoch_short
                 && a.k_epoch_start_long == asset.k_epoch_start_long
                 && a.k_epoch_start_short == asset.k_epoch_start_short
                 && a.f_epoch_start_long_num == asset.f_epoch_start_long_num
@@ -2173,11 +2186,12 @@ impl V16Core {
         loss_weight: u128,
         asset_index_u32: u32,
     ) -> V16Result<(AssetStateV16, PortfolioLegV16)> {
-        let (a_basis, k_snap, f_snap, b_snap, epoch_snap) = match side {
+        let (a_basis, k_snap, f_snap, kf_epoch_snap, b_snap, epoch_snap) = match side {
             SideV16::Long => (
                 asset.a_long,
                 asset.k_long,
                 asset.f_long_num,
+                asset.kf_epoch_long,
                 asset.b_long_num,
                 asset.epoch_long,
             ),
@@ -2185,6 +2199,7 @@ impl V16Core {
                 asset.a_short,
                 asset.k_short,
                 asset.f_short_num,
+                asset.kf_epoch_short,
                 asset.b_short_num,
                 asset.epoch_short,
             ),
@@ -2210,6 +2225,7 @@ impl V16Core {
             a_basis,
             k_snap,
             f_snap,
+            kf_epoch_snap,
             epoch_snap,
             loss_weight,
             b_snap,
@@ -3599,6 +3615,8 @@ pub struct AssetStateV16 {
     pub k_short: i128,
     pub f_long_num: i128,
     pub f_short_num: i128,
+    pub kf_epoch_long: u64,
+    pub kf_epoch_short: u64,
     pub k_epoch_start_long: i128,
     pub k_epoch_start_short: i128,
     pub f_epoch_start_long_num: i128,
@@ -3645,6 +3663,8 @@ impl Default for AssetStateV16 {
             k_short: 0,
             f_long_num: 0,
             f_short_num: 0,
+            kf_epoch_long: 0,
+            kf_epoch_short: 0,
             k_epoch_start_long: 0,
             k_epoch_start_short: 0,
             f_epoch_start_long_num: 0,
@@ -4423,6 +4443,7 @@ pub struct PortfolioLegV16 {
     pub a_basis: u128,
     pub k_snap: i128,
     pub f_snap: i128,
+    pub kf_epoch_snap: u64,
     pub epoch_snap: u64,
     pub loss_weight: u128,
     pub b_snap: u128,
@@ -4442,6 +4463,7 @@ impl PortfolioLegV16 {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: 0,
         b_snap: 0,
@@ -4460,6 +4482,7 @@ impl PortfolioLegV16 {
             && self.a_basis == ADL_ONE
             && self.k_snap == 0
             && self.f_snap == 0
+            && self.kf_epoch_snap == 0
             && self.epoch_snap == 0
             && self.loss_weight == 0
             && self.b_snap == 0
@@ -5983,6 +6006,8 @@ pub struct AssetStateV16Account {
     pub k_short: V16PodI128,
     pub f_long_num: V16PodI128,
     pub f_short_num: V16PodI128,
+    pub kf_epoch_long: V16PodU64,
+    pub kf_epoch_short: V16PodU64,
     pub k_epoch_start_long: V16PodI128,
     pub k_epoch_start_short: V16PodI128,
     pub f_epoch_start_long_num: V16PodI128,
@@ -6029,6 +6054,8 @@ impl AssetStateV16Account {
             k_short: V16PodI128::new(value.k_short),
             f_long_num: V16PodI128::new(value.f_long_num),
             f_short_num: V16PodI128::new(value.f_short_num),
+            kf_epoch_long: V16PodU64::new(value.kf_epoch_long),
+            kf_epoch_short: V16PodU64::new(value.kf_epoch_short),
             k_epoch_start_long: V16PodI128::new(value.k_epoch_start_long),
             k_epoch_start_short: V16PodI128::new(value.k_epoch_start_short),
             f_epoch_start_long_num: V16PodI128::new(value.f_epoch_start_long_num),
@@ -6075,6 +6102,8 @@ impl AssetStateV16Account {
             k_short: self.k_short.get(),
             f_long_num: self.f_long_num.get(),
             f_short_num: self.f_short_num.get(),
+            kf_epoch_long: self.kf_epoch_long.get(),
+            kf_epoch_short: self.kf_epoch_short.get(),
             k_epoch_start_long: self.k_epoch_start_long.get(),
             k_epoch_start_short: self.k_epoch_start_short.get(),
             f_epoch_start_long_num: self.f_epoch_start_long_num.get(),
@@ -7040,6 +7069,8 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             || (mode == MarketModeV16::Live && asset.oi_eff_long_q != asset.oi_eff_short_q)
             || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
             || asset.loss_weight_sum_short > SOCIAL_LOSS_DEN
+            || asset.stale_account_count_long > asset.stored_pos_count_long
+            || asset.stale_account_count_short > asset.stored_pos_count_short
             || (asset.oi_eff_long_q != 0 && asset.loss_weight_sum_long == 0)
             || (asset.oi_eff_short_q != 0 && asset.loss_weight_sum_short == 0)
             || (asset.loss_weight_sum_long != 0 && asset.stored_pos_count_long == 0)
@@ -8379,6 +8410,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn account_has_source_claims(account: &PortfolioV16View<'_>) -> V16Result<bool> {
         Ok(Self::account_source_claim_bound_sum_num(account)? != 0)
+    }
+
+    fn account_has_stale_source_counterparty(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() && source.source_claim_bound_num.get() != 0 {
+                let (asset_index, source_side) =
+                    self.domain_asset_side(source.domain.get() as usize)?;
+                let asset = self.asset_state(asset_index)?;
+                let stale_count = match source_side {
+                    SideV16::Long => asset.stale_account_count_long,
+                    SideV16::Short => asset.stale_account_count_short,
+                };
+                if stale_count != 0 {
+                    return Ok(true);
+                }
+            }
+            slot += 1;
+        }
+        Ok(false)
     }
 
     fn source_claim_unliened_num(account: &PortfolioV16View<'_>, domain: usize) -> V16Result<u128> {
@@ -10398,7 +10456,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &self,
         asset_index: usize,
         leg: PortfolioLegV16,
-    ) -> V16Result<(i128, i128)> {
+    ) -> V16Result<(i128, i128, u64)> {
         if asset_index >= self.header.config.max_market_slots.get() as usize
             || asset_index >= self.markets.len()
         {
@@ -10411,35 +10469,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn kf_target_for_leg_from_asset(
         asset: AssetStateV16,
         leg: PortfolioLegV16,
-    ) -> V16Result<(i128, i128)> {
-        let (current_k, current_f, epoch_start_k, epoch_start_f, side_epoch, mode) = match leg.side
-        {
-            SideV16::Long => (
-                asset.k_long,
-                asset.f_long_num,
-                asset.k_epoch_start_long,
-                asset.f_epoch_start_long_num,
-                asset.epoch_long,
-                asset.mode_long,
-            ),
-            SideV16::Short => (
-                asset.k_short,
-                asset.f_short_num,
-                asset.k_epoch_start_short,
-                asset.f_epoch_start_short_num,
-                asset.epoch_short,
-                asset.mode_short,
-            ),
-        };
-        if leg.epoch_snap == side_epoch {
-            Ok((current_k, current_f))
+    ) -> V16Result<(i128, i128, u64)> {
+        let (current_k, current_f, kf_epoch, epoch_start_k, epoch_start_f, side_epoch, mode) =
+            match leg.side {
+                SideV16::Long => (
+                    asset.k_long,
+                    asset.f_long_num,
+                    asset.kf_epoch_long,
+                    asset.k_epoch_start_long,
+                    asset.f_epoch_start_long_num,
+                    asset.epoch_long,
+                    asset.mode_long,
+                ),
+                SideV16::Short => (
+                    asset.k_short,
+                    asset.f_short_num,
+                    asset.kf_epoch_short,
+                    asset.k_epoch_start_short,
+                    asset.f_epoch_start_short_num,
+                    asset.epoch_short,
+                    asset.mode_short,
+                ),
+            };
+        let (target_k, target_f) = if leg.epoch_snap == side_epoch {
+            (current_k, current_f)
         } else if mode == SideModeV16::ResetPending
             && leg.epoch_snap.checked_add(1) == Some(side_epoch)
         {
-            Ok((epoch_start_k, epoch_start_f))
+            (epoch_start_k, epoch_start_f)
         } else {
-            Err(V16Error::InvalidLeg)
+            return Err(V16Error::InvalidLeg);
+        };
+        if leg.kf_epoch_snap > kf_epoch
+            || (leg.kf_epoch_snap == kf_epoch && (leg.k_snap != target_k || leg.f_snap != target_f))
+        {
+            return Err(V16Error::InvalidLeg);
         }
+        Ok((target_k, target_f, kf_epoch))
     }
 
     fn b_target_for_leg(&self, asset_index: usize, leg: PortfolioLegV16) -> V16Result<u128> {
@@ -10482,8 +10548,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn leg_kf_delta_components_for_settlement_from_asset(
         asset: AssetStateV16,
         leg: PortfolioLegV16,
-    ) -> V16Result<(i128, i128, i128, i128, i128)> {
-        let (k_now, f_now) = Self::kf_target_for_leg_from_asset(asset, leg)?;
+    ) -> V16Result<(i128, i128, u64, i128, i128, i128)> {
+        let (k_now, f_now, kf_epoch_now) = Self::kf_target_for_leg_from_asset(asset, leg)?;
         let den = leg
             .a_basis
             .checked_mul(POS_SCALE)
@@ -10520,7 +10586,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_add(f_delta)
             .ok_or(V16Error::ArithmeticOverflow)?;
         validate_non_min_i128(net)?;
-        Ok((k_now, f_now, k_delta, f_delta, net))
+        Ok((k_now, f_now, kf_epoch_now, k_delta, f_delta, net))
     }
 
     #[cfg(kani)]
@@ -10529,7 +10595,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset: AssetStateV16,
         leg: PortfolioLegV16,
     ) -> V16Result<(i128, i128, i128)> {
-        let (k_now, f_now, _k_delta, _f_delta, net) =
+        let (k_now, f_now, _kf_epoch_now, _k_delta, _f_delta, net) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
         Ok((k_now, f_now, net))
     }
@@ -10578,8 +10644,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidLeg);
         }
-        let (k_now, f_now, _k_delta, f_delta, net) =
+        let (k_now, f_now, kf_epoch_now, _k_delta, f_delta, net) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
+        let was_kf_stale = leg.kf_epoch_snap != kf_epoch_now;
         if net != 0 {
             if net > 0 {
                 let source_domain =
@@ -10601,9 +10668,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::record_account_funding_flow(account, leg.side, f_delta)?;
         leg.k_snap = k_now;
         leg.f_snap = f_now;
+        leg.kf_epoch_snap = kf_epoch_now;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
+        if was_kf_stale {
+            self.consume_stale_account_counter(asset_index, leg.side)?;
+        }
         account.header.health_cert.valid = 0;
         Ok(())
+    }
+
+    fn consume_stale_account_counter(
+        &mut self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<()> {
+        let mut asset = self.asset_state(asset_index)?;
+        match side {
+            SideV16::Long => {
+                asset.stale_account_count_long = asset
+                    .stale_account_count_long
+                    .checked_sub(1)
+                    .ok_or(V16Error::CounterUnderflow)?;
+            }
+            SideV16::Short => {
+                asset.stale_account_count_short = asset
+                    .stale_account_count_short
+                    .checked_sub(1)
+                    .ok_or(V16Error::CounterUnderflow)?;
+            }
+        }
+        self.set_asset_state(asset_index, asset)
     }
 
     fn clear_account_stale(&mut self, account: &mut PortfolioV16ViewMut<'_>) -> V16Result<()> {
@@ -11436,10 +11530,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
 
         let mut asset = old;
-        asset.k_long = add_non_min_i128(asset.k_long, k_delta)?;
-        asset.k_short = add_non_min_i128(asset.k_short, -k_delta)?;
-        asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
-        asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
+        if old.mode_long != SideModeV16::ResetPending {
+            asset.k_long = add_non_min_i128(asset.k_long, k_delta)?;
+            asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
+            if asset.k_long != old.k_long || asset.f_long_num != old.f_long_num {
+                asset.kf_epoch_long = asset
+                    .kf_epoch_long
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+                asset.stale_account_count_long = asset.stored_pos_count_long;
+            }
+        }
+        if old.mode_short != SideModeV16::ResetPending {
+            asset.k_short = add_non_min_i128(asset.k_short, -k_delta)?;
+            asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
+            if asset.k_short != old.k_short || asset.f_short_num != old.f_short_num {
+                asset.kf_epoch_short = asset
+                    .kf_epoch_short
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+                asset.stale_account_count_short = asset.stored_pos_count_short;
+            }
+        }
         asset.effective_price = effective_price;
         asset.fund_px_last = effective_price;
         asset.slot_last = asset
@@ -12465,6 +12577,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if decode_bool(account.header.stale_state)?
                 || decode_bool(account.header.b_stale_state)?
                 || self.account_has_loss_stale_live_leg(account)?
+                || self.account_has_stale_source_counterparty(account)?
             {
                 return Ok(HLockLaneV16::HMax);
             }
@@ -12482,6 +12595,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         if decode_bool(self.header.threshold_stress_active)?
             || decode_bool(self.header.bankruptcy_hlock_active)?
+            || self.header.negative_pnl_account_count.get() != 0
             || decode_market_mode(self.header.mode)? == MarketModeV16::Recovery
             || instruction_bankruptcy_candidate
         {
@@ -12781,8 +12895,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
             return Err(V16Error::LockActive);
         }
-        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
-        if k_target != leg.k_snap || f_target != leg.f_snap {
+        let (k_target, f_target, kf_epoch_target) = self.kf_target_for_leg(asset_index, leg)?;
+        if k_target != leg.k_snap || f_target != leg.f_snap || kf_epoch_target != leg.kf_epoch_snap
+        {
             return Err(V16Error::Stale);
         }
         if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
@@ -12824,8 +12939,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
             return Err(V16Error::LockActive);
         }
-        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
-        if k_target != leg.k_snap || f_target != leg.f_snap {
+        let (k_target, f_target, kf_epoch_target) = self.kf_target_for_leg(asset_index, leg)?;
+        if k_target != leg.k_snap || f_target != leg.f_snap || kf_epoch_target != leg.kf_epoch_snap
+        {
             return Err(V16Error::Stale);
         }
         if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
@@ -15324,8 +15440,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
                     return Ok(());
                 }
-                let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
-                if k_target != leg.k_snap || f_target != leg.f_snap {
+                let (k_target, f_target, kf_epoch_target) =
+                    self.kf_target_for_leg(asset_index, leg)?;
+                if k_target != leg.k_snap
+                    || f_target != leg.f_snap
+                    || kf_epoch_target != leg.kf_epoch_snap
+                {
                     return Ok(());
                 }
                 if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
@@ -15601,7 +15721,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok((0, 0, 0, 0));
         };
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
-        let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
+        let (k_now, f_now, kf_epoch_now) = self.kf_target_for_leg(asset_index, leg)?;
+        let was_kf_stale = leg.kf_epoch_snap != kf_epoch_now;
         let den = leg
             .a_basis
             .checked_mul(POS_SCALE)
@@ -15655,7 +15776,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::record_account_funding_flow(account, leg.side, f_delta)?;
         leg.k_snap = k_now;
         leg.f_snap = f_now;
+        leg.kf_epoch_snap = kf_epoch_now;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
+        if was_kf_stale {
+            self.consume_stale_account_counter(asset_index, leg.side)?;
+        }
         account.header.health_cert.valid = 0;
         Ok((
             loss_settled,
@@ -15686,11 +15811,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
 
-        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+        let (k_target, f_target, kf_epoch_target) = self.kf_target_for_leg(asset_index, leg)?;
         let b_target = self.b_target_for_leg(asset_index, leg)?;
         if account.header.pnl.get() == 0
             && k_target == leg.k_snap
             && f_target == leg.f_snap
+            && kf_epoch_target == leg.kf_epoch_snap
             && b_target <= leg.b_snap
             && !account
                 .header
@@ -15841,6 +15967,7 @@ pub struct PortfolioLegV16Account {
     pub a_basis: V16PodU128,
     pub k_snap: V16PodI128,
     pub f_snap: V16PodI128,
+    pub kf_epoch_snap: V16PodU64,
     pub epoch_snap: V16PodU64,
     pub loss_weight: V16PodU128,
     pub b_snap: V16PodU128,
@@ -15861,6 +15988,7 @@ impl PortfolioLegV16Account {
             a_basis: V16PodU128::new(value.a_basis),
             k_snap: V16PodI128::new(value.k_snap),
             f_snap: V16PodI128::new(value.f_snap),
+            kf_epoch_snap: V16PodU64::new(value.kf_epoch_snap),
             epoch_snap: V16PodU64::new(value.epoch_snap),
             loss_weight: V16PodU128::new(value.loss_weight),
             b_snap: V16PodU128::new(value.b_snap),
@@ -15881,6 +16009,7 @@ impl PortfolioLegV16Account {
             a_basis: self.a_basis.get(),
             k_snap: self.k_snap.get(),
             f_snap: self.f_snap.get(),
+            kf_epoch_snap: self.kf_epoch_snap.get(),
             epoch_snap: self.epoch_snap.get(),
             loss_weight: self.loss_weight.get(),
             b_snap: self.b_snap.get(),
@@ -16192,7 +16321,7 @@ pub struct PortfolioAccountV16Account {
 // Gated to non-kani: under `cfg(kani)` PORTFOLIO_SOURCE_DOMAIN_CAP is reduced for
 // proof tractability, so the production on-chain layout is the non-kani one.
 #[cfg(not(kani))]
-const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9291);
+const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9419);
 
 impl Default for PortfolioAccountV16Account {
     fn default() -> Self {
@@ -16717,12 +16846,41 @@ fn snapshot_epoch_bound_to_side(epoch_snap: u64, side_epoch: u64, mode: SideMode
 }
 
 fn leg_snapshots_bound_to_asset_side(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
-    let (side_epoch, mode) = match leg.side {
-        SideV16::Long => (asset.epoch_long, asset.mode_long),
-        SideV16::Short => (asset.epoch_short, asset.mode_short),
+    let (side_epoch, mode, kf_epoch, current_k, current_f, epoch_start_k, epoch_start_f) =
+        match leg.side {
+            SideV16::Long => (
+                asset.epoch_long,
+                asset.mode_long,
+                asset.kf_epoch_long,
+                asset.k_long,
+                asset.f_long_num,
+                asset.k_epoch_start_long,
+                asset.f_epoch_start_long_num,
+            ),
+            SideV16::Short => (
+                asset.epoch_short,
+                asset.mode_short,
+                asset.kf_epoch_short,
+                asset.k_short,
+                asset.f_short_num,
+                asset.k_epoch_start_short,
+                asset.f_epoch_start_short_num,
+            ),
+        };
+    let target_kf = if leg.epoch_snap == side_epoch {
+        Some((current_k, current_f))
+    } else if mode == SideModeV16::ResetPending && leg.epoch_snap.checked_add(1) == Some(side_epoch)
+    {
+        Some((epoch_start_k, epoch_start_f))
+    } else {
+        None
     };
-    snapshot_epoch_bound_to_side(leg.epoch_snap, side_epoch, mode)
-        && snapshot_epoch_bound_to_side(leg.b_epoch_snap, side_epoch, mode)
+    snapshot_epoch_bound_to_side(leg.b_epoch_snap, side_epoch, mode)
+        && target_kf.is_some_and(|(target_k, target_f)| {
+            leg.kf_epoch_snap <= kf_epoch
+                && (leg.kf_epoch_snap != kf_epoch
+                    || (leg.k_snap == target_k && leg.f_snap == target_f))
+        })
 }
 
 fn same_side_risk_reduction_or_flat_obligation(current: i128, next: i128) -> bool {
