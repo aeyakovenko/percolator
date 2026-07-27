@@ -10,10 +10,11 @@ use percolator::{
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
-    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
-    SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
+    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
+    SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error, V16PodI128, V16PodU128,
+    V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -2449,6 +2450,92 @@ fn v16_permissionless_recovery_crank_is_value_neutral_and_idempotent() {
     assert_eq!(account.header.pnl, pnl_before);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_close_removes_one_active_leg_per_progress_call() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut long_header = account_fixture(2, 13);
+    let mut short_header = account_fixture(2, 14);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+        for asset_index in 0..2 {
+            market
+                .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                    &mut long,
+                    &mut short,
+                    TradeRequestV16 {
+                        asset_index,
+                        size_q: POS_SCALE as i128,
+                        exec_price: 100,
+                        fee_bps: 0,
+                    },
+                )
+                .unwrap();
+        }
+        let resolved_slot = market.header.current_slot.get();
+        market.resolve_market_not_atomic(resolved_slot).unwrap();
+    }
+
+    let active_leg_count = |account: &PortfolioAccountV16Account| {
+        account
+            .active_bitmap
+            .iter()
+            .map(|word| word.get().count_ones())
+            .sum::<u32>()
+    };
+    assert_eq!(active_leg_count(&long_header), 2);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let capital_before = long_header.capital;
+    let pnl_before = long_header.pnl;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let first = market
+        .close_resolved_account_not_atomic(&mut long, 0)
+        .unwrap();
+    assert_eq!(first, ResolvedCloseOutcomeV16::ProgressOnly);
+    assert_eq!(
+        long.header
+            .active_bitmap
+            .iter()
+            .map(|word| word.get().count_ones())
+            .sum::<u32>(),
+        1
+    );
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(long.header.capital, capital_before);
+    assert_eq!(long.header.pnl, pnl_before);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+
+    let second = market
+        .close_resolved_account_not_atomic(&mut long, 0)
+        .unwrap();
+    assert_eq!(
+        second,
+        ResolvedCloseOutcomeV16::Closed {
+            payout: capital_before.get()
+        }
+    );
+    assert_eq!(
+        long.header
+            .active_bitmap
+            .iter()
+            .map(|word| word.get().count_ones())
+            .sum::<u32>(),
+        0
+    );
+    assert_eq!(long.header.capital.get(), 0);
+    assert_eq!(long.header.pnl.get(), 0);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
 }
 
 #[test]

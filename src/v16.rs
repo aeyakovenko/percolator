@@ -8429,6 +8429,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(Self::account_source_claim_bound_sum_num(account)? != 0)
     }
 
+    fn account_source_claim_domain_count(account: &PortfolioV16View<'_>) -> usize {
+        let mut count = 0usize;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() && source.source_claim_bound_num.get() != 0 {
+                count += 1;
+            }
+            slot += 1;
+        }
+        count
+    }
+
     fn source_claim_unliened_num(account: &PortfolioV16View<'_>, domain: usize) -> V16Result<u128> {
         let source = account.source_domain(domain)?;
         let locked = source
@@ -15267,6 +15283,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn realize_source_backed_claims_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
+        one_source_domain: bool,
     ) -> V16Result<u128> {
         if decode_bool(account.header.resolved_payout_receipt.present)? {
             // The face is already frozen into the receipt pool.
@@ -15316,7 +15333,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         // Terminal: PnL reservations no longer gate realization.
         account.header.reserved_pnl = V16PodU128::new(0);
-        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account, false)?;
+        let converted =
+            self.convert_released_pnl_to_capital_core_not_atomic(account, one_source_domain)?;
         // If the payout snapshot was captured before this account realized (another
         // winner closed first), the realized face is still counted in the ledger's
         // unreceipted bound. Refine it out, or the stale bound dilutes the payout
@@ -15442,12 +15460,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || decode_bool(account.header.b_stale_state)?
             || decode_bool(account.header.stale_state)?
         {
+            self.validate_shape()?;
+            account.validate_with_market(&self.as_view())?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)?;
+        let multiple_source_domains =
+            Self::account_source_claim_domain_count(&account.as_view()) > 1;
+        if self.realize_source_backed_claims_for_resolved_close_not_atomic(
+            account,
+            multiple_source_domains,
+        )? != 0
+            && multiple_source_domains
+        {
+            self.validate_shape()?;
+            account.validate_with_market(&self.as_view())?;
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
         let mut payout_receipt = None;
         let pnl_payout = if account.header.pnl.get() > 0
             || decode_bool(account.header.resolved_payout_receipt.present)?
@@ -15556,7 +15587,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
             if leg.active {
+                // Clearing every admitted leg in one call can exceed the SVM CU
+                // limit. The remaining bitmap makes this a ProgressOnly result.
                 self.clear_resolved_close_leg(account, leg.asset_index as usize)?;
+                break;
             }
             slot += 1;
         }
