@@ -2620,6 +2620,42 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
         Err(V16Error::LockActive),
         "source-backed positive PnL must not be realized while the source-claim exposure remains open"
     );
+    long.header.source_domains[0].source_lien_capital_at_risk_fee_revenue = V16PodU128::new(3);
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(10 * POS_SCALE),
+                exec_price: 1,
+                fee_bps: 0,
+            },
+        )
+        .expect("risk-reducing trade must flatten the source-claim exposure");
+    assert_eq!(
+        long.header.active_bitmap.map(V16PodU64::get),
+        V16_EMPTY_ACTIVE_BITMAP
+    );
+    assert_eq!(
+        long.header.source_domains[0]
+            .source_lien_effective_reserved
+            .get(),
+        10,
+        "flattening preserves the lien until a favorable conversion proves it is unneeded"
+    );
+
+    let converted = market
+        .convert_released_pnl_to_capital_step_not_atomic(&mut long)
+        .expect("flat account must release its unneeded lien and realize source-backed PnL");
+    assert_eq!(converted, claim);
+    assert_eq!(long.header.pnl.get(), 0);
+    assert_eq!(long.header.capital.get(), claim);
+    assert_eq!(
+        long.header.source_domains[0],
+        PortfolioSourceDomainV16Account::default()
+    );
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();

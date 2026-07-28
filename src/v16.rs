@@ -2407,7 +2407,6 @@ impl V16Core {
         Ok((bucket, source))
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     // Contract layer: lien release is the un-pledge relabel — valid liened
     // returns to fresh unliened atom-for-atom, fresh_reserved and all stock
     // quantities untouched; zero-amount is the identity.
@@ -2672,7 +2671,6 @@ impl V16Core {
         Ok((reservation, source))
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     // Contract layer: insurance lien release un-encumbers reserved credit —
     // exact mirror of creation; reservation total and backing-side untouched.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)>| match result {
@@ -7819,7 +7817,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     pub fn release_source_credit_lien_from_counterparty_not_atomic(
         &mut self,
         domain: usize,
@@ -8074,7 +8071,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     pub fn release_source_credit_lien_from_insurance_not_atomic(
         &mut self,
         domain: usize,
@@ -14711,7 +14707,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
         if has_source_claims {
             if self.account_has_active_source_claim_exposure(&account.as_view())?
-                || Self::valid_source_lien_effective_reserved_sum(&account.as_view())? != 0
+                || (!one_source_domain
+                    && Self::valid_source_lien_effective_reserved_sum(&account.as_view())? != 0)
             {
                 return Err(V16Error::LockActive);
             }
@@ -14824,6 +14821,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
         self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
+        if Self::valid_source_lien_effective_reserved_sum(&account.as_view())? != 0 {
+            self.release_account_source_credit_liens_if_unneeded_not_atomic(account)?;
+        }
         let converted = self.convert_released_pnl_to_capital_core_not_atomic(account, false)?;
         if converted != 0 {
             self.validate_shape()?;
@@ -14837,6 +14837,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
         self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
+        if Self::valid_source_lien_effective_reserved_sum(&account.as_view())? != 0 {
+            self.release_account_source_credit_liens_if_unneeded_core_not_atomic(account, true)?;
+        }
         let converted = self.convert_released_pnl_to_capital_core_not_atomic(account, true)?;
         if converted != 0 {
             self.validate_shape()?;
@@ -14845,10 +14848,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(converted)
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     pub fn release_account_source_credit_liens_if_unneeded_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.release_account_source_credit_liens_if_unneeded_core_not_atomic(account, false)
+    }
+
+    fn release_account_source_credit_liens_if_unneeded_core_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        one_source_domain: bool,
     ) -> V16Result<u128> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
@@ -14901,7 +14911,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 source.source_lien_counterparty_backing_num = V16PodU128::new(0);
                 source.source_lien_insurance_backing_num = V16PodU128::new(0);
                 source.source_lien_fee_last_slot = V16PodU64::new(0);
+                source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(0);
                 account.reset_source_domain_slot_if_empty(slot);
+                if one_source_domain {
+                    break;
+                }
             }
             slot += 1;
         }
