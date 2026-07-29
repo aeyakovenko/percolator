@@ -1432,6 +1432,69 @@ fn v16_fractional_price_cap_carry_reaches_micro_target_in_finite_segments() {
 }
 
 #[test]
+fn v16_fractional_price_cap_carry_survives_same_direction_target_updates() {
+    const CAP_BPS: u64 = 24;
+
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(CAP_BPS);
+    header.config.max_accrual_dt_slots = V16PodU64::new(20);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(20);
+    let mut long_header = account_fixture(1, 16);
+    let mut short_header = account_fixture(1, 17);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 200)
+        .unwrap();
+    let (first_price, first_remainder) =
+        capped_oracle_price_step_v16(100, 200, CAP_BPS, 4, 0).unwrap();
+    assert_eq!((first_price, first_remainder), (100, 9_600));
+    market
+        .accrue_asset_to_not_atomic(0, 5, first_price, 0, true)
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 201)
+        .unwrap();
+    let same_direction = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(same_direction.retired_slot, 9_600);
+    let (next_price, next_remainder) = capped_oracle_price_step_v16(
+        same_direction.effective_price,
+        same_direction.raw_oracle_target_price,
+        CAP_BPS,
+        1,
+        same_direction.retired_slot,
+    )
+    .unwrap();
+    assert_eq!((next_price, next_remainder), (101, 2_000));
+    market
+        .accrue_asset_to_not_atomic(0, 6, next_price, 0, true)
+        .unwrap();
+
+    market.set_asset_raw_oracle_target_not_atomic(0, 1).unwrap();
+    let reversed = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(reversed.effective_price, 101);
+    assert_eq!(reversed.raw_oracle_target_price, 1);
+    assert_eq!(reversed.retired_slot, 0);
+}
+
+#[test]
 fn v16_public_empty_asset_oracle_anchor_reset_rejects_any_group_position_state() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut other_asset = markets[1].engine.asset.try_to_runtime().unwrap();

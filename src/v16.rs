@@ -637,7 +637,8 @@ pub fn active_bitmap_count_ones(bitmap: V16ActiveBitmap) -> u32 {
 
 /// Computes the deterministic target-directed price step while carrying the fractional part of the
 /// percentage cap across accrual segments. The remainder is in price-atom basis-point numerator
-/// units and is always strictly below `MAX_MARGIN_BPS`.
+/// units, is always strictly below `MAX_MARGIN_BPS`, and belongs to the current target direction.
+/// Callers must pass zero after the target crosses the anchor.
 pub fn capped_oracle_price_step_v16(
     anchor: u64,
     target: u64,
@@ -11352,7 +11353,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             None
         };
-        if target_changed {
+        let target_direction_preserved = (asset.raw_oracle_target_price > asset.effective_price
+            && raw_oracle_target_price > asset.effective_price)
+            || (asset.raw_oracle_target_price < asset.effective_price
+                && raw_oracle_target_price < asset.effective_price);
+        if target_changed && !target_direction_preserved {
             asset.retired_slot = 0;
         }
         asset.raw_oracle_target_price = raw_oracle_target_price;

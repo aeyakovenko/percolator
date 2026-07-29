@@ -207,12 +207,14 @@ max_delta      = floor(budget_num / 10_000)
 next_remainder = budget_num mod 10_000
 ```
 
-The target-directed effective-price step consumes at most `max_delta`; reaching the target resets
-the remainder, as does changing the authenticated target. A zero-price-delta segment with
+The target-directed effective-price step consumes at most `max_delta`. Reaching the target or
+changing the authenticated target to the opposite side of the effective price resets the
+remainder; target changes that remain on the same side preserve it. A zero-price-delta segment with
 `budget_num < 10_000` persists `next_remainder` and is progress. A caller MUST NOT consume a segment
 without moving once one whole target-directed price atom is representable. Thus cumulative movement
-never exceeds the exact per-slot cap, while every nonzero target difference reaches its target after
-finitely many bounded segments even at the minimum representable price.
+never exceeds the exact per-slot cap, continuously advancing same-direction reports cannot discard
+cap budget, and every fixed nonzero target difference reaches its target after finitely many bounded
+segments even at the minimum representable price.
 
 Close-progress envelope MUST cover every allowed portfolio and close domain set, not merely per asset.
 
