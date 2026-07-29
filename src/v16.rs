@@ -635,6 +635,55 @@ pub fn active_bitmap_count_ones(bitmap: V16ActiveBitmap) -> u32 {
     total
 }
 
+/// Computes the deterministic target-directed price step while carrying the fractional part of the
+/// percentage cap across accrual segments. The remainder is in price-atom basis-point numerator
+/// units and is always strictly below `MAX_MARGIN_BPS`.
+pub fn capped_oracle_price_step_v16(
+    anchor: u64,
+    target: u64,
+    cap_bps_per_slot: u64,
+    dt_slots: u64,
+    remainder_num: u64,
+) -> V16Result<(u64, u64)> {
+    if anchor == 0
+        || anchor > MAX_ORACLE_PRICE
+        || target == 0
+        || target > MAX_ORACLE_PRICE
+        || remainder_num >= MAX_MARGIN_BPS
+    {
+        return Err(V16Error::InvalidConfig);
+    }
+    if anchor == target {
+        return Ok((target, 0));
+    }
+    if cap_bps_per_slot == 0 || dt_slots == 0 {
+        return Ok((anchor, remainder_num));
+    }
+
+    let budget_num = (anchor as u128)
+        .checked_mul(cap_bps_per_slot as u128)
+        .and_then(|v| v.checked_mul(dt_slots as u128))
+        .and_then(|v| v.checked_add(remainder_num as u128))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    let max_delta = budget_num / MAX_MARGIN_BPS as u128;
+    let next_remainder = (budget_num % MAX_MARGIN_BPS as u128) as u64;
+    let distance = anchor.abs_diff(target) as u128;
+    if max_delta >= distance {
+        return Ok((target, 0));
+    }
+    let delta = u64::try_from(max_delta).map_err(|_| V16Error::ArithmeticOverflow)?;
+    let next = if target > anchor {
+        anchor
+            .checked_add(delta)
+            .ok_or(V16Error::ArithmeticOverflow)?
+    } else {
+        anchor
+            .checked_sub(delta)
+            .ok_or(V16Error::ArithmeticOverflow)?
+    };
+    Ok((next, next_remainder))
+}
+
 struct V16Core;
 
 impl V16Core {
@@ -3587,6 +3636,8 @@ impl V16Config {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssetStateV16 {
     pub market_id: u64,
+    /// Retired lifecycle: retirement slot. Active/DrainOnly lifecycle: fractional oracle
+    /// price-cap numerator carried between bounded accrual segments (`< MAX_MARGIN_BPS`).
     pub retired_slot: u64,
     pub lifecycle: AssetLifecycleV16,
     pub raw_oracle_target_price: u64,
@@ -7029,6 +7080,8 @@ impl<'a, T> MarketGroupV16View<'a, T> {
                 || asset.raw_oracle_target_price > MAX_ORACLE_PRICE
                 || asset.fund_px_last == 0
                 || asset.fund_px_last > MAX_ORACLE_PRICE))
+            || (!matches!(asset.lifecycle, AssetLifecycleV16::Retired)
+                && asset.retired_slot >= MAX_MARGIN_BPS)
             || asset.slot_last > current_slot
             || asset.k_long == i128::MIN
             || asset.k_short == i128::MIN
@@ -11299,6 +11352,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             None
         };
+        if target_changed {
+            asset.retired_slot = 0;
+        }
         asset.raw_oracle_target_price = raw_oracle_target_price;
         self.set_asset_state(asset_index, asset)?;
         if let Some(next) = next_oracle_epoch {
@@ -11331,6 +11387,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset.effective_price = authenticated_price;
         asset.fund_px_last = authenticated_price;
         asset.slot_last = now_slot;
+        asset.retired_slot = 0;
         self.set_asset_state(asset_index, asset)?;
         self.header.current_slot = V16PodU64::new(now_slot);
         self.header.slot_last = V16PodU64::new(now_slot);
@@ -11399,15 +11456,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             dt_total
         };
         let exposed = old.oi_eff_long_q != 0 || old.oi_eff_short_q != 0;
+        let old_price_remainder_num = if exposed { old.retired_slot } else { 0 };
+        if old_price_remainder_num >= MAX_MARGIN_BPS {
+            return Err(V16Error::InvalidConfig);
+        }
+        let price_budget_num = (config.max_price_move_bps_per_slot as u128)
+            .checked_mul(segment_dt as u128)
+            .and_then(|v| v.checked_mul(old.effective_price as u128))
+            .and_then(|v| v.checked_add(old_price_remainder_num as u128))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let price_diff = effective_price.abs_diff(old.effective_price) as u128;
+        let price_cost_num = price_diff
+            .checked_mul(MAX_MARGIN_BPS as u128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if exposed && price_cost_num > price_budget_num {
+            return Err(V16Error::RecoveryRequired);
+        }
         if segment_dt != 0
             && exposed
             && old.raw_oracle_target_price != old.effective_price
             && effective_price == old.effective_price
+            && price_budget_num >= MAX_MARGIN_BPS as u128
         {
-            // A percentage cap can round below one price atom. Consuming the segment anyway lets
-            // a permissionless caller reset dt every slot and pin a live market away from its
-            // committed oracle target forever. Preserve the elapsed segment until the caller can
-            // submit a representable target-directed price move.
+            // Once a whole price atom is representable, consuming another segment without moving
+            // would discard usable cap and restore the permissionless crank-pinning attack.
             return Err(V16Error::NonProgress);
         }
         let activity = V16Core::accrual_activity_for_asset_segment(
@@ -11419,17 +11491,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if activity.equity_active {
             if segment_dt == 0 {
                 return Err(V16Error::NonProgress);
-            }
-            let price_diff = effective_price.abs_diff(old.effective_price) as u128;
-            let lhs = price_diff
-                .checked_mul(MAX_MARGIN_BPS as u128)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            let rhs = (config.max_price_move_bps_per_slot as u128)
-                .checked_mul(segment_dt as u128)
-                .and_then(|v| v.checked_mul(old.effective_price as u128))
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            if lhs > rhs {
-                return Err(V16Error::RecoveryRequired);
             }
             if !protective_progress_committed {
                 return Err(V16Error::NonProgress);
@@ -11455,6 +11516,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset.k_short = add_non_min_i128(asset.k_short, -k_delta)?;
         asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
         asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
+        asset.retired_slot = if !exposed || effective_price == old.raw_oracle_target_price {
+            0
+        } else {
+            ((price_budget_num - price_cost_num) % MAX_MARGIN_BPS as u128) as u64
+        };
         asset.effective_price = effective_price;
         asset.fund_px_last = effective_price;
         asset.slot_last = asset

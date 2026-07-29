@@ -198,6 +198,22 @@ mm_req_X              = max(floor(X * cfg_maintenance_bps / 10_000), cfg_min_non
 require price_funding_loss_X + liq_fee_X <= mm_req_X
 ```
 
+Price-cap rounding MUST carry across segments instead of being discarded:
+
+```text
+budget_num     = effective_price * cfg_max_price_move_bps_per_slot * segment_dt
+               + prior_price_cap_remainder_num
+max_delta      = floor(budget_num / 10_000)
+next_remainder = budget_num mod 10_000
+```
+
+The target-directed effective-price step consumes at most `max_delta`; reaching the target resets
+the remainder, as does changing the authenticated target. A zero-price-delta segment with
+`budget_num < 10_000` persists `next_remainder` and is progress. A caller MUST NOT consume a segment
+without moving once one whole target-directed price atom is representable. Thus cumulative movement
+never exceeds the exact per-slot cap, while every nonzero target difference reaches its target after
+finitely many bounded segments even at the minimum representable price.
+
 Close-progress envelope MUST cover every allowed portfolio and close domain set, not merely per asset.
 
 RESERVED (v16.9.0): the recovery-fallback price mechanism below is specified for a FUTURE revision and is NOT implemented; no engine path synthesizes fallback prices, and activation does not run this validation. The envelope is retained as the normative design any future implementation MUST satisfy before the reserved config knobs may be consumed. For each Active or activating asset (future mechanism):

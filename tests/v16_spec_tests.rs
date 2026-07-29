@@ -3,9 +3,9 @@ use percolator::{
     AutoCrankPlanV16, AutoCrankWorkV16,
 };
 use percolator::{
-    v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
-    HealthCertV16, HealthCertV16Account, LiquidationRequestV16, Market,
+    capped_oracle_price_step_v16, v16_domain_count_for_market_slots, AssetLifecycleV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    EngineAssetSlotV16Account, HealthCertV16, HealthCertV16Account, LiquidationRequestV16, Market,
     MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
@@ -1360,6 +1360,75 @@ fn v16_lagged_oracle_target_rejects_zero_delta_slot_consumption() {
     assert_eq!(progressed.dt, 1);
     assert!(progressed.price_move_active);
     assert_eq!(market.markets[0].engine.asset.effective_price.get(), 101);
+}
+
+#[test]
+fn v16_fractional_price_cap_carry_reaches_micro_target_in_finite_segments() {
+    const CAP_BPS: u64 = 24;
+    const MAX_DT: u64 = 20;
+
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(CAP_BPS);
+    header.config.max_accrual_dt_slots = V16PodU64::new(MAX_DT);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(MAX_DT);
+    let mut long_header = account_fixture(1, 16);
+    let mut short_header = account_fixture(1, 17);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    market.set_asset_raw_oracle_target_not_atomic(0, 1).unwrap();
+
+    let mut saw_fraction_only_segment = false;
+    let mut now_slot = MAX_DT;
+    for _ in 0..200 {
+        let before = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        let segment_dt = (now_slot - before.slot_last).min(MAX_DT);
+        let (next_price, expected_remainder) = capped_oracle_price_step_v16(
+            before.effective_price,
+            before.raw_oracle_target_price,
+            CAP_BPS,
+            segment_dt,
+            before.retired_slot,
+        )
+        .unwrap();
+        let outcome = market
+            .accrue_asset_to_not_atomic(0, now_slot, next_price, 0, true)
+            .unwrap();
+        let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(after.retired_slot, expected_remainder);
+        if next_price == before.effective_price {
+            saw_fraction_only_segment = true;
+            assert!(!outcome.price_move_active);
+            assert!(
+                after.retired_slot > before.retired_slot,
+                "a sub-atom segment carries its cap instead of discarding it"
+            );
+        }
+        if after.effective_price == 1 {
+            break;
+        }
+        now_slot += MAX_DT;
+    }
+
+    let final_asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert!(saw_fraction_only_segment);
+    assert_eq!(final_asset.effective_price, 1);
+    assert_eq!(final_asset.raw_oracle_target_price, 1);
+    assert_eq!(final_asset.retired_slot, 0);
 }
 
 #[test]
