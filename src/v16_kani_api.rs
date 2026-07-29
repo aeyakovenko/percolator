@@ -1366,6 +1366,7 @@ pub fn kani_eq_portfolio_source_domain_v16_account(
     a.domain.get() == b.domain.get()
         && a.source_claim_market_id.get() == b.source_claim_market_id.get()
         && a.source_claim_bound_num.get() == b.source_claim_bound_num.get()
+        && a.active_leg_claim_floor_num.get() == b.active_leg_claim_floor_num.get()
         && a.source_claim_liened_num.get() == b.source_claim_liened_num.get()
         && a.source_claim_counterparty_liened_num.get()
             == b.source_claim_counterparty_liened_num.get()

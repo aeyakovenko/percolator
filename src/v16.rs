@@ -28,7 +28,8 @@ pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
 // Bump whenever the on-chain account/header Pod layout changes (see the
 // PortfolioAccountV16Account size assertion). 17: added funding flow counters.
-pub const V16_LAYOUT_DISCRIMINATOR: u16 = 17;
+// 18: preserve pre-existing same-domain claims across a later leg episode.
+pub const V16_LAYOUT_DISCRIMINATOR: u16 = 18;
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
 pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
@@ -4223,8 +4224,24 @@ impl<'a> PortfolioV16View<'a> {
             } else {
                 slot.source_credit_short.try_to_runtime()?
             };
-            if source.source_claim_bound_num.get() > domain_credit.positive_claim_bound_num {
+            if source.source_claim_bound_num.get() > domain_credit.positive_claim_bound_num
+                || source.active_leg_claim_floor_num.get() > source.source_claim_bound_num.get()
+            {
                 return Err(V16Error::InvalidLeg);
+            }
+            if source.active_leg_claim_floor_num.get() != 0 {
+                let expected_leg_side = if d % 2 == 0 {
+                    SideV16::Short
+                } else {
+                    SideV16::Long
+                };
+                let leg_slot = self
+                    .active_leg_slot_for_asset(asset_index)?
+                    .ok_or(V16Error::InvalidLeg)?;
+                let leg = self.header.legs[leg_slot].try_to_runtime()?;
+                if leg.side != expected_leg_side {
+                    return Err(V16Error::InvalidLeg);
+                }
             }
             let proof = SourceCreditLienAggregateProofV16 {
                 domain: u16::try_from(d).map_err(|_| V16Error::ArithmeticOverflow)?,
@@ -8453,12 +8470,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_sub(impaired_burn)
             .ok_or(V16Error::CounterUnderflow)?;
         let source = &mut account.header.source_domains[slot];
-        source.source_claim_bound_num = V16PodU128::new(
+        let next_claim_bound = source
+            .source_claim_bound_num
+            .get()
+            .checked_sub(impaired_burn)
+            .ok_or(V16Error::CounterUnderflow)?;
+        source.source_claim_bound_num = V16PodU128::new(next_claim_bound);
+        source.active_leg_claim_floor_num = V16PodU128::new(
             source
-                .source_claim_bound_num
+                .active_leg_claim_floor_num
                 .get()
-                .checked_sub(impaired_burn)
-                .ok_or(V16Error::CounterUnderflow)?,
+                .min(next_claim_bound),
         );
         source.source_claim_impaired_num = V16PodU128::new(next_impaired);
         let impaired_effective_burn = if next_impaired == 0 {
@@ -8640,12 +8662,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let burn = burnable.min(burn_num);
             if burn != 0 {
                 let source = &mut account.header.source_domains[slot];
-                source.source_claim_bound_num = V16PodU128::new(
+                let next_claim_bound = source
+                    .source_claim_bound_num
+                    .get()
+                    .checked_sub(burn)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                source.source_claim_bound_num = V16PodU128::new(next_claim_bound);
+                source.active_leg_claim_floor_num = V16PodU128::new(
                     source
-                        .source_claim_bound_num
+                        .active_leg_claim_floor_num
                         .get()
-                        .checked_sub(burn)
-                        .ok_or(V16Error::CounterUnderflow)?,
+                        .min(next_claim_bound),
                 );
                 let mut source_credit = self.source_credit_for_domain(d)?;
                 source_credit.positive_claim_bound_num = source_credit
@@ -12785,9 +12812,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             SideV16::Short => asset.a_short,
         };
         let loss_weight = loss_weight_for_basis(basis_pos_q.unsigned_abs(), a_basis)?;
+        let source_domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
+        let active_leg_claim_floor_num = account
+            .as_view()
+            .source_domain(source_domain)?
+            .source_claim_bound_num
+            .get();
         let (asset, new_leg) =
             V16Core::kernel_attach_leg(asset, side, basis_pos_q, loss_weight, asset_index as u32)?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
+        if active_leg_claim_floor_num != 0 {
+            let source = account.source_domain_mut_or_insert(source_domain)?;
+            source.active_leg_claim_floor_num = V16PodU128::new(active_leg_claim_floor_num);
+        }
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
         active_bitmap_set(&mut bitmap, leg_slot)?;
         account.header.active_bitmap = bitmap.map(V16PodU64::new);
@@ -12826,6 +12863,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let asset = self.asset_state(asset_index)?;
         let asset = V16Core::kernel_clear_leg(leg, asset)?;
+        let source_domain = self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
+        if let Some(source_slot) = account.source_domain_slot(source_domain)? {
+            account.header.source_domains[source_slot].active_leg_claim_floor_num =
+                V16PodU128::new(0);
+            account.reset_source_domain_slot_if_empty(source_slot);
+        }
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
@@ -12870,6 +12913,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         leg.b_rem = 0;
         let asset = self.asset_state(asset_index)?;
         let asset = V16Core::kernel_clear_leg(leg, asset)?;
+        let source_domain = self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
+        if let Some(source_slot) = account.source_domain_slot(source_domain)? {
+            account.header.source_domains[source_slot].active_leg_claim_floor_num =
+                V16PodU128::new(0);
+            account.reset_source_domain_slot_if_empty(source_slot);
+        }
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
@@ -15726,20 +15775,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let source_claim_bound_num = account.header.source_domains[source_slot]
             .source_claim_bound_num
             .get();
-        if source_claim_bound_num == 0 {
+        let preserved_claim_floor_num = account.header.source_domains[source_slot]
+            .active_leg_claim_floor_num
+            .get()
+            .min(source_claim_bound_num);
+        let forfeited_claim_bound_num = source_claim_bound_num
+            .checked_sub(preserved_claim_floor_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        if forfeited_claim_bound_num == 0 {
             return Ok(0);
         }
-        V16Core::validate_bound_num_atom_aligned(source_claim_bound_num)?;
+        V16Core::validate_bound_num_atom_aligned(forfeited_claim_bound_num)?;
 
         // A dead-leg forfeit values this leg's positive PnL at zero. Release any
-        // valid source-credit lien first so forfeiting the face returns backing
-        // instead of consuming it. Impaired claim fields are burned by the
-        // canonical source-claim burn below.
-        if account.header.source_domains[source_slot]
+        // valid source-credit lien first when every claim in the domain belongs
+        // to this episode, so forfeiting the face returns backing instead of
+        // consuming it. If a prior episode's claim floor remains, only an
+        // unencumbered current-episode suffix is identifiable without weakening
+        // that historical claim's backing.
+        let source = account.header.source_domains[source_slot];
+        let locked_claim_bound_num = source
             .source_claim_liened_num
             .get()
-            != 0
-        {
+            .checked_add(source.source_claim_impaired_num.get())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let unliened_claim_bound_num = source_claim_bound_num
+            .checked_sub(locked_claim_bound_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        if forfeited_claim_bound_num > unliened_claim_bound_num {
+            if preserved_claim_floor_num != 0 {
+                return Err(V16Error::LockActive);
+            }
             self.release_account_source_credit_lien_for_domain_not_atomic(account, source_domain)?;
             source_slot = account
                 .source_domain_slot(source_domain)?
@@ -15751,7 +15817,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if source_slot != 0 {
             account.header.source_domains.swap(0, source_slot);
         }
-        let source_claim_face = V16Core::amount_from_bound_num(source_claim_bound_num)?;
+        let source_claim_face = V16Core::amount_from_bound_num(forfeited_claim_bound_num)?;
         let positive_pnl = account.header.pnl.get().max(0) as u128;
         let positive_pnl_forfeited = source_claim_face.min(positive_pnl);
         if positive_pnl_forfeited != 0 {
@@ -15767,11 +15833,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         // Source bounds are normally exact atom multiples of positive PnL. Burn
-        // any conservative excess as attribution-only state after the PnL debit.
+        // only this episode's conservative excess as attribution-only state
+        // after the PnL debit; the attach-time floor belongs to an earlier leg.
         if let Some(remaining_slot) = account.source_domain_slot(source_domain)? {
-            let remaining = account.header.source_domains[remaining_slot]
+            let remaining_source = account.header.source_domains[remaining_slot];
+            let remaining = remaining_source
                 .source_claim_bound_num
-                .get();
+                .get()
+                .checked_sub(
+                    remaining_source
+                        .active_leg_claim_floor_num
+                        .get()
+                        .min(remaining_source.source_claim_bound_num.get()),
+                )
+                .ok_or(V16Error::CounterUnderflow)?;
             if remaining != 0 {
                 if remaining_slot != 0 {
                     account.header.source_domains.swap(0, remaining_slot);
@@ -16230,6 +16305,9 @@ pub struct PortfolioSourceDomainV16Account {
     pub domain: V16PodU32,
     pub source_claim_market_id: V16PodU64,
     pub source_claim_bound_num: V16PodU128,
+    // Claim bound already present when the current leg episode attached. A
+    // Recovery forfeit may burn only the selected episode's suffix above it.
+    pub active_leg_claim_floor_num: V16PodU128,
     pub source_claim_liened_num: V16PodU128,
     pub source_claim_counterparty_liened_num: V16PodU128,
     pub source_claim_insurance_liened_num: V16PodU128,
@@ -16251,6 +16329,7 @@ impl PortfolioSourceDomainV16Account {
     #[inline]
     pub fn is_occupied(self) -> bool {
         self.source_claim_bound_num.get() != 0
+            || self.active_leg_claim_floor_num.get() != 0
             || self.source_claim_liened_num.get() != 0
             || self.source_claim_counterparty_liened_num.get() != 0
             || self.source_claim_insurance_liened_num.get() != 0
@@ -16315,7 +16394,7 @@ pub struct PortfolioAccountV16Account {
 // Gated to non-kani: under `cfg(kani)` PORTFOLIO_SOURCE_DOMAIN_CAP is reduced for
 // proof tractability, so the production on-chain layout is the non-kani one.
 #[cfg(not(kani))]
-const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9291);
+const _: () = assert!(core::mem::size_of::<PortfolioAccountV16Account>() == 9803);
 
 impl Default for PortfolioAccountV16Account {
     fn default() -> Self {

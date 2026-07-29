@@ -672,6 +672,45 @@ fn v16_recovery_forfeit_preserves_unrelated_source_domain_claim() {
 }
 
 #[test]
+fn v16_recovery_forfeit_preserves_prior_same_domain_position_episode() {
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        bankrupt_recovery_pair_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        let historical_pnl = short.header.pnl.get();
+        let historical_claim = short.header.source_domains[0].source_claim_bound_num.get();
+        assert!(historical_pnl > 0 && historical_claim > 0);
+        short.header.source_domains[0].active_leg_claim_floor_num =
+            V16PodU128::new(historical_claim);
+        short.validate_with_market(&market.as_view()).unwrap();
+
+        let short_forfeit = market
+            .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+            .unwrap();
+        assert!(short_forfeit.detached);
+        assert_eq!(short_forfeit.positive_pnl_forfeited, 0);
+        assert_eq!(short.header.pnl.get(), historical_pnl);
+        assert_eq!(
+            short.header.source_domains[0].source_claim_bound_num.get(),
+            historical_claim
+        );
+        assert_eq!(
+            short.header.source_domains[0]
+                .active_leg_claim_floor_num
+                .get(),
+            0,
+            "clearing episode two removes only its attribution floor"
+        );
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
 fn v16_funding_counters_ignore_inactive_accounts_when_market_funding_moves() {
     let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
     let mut long_header = account_fixture(1, 130);
