@@ -462,6 +462,15 @@ impl MarketGroupV16HeaderAccount {
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_preflight_fee_sync_target_lag(
+        &self,
+        account: &PortfolioV16View<'_>,
+        market_mode: MarketModeV16,
+        nonflat: bool,
+    ) -> V16Result<()> {
+        self.preflight_fee_sync_target_lag(account, market_mode, nonflat)
+    }
+
     pub fn kani_clear_leg(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

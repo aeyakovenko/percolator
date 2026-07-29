@@ -12306,13 +12306,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn account_has_target_effective_lag(&self, account: &PortfolioV16View<'_>) -> V16Result<bool> {
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active && self.asset_has_target_effective_lag(leg.asset_index as usize)? {
+            let leg = &account.header.legs[slot];
+            if decode_bool(leg.active)?
+                && self.asset_has_target_effective_lag(leg.asset_index.get() as usize)?
+            {
                 return Ok(true);
             }
             slot += 1;
         }
         Ok(false)
+    }
+
+    fn preflight_fee_sync_target_lag(
+        &self,
+        account: &PortfolioV16View<'_>,
+        market_mode: MarketModeV16,
+        nonflat: bool,
+    ) -> V16Result<()> {
+        let target_effective_lag = if market_mode == MarketModeV16::Live && nonflat {
+            self.account_has_target_effective_lag(account)?
+        } else {
+            false
+        };
+        if V16Core::fee_sync_target_lag_blocked(
+            market_mode == MarketModeV16::Live,
+            nonflat,
+            target_effective_lag,
+        ) {
+            return Err(V16Error::LockActive);
+        }
+        Ok(())
     }
 
     fn ensure_favorable_action_allowed(&self, account: &PortfolioV16View<'_>) -> V16Result<()> {
@@ -14884,18 +14907,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let nonflat = !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
-        let target_effective_lag = if market_mode == MarketModeV16::Live && nonflat {
-            self.account_has_target_effective_lag(&account.as_view())?
-        } else {
-            false
-        };
-        if V16Core::fee_sync_target_lag_blocked(
-            market_mode == MarketModeV16::Live,
-            nonflat,
-            target_effective_lag,
-        ) {
-            return Err(V16Error::LockActive);
-        }
+        self.preflight_fee_sync_target_lag(&account.as_view(), market_mode, nonflat)?;
         let fee_anchor = if market_mode == MarketModeV16::Live && nonflat {
             self.account_fee_anchor_for_loss_currentness(&account.as_view(), now_slot)?
         } else if market_mode == MarketModeV16::Resolved {

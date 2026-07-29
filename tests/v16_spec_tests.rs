@@ -510,8 +510,7 @@ fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
     assert_eq!(header.insurance.get(), 0);
     let accrued_asset = markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(
-        accrued_asset.raw_oracle_target_price,
-        accrued_asset.effective_price,
+        accrued_asset.raw_oracle_target_price, accrued_asset.effective_price,
         "control must fully apply its authenticated target before fee sync"
     );
 

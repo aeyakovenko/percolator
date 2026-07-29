@@ -8,8 +8,8 @@ use percolator::v16::{
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
-    kani_expected_source_credit_rate_num_for_state, kani_fee_sync_target_lag_blocked,
-    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
+    kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
+    kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
@@ -22,8 +22,8 @@ use percolator::v16::{
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, MarketModeV16,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
@@ -160,6 +160,40 @@ fn one_market_direct_view_fixture() -> (
     )];
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     (header, markets, PortfolioAccountV16Account::default())
+}
+
+fn two_market_direct_view_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+) {
+    let (market_group_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.slot_last = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(1);
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let mut asset_index = 0usize;
+    while asset_index < 2 {
+        let mut asset = AssetStateV16::default();
+        asset.market_id = asset_index as u64 + 1;
+        asset.lifecycle = AssetLifecycleV16::Active;
+        asset.raw_oracle_target_price = 100;
+        asset.effective_price = 100;
+        asset.fund_px_last = 100;
+        asset.slot_last = 1;
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        asset_index += 1;
+    }
+    (header, markets, empty_account_fixture(market_group_id, 2))
 }
 
 fn empty_recovery_slot_for_market(
@@ -8681,7 +8715,7 @@ fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_resolved_two_active_legs_are_unattributed_for_bankruptcy() {
-    let (mut header, mut markets, mut account_header) = two_market_view_fixture();
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
     header.mode = 1; // Resolved
     header.current_slot = V16PodU64::new(2);
     header.resolved_slot = V16PodU64::new(2);
@@ -9573,20 +9607,109 @@ fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
 }
 
 #[kani::proof]
-fn proof_v16_fee_sync_target_lag_guard_is_exact() {
-    let live: bool = kani::any();
-    let nonflat: bool = kani::any();
-    let target_effective_lag: bool = kani::any();
-    let blocked = kani_fee_sync_target_lag_blocked(live, nonflat, target_effective_lag);
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_fee_sync_preflight_cannot_preempt_any_active_leg_mark() {
+    let lag_asset_raw: u8 = kani::any();
+    let target_above_effective: bool = kani::any();
+    let first_leg_short: bool = kani::any();
+    let second_leg_short: bool = kani::any();
+    let target_delta_raw: u8 = kani::any();
+    kani::assume(lag_asset_raw < 2);
+    kani::assume((1..=50).contains(&target_delta_raw));
+
+    let lag_asset = lag_asset_raw as usize;
+    let target_delta = target_delta_raw as u64;
+    let (mut header, mut markets, mut account_header) = two_market_view_fixture();
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    header.vault = V16PodU128::new(1_000);
+    header.c_tot = V16PodU128::new(1_000);
+    account_header.capital = V16PodU128::new(1_000);
+
+    let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
+    let mut asset_index = 0usize;
+    while asset_index < 2 {
+        let mut asset = markets[asset_index].engine.asset.try_to_runtime().unwrap();
+        asset.effective_price = 100;
+        asset.raw_oracle_target_price = if asset_index == lag_asset {
+            if target_above_effective {
+                100 + target_delta
+            } else {
+                100 - target_delta
+            }
+        } else {
+            100
+        };
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+        let side =
+            if (asset_index == 0 && first_leg_short) || (asset_index == 1 && second_leg_short) {
+                SideV16::Short
+            } else {
+                SideV16::Long
+            };
+        account_header.legs[asset_index] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index: asset_index as u32,
+            market_id: asset.market_id,
+            side,
+            basis_pos_q: if side == SideV16::Short {
+                -(POS_SCALE as i128)
+            } else {
+                POS_SCALE as i128
+            },
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: POS_SCALE,
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: false,
+            stale: false,
+        });
+        active_bitmap_set(&mut bitmap, asset_index).unwrap();
+        asset_index += 1;
+    }
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result =
+        market.kani_preflight_fee_sync_target_lag(&account.as_view(), MarketModeV16::Live, true);
+
     kani::cover!(
-        blocked,
-        "fee-sync target-lag guard covers a blocked live nonflat account"
+        lag_asset == 0 && target_above_effective && first_leg_short,
+        "fee sync blocks an upward target on the first short leg"
     );
     kani::cover!(
-        !blocked && live,
-        "fee-sync target-lag guard covers a live admissible account"
+        lag_asset == 0 && !target_above_effective && !first_leg_short,
+        "fee sync blocks a downward target on the first long leg"
     );
-    assert_eq!(blocked, live && nonflat && target_effective_lag);
+    kani::cover!(
+        lag_asset == 1 && target_above_effective && second_leg_short,
+        "fee sync scans through to an upward target on the second short leg"
+    );
+    kani::cover!(
+        lag_asset == 1 && !target_above_effective && !second_leg_short,
+        "fee sync scans through to a downward target on the second long leg"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+
+    let mut caught_up = market.markets[lag_asset]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap();
+    caught_up.raw_oracle_target_price = caught_up.effective_price;
+    market.markets[lag_asset].engine.asset = AssetStateV16Account::from_runtime(&caught_up);
+    assert_eq!(
+        market.kani_preflight_fee_sync_target_lag(&account.as_view(), MarketModeV16::Live, true,),
+        Ok(()),
+        "the same portfolio becomes fee-sync eligible after the mark catches up"
+    );
 }
 
 #[kani::proof]
