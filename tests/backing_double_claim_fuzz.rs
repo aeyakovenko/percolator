@@ -12,11 +12,12 @@
 
 use percolator::BOUND_SCALE;
 use percolator::{
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
+    PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, SideV16,
     SourceCreditStateV16, SourceCreditStateV16Account, V16Config, V16PodI128, V16PodU128,
-    V16PodU32, V16PodU64, CREDIT_RATE_SCALE,
+    V16PodU32, V16PodU64, ADL_ONE, CREDIT_RATE_SCALE, POS_SCALE,
 };
 use proptest::prelude::*;
 
@@ -591,10 +592,16 @@ fn terminal_close_with_expired_backing_does_not_strand() {
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 
     let vault_before = market.header.vault.get();
-    let outcome = market
-        .close_resolved_account_not_atomic(&mut account, 0)
-        .expect("expired-backing winner close must not revert (liveness)");
-    let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { payout: _ });
+    let mut closed = false;
+    for _ in 0..3 {
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut account, 0)
+            .expect("expired-backing winner close must not revert (liveness)");
+        if matches!(outcome, ResolvedCloseOutcomeV16::Closed { .. }) {
+            closed = true;
+            break;
+        }
+    }
     assert!(closed, "expired-backing winner did not fully close");
     let paid = vault_before - market.header.vault.get();
 
@@ -616,6 +623,123 @@ fn terminal_close_with_expired_backing_does_not_strand() {
         .withdraw_fresh_counterparty_backing_not_atomic(0, backing)
         .is_err());
     assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn resolved_close_prepares_lapsed_backing_before_pending_k_loss() {
+    const CAPITAL: u128 = 50_000_000;
+    const PNL: u128 = 500_000;
+    const BACKING: u128 = 17;
+    const SLOT: u64 = 44;
+    const POSITION_Q: u128 = 50_000 * POS_SCALE;
+
+    let (mut header, mut markets) = resolved_market_with_backing(CAPITAL, PNL, 0, BACKING);
+    let engine_market_id = markets[0].engine.asset.market_id.get();
+    header.current_slot = V16PodU64::new(SLOT);
+    header.resolved_slot = V16PodU64::new(SLOT);
+    header.slot_last = V16PodU64::new(SLOT);
+    header.pnl_matured_pos_tot = V16PodU128::new(0);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    header.source_claim_bound_total_num = V16PodU128::new(PNL * BOUND_SCALE);
+
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(
+        &BackingBucketV16::empty_for_market(engine_market_id),
+    );
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16::EMPTY);
+    let claim_num = PNL * BOUND_SCALE;
+    let backing_num = BACKING * BOUND_SCALE;
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: engine_market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: SLOT,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: backing_num * CREDIT_RATE_SCALE / claim_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.slot_last = SLOT;
+    asset.oi_eff_long_q = POSITION_Q;
+    asset.stored_pos_count_long = 1;
+    asset.loss_weight_sum_long = POSITION_Q;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut account_header = winner_account(CAPITAL, PNL);
+    account_header.last_fee_slot = V16PodU64::new(SLOT);
+    account_header.source_domains[0].domain = V16PodU32::new(1);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(engine_market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: engine_market_id,
+        side: SideV16::Long,
+        basis_pos_q: POSITION_Q as i128,
+        a_basis: ADL_ONE,
+        k_snap: 10 * ADL_ONE as i128,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POSITION_Q,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    let capital_before = account.header.capital.get();
+    let vault_before = market.header.vault.get();
+    let first = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("resolved close must commit the lapsed backing transition");
+    assert_eq!(first, ResolvedCloseOutcomeV16::ProgressOnly);
+    assert_eq!(account.header.capital.get(), capital_before);
+    assert_eq!(account.header.pnl.get(), PNL as i128);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired,
+    );
+
+    let mut closed = false;
+    for _ in 0..4 {
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut account, 0)
+            .expect("prepared source state must not block K/F settlement");
+        if matches!(outcome, ResolvedCloseOutcomeV16::Closed { .. }) {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "bounded terminal continuation did not close");
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(
+        market.header.vault.get(),
+        BACKING + PNL,
+        "the crystallized mark loss remains in the source-backing ledger",
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
 
 proptest! {
