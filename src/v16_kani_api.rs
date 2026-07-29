@@ -58,6 +58,14 @@ pub fn kani_cert_is_current(
     )
 }
 
+pub fn kani_settle_kf_cohort(
+    leg_epoch: u64,
+    current_epoch: u64,
+    stale_count: u64,
+) -> V16Result<(u64, u64)> {
+    V16Core::kernel_settle_kf_cohort(leg_epoch, current_epoch, stale_count)
+}
+
 pub fn kani_active_bitmap_set(
     bitmap: &mut V16ActiveBitmap,
     leg_slot_index: usize,

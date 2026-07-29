@@ -2596,6 +2596,13 @@ fn contract_check_kernel_bresidual_step() {
     let _ = V16Core::kernel_bresidual_step(residual_remaining, booked, resolved);
 }
 
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_settle_kf_cohort)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_settle_kf_cohort() {
+    let _ = V16Core::kernel_settle_kf_cohort(kani::any(), kani::any(), kani::any());
+}
+
 // ROADMAP workstream B.2 (cross-layer conservation): book_bankruptcy_residual_
 // chunk_for_account_core calls the inner booking step on ledger.residual_remaining
 // and then advances the close ledger by the outcome's (booked_loss, explicit_loss).

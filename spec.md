@@ -1292,24 +1292,6 @@ Every `C_i`, `PNL_i`, position, B, fee, source-credit, lien, claim-bound, close-
 
 `clear_leg` requires A/K/F/B settled and all source-credit liens or pending obligations touching the leg released, consumed, escrowed, or pulled forward. It quarantines remainder, transfers local `b_rem` to dust, subtracts weight only after pending obligations are handled, clears local fields, and mutates OI only through a transition proving matching OI change.
 
-When K/F changes, the affected side increments a checked monotonic K/F cohort
-generation and snapshots its current stored-position count as explicit stale
-settlement work. Each leg stores the generation of its K/F snapshot. Endpoint
-equality is insufficient: a price or funding round trip may return K/F to an old
-numeric value without settling the intervening cohort. A claim sourced from a
-stale side is not favorable credit: it cannot be converted or withdrawn and
-cannot support initial margin. The global H-lock also remains active between a
-loser's K/F/principal settlement and completion of its negative-PnL close.
-
-K/F cohort work does not block engine trading. A wrapper that lets an unsigned
-delegate add exposure to a position must consume the side counters: it MUST
-reject or obtain explicit owner consent when the exposure's opposite side has
-nonzero stale work, and while any negative-PnL close is unresolved. This keeps
-historical social-loss risk out of a fresh unsigned position without turning
-ordinary oracle movement into a market-wide admission stall. Fully signed
-counterparties may knowingly transfer that risk, and pure reductions remain
-available.
-
 For a nonzero leg:
 
 ```text
@@ -1329,14 +1311,6 @@ If full B settlement is too large, partial settlement is allowed. While `B_remai
 -------------------------------------------------------------------------------
 
 `accrue_asset_to(asset, now_slot, effective_price, funding_rate)` requires Active/DrainOnly live mode, authenticated time, valid price, and bounded funding rate. Domain locks do not block K/F/price/time accrual. Accrual MUST NOT mutate B, A, OI, weights, staged residuals, staged insurance, ADL, pending barriers, pending obligations, or exposure-clear state for a locked domain unless held by the close/recovery path.
-
-Unsettled account snapshots do not pause a later bounded K/F segment. For a
-non-resetting side, a later segment refreshes the affected side's stale count to
-the current stored-position count; each account then settles directly to the
-newest endpoint exactly once. A `ResetPending` side freezes its K/F endpoint and
-generation and preserves its outstanding count because its stored legs target
-the frozen prior-epoch endpoint; later market accrual does not create work for
-that side.
 
 Before any accrual/effective-price/K/F write is usable by a favorable action:
 1. affected source-domain claim-bound buckets MUST be recomputed conservatively;

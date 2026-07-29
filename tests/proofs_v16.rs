@@ -15,14 +15,15 @@ use percolator::v16::{
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
-    kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    kani_prepare_asset_recovery_transition, kani_settle_kf_cohort,
+    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_trade_preexisting_oi_reduction_gate, kani_trade_preflight_risk_gate,
+    kani_validate_positive_pnl_source_attribution, AssetLifecycleV16, AssetStateV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
+    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
+    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -9312,6 +9313,58 @@ fn proof_v16_reset_pending_accrual_preserves_frozen_stale_work() {
     assert_eq!(after.mode_long, SideModeV16::ResetPending);
     assert_eq!(after.stored_pos_count_long, 1);
     assert_eq!(after.stale_account_count_long, u64::from(prior_stale));
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_kf_cohort_round_trip_consumes_each_account_exactly_once() {
+    let leg_epoch: u64 = kani::any();
+    let current_epoch: u64 = kani::any();
+    let stale_count: u64 = kani::any();
+    let first = kani_settle_kf_cohort(leg_epoch, current_epoch, stale_count);
+
+    if leg_epoch > current_epoch {
+        assert_eq!(first, Err(V16Error::InvalidLeg));
+        kani::cover!(
+            leg_epoch > current_epoch && current_epoch > u32::MAX as u64,
+            "future leg generations are rejected over the full-width epoch range"
+        );
+    } else if leg_epoch == current_epoch {
+        assert_eq!(first, Ok((current_epoch, stale_count)));
+        kani::cover!(
+            stale_count > u32::MAX as u64,
+            "a current account cannot consume another account's full-width cohort count"
+        );
+    } else if stale_count == 0 {
+        assert_eq!(first, Err(V16Error::CounterUnderflow));
+        kani::cover!(
+            leg_epoch < current_epoch && current_epoch - leg_epoch > 1,
+            "an inconsistent empty stale cohort fails closed after multiple generations"
+        );
+    } else {
+        let (next_epoch, next_count) = first.unwrap();
+        assert_eq!(next_epoch, current_epoch);
+        assert_eq!(next_count, stale_count - 1);
+        assert_eq!(
+            kani_settle_kf_cohort(next_epoch, current_epoch, next_count),
+            Ok((current_epoch, next_count)),
+            "repeating one account's settlement cannot consume another member"
+        );
+        let another_stale_account = kani_settle_kf_cohort(leg_epoch, current_epoch, next_count);
+        if next_count == 0 {
+            assert_eq!(another_stale_account, Err(V16Error::CounterUnderflow));
+        } else {
+            assert_eq!(another_stale_account, Ok((current_epoch, next_count - 1)));
+        }
+        kani::cover!(
+            stale_count > 1
+                && current_epoch > leg_epoch
+                && current_epoch - leg_epoch > 1
+                && current_epoch > u32::MAX as u64,
+            "distinct stale accounts consume one member each across endpoint round trips"
+        );
+    }
 }
 
 #[kani::proof]

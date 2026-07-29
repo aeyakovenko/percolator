@@ -1856,6 +1856,42 @@ impl V16Core {
         }
     }
 
+    /// Advance one account to the current K/F cohort. A stale account consumes
+    /// exactly one aggregate cohort member; a repeated settlement is idempotent.
+    #[inline(always)]
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u64, u64)>| match result {
+        Ok((next_epoch, next_count)) => {
+            *next_epoch == current_epoch
+                && if leg_epoch == current_epoch {
+                    *next_count == stale_count
+                } else {
+                    leg_epoch < current_epoch
+                        && stale_count > 0
+                        && next_count.checked_add(1) == Some(stale_count)
+                }
+        }
+        Err(V16Error::InvalidLeg) => leg_epoch > current_epoch,
+        Err(V16Error::CounterUnderflow) => leg_epoch < current_epoch && stale_count == 0,
+        Err(_) => false,
+    }))]
+    pub(crate) fn kernel_settle_kf_cohort(
+        leg_epoch: u64,
+        current_epoch: u64,
+        stale_count: u64,
+    ) -> V16Result<(u64, u64)> {
+        if leg_epoch > current_epoch {
+            return Err(V16Error::InvalidLeg);
+        }
+        let next_count = if leg_epoch == current_epoch {
+            stale_count
+        } else {
+            stale_count
+                .checked_sub(1)
+                .ok_or(V16Error::CounterUnderflow)?
+        };
+        Ok((current_epoch, next_count))
+    }
+
     /// PRODUCTION KERNEL (roadmap workstream B.2, resolved-bankruptcy PnL
     /// settlement): reduce an account's NEGATIVE PnL by the loss the residual
     /// booking just absorbed. `cleared = min(booked_loss + explicit_loss, |pnl|)`
@@ -10646,7 +10682,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let (k_now, f_now, kf_epoch_now, _k_delta, f_delta, net) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
-        let was_kf_stale = leg.kf_epoch_snap != kf_epoch_now;
+        let stale_count = match leg.side {
+            SideV16::Long => asset.stale_account_count_long,
+            SideV16::Short => asset.stale_account_count_short,
+        };
+        let (next_kf_epoch_snap, next_stale_count) =
+            V16Core::kernel_settle_kf_cohort(leg.kf_epoch_snap, kf_epoch_now, stale_count)?;
         if net != 0 {
             if net > 0 {
                 let source_domain =
@@ -10668,34 +10709,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::record_account_funding_flow(account, leg.side, f_delta)?;
         leg.k_snap = k_now;
         leg.f_snap = f_now;
-        leg.kf_epoch_snap = kf_epoch_now;
+        leg.kf_epoch_snap = next_kf_epoch_snap;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
-        if was_kf_stale {
-            self.consume_stale_account_counter(asset_index, leg.side)?;
+        if next_stale_count != stale_count {
+            self.set_stale_account_counter(asset_index, leg.side, next_stale_count)?;
         }
         account.header.health_cert.valid = 0;
         Ok(())
     }
 
-    fn consume_stale_account_counter(
+    fn set_stale_account_counter(
         &mut self,
         asset_index: usize,
         side: SideV16,
+        stale_count: u64,
     ) -> V16Result<()> {
         let mut asset = self.asset_state(asset_index)?;
         match side {
-            SideV16::Long => {
-                asset.stale_account_count_long = asset
-                    .stale_account_count_long
-                    .checked_sub(1)
-                    .ok_or(V16Error::CounterUnderflow)?;
-            }
-            SideV16::Short => {
-                asset.stale_account_count_short = asset
-                    .stale_account_count_short
-                    .checked_sub(1)
-                    .ok_or(V16Error::CounterUnderflow)?;
-            }
+            SideV16::Long => asset.stale_account_count_long = stale_count,
+            SideV16::Short => asset.stale_account_count_short = stale_count,
         }
         self.set_asset_state(asset_index, asset)
     }
@@ -15721,8 +15753,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok((0, 0, 0, 0));
         };
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
-        let (k_now, f_now, kf_epoch_now) = self.kf_target_for_leg(asset_index, leg)?;
-        let was_kf_stale = leg.kf_epoch_snap != kf_epoch_now;
+        let asset = self.asset_state(asset_index)?;
+        let (k_now, f_now, kf_epoch_now) = Self::kf_target_for_leg_from_asset(asset, leg)?;
+        let stale_count = match leg.side {
+            SideV16::Long => asset.stale_account_count_long,
+            SideV16::Short => asset.stale_account_count_short,
+        };
+        let (next_kf_epoch_snap, next_stale_count) =
+            V16Core::kernel_settle_kf_cohort(leg.kf_epoch_snap, kf_epoch_now, stale_count)?;
         let den = leg
             .a_basis
             .checked_mul(POS_SCALE)
@@ -15776,10 +15814,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::record_account_funding_flow(account, leg.side, f_delta)?;
         leg.k_snap = k_now;
         leg.f_snap = f_now;
-        leg.kf_epoch_snap = kf_epoch_now;
+        leg.kf_epoch_snap = next_kf_epoch_snap;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
-        if was_kf_stale {
-            self.consume_stale_account_counter(asset_index, leg.side)?;
+        if next_stale_count != stale_count {
+            self.set_stale_account_counter(asset_index, leg.side, next_stale_count)?;
         }
         account.header.health_cert.valid = 0;
         Ok((
