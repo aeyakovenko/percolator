@@ -12,6 +12,49 @@ use super::*;
 use crate::wide_math::{checked_mul_div_ceil_u256, U256};
 use crate::{BOUND_SCALE, MAX_VAULT_TVL, V16_TOKEN_VALUE_CLASS_COUNT};
 
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn closure_recovery_forfeit_source_plan_partitions_claim_without_overlap() {
+    let source_claim_bound_num: u128 = kani::any();
+    let active_leg_claim_floor_num: u128 = kani::any();
+    let locked_claim_bound_num: u128 = kani::any();
+
+    match recovery_forfeit_source_plan(
+        source_claim_bound_num,
+        active_leg_claim_floor_num,
+        locked_claim_bound_num,
+    ) {
+        Ok(plan) => {
+            assert!(active_leg_claim_floor_num <= source_claim_bound_num);
+            assert!(locked_claim_bound_num <= source_claim_bound_num);
+            assert_eq!(
+                plan.preserved_claim_bound_num
+                    .checked_add(plan.forfeited_claim_bound_num),
+                Some(source_claim_bound_num)
+            );
+            assert_eq!(
+                plan.release_valid_lien,
+                locked_claim_bound_num > active_leg_claim_floor_num
+            );
+            if !plan.release_valid_lien {
+                assert!(
+                    plan.forfeited_claim_bound_num
+                        <= source_claim_bound_num - locked_claim_bound_num
+                );
+            }
+        }
+        Err(V16Error::InvalidLeg) => {
+            assert!(
+                active_leg_claim_floor_num > source_claim_bound_num
+                    || locked_claim_bound_num > source_claim_bound_num
+            );
+        }
+        Err(other) => panic!("unexpected source-plan error: {other:?}"),
+    }
+}
+
 // ===================== KANI FUNCTION-CONTRACT LAYER =====================
 // Built ONLY by scripts/contracts_runner.sh (cargo feature `contracts` +
 // CLI -Z function-contracts + a separate CARGO_TARGET_DIR). The main proof

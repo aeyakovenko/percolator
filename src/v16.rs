@@ -5483,6 +5483,32 @@ pub struct DeadLegForfeitOutcomeV16 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RecoveryForfeitSourcePlanV16 {
+    preserved_claim_bound_num: u128,
+    forfeited_claim_bound_num: u128,
+    release_valid_lien: bool,
+}
+
+fn recovery_forfeit_source_plan(
+    source_claim_bound_num: u128,
+    active_leg_claim_floor_num: u128,
+    locked_claim_bound_num: u128,
+) -> V16Result<RecoveryForfeitSourcePlanV16> {
+    if active_leg_claim_floor_num > source_claim_bound_num
+        || locked_claim_bound_num > source_claim_bound_num
+    {
+        return Err(V16Error::InvalidLeg);
+    }
+    let forfeited_claim_bound_num = source_claim_bound_num - active_leg_claim_floor_num;
+    let unliened_claim_bound_num = source_claim_bound_num - locked_claim_bound_num;
+    Ok(RecoveryForfeitSourcePlanV16 {
+        preserved_claim_bound_num: active_leg_claim_floor_num,
+        forfeited_claim_bound_num,
+        release_valid_lien: forfeited_claim_bound_num > unliened_claim_bound_num,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SupportLossApplicationV16 {
     support_consumed: u128,
     junior_face_burned: u128,
@@ -14626,18 +14652,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn convert_released_pnl_to_capital_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
+        face_limit: Option<u128>,
+        source_domain_scope: Option<usize>,
     ) -> V16Result<u128> {
         let pos = account.header.pnl.get().max(0) as u128;
-        let released = pos.saturating_sub(account.header.reserved_pnl.get());
+        let mut released = pos.saturating_sub(account.header.reserved_pnl.get());
+        if let Some(limit) = face_limit {
+            released = released.min(limit);
+        }
         if released == 0 {
             return Ok(0);
         }
         if Self::account_has_source_claims(&account.as_view())?
             && self.account_has_active_source_claim_exposure(&account.as_view())?
+            && source_domain_scope.is_none()
         {
             return Err(V16Error::LockActive);
         }
-        let converted = if Self::account_has_source_claims(&account.as_view())? {
+        let converted = if let Some(domain) = source_domain_scope {
+            let source_slot = account
+                .source_domain_slot(domain)?
+                .ok_or(V16Error::InvalidLeg)?;
+            let released_num = V16Core::bound_num_from_amount(released)?;
+            if Self::source_claim_unliened_num(&account.as_view(), domain)? < released_num {
+                return Err(V16Error::LockActive);
+            }
+            if source_slot != 0 {
+                account.header.source_domains.swap(0, source_slot);
+            }
+            self.source_domain_realizable_support_for_face(domain, released)?
+        } else if Self::account_has_source_claims(&account.as_view())? {
             self.account_source_realizable_support(&account.as_view(), released)?
         } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
             0
@@ -14648,7 +14692,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         let vault_before = self.header.vault.get();
-        let consumption = if Self::account_has_source_claims(&account.as_view())? {
+        let consumption = if let Some(domain) = source_domain_scope {
+            self.consume_source_domain_credit_for_effective_not_atomic(domain, converted)?
+        } else if Self::account_has_source_claims(&account.as_view())? {
             self.create_and_consume_account_source_credit_for_effective_not_atomic(
                 account, converted,
             )?
@@ -14717,7 +14763,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
         self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
-        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
+        let converted =
+            self.convert_released_pnl_to_capital_core_not_atomic(account, None, None)?;
         if converted != 0 {
             self.validate_shape()?;
             account.validate_with_market(&self.as_view())?;
@@ -15196,7 +15243,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         // Terminal: PnL reservations no longer gate realization.
         account.header.reserved_pnl = V16PodU128::new(0);
-        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
+        let converted =
+            self.convert_released_pnl_to_capital_core_not_atomic(account, None, None)?;
         // If the payout snapshot was captured before this account realized (another
         // winner closed first), the realized face is still counted in the ledger's
         // unreceipted bound. Refine it out, or the stale bound dilutes the payout
@@ -15775,41 +15823,68 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let source_claim_bound_num = account.header.source_domains[source_slot]
             .source_claim_bound_num
             .get();
-        let preserved_claim_floor_num = account.header.source_domains[source_slot]
-            .active_leg_claim_floor_num
-            .get()
-            .min(source_claim_bound_num);
-        let forfeited_claim_bound_num = source_claim_bound_num
-            .checked_sub(preserved_claim_floor_num)
-            .ok_or(V16Error::CounterUnderflow)?;
-        if forfeited_claim_bound_num == 0 {
-            return Ok(0);
-        }
-        V16Core::validate_bound_num_atom_aligned(forfeited_claim_bound_num)?;
-
-        // A dead-leg forfeit values this leg's positive PnL at zero. Release any
-        // valid source-credit lien first when every claim in the domain belongs
-        // to this episode, so forfeiting the face returns backing instead of
-        // consuming it. If a prior episode's claim floor remains, only an
-        // unencumbered current-episode suffix is identifiable without weakening
-        // that historical claim's backing.
         let source = account.header.source_domains[source_slot];
+        let impaired_claim_bound_num = source.source_claim_impaired_num.get();
         let locked_claim_bound_num = source
             .source_claim_liened_num
             .get()
-            .checked_add(source.source_claim_impaired_num.get())
+            .checked_add(impaired_claim_bound_num)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let unliened_claim_bound_num = source_claim_bound_num
-            .checked_sub(locked_claim_bound_num)
-            .ok_or(V16Error::CounterUnderflow)?;
-        if forfeited_claim_bound_num > unliened_claim_bound_num {
-            if preserved_claim_floor_num != 0 {
+        let source_plan = recovery_forfeit_source_plan(
+            source_claim_bound_num,
+            source.active_leg_claim_floor_num.get(),
+            locked_claim_bound_num,
+        )?;
+        V16Core::validate_bound_num_atom_aligned(source_plan.forfeited_claim_bound_num)?;
+
+        // A dead-leg forfeit values this episode's positive PnL at zero. When
+        // the suffix overlaps a fungible domain lien, first realize the saved
+        // pre-attach floor from this domain into senior capital. This happens
+        // in the same transition as the lien release, so a backing provider
+        // cannot withdraw between release and realization.
+        if source_plan.release_valid_lien {
+            if source_plan.preserved_claim_bound_num != 0 && impaired_claim_bound_num != 0 {
                 return Err(V16Error::LockActive);
             }
             self.release_account_source_credit_lien_for_domain_not_atomic(account, source_domain)?;
             source_slot = account
                 .source_domain_slot(source_domain)?
                 .ok_or(V16Error::InvalidLeg)?;
+            if source_plan.preserved_claim_bound_num != 0 {
+                if source_slot != 0 {
+                    account.header.source_domains.swap(0, source_slot);
+                }
+
+                let pnl_before = account.header.pnl.get().max(0) as u128;
+                let preserved_claim_face =
+                    V16Core::amount_from_bound_num(source_plan.preserved_claim_bound_num)?;
+                self.convert_released_pnl_to_capital_core_not_atomic(
+                    account,
+                    Some(preserved_claim_face),
+                    Some(source_domain),
+                )?;
+                let pnl_after = account.header.pnl.get().max(0) as u128;
+                let preserved_face_burned = pnl_before
+                    .checked_sub(pnl_after)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                let preserved_bound_burned = V16Core::bound_num_from_amount(preserved_face_burned)?;
+                if preserved_bound_burned > source_plan.preserved_claim_bound_num {
+                    return Err(V16Error::CounterUnderflow);
+                }
+                source_slot = account
+                    .source_domain_slot(source_domain)?
+                    .ok_or(V16Error::InvalidLeg)?;
+                account.header.source_domains[source_slot].active_leg_claim_floor_num =
+                    V16PodU128::new(
+                        source_plan
+                            .preserved_claim_bound_num
+                            .checked_sub(preserved_bound_burned)
+                            .ok_or(V16Error::CounterUnderflow)?,
+                    );
+            }
+        }
+        if source_plan.forfeited_claim_bound_num == 0 {
+            return Ok(0);
         }
 
         // The canonical PnL setter burns source claims in sparse-slot order.
@@ -15817,7 +15892,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if source_slot != 0 {
             account.header.source_domains.swap(0, source_slot);
         }
-        let source_claim_face = V16Core::amount_from_bound_num(forfeited_claim_bound_num)?;
+        let source_claim_face =
+            V16Core::amount_from_bound_num(source_plan.forfeited_claim_bound_num)?;
         let positive_pnl = account.header.pnl.get().max(0) as u128;
         let positive_pnl_forfeited = source_claim_face.min(positive_pnl);
         if positive_pnl_forfeited != 0 {
