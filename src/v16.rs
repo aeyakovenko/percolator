@@ -11582,7 +11582,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
-    ///   recovery_eligible— Resolved, unattributed-insolvent negative-PnL recovery
+    ///   recovery_eligible— Recovery, terminal resolution continuation
     ///   resolved_winner  — Resolved, positive PnL, resolved payout ready
     /// Assembled via the proven actionable_summary_from_signals kernel. Live-only
     /// flags need cert currentness only where their entrypoint does (liquidate),
@@ -11595,6 +11595,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mode = decode_market_mode(self.header.mode)?;
         let live = mode == MarketModeV16::Live;
         let resolved = mode == MarketModeV16::Resolved;
+        let recovery = mode == MarketModeV16::Recovery;
 
         let cert = account.header.health_cert.try_to_runtime()?;
         let cert_current = V16Core::kernel_cert_is_current(
@@ -11633,17 +11634,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
         let liquidatable = live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
-        // Permissionless recovery (declare_permissionless_recovery) is a LIVE-mode
-        // action — it rejects Resolved mode with LockActive. The proactive Live
-        // recovery condition the auto-crank declares is an EXPIRED outstanding
-        // close (expired_close -> DeclareRecovery, reason
-        // ActiveBankruptCloseCannotProgress); every other recovery reason is
-        // declared REACTIVELY inside the dispatched crank op when it detects
-        // non-progress (BIndexHeadroomExhausted, etc.). Resolved bad-debt
-        // wind-down is handled by CloseResolved itself, not by the recovery
-        // selector flag, so recovery_eligible stays in the summary type for the
-        // proven selector but is driven by expired_close.
-        let recovery_eligible = false;
+        // A committed Recovery state can exist across an engine/program upgrade.
+        // Classify it as terminally actionable so the same sole public auto-crank
+        // that declares a new recovery also completes its transition to Resolved.
+        let recovery_eligible = recovery;
         // resolved_winner routes to close_resolved, which LAZILY captures the
         // payout snapshot itself (initialize_resolved_payout_ledger_if_needed is
         // reached only via close_resolved -> create_resolved_payout_receipt) — so
@@ -11741,7 +11735,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let recovery_reason = if summary.expired_close {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {
-            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
+            self.header
+                .recovery_reason
+                .try_to_runtime()?
+                .unwrap_or(PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow)
         };
         // PRODUCTION KERNEL: the proven plan selector (priority + totality +
         // engine-selected asset). refresh accrues the first active leg's asset.

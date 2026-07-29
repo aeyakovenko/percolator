@@ -3315,8 +3315,9 @@ fn v16_auto_crank_terminally_resolves_expired_live_close() {
 }
 
 #[test]
-fn v16_committed_recovery_has_value_neutral_resolution_escape() {
+fn v16_auto_crank_resolves_committed_recovery_value_neutrally() {
     let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 43);
     header.mode = 2;
     header.current_slot = V16PodU64::new(7);
     header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
@@ -3327,13 +3328,38 @@ fn v16_committed_recovery_has_value_neutral_resolution_escape() {
     header.insurance = V16PodU128::new(3);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(
+        summary.recovery_eligible,
+        "a committed Recovery mode must remain actionable through the sole public auto-crank"
+    );
     let vault_before = market.header.vault;
     let c_tot_before = market.header.c_tot;
     let insurance_before = market.header.insurance;
-    market
-        .resolve_market_not_atomic(8)
-        .expect("Recovery must retain a terminal resolution escape");
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 8,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the sole public auto-crank must resolve committed Recovery");
 
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
+        }
+    );
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::RecoveryDeclared(
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
+        ))
+    );
     assert_eq!(market.header.mode, 1);
     assert_eq!(market.header.resolved_slot.get(), 8);
     assert_eq!(market.header.current_slot.get(), 8);
