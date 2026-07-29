@@ -55,6 +55,39 @@ fn closure_recovery_forfeit_source_plan_partitions_claim_without_overlap() {
     }
 }
 
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn closure_recovery_expiry_impairment_preserves_claim_and_effective_totals() {
+    let face = u128::from(kani::any::<u16>());
+    let effective = u128::from(kani::any::<u8>());
+    kani::assume(face != 0 && effective != 0);
+
+    let mut source = PortfolioSourceDomainV16Account::default();
+    source.source_claim_bound_num = V16PodU128::new(face);
+    source.source_claim_liened_num = V16PodU128::new(face);
+    source.source_claim_counterparty_liened_num = V16PodU128::new(face);
+    source.source_lien_effective_reserved = V16PodU128::new(effective);
+    source.source_lien_counterparty_backing_num = V16PodU128::new(effective * BOUND_SCALE);
+    source.source_lien_fee_last_slot = V16PodU64::new(1);
+
+    let (impaired, impaired_effective) =
+        V16Core::prepare_account_counterparty_lien_impairment(source).unwrap();
+    assert_eq!(impaired_effective, effective);
+    assert_eq!(impaired.source_claim_bound_num.get(), face);
+    assert_eq!(impaired.source_claim_liened_num.get(), 0);
+    assert_eq!(impaired.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(impaired.source_claim_impaired_num.get(), face);
+    assert_eq!(impaired.source_lien_effective_reserved.get(), 0);
+    assert_eq!(
+        impaired.source_lien_impaired_effective_reserved.get(),
+        effective
+    );
+    assert_eq!(impaired.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(impaired.source_lien_fee_last_slot.get(), 0);
+}
+
 // ===================== KANI FUNCTION-CONTRACT LAYER =====================
 // Built ONLY by scripts/contracts_runner.sh (cargo feature `contracts` +
 // CLI -Z function-contracts + a separate CARGO_TARGET_DIR). The main proof
