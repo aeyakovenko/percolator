@@ -15740,10 +15740,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         asset_index: usize,
-    ) -> V16Result<(u128, u128, u128, u128)> {
+    ) -> V16Result<(u128, u128, u128)> {
         let Some(leg_slot) = Self::active_leg_slot_for_asset(&account.as_view(), asset_index)?
         else {
-            return Ok((0, 0, 0, 0));
+            return Ok((0, 0, 0));
         };
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
         let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
@@ -15787,14 +15787,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut loss_settled = 0u128;
         let mut support_consumed = 0u128;
         let mut junior_face_burned = 0u128;
-        let mut positive_pnl_forfeited = 0u128;
         if net < 0 {
             loss_settled = net.unsigned_abs();
             let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
             support_consumed = support.support_consumed;
             junior_face_burned = support.junior_face_burned;
-        } else {
-            positive_pnl_forfeited = net as u128;
+        } else if net > 0 {
+            let source_domain =
+                self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
+            self.apply_signed_kf_delta_to_pnl(account, net, Some(source_domain))?;
         }
 
         Self::record_account_funding_flow(account, leg.side, f_delta)?;
@@ -15802,12 +15803,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         leg.f_snap = f_now;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
-        Ok((
-            loss_settled,
-            positive_pnl_forfeited,
-            support_consumed,
-            junior_face_burned,
-        ))
+        Ok((loss_settled, support_consumed, junior_face_burned))
     }
 
     fn forfeit_materialized_positive_pnl_for_leg(
@@ -15955,40 +15951,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
 
-        let materialized_positive_pnl_forfeited =
-            self.forfeit_materialized_positive_pnl_for_leg(account, asset_index, leg.side)?;
-        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
-        let b_target = self.b_target_for_leg(asset_index, leg)?;
-        if account.header.pnl.get() == 0
-            && k_target == leg.k_snap
-            && f_target == leg.f_snap
-            && b_target <= leg.b_snap
-            && !account
-                .header
-                .close_progress
-                .try_to_runtime()?
-                .has_pending_residual()
-        {
-            self.clear_leg(account, asset_index)?;
-            return Ok(DeadLegForfeitOutcomeV16 {
-                detached: true,
-                positive_pnl_forfeited: materialized_positive_pnl_forfeited,
-                loss_settled: 0,
-                support_consumed: 0,
-                junior_face_burned: 0,
-                principal_used: 0,
-                insurance_used: 0,
-                residual_booked: 0,
-                explicit_loss: 0,
-            });
+        // Keep the selected episode's source suffix alive while K/F and B settle. Burning its
+        // gross claim first would make the episode's later B haircut consume the attach-time floor.
+        let source_domain = self.insurance_domain_index(asset_index, opposite_side(leg.side))?;
+        if let Some(source_slot) = account.source_domain_slot(source_domain)? {
+            if source_slot != 0 {
+                account.header.source_domains.swap(0, source_slot);
+            }
         }
 
-        let (loss_settled, positive_pnl_delta_forfeited, support_consumed, junior_face_burned) =
+        let (loss_settled, support_consumed, junior_face_burned) =
             self.settle_forfeited_leg_kf_effects(account, asset_index)?;
-        let positive_pnl_forfeited = materialized_positive_pnl_forfeited
-            .checked_add(positive_pnl_delta_forfeited)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-
         let mut total_loss_settled = loss_settled;
         let refreshed = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
         if self.b_target_for_leg(asset_index, refreshed)? > refreshed.b_snap {
@@ -16002,7 +15975,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 account.validate_with_market(&self.as_view())?;
                 return Ok(DeadLegForfeitOutcomeV16 {
                     detached: false,
-                    positive_pnl_forfeited,
+                    positive_pnl_forfeited: 0,
                     loss_settled: total_loss_settled,
                     support_consumed,
                     junior_face_burned,
@@ -16012,6 +15985,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     explicit_loss: 0,
                 });
             }
+        }
+
+        let materialized_positive_pnl_forfeited =
+            self.forfeit_materialized_positive_pnl_for_leg(account, asset_index, leg.side)?;
+        let positive_pnl_forfeited = materialized_positive_pnl_forfeited;
+        let refreshed = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
+        let (k_target, f_target) = self.kf_target_for_leg(asset_index, refreshed)?;
+        let b_target = self.b_target_for_leg(asset_index, refreshed)?;
+        if account.header.pnl.get() == 0
+            && k_target == refreshed.k_snap
+            && f_target == refreshed.f_snap
+            && b_target <= refreshed.b_snap
+            && !account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+        {
+            self.clear_leg(account, asset_index)?;
+            return Ok(DeadLegForfeitOutcomeV16 {
+                detached: true,
+                positive_pnl_forfeited,
+                loss_settled: total_loss_settled,
+                support_consumed,
+                junior_face_burned,
+                principal_used: 0,
+                insurance_used: 0,
+                residual_booked: 0,
+                explicit_loss: 0,
+            });
         }
 
         let principal_used = self.settle_negative_pnl_from_principal_not_atomic(account)?;

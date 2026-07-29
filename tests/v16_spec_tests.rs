@@ -711,6 +711,102 @@ fn v16_recovery_forfeit_preserves_prior_same_domain_position_episode() {
 }
 
 #[test]
+fn v16_recovery_forfeit_nets_current_episode_b_before_prior_claim() {
+    const HISTORICAL_FACE: u128 = 48_000;
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        bankrupt_recovery_pair_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        assert_eq!(short.header.pnl.get(), 59_424);
+        short.header.source_domains[0].active_leg_claim_floor_num =
+            V16PodU128::new(HISTORICAL_FACE * BOUND_SCALE);
+        short.validate_with_market(&market.as_view()).unwrap();
+
+        let bankrupt = market
+            .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+            .unwrap();
+        assert!(bankrupt.detached);
+        let short_leg = short.header.legs[0].try_to_runtime().unwrap();
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert!(
+            short_leg.b_snap < asset.b_short_num,
+            "bankrupt counterparty must book a real B haircut"
+        );
+
+        let first_budget = (asset.b_short_num - short_leg.b_snap) / 2;
+        assert!(first_budget > 0);
+        let partial = market
+            .forfeit_recovery_leg_not_atomic(&mut short, 0, first_budget)
+            .unwrap();
+        assert!(!partial.detached);
+        assert_eq!(partial.positive_pnl_forfeited, 0);
+        assert_eq!(
+            short.header.source_domains[0]
+                .active_leg_claim_floor_num
+                .get(),
+            HISTORICAL_FACE * BOUND_SCALE,
+            "partial B progress must retain the episode boundary"
+        );
+
+        let winner = market
+            .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+            .unwrap();
+        assert!(winner.detached);
+        assert_eq!(short.header.pnl.get(), HISTORICAL_FACE as i128);
+        assert_eq!(
+            short.header.source_domains[0].source_claim_bound_num.get(),
+            HISTORICAL_FACE * BOUND_SCALE,
+            "the current episode's B haircut must net against its own gross claim"
+        );
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
+fn v16_recovery_forfeit_nets_pending_positive_kf_before_prior_claim() {
+    const HISTORICAL_FACE: u128 = 48_000;
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        bankrupt_recovery_pair_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut short, 0, HISTORICAL_FACE)
+            .unwrap();
+        short.header.source_domains[0].active_leg_claim_floor_num =
+            V16PodU128::new(HISTORICAL_FACE * BOUND_SCALE);
+        assert_eq!(short.header.pnl.get(), HISTORICAL_FACE as i128);
+
+        let bankrupt = market
+            .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+            .unwrap();
+        assert!(bankrupt.detached);
+        let winner = market
+            .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+            .unwrap();
+        assert!(winner.detached);
+        assert_eq!(winner.positive_pnl_forfeited, 51_000);
+        assert_eq!(short.header.pnl.get(), HISTORICAL_FACE as i128);
+        assert_eq!(
+            short.header.source_domains[0].source_claim_bound_num.get(),
+            HISTORICAL_FACE * BOUND_SCALE,
+            "pending positive K/F must absorb its episode's B haircut before forfeit"
+        );
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
 fn v16_funding_counters_ignore_inactive_accounts_when_market_funding_moves() {
     let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
     let mut long_header = account_fixture(1, 130);
