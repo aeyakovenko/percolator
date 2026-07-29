@@ -55,6 +55,64 @@ fn closure_recovery_forfeit_source_plan_partitions_claim_without_overlap() {
     }
 }
 
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn closure_recovery_forfeit_preserves_prior_episode_value() {
+    let prior_claim_atoms: u8 = kani::any();
+    let current_episode_atoms: u8 = kani::any();
+    let locked_claim_atoms: u16 = kani::any();
+    let realized_prior_atoms: u8 = kani::any();
+    kani::assume(prior_claim_atoms > 0);
+    kani::assume(realized_prior_atoms <= prior_claim_atoms);
+
+    let prior_claim_atoms = prior_claim_atoms as u128;
+    let current_episode_atoms = current_episode_atoms as u128;
+    let total_claim_atoms = prior_claim_atoms + current_episode_atoms;
+    kani::assume((locked_claim_atoms as u128) <= total_claim_atoms);
+
+    let total_claim_num = total_claim_atoms * BOUND_SCALE;
+    let prior_claim_num = prior_claim_atoms * BOUND_SCALE;
+    let locked_claim_num = (locked_claim_atoms as u128) * BOUND_SCALE;
+    let plan =
+        recovery_forfeit_source_plan(total_claim_num, prior_claim_num, locked_claim_num).unwrap();
+
+    assert_eq!(plan.preserved_claim_bound_num, prior_claim_num);
+    assert_eq!(
+        plan.forfeited_claim_bound_num,
+        current_episode_atoms * BOUND_SCALE
+    );
+
+    let realized_prior_atoms = if plan.release_valid_lien {
+        assert!((locked_claim_atoms as u128) > prior_claim_atoms);
+        realized_prior_atoms as u128
+    } else {
+        assert!((locked_claim_atoms as u128) <= prior_claim_atoms);
+        0
+    };
+    let post_claim_atoms = total_claim_atoms
+        .checked_sub(current_episode_atoms)
+        .and_then(|v| v.checked_sub(realized_prior_atoms))
+        .unwrap();
+
+    assert_eq!(post_claim_atoms + realized_prior_atoms, prior_claim_atoms);
+    if plan.release_valid_lien {
+        kani::cover!(
+            current_episode_atoms > 0
+                && realized_prior_atoms > 0
+                && realized_prior_atoms < prior_claim_atoms,
+            "overlapping lien preserves value across partial prior-claim realization"
+        );
+    } else {
+        assert!(post_claim_atoms >= locked_claim_atoms as u128);
+        kani::cover!(
+            current_episode_atoms > 0 && locked_claim_atoms as u128 == prior_claim_atoms,
+            "nonoverlapping lien remains fully covered after current-episode forfeit"
+        );
+    }
+}
+
 // ===================== KANI FUNCTION-CONTRACT LAYER =====================
 // Built ONLY by scripts/contracts_runner.sh (cargo feature `contracts` +
 // CLI -Z function-contracts + a separate CARGO_TARGET_DIR). The main proof
@@ -1905,7 +1963,7 @@ fn closure_restarted_slot_preserves_budget_witness() {
 // the value's exactness is the separately-proven kernel_attach_leg contract.
 // With the division gone, the body is gates + the cheap real kernel + slot
 // placement — the composition the direct/stub_verified routes could not reach.
-#[cfg(all(kani, feature = "contracts"))]
+#[cfg(all(kani, any(feature = "contracts", feature = "closure")))]
 fn kani_any_loss_weight(_abs_basis_q: u128, _a_basis: u128) -> V16Result<u128> {
     let w: u128 = kani::any();
     kani::assume(w != 0);
@@ -2036,15 +2094,14 @@ fn composition_clear_leg_body_frame() {
 // Episode-attribution composition for the nonempty-source branch introduced by
 // layout 18. The real attach body must snapshot the existing same-domain claim
 // exactly; the real clear body must remove only that marker and leave the prior
-// claim untouched. Division and the two already-contracted asset kernels are
-// irrelevant to this account-local attribution property.
-#[cfg(all(kani, feature = "contracts"))]
+// claim untouched. Only the intractable division is stubbed; the attach and
+// clear kernels remain real so an unconstrained contract result cannot satisfy
+// this composition vacuously.
+#[cfg(all(kani, feature = "closure"))]
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 #[kani::stub(crate::v16::loss_weight_for_basis, kani_any_loss_weight)]
-#[kani::stub_verified(V16Core::kernel_clear_leg)]
-#[kani::stub_verified(V16Core::kernel_attach_leg)]
 fn composition_same_domain_claim_floor_attach_clear() {
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
