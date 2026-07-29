@@ -1909,8 +1909,8 @@ fn composition_attach_body_frame_division_stubbed() {
         }
     }
     kani::cover!(true, "division-stubbed attach body frame reached");
-    // WHOLE-BODY FRAME: the body touches ONLY leg[0], the active bitmap, and
-    // the health cert in the account; every other account field is frozen.
+    // EMPTY-SOURCE WHOLE-BODY FRAME: without a pre-existing source claim, the
+    // body touches only leg[0], the active bitmap, and the health certificate.
     let mut expected = a0;
     expected.legs[0] = account_header.legs[0];
     expected.active_bitmap = account_header.active_bitmap;
@@ -1988,6 +1988,103 @@ fn composition_clear_leg_body_frame() {
     ));
     // leg[0] is now empty/inactive
     assert!(!account_header.legs[0].try_to_runtime().unwrap().active);
+}
+
+// Episode-attribution composition for the nonempty-source branch introduced by
+// layout 18. The real attach body must snapshot the existing same-domain claim
+// exactly; the real clear body must remove only that marker and leave the prior
+// claim untouched. Division and the two already-contracted asset kernels are
+// irrelevant to this account-local attribution property.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+#[kani::stub(crate::v16::loss_weight_for_basis, kani_any_loss_weight)]
+#[kani::stub_verified(V16Core::kernel_clear_leg)]
+#[kani::stub_verified(V16Core::kernel_attach_leg)]
+fn composition_same_domain_claim_floor_attach_clear() {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let market_id = markets[0].engine.asset.market_id.get();
+    let prov = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
+        [1u8; 32], [2u8; 32], [2u8; 32],
+    ));
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.init_empty_in_place(prov).unwrap();
+    account_header.last_fee_slot = V16PodU64::new(1);
+
+    let claim_atoms: u8 = kani::any();
+    kani::assume((1..=16).contains(&claim_atoms));
+    let claim_num = (claim_atoms as u128) * BOUND_SCALE;
+    account_header.pnl = V16PodI128::new(claim_atoms as i128);
+    account_header.source_domains[0].domain = V16PodU32::new(1);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+
+    let basis: i128 = kani::any();
+    kani::assume(basis > 0 && basis <= MAX_POSITION_ABS_Q as i128);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        if market
+            .kani_attach_leg_at_slot(&mut account, 0, SideV16::Long, basis, 0)
+            .is_err()
+        {
+            return;
+        }
+    }
+    kani::cover!(
+        claim_atoms > 1,
+        "same-domain attach snapshots a nontrivial prior claim"
+    );
+    assert_eq!(
+        account_header.source_domains[0]
+            .active_leg_claim_floor_num
+            .get(),
+        claim_num
+    );
+    assert_eq!(
+        account_header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+        claim_num
+    );
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        if market.kani_clear_leg(&mut account, 0).is_err() {
+            return;
+        }
+    }
+    kani::cover!(
+        claim_atoms > 1,
+        "same-domain clear removes the episode marker"
+    );
+    assert_eq!(
+        account_header.source_domains[0]
+            .active_leg_claim_floor_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        account_header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+        claim_num
+    );
 }
 
 // ============ NO-DoS GATE-REACHABILITY (existential liveness) ============
