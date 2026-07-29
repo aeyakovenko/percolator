@@ -18,12 +18,11 @@ use percolator::v16::{
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankOutcomeV16, AutoCrankPlanV16,
-    AutoCrankWorkV16, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
-    BatchTradeOutcomeV16, CloseProgressLedgerV16, CloseProgressLedgerV16Account,
-    EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16, HealthCertV16Account,
-    InsuranceCreditReservationV16, InsuranceCreditReservationV16Account, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -4790,60 +4789,90 @@ fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
 #[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
-fn proof_v16_committed_recovery_auto_crank_resolves_value_neutrally() {
-    let c_tot: u16 = kani::any();
-    let insurance: u16 = kani::any();
-    let surplus: u16 = kani::any();
+fn proof_v16_committed_recovery_is_always_actionable() {
+    let reason_code: u8 = kani::any();
+    let loss_stale: bool = kani::any();
+    let c_tot: u8 = kani::any();
+    let insurance: u8 = kani::any();
+    let surplus: u8 = kani::any();
+    kani::assume(reason_code < 8);
+    let reason = match reason_code {
+        0 => PermissionlessRecoveryReasonV16::BelowProgressFloor,
+        1 => PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability,
+        2 => PermissionlessRecoveryReasonV16::AccountBSettlementCannotProgress,
+        3 => PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted,
+        4 => PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        5 => PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        6 => PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        _ => PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery,
+    };
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.mode = 2;
     header.current_slot = V16PodU64::new(7);
-    header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
-        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
-    ));
+    header.loss_stale_active = u8::from(loss_stale);
+    header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(reason));
     header.c_tot = V16PodU128::new(c_tot as u128);
     header.insurance = V16PodU128::new(insurance as u128);
     header.vault = V16PodU128::new(c_tot as u128 + insurance as u128 + surplus as u128);
-    let vault_before = header.vault;
-    let c_tot_before = header.c_tot;
-    let insurance_before = header.insurance;
-    let reason_before = header.recovery_reason;
-    let asset_before = markets[0].engine;
+    account_header.capital = V16PodU128::new(c_tot as u128);
 
-    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
     let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(summary.is_actionable());
     assert!(summary.recovery_eligible);
-    let result = market
-        .permissionless_auto_crank_not_atomic(
-            &mut account,
-            AutoCrankWorkV16 {
-                now_slot: 8,
-                observations: &[],
-                resolved_close_fee_rate_per_slot: 0,
-            },
-        )
-        .unwrap();
+    assert!(!summary.stale);
+    assert!(!summary.b_stale);
+    assert!(!summary.pending_close);
+    assert!(!summary.expired_close);
+    assert!(!summary.liquidatable);
+    assert!(!summary.resolved_winner);
+    kani::cover!(
+        reason_code == 0 && !loss_stale && c_tot > 0 && insurance > 0 && surplus > 0,
+        "the first recovery reason remains actionable with nonzero value state"
+    );
+    kani::cover!(
+        reason_code == 7 && loss_stale && c_tot > 0 && insurance > 0 && surplus > 0,
+        "the last recovery reason remains actionable with stale loss and nonzero value state"
+    );
+}
 
-    assert_eq!(
-        result.selected,
-        AutoCrankPlanV16::DeclareRecovery {
-            reason: PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
-        }
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_expired_close_is_always_recovery_actionable() {
+    let loss_stale: bool = kani::any();
+    let c_tot: u8 = kani::any();
+    let insurance: u8 = kani::any();
+    let surplus: u8 = kani::any();
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.current_slot = V16PodU64::new(7);
+    header.loss_stale_active = u8::from(loss_stale);
+    header.c_tot = V16PodU128::new(c_tot as u128);
+    header.insurance = V16PodU128::new(insurance as u128);
+    header.vault = V16PodU128::new(c_tot as u128 + insurance as u128 + surplus as u128);
+    account_header.capital = V16PodU128::new(c_tot as u128);
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            close_id: 1,
+            market_id: markets[0].engine.asset.market_id.get(),
+            gross_loss_at_close_start: 1,
+            max_close_slot: 6,
+            residual_remaining: 1,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(summary.is_actionable());
+    assert!(summary.expired_close);
+    assert!(!summary.recovery_eligible);
+    kani::cover!(
+        loss_stale && c_tot > 0 && insurance > 0 && surplus > 0,
+        "an expired close is recovery-actionable with stale loss and nonzero value state"
     );
-    assert_eq!(
-        result.outcome,
-        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::RecoveryDeclared(
-            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
-        ))
-    );
-    assert_eq!(market.header.mode, 1);
-    assert_eq!(market.header.current_slot.get(), 8);
-    assert_eq!(market.header.resolved_slot.get(), 8);
-    assert_eq!(market.header.recovery_reason, reason_before);
-    assert_eq!(market.header.vault, vault_before);
-    assert_eq!(market.header.c_tot, c_tot_before);
-    assert_eq!(market.header.insurance, insurance_before);
-    assert_eq!(market.markets[0].engine, asset_before);
 }
 
 #[kani::proof]
