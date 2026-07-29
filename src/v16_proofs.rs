@@ -2566,8 +2566,8 @@ fn contract_check_bresidual_chunk_conservation() {
 // ROADMAP workstream B.2 (bankruptcy-residual conservation composition): the step
 // decision kernel preserves residual conservation on every Outcome path — a
 // booked chunk (conservation assumed from the proven leaf contract) is carried
-// through, an unbookable residual in a resolved market becomes pure explicit
-// loss, and the non-resolved case signals recovery. No value created or lost.
+// through, an unbookable residual on a caller-proved terminal path becomes pure
+// explicit loss, and every other case signals recovery. No value created or lost.
 #[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::kernel_bresidual_step)]
 #[kani::solver(cadical)]
@@ -2583,8 +2583,25 @@ fn contract_check_kernel_bresidual_step() {
     } else {
         None
     };
-    let resolved: bool = kani::any();
-    let _ = V16Core::kernel_bresidual_step(residual_remaining, booked, resolved);
+    let terminal_explicit_loss_allowed: bool = kani::any();
+    let _ =
+        V16Core::kernel_bresidual_step(residual_remaining, booked, terminal_explicit_loss_allowed);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_terminal_explicit_loss_allowed)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_terminal_explicit_loss_allowed() {
+    let market_resolved: bool = kani::any();
+    let asset_lifecycle: AssetLifecycleV16 = kani::any();
+    let loss_weight_sum: u128 = kani::any();
+    let source: SourceCreditStateV16 = kani::any();
+    let _ = V16Core::kernel_terminal_explicit_loss_allowed(
+        market_resolved,
+        asset_lifecycle,
+        loss_weight_sum,
+        source,
+    );
 }
 
 // ROADMAP workstream B.2 (cross-layer conservation): book_bankruptcy_residual_

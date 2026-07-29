@@ -1808,8 +1808,9 @@ impl V16Core {
     /// (Some when a chunk was booked, None when it could not be — no loss-side
     /// weight, no B-headroom, or no positive delta), decide the step's terminal
     /// outcome. A booked chunk's outcome is carried through; an unbookable residual
-    /// is recorded ENTIRELY as explicit loss in a resolved market, else it signals
-    /// DeclareRecovery. PROVES residual conservation for EVERY Outcome path
+    /// is recorded ENTIRELY as explicit loss only when the caller has proved that
+    /// terminal assignment is safe, else it signals DeclareRecovery. PROVES residual
+    /// conservation for EVERY Outcome path
     /// (booked_loss+explicit_loss+remaining_after == residual_remaining), composing
     /// the leaf booking contract into the step decision — no value is created or
     /// lost regardless of which branch is taken. Pure.
@@ -1833,12 +1834,12 @@ impl V16Core {
     pub(crate) fn kernel_bresidual_step(
         residual_remaining: u128,
         booked: Option<BResidualBookingOutcomeV16>,
-        resolved: bool,
+        terminal_explicit_loss_allowed: bool,
     ) -> BResidualStepV16 {
         match booked {
             Some(o) => BResidualStepV16::Outcome(o),
             None => {
-                if resolved {
+                if terminal_explicit_loss_allowed {
                     BResidualStepV16::Outcome(BResidualBookingOutcomeV16 {
                         booked_loss: 0,
                         explicit_loss: residual_remaining,
@@ -1850,6 +1851,41 @@ impl V16Core {
                 }
             }
         }
+    }
+
+    /// An unbookable residual may be assigned as explicit loss in a resolved
+    /// market, or in an asset-local Recovery domain after every potential
+    /// claimant/provider obligation and social-loss recipient has disappeared.
+    /// Fresh unused backing and insurance reservations are not obligations and
+    /// intentionally do not block this terminal path.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|allowed: &bool| {
+        *allowed == (market_resolved
+            || (asset_lifecycle == AssetLifecycleV16::Recovery
+                && loss_weight_sum == 0
+                && source.positive_claim_bound_num == 0
+                && source.exact_positive_claim_num == 0
+                && source.provider_receivable_num == 0
+                && source.valid_liened_backing_num == 0
+                && source.impaired_liened_backing_num == 0
+                && source.valid_liened_insurance_num == 0
+                && source.impaired_liened_insurance_num == 0))
+    }))]
+    pub(crate) fn kernel_terminal_explicit_loss_allowed(
+        market_resolved: bool,
+        asset_lifecycle: AssetLifecycleV16,
+        loss_weight_sum: u128,
+        source: SourceCreditStateV16,
+    ) -> bool {
+        market_resolved
+            || (asset_lifecycle == AssetLifecycleV16::Recovery
+                && loss_weight_sum == 0
+                && source.positive_claim_bound_num == 0
+                && source.exact_positive_claim_num == 0
+                && source.provider_receivable_num == 0
+                && source.valid_liened_backing_num == 0
+                && source.impaired_liened_backing_num == 0
+                && source.valid_liened_insurance_num == 0
+                && source.impaired_liened_insurance_num == 0)
     }
 
     /// PRODUCTION KERNEL (roadmap workstream B.2, resolved-bankruptcy PnL
@@ -13258,6 +13294,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             SideV16::Short => asset.loss_weight_sum_short,
         };
         let resolved = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved;
+        let loss_domain = self.insurance_domain_index(asset_index, bankrupt_side)?;
+        let loss_source = self.source_credit_for_domain(loss_domain)?;
+        let terminal_explicit_loss_allowed = V16Core::kernel_terminal_explicit_loss_allowed(
+            resolved,
+            asset.lifecycle,
+            weight_sum,
+            loss_source,
+        );
         // Determine whether a chunk can be booked (and the recovery reason if not).
         // weight_sum==0 -> no loss-side to absorb (ActiveBankruptClose); engine
         // chunk 0 / apply None -> no B-headroom (BIndexHeadroomExhausted). The
@@ -13302,7 +13346,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         };
         // PRODUCTION KERNEL: the conservation-proven step decision.
-        match V16Core::kernel_bresidual_step(residual_remaining, booked, resolved) {
+        match V16Core::kernel_bresidual_step(
+            residual_remaining,
+            booked,
+            terminal_explicit_loss_allowed,
+        ) {
             BResidualStepV16::Outcome(outcome) => {
                 if let Some(asset_mut) = new_asset {
                     self.set_asset_state(asset_index, asset_mut)?;

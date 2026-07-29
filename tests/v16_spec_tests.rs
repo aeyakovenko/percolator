@@ -422,6 +422,137 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
     );
 }
 
+fn bankrupt_recovery_pair_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 6_480_000);
+    cfg.min_nonzero_mm_req = 599;
+    cfg.min_nonzero_im_req = 600;
+    cfg.maintenance_margin_bps = 500;
+    cfg.initial_margin_bps = 500;
+    cfg.liquidation_fee_bps = 5;
+    cfg.liquidation_fee_cap = percolator::MAX_PROTOCOL_FEE_ABS;
+    cfg.max_price_move_bps_per_slot = 24;
+    cfg.max_accrual_dt_slots = 20;
+    cfg.max_abs_funding_e9_per_slot = 1_000;
+    cfg.min_funding_lifetime_slots = 10_000_000;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, FUNDING_COUNTER_PRICE, 0)
+        .unwrap();
+    let mut long_header = account_fixture(1, 132);
+    let mut short_header = account_fixture(1, 133);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 51_000).unwrap();
+        market.deposit_not_atomic(&mut short, 100_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: FUNDING_COUNTER_PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 20, 952_000, 0, true)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 25, 940_576, 0, true)
+            .unwrap();
+        market.force_asset_recovery_not_atomic(0, 25).unwrap();
+    }
+    (header, markets, long_header, short_header)
+}
+
+#[test]
+fn v16_claim_free_recovery_domain_survives_winner_first_forfeit() {
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        bankrupt_recovery_pair_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        let winner = market
+            .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+            .unwrap();
+        assert!(winner.detached);
+        assert!(winner.positive_pnl_forfeited > 0);
+        assert_eq!(short.header.pnl.get(), 0);
+
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(asset.loss_weight_sum_short, 0);
+        assert_eq!(asset.oi_eff_short_q, 0);
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .source_credit_long
+                .try_to_runtime()
+                .unwrap()
+                .positive_claim_bound_num,
+            0
+        );
+
+        let loser = market
+            .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+            .expect("claim-free shutdown loss must not require global Recovery");
+        assert!(loser.detached);
+        assert!(loser.explicit_loss > 0);
+        assert_eq!(long.header.pnl.get(), 0);
+        assert_eq!(long.header.capital.get(), 0);
+        assert!(!long.header.legs[0].try_to_runtime().unwrap().active);
+        assert!(!short.header.legs[0].try_to_runtime().unwrap().active);
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
+fn v16_recovery_residual_preserves_materialized_winner_claim() {
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        bankrupt_recovery_pair_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        assert!(short.header.pnl.get() > 0);
+        let winner = market
+            .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+            .unwrap();
+        assert!(winner.detached);
+        assert_eq!(winner.positive_pnl_forfeited, 0);
+        assert!(
+            market.markets[0]
+                .engine
+                .source_credit_long
+                .try_to_runtime()
+                .unwrap()
+                .positive_claim_bound_num
+                > 0
+        );
+
+        assert_eq!(
+            market.forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX),
+            Err(V16Error::RecoveryRequired),
+            "a real winner claim still requires global loss resolution"
+        );
+    }
+}
+
 #[test]
 fn v16_funding_counters_ignore_inactive_accounts_when_market_funding_moves() {
     let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
