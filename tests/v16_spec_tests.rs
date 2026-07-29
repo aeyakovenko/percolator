@@ -422,14 +422,22 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
     );
 }
 
-fn bankrupt_recovery_pair_fixture() -> (
+fn bankrupt_recovery_pair_fixture_at(
+    market_slots: u32,
+    asset_index: usize,
+) -> (
     MarketGroupV16HeaderAccount,
     Vec<Market<u64>>,
     PortfolioAccountV16Account,
     PortfolioAccountV16Account,
 ) {
     let (market_id, _, _) = ids();
-    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 6_480_000);
+    let mut cfg = V16Config::public_user_fund_with_market_slots(
+        market_slots as u16,
+        market_slots,
+        0,
+        6_480_000,
+    );
     cfg.min_nonzero_mm_req = 599;
     cfg.min_nonzero_im_req = 600;
     cfg.maintenance_margin_bps = 500;
@@ -440,13 +448,36 @@ fn bankrupt_recovery_pair_fixture() -> (
     cfg.max_accrual_dt_slots = 20;
     cfg.max_abs_funding_e9_per_slot = 1_000;
     cfg.min_funding_lifetime_slots = 10_000_000;
-    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
-    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, market_slots, 0).unwrap();
+    let mut markets = (0..market_slots)
+        .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
     header
-        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, FUNDING_COUNTER_PRICE, 0)
+        .activate_empty_asset_slot_not_atomic(
+            asset_index as u32,
+            &mut markets[asset_index].engine,
+            FUNDING_COUNTER_PRICE,
+            0,
+        )
         .unwrap();
-    let mut long_header = account_fixture(1, 132);
-    let mut short_header = account_fixture(1, 133);
+    let mut activation_slot = 1u64;
+    for (i, market) in markets.iter_mut().enumerate() {
+        if i == asset_index {
+            continue;
+        }
+        header
+            .activate_empty_asset_slot_not_atomic(
+                i as u32,
+                &mut market.engine,
+                FUNDING_COUNTER_PRICE,
+                activation_slot,
+            )
+            .unwrap();
+        activation_slot += 1;
+    }
+    let mut long_header = account_fixture(market_slots, 132);
+    let mut short_header = account_fixture(market_slots, 133);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut long = PortfolioV16ViewMut::new(&mut long_header);
@@ -458,7 +489,7 @@ fn bankrupt_recovery_pair_fixture() -> (
                 &mut long,
                 &mut short,
                 TradeRequestV16 {
-                    asset_index: 0,
+                    asset_index,
                     size_q: signed_q(POS_SCALE),
                     exec_price: FUNDING_COUNTER_PRICE,
                     fee_bps: 0,
@@ -466,14 +497,25 @@ fn bankrupt_recovery_pair_fixture() -> (
             )
             .unwrap();
         market
-            .accrue_asset_to_not_atomic(0, 20, 952_000, 0, true)
+            .accrue_asset_to_not_atomic(asset_index, 20, 952_000, 0, true)
             .unwrap();
         market
-            .accrue_asset_to_not_atomic(0, 25, 940_576, 0, true)
+            .accrue_asset_to_not_atomic(asset_index, 25, 940_576, 0, true)
             .unwrap();
-        market.force_asset_recovery_not_atomic(0, 25).unwrap();
+        market
+            .force_asset_recovery_not_atomic(asset_index, 25)
+            .unwrap();
     }
     (header, markets, long_header, short_header)
+}
+
+fn bankrupt_recovery_pair_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    bankrupt_recovery_pair_fixture_at(1, 0)
 }
 
 #[test]
@@ -520,7 +562,7 @@ fn v16_claim_free_recovery_domain_survives_winner_first_forfeit() {
 }
 
 #[test]
-fn v16_recovery_residual_preserves_materialized_winner_claim() {
+fn v16_recovery_forfeit_waives_materialized_winner_claim_before_detach() {
     let (mut header, mut markets, mut long_header, mut short_header) =
         bankrupt_recovery_pair_fixture();
     {
@@ -534,22 +576,98 @@ fn v16_recovery_residual_preserves_materialized_winner_claim() {
             .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
             .unwrap();
         assert!(winner.detached);
-        assert_eq!(winner.positive_pnl_forfeited, 0);
-        assert!(
+        assert!(winner.positive_pnl_forfeited > 0);
+        assert_eq!(short.header.pnl.get(), 0);
+        assert_eq!(
             market.markets[0]
                 .engine
                 .source_credit_long
                 .try_to_runtime()
                 .unwrap()
-                .positive_claim_bound_num
-                > 0
+                .positive_claim_bound_num,
+            0,
+            "owner-signed dead-leg forfeit must waive the selected leg's materialized claim"
         );
 
+        let loser = market
+            .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+            .expect("winner-first materialization must not strand the bankrupt counterparty");
+        assert!(loser.detached);
+        assert!(loser.explicit_loss > 0);
+        assert_eq!(long.header.pnl.get(), 0);
+        assert_eq!(long.header.capital.get(), 0);
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
+fn v16_recovery_forfeit_preserves_unrelated_source_domain_claim() {
+    const RECOVERY_ASSET: usize = 1;
+    const UNRELATED_FACE: u128 = 777;
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        bankrupt_recovery_pair_fixture_at(2, RECOVERY_ASSET);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut short, 0, UNRELATED_FACE)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        let selected_claim_before = market.markets[RECOVERY_ASSET]
+            .engine
+            .source_credit_long
+            .try_to_runtime()
+            .unwrap()
+            .positive_claim_bound_num;
+        assert!(selected_claim_before > 0);
         assert_eq!(
-            market.forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX),
-            Err(V16Error::RecoveryRequired),
-            "a real winner claim still requires global loss resolution"
+            short.header.pnl.get(),
+            i128::try_from(UNRELATED_FACE + selected_claim_before / BOUND_SCALE).unwrap()
         );
+
+        let winner = market
+            .forfeit_recovery_leg_not_atomic(&mut short, RECOVERY_ASSET, u128::MAX)
+            .unwrap();
+        assert!(winner.detached);
+        assert_eq!(
+            winner.positive_pnl_forfeited,
+            selected_claim_before / BOUND_SCALE
+        );
+        assert_eq!(
+            short.header.pnl.get(),
+            i128::try_from(UNRELATED_FACE).unwrap()
+        );
+        assert_eq!(
+            market.markets[RECOVERY_ASSET]
+                .engine
+                .source_credit_long
+                .try_to_runtime()
+                .unwrap()
+                .positive_claim_bound_num,
+            0
+        );
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .source_credit_long
+                .try_to_runtime()
+                .unwrap()
+                .positive_claim_bound_num,
+            UNRELATED_FACE * BOUND_SCALE,
+            "selected-leg forfeit must not burn another asset's source claim"
+        );
+
+        let loser = market
+            .forfeit_recovery_leg_not_atomic(&mut long, RECOVERY_ASSET, u128::MAX)
+            .unwrap();
+        assert!(loser.detached);
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
     }
 }
 

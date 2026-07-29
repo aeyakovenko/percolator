@@ -15713,6 +15713,76 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ))
     }
 
+    fn forfeit_materialized_positive_pnl_for_leg(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        leg_side: SideV16,
+    ) -> V16Result<u128> {
+        let source_domain = self.insurance_domain_index(asset_index, opposite_side(leg_side))?;
+        let Some(mut source_slot) = account.source_domain_slot(source_domain)? else {
+            return Ok(0);
+        };
+        let source_claim_bound_num = account.header.source_domains[source_slot]
+            .source_claim_bound_num
+            .get();
+        if source_claim_bound_num == 0 {
+            return Ok(0);
+        }
+        V16Core::validate_bound_num_atom_aligned(source_claim_bound_num)?;
+
+        // A dead-leg forfeit values this leg's positive PnL at zero. Release any
+        // valid source-credit lien first so forfeiting the face returns backing
+        // instead of consuming it. Impaired claim fields are burned by the
+        // canonical source-claim burn below.
+        if account.header.source_domains[source_slot]
+            .source_claim_liened_num
+            .get()
+            != 0
+        {
+            self.release_account_source_credit_lien_for_domain_not_atomic(account, source_domain)?;
+            source_slot = account
+                .source_domain_slot(source_domain)?
+                .ok_or(V16Error::InvalidLeg)?;
+        }
+
+        // The canonical PnL setter burns source claims in sparse-slot order.
+        // Put this leg's source first so unrelated asset claims are untouched.
+        if source_slot != 0 {
+            account.header.source_domains.swap(0, source_slot);
+        }
+        let source_claim_face = V16Core::amount_from_bound_num(source_claim_bound_num)?;
+        let positive_pnl = account.header.pnl.get().max(0) as u128;
+        let positive_pnl_forfeited = source_claim_face.min(positive_pnl);
+        if positive_pnl_forfeited != 0 {
+            let decrease =
+                i128::try_from(positive_pnl_forfeited).map_err(|_| V16Error::ArithmeticOverflow)?;
+            let next_pnl = account
+                .header
+                .pnl
+                .get()
+                .checked_sub(decrease)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.set_account_pnl(account, next_pnl)?;
+        }
+
+        // Source bounds are normally exact atom multiples of positive PnL. Burn
+        // any conservative excess as attribution-only state after the PnL debit.
+        if let Some(remaining_slot) = account.source_domain_slot(source_domain)? {
+            let remaining = account.header.source_domains[remaining_slot]
+                .source_claim_bound_num
+                .get();
+            if remaining != 0 {
+                if remaining_slot != 0 {
+                    account.header.source_domains.swap(0, remaining_slot);
+                }
+                self.burn_account_source_claim_bound_num(account, remaining)?;
+            }
+        }
+        account.compact_source_domains();
+        Ok(positive_pnl_forfeited)
+    }
+
     pub fn forfeit_recovery_leg_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -15734,6 +15804,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
 
+        let materialized_positive_pnl_forfeited =
+            self.forfeit_materialized_positive_pnl_for_leg(account, asset_index, leg.side)?;
         let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
         let b_target = self.b_target_for_leg(asset_index, leg)?;
         if account.header.pnl.get() == 0
@@ -15749,7 +15821,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.clear_leg(account, asset_index)?;
             return Ok(DeadLegForfeitOutcomeV16 {
                 detached: true,
-                positive_pnl_forfeited: 0,
+                positive_pnl_forfeited: materialized_positive_pnl_forfeited,
                 loss_settled: 0,
                 support_consumed: 0,
                 junior_face_burned: 0,
@@ -15760,8 +15832,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             });
         }
 
-        let (loss_settled, positive_pnl_forfeited, support_consumed, junior_face_burned) =
+        let (loss_settled, positive_pnl_delta_forfeited, support_consumed, junior_face_burned) =
             self.settle_forfeited_leg_kf_effects(account, asset_index)?;
+        let positive_pnl_forfeited = materialized_positive_pnl_forfeited
+            .checked_add(positive_pnl_delta_forfeited)
+            .ok_or(V16Error::ArithmeticOverflow)?;
 
         let mut total_loss_settled = loss_settled;
         let refreshed = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
