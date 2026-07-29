@@ -769,6 +769,98 @@ fn v16_recovery_forfeit_nets_current_episode_b_before_prior_claim() {
 }
 
 #[test]
+fn v16_recovery_forfeit_at_slot_impairs_expired_backing_and_preserves_floor() {
+    const HISTORICAL_FACE: u128 = 48_000;
+    const LIEN_FACE: u128 = 50_000;
+    const BACKING: u128 = 200_000;
+    const EXPIRY_SLOT: u64 = 26;
+    let (mut header, mut markets, mut long_header, mut short_header) =
+        bankrupt_recovery_pair_fixture();
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        assert!(short.header.pnl.get() > HISTORICAL_FACE as i128);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(0, BACKING, EXPIRY_SLOT)
+            .unwrap();
+
+        let mut bucket = market.markets[0]
+            .engine
+            .backing_long
+            .try_to_runtime()
+            .unwrap();
+        bucket.fresh_unliened_backing_num -= LIEN_FACE * BOUND_SCALE;
+        bucket.valid_liened_backing_num += LIEN_FACE * BOUND_SCALE;
+        market.markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&bucket);
+
+        let mut source_credit = market.markets[0]
+            .engine
+            .source_credit_long
+            .try_to_runtime()
+            .unwrap();
+        source_credit.valid_liened_backing_num += LIEN_FACE * BOUND_SCALE;
+        market.markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&source_credit);
+
+        let source = &mut short.header.source_domains[0];
+        source.active_leg_claim_floor_num = V16PodU128::new(HISTORICAL_FACE * BOUND_SCALE);
+        source.source_claim_liened_num = V16PodU128::new(LIEN_FACE * BOUND_SCALE);
+        source.source_claim_counterparty_liened_num = V16PodU128::new(LIEN_FACE * BOUND_SCALE);
+        source.source_lien_effective_reserved = V16PodU128::new(LIEN_FACE);
+        source.source_lien_counterparty_backing_num = V16PodU128::new(LIEN_FACE * BOUND_SCALE);
+        source.source_lien_fee_last_slot = V16PodU64::new(25);
+
+        market.validate_shape().unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+        let capital_before = short.header.capital.get();
+        let bankrupt = market
+            .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+            .unwrap();
+        assert!(bankrupt.detached);
+
+        let short_leg = short.header.legs[0].try_to_runtime().unwrap();
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        let first_budget = (asset.b_short_num - short_leg.b_snap) / 2;
+        assert!(first_budget > 0);
+        let partial = market
+            .forfeit_recovery_leg_at_slot_not_atomic(&mut short, 0, first_budget, EXPIRY_SLOT + 1)
+            .expect("expiry reconciliation must compose with bounded B progress");
+        assert!(!partial.detached);
+
+        let winner = market
+            .forfeit_recovery_leg_at_slot_not_atomic(&mut short, 0, u128::MAX, EXPIRY_SLOT + 1)
+            .expect("authenticated expiry must not strand the remaining Recovery leg");
+        assert!(winner.detached);
+        assert_eq!(short.header.capital.get(), capital_before);
+        assert_eq!(short.header.pnl.get(), HISTORICAL_FACE as i128);
+        assert_eq!(
+            short.header.source_domains[0]
+                .source_claim_impaired_num
+                .get(),
+            HISTORICAL_FACE * BOUND_SCALE
+        );
+        assert_eq!(
+            short.header.source_domains[0].source_claim_liened_num.get(),
+            0
+        );
+        let expired_bucket = market.markets[0]
+            .engine
+            .backing_long
+            .try_to_runtime()
+            .unwrap();
+        assert_eq!(expired_bucket.status, BackingBucketStatusV16::Impaired);
+        assert_eq!(expired_bucket.valid_liened_backing_num, 0);
+        assert_eq!(expired_bucket.consumed_liened_backing_num, 0);
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
 fn v16_recovery_forfeit_nets_pending_positive_kf_before_prior_claim() {
     const HISTORICAL_FACE: u128 = 48_000;
     let (mut header, mut markets, mut long_header, mut short_header) =
