@@ -11835,8 +11835,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 )?)
             }
             AutoCrankPlanV16::DeclareRecovery { reason } => {
-                // recovery declaration needs no observation.
-                AutoCrankOutcomeV16::Progressed(self.permissionless_crank_not_atomic(
+                // Recovery declaration needs no observation. Complete the terminal
+                // transition in the same public auto-crank so Recovery cannot become
+                // a committed mode with no user withdrawal or resolution path.
+                let progress = self.permissionless_crank_not_atomic(
                     account,
                     PermissionlessCrankRequestV16 {
                         now_slot: work.now_slot,
@@ -11845,7 +11847,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         funding_rate_e9: 0,
                         action: PermissionlessCrankActionV16::Recover(reason),
                     },
-                )?)
+                )?;
+                self.resolve_market_not_atomic(work.now_slot)?;
+                AutoCrankOutcomeV16::Progressed(progress)
             }
             AutoCrankPlanV16::CloseResolved => {
                 AutoCrankOutcomeV16::ResolvedClose(self.close_resolved_account_not_atomic(
@@ -14981,9 +14985,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     pub fn resolve_market_not_atomic(&mut self, resolved_slot: u64) -> V16Result<()> {
-        if decode_market_mode(self.header.mode)? == MarketModeV16::Recovery {
-            return Err(V16Error::LockActive);
-        }
+        // Recovery is a terminal safety mode, not a permanent sink. Resolution
+        // preserves its recorded reason while exposing the bounded resolved-close
+        // path for every account.
+        decode_market_mode(self.header.mode)?;
         if resolved_slot < self.header.current_slot.get() {
             return Err(V16Error::Stale);
         }
