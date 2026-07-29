@@ -16200,6 +16200,51 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(converted)
     }
 
+    /// Commit at most one mutation which makes a lapsed source domain safe for
+    /// resolved settlement. K/F settlement can reduce positive PnL and burn its
+    /// source claim, so this must run before those side effects consult a stale
+    /// Fresh bucket.
+    fn prepare_one_lapsed_source_domain_for_resolved_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<Option<usize>> {
+        if !Self::account_has_source_claims(&account.as_view())? {
+            return Ok(None);
+        }
+
+        account.compact_source_domains();
+        let current_slot = self.header.current_slot.get();
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if !source.is_occupied() {
+                slot += 1;
+                continue;
+            }
+
+            let domain = source.domain.get() as usize;
+            self.domain_asset_side(domain)?;
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= current_slot
+            {
+                if source.source_claim_liened_num.get() != 0 {
+                    self.release_account_source_credit_lien_for_domain_not_atomic(account, domain)?;
+                } else {
+                    self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
+                }
+                account.header.health_cert.valid = 0;
+                self.validate_shape()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(Some(domain));
+            }
+            slot += 1;
+        }
+        Ok(None)
+    }
+
     fn claim_resolved_payout_topup_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -16280,6 +16325,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<ResolvedCloseOutcomeV16> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
+        }
+        if self
+            .prepare_one_lapsed_source_domain_for_resolved_close_not_atomic(account)?
+            .is_some()
+        {
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
         if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
             .settle_account_side_effects_not_atomic(
