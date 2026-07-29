@@ -3175,6 +3175,7 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
+    let recovery: bool = kani::any();
     let current_slot_raw: u8 = kani::any();
     let stale_lag_raw: u8 = kani::any();
     let resolved_delta_raw: u8 = kani::any();
@@ -3191,6 +3192,12 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     let slot_last = current_slot - stale_lag_raw as u64;
     let resolved_slot = current_slot + resolved_delta_raw as u64;
     let (mut header, mut markets, _) = one_market_view_fixture();
+    if recovery {
+        header.mode = 2;
+        header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        ));
+    }
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
@@ -3201,6 +3208,7 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
     let slot_last_before = header.slot_last;
+    let recovery_reason_before = header.recovery_reason;
     let asset_before = markets[0].engine.asset;
     let long_budget_before = markets[0].engine.insurance_domain_budget_long;
     let short_budget_before = markets[0].engine.insurance_domain_budget_short;
@@ -3221,11 +3229,16 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
             && surplus > 255,
         "resolved market transition covers future authenticated slot over wide symbolic value state"
     );
+    kani::cover!(
+        recovery && resolved_delta_raw > 0,
+        "terminal Recovery mode has a successful authenticated resolution escape"
+    );
     assert_eq!(market.header.mode, 1);
     assert_eq!(market.header.resolved_slot.get(), resolved_slot);
     assert_eq!(market.header.current_slot.get(), resolved_slot);
     assert_eq!(market.header.slot_last, slot_last_before);
     assert_eq!(market.header.loss_stale_active, 0);
+    assert_eq!(market.header.recovery_reason, recovery_reason_before);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);

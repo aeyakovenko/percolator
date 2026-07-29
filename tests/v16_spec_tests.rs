@@ -13,7 +13,8 @@ use percolator::{
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    V16Config, V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32,
+    V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -3234,9 +3235,10 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
 // Live account whose outstanding bankruptcy close ledger has EXPIRED (current
 // slot past max_close_slot) is classified expired_close, and the auto-crank
 // dispatches the terminal recovery declaration (ActiveBankruptCloseCannotProgress)
-// — the close-cannot-progress recovery, no caller-chosen action, no value move.
+// and resolves in the same public call. Recovery is an audit reason, not a
+// committed sink with no account exit.
 #[test]
-fn v16_auto_crank_declares_recovery_for_expired_live_close() {
+fn v16_auto_crank_terminally_resolves_expired_live_close() {
     use percolator::{CloseProgressLedgerV16, CloseProgressLedgerV16Account};
 
     let (mut header, mut markets) = market_fixture(1, 100);
@@ -3299,8 +3301,49 @@ fn v16_auto_crank_declares_recovery_for_expired_live_close() {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         ))
     );
-    // recovery declaration moves no value.
+    assert_eq!(market.header.mode, 1, "terminal recovery must be Resolved");
+    assert_eq!(market.header.resolved_slot.get(), 10);
+    assert_eq!(market.header.current_slot.get(), 10);
+    assert_eq!(
+        market.header.recovery_reason.try_to_runtime().unwrap(),
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress),
+        "the resolved market retains the terminal recovery reason for audit"
+    );
+    // Terminal recovery and resolution move no value.
     assert_eq!(market.header.vault, vault_before);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_committed_recovery_has_value_neutral_resolution_escape() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.mode = 2;
+    header.current_slot = V16PodU64::new(7);
+    header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    ));
+    header.vault = V16PodU128::new(17);
+    header.c_tot = V16PodU128::new(11);
+    header.insurance = V16PodU128::new(3);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault;
+    let c_tot_before = market.header.c_tot;
+    let insurance_before = market.header.insurance;
+    market
+        .resolve_market_not_atomic(8)
+        .expect("Recovery must retain a terminal resolution escape");
+
+    assert_eq!(market.header.mode, 1);
+    assert_eq!(market.header.resolved_slot.get(), 8);
+    assert_eq!(market.header.current_slot.get(), 8);
+    assert_eq!(
+        market.header.recovery_reason.try_to_runtime().unwrap(),
+        Some(PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow)
+    );
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
     market.validate_shape().unwrap();
 }
 
