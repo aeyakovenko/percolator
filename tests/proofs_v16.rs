@@ -54,6 +54,86 @@ fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
 }
 
+// Shared liquidation/rebalance theorem for partially ADL-reduced positions.
+// Live assets have equal effective OI on both sides, while an account's stored
+// basis can be larger. The production capacity prevents OI underflow and makes
+// any resulting zero-OI residue permissionlessly actionable.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_unilateral_close_capacity_is_safe_progress_and_residue_complete() {
+    let side = if kani::any::<bool>() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let stored_abs: u128 = kani::any();
+    let matched_oi: u128 = kani::any();
+    let request: u128 = kani::any();
+    kani::assume((1..=MAX_POSITION_ABS_Q).contains(&stored_abs));
+    kani::assume((1..=MAX_OI_SIDE_Q).contains(&matched_oi));
+    kani::assume(request > 0);
+
+    let capacity = MarketGroupV16ViewMut::<u64>::kani_kernel_unilateral_close_capacity(
+        stored_abs, matched_oi, matched_oi,
+    );
+    let work = request.min(capacity);
+    let pre_basis_signed = match side {
+        SideV16::Long => stored_abs as i128,
+        SideV16::Short => -(stored_abs as i128),
+    };
+    let (reduced_q, delta) = MarketGroupV16ViewMut::<u64>::kani_kernel_reduce_position_delta(
+        pre_basis_signed,
+        side,
+        work,
+    )
+    .unwrap();
+    let expected = request.min(stored_abs).min(matched_oi);
+    let post_basis_signed = pre_basis_signed.checked_add(delta).unwrap();
+    let long_oi_after = matched_oi.checked_sub(reduced_q).unwrap();
+    let short_oi_after = matched_oi.checked_sub(reduced_q).unwrap();
+
+    assert_eq!(capacity, stored_abs.min(matched_oi));
+    assert_eq!(reduced_q, expected);
+    assert!(reduced_q > 0);
+    assert!(reduced_q <= stored_abs);
+    assert!(reduced_q <= matched_oi);
+    assert_eq!(post_basis_signed.unsigned_abs(), stored_abs - reduced_q);
+    assert!(post_basis_signed == 0 || post_basis_signed.signum() == pre_basis_signed.signum());
+
+    if request >= capacity && stored_abs > matched_oi {
+        assert_eq!(long_oi_after, 0);
+        assert_eq!(short_oi_after, 0);
+        assert_ne!(post_basis_signed, 0);
+        let mut asset = AssetStateV16::default();
+        asset.oi_eff_long_q = long_oi_after;
+        asset.oi_eff_short_q = short_oi_after;
+        match side {
+            SideV16::Long => asset.stored_pos_count_long = 1,
+            SideV16::Short => asset.stored_pos_count_short = 1,
+        }
+        let leg = PortfolioLegV16 {
+            active: true,
+            side,
+            basis_pos_q: post_basis_signed,
+            ..PortfolioLegV16::EMPTY
+        };
+        assert!(MarketGroupV16ViewMut::<u64>::kani_leg_has_exhausted_effective_oi(asset, leg));
+    }
+
+    kani::cover!(side == SideV16::Long, "capacity covers long reductions");
+    kani::cover!(side == SideV16::Short, "capacity covers short reductions");
+    kani::cover!(request < capacity, "capacity covers partial requested work");
+    kani::cover!(
+        request >= capacity && stored_abs > matched_oi,
+        "capacity covers an ADL terminal residue"
+    );
+    kani::cover!(
+        request >= capacity && stored_abs <= matched_oi,
+        "capacity covers a full account close"
+    );
+}
+
 fn empty_account_fixture(market_id: [u8; 32], account_tag: u8) -> PortfolioAccountV16Account {
     let mut account_id = [0u8; 32];
     account_id[0] = account_tag;

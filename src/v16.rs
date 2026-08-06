@@ -1560,6 +1560,17 @@ impl V16Core {
         Ok((long_reduction_q, short_reduction_q))
     }
 
+    /// PRODUCTION KERNEL: cap unilateral close work by the account's stored
+    /// basis and by matched effective OI. Liquidation and owner rebalance share
+    /// this bound so neither can subtract more OI than either side contains.
+    fn kernel_unilateral_close_capacity(
+        stored_abs: u128,
+        oi_eff_long_q: u128,
+        oi_eff_short_q: u128,
+    ) -> u128 {
+        stored_abs.min(oi_eff_long_q).min(oi_eff_short_q)
+    }
+
     /// PRODUCTION KERNEL (roadmap 3A.2 risk-reduction / S-L3, A5.dec rank): the
     /// position-reduction core of liquidation/rebalance. Clamps the requested
     /// close to the leg and produces the toward-zero signed delta:
@@ -11495,7 +11506,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if asset_index >= configured_assets || asset_index >= self.markets.len() {
                 return Err(V16Error::HiddenLeg);
             }
-            let asset = self.markets[asset_index].engine.asset.try_to_runtime()?;
+            let mut asset = self.markets[asset_index].engine.asset.try_to_runtime()?;
             if leg.market_id != asset.market_id
                 || !matches!(
                     asset.lifecycle,
@@ -11516,6 +11527,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             seen_assets[seen_asset_count] = leg.asset_index;
             seen_asset_count += 1;
+            if Self::leg_has_exhausted_effective_oi(asset, leg)
+                && !account
+                    .header
+                    .close_progress
+                    .try_to_runtime()?
+                    .has_pending_residual()
+                && !self.has_pending_domain_loss_barrier(asset_index, leg.side)?
+            {
+                self.begin_full_drain_reset_inner(asset_index, leg.side)?;
+                asset = self.asset_state(asset_index)?;
+            }
             self.settle_leg_kf_effects_at_slot_with_asset(account, slot, asset)?;
             let mut refreshed = account.header.legs[slot].try_to_runtime()?;
             let target = Self::b_target_for_leg_from_asset(asset, refreshed)?;
@@ -11545,10 +11567,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 return Err(V16Error::BStale);
             }
-            // A prior-reset leg no longer owns effective OI. Once its terminal
-            // K/F/B claims are settled above, detaching it is bookkeeping, not
-            // a position close. Clear at most one per call to keep max-shape CU
-            // bounded; the classifier keeps another obligation actionable.
+            // A prior-reset leg no longer owns effective OI. This includes a
+            // legacy exhausted residue migrated into a reset above.
             let should_clear_reset = if reset_obligation_cleared
                 || !Self::leg_is_prior_reset_obligation(asset, refreshed)
             {
@@ -12497,16 +12517,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let active = active_bitmap_get(bitmap, slot) && leg.active;
             if active {
                 let asset = self.asset_state(leg.asset_index as usize)?;
-                let (side_oi, side_mode, asset_epoch) = match leg.side {
-                    SideV16::Long => (asset.oi_eff_long_q, asset.mode_long, asset.epoch_long),
-                    SideV16::Short => (asset.oi_eff_short_q, asset.mode_short, asset.epoch_short),
+                let (side_mode, asset_epoch) = match leg.side {
+                    SideV16::Long => (asset.mode_long, asset.epoch_long),
+                    SideV16::Short => (asset.mode_short, asset.epoch_short),
                 };
+                let matched_oi = asset.oi_eff_long_q.min(asset.oi_eff_short_q);
                 let (b_stale, refresh, liquidatable, reset_obligation) =
                     V16Core::kernel_auto_crank_leg_flags(
                         true,
                         asset.lifecycle,
                         leg.basis_pos_q,
-                        side_oi,
+                        matched_oi,
                         side_mode,
                         asset_epoch,
                         leg.epoch_snap,
@@ -12515,7 +12536,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 b_stale_flags[slot] = b_stale;
                 refresh_flags[slot] = refresh;
                 liquidation_flags[slot] = liquidatable;
-                reset_obligation_flags[slot] = reset_obligation;
+                reset_obligation_flags[slot] =
+                    reset_obligation || Self::leg_has_exhausted_effective_oi(asset, leg);
             }
             slot += 1;
         }
@@ -14267,6 +14289,41 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn unilateral_close_capacity(&self, asset_index: usize, stored_abs: u128) -> V16Result<u128> {
+        let asset = self.asset_state(asset_index)?;
+        Ok(V16Core::kernel_unilateral_close_capacity(
+            stored_abs,
+            asset.oi_eff_long_q,
+            asset.oi_eff_short_q,
+        ))
+    }
+
+    fn begin_side_reset_if_effective_oi_exhausted(
+        &mut self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<()> {
+        let asset = self.asset_state(asset_index)?;
+        let exhausted = match side {
+            SideV16::Long => {
+                asset.oi_eff_long_q == 0
+                    && asset.stored_pos_count_long != 0
+                    && asset.pending_obligation_count_long == 0
+                    && asset.mode_long != SideModeV16::ResetPending
+            }
+            SideV16::Short => {
+                asset.oi_eff_short_q == 0
+                    && asset.stored_pos_count_short != 0
+                    && asset.pending_obligation_count_short == 0
+                    && asset.mode_short != SideModeV16::ResetPending
+            }
+        };
+        if exhausted && !self.has_pending_domain_loss_barrier(asset_index, side)? {
+            self.begin_full_drain_reset_inner(asset_index, side)?;
+        }
+        Ok(())
+    }
+
     fn reduce_matching_open_interest_for_unilateral_close(
         &mut self,
         asset_index: usize,
@@ -14342,6 +14399,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             SideV16::Short => close_i128,
         };
         self.apply_position_delta(account, asset_index, delta)?;
+        self.begin_side_reset_if_effective_oi_exhausted(asset_index, leg.side)?;
         self.reduce_matching_open_interest_for_unilateral_close(asset_index, leg.side, close_q)
     }
 
@@ -14398,8 +14456,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // contract now governs the real liquidation route (3C). Liquidation size
         // is engine-selected: close just enough to restore maintenance health
         // when possible, otherwise close the selected leg fully.
+        let close_budget = close_request_q.min(
+            self.unilateral_close_capacity(request.asset_index, leg.basis_pos_q.unsigned_abs())?,
+        );
+        if close_budget == 0 {
+            return Err(V16Error::NonProgress);
+        }
         let (close_q, close_delta) =
-            V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, close_request_q)?;
+            V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, close_budget)?;
         if self.position_delta_touches_pending_domain_loss_barrier(
             &account.as_view(),
             request.asset_index,
@@ -14524,8 +14588,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         // PRODUCTION KERNEL: clamp + toward-zero reduction delta (rank decrease,
         // never over-closes, full close clears).
+        let reduce_budget = request.reduce_q.min(
+            self.unilateral_close_capacity(request.asset_index, leg.basis_pos_q.unsigned_abs())?,
+        );
         let (reduce_q, reduce_delta) =
-            V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, request.reduce_q)?;
+            V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, reduce_budget)?;
         if reduce_q == 0 {
             return Err(V16Error::NonProgress);
         }
@@ -16176,6 +16243,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
                     return Ok(());
                 }
+                let asset = self.asset_state(asset_index)?;
+                if Self::leg_has_exhausted_effective_oi(asset, leg) {
+                    self.begin_full_drain_reset_inner(asset_index, leg.side)?;
+                }
                 let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
                 if k_target != leg.k_snap || f_target != leg.f_snap {
                     return Ok(());
@@ -16515,6 +16586,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             support_consumed,
             junior_face_burned,
         ))
+    }
+
+    fn leg_has_exhausted_effective_oi(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
+        let (effective_oi, stored_count, pending_count, mode) = match leg.side {
+            SideV16::Long => (
+                asset.oi_eff_long_q,
+                asset.stored_pos_count_long,
+                asset.pending_obligation_count_long,
+                asset.mode_long,
+            ),
+            SideV16::Short => (
+                asset.oi_eff_short_q,
+                asset.stored_pos_count_short,
+                asset.pending_obligation_count_short,
+                asset.mode_short,
+            ),
+        };
+        leg.active
+            && leg.basis_pos_q != 0
+            && effective_oi == 0
+            && stored_count != 0
+            && pending_count == 0
+            && mode != SideModeV16::ResetPending
     }
 
     pub fn forfeit_recovery_leg_not_atomic(
