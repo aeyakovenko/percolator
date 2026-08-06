@@ -818,6 +818,16 @@ impl V16Core {
         ))
     }
 
+    fn terminal_claim_free_overlap_recredit(
+        provider_receivable_atoms: u128,
+        paired_domain_insurance_spent: u128,
+        claim_free_residual_remaining: u128,
+    ) -> u128 {
+        provider_receivable_atoms
+            .min(paired_domain_insurance_spent)
+            .min(claim_free_residual_remaining)
+    }
+
     #[inline]
     fn validate_bound_num_atom_aligned(bound_num: u128) -> V16Result<()> {
         if bound_num == 0 {
@@ -5346,6 +5356,17 @@ impl TokenValueFlowProofV16 {
         let mut proof = Self::empty(vault_before, vault_after);
         proof.debit(TokenValueClassV16::InsuranceCapital, amount)?;
         proof.credit(TokenValueClassV16::AccountCapital, amount)?;
+        Ok(proof)
+    }
+
+    fn unallocated_protocol_surplus_to_insurance(
+        amount: u128,
+        vault_before: u128,
+        vault_after: u128,
+    ) -> V16Result<Self> {
+        let mut proof = Self::empty(vault_before, vault_after);
+        proof.debit(TokenValueClassV16::UnallocatedProtocolSurplus, amount)?;
+        proof.credit(TokenValueClassV16::InsuranceCapital, amount)?;
         Ok(proof)
     }
 
@@ -9925,6 +9946,103 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             counterparty_credit_consumed,
             insurance_credit_consumed,
         })
+    }
+
+    fn recredit_terminal_claim_free_overlap_for_source_domain_not_atomic(
+        &mut self,
+        source_domain: usize,
+        claim_free_residual_remaining: &mut u128,
+    ) -> V16Result<u128> {
+        let (asset_index, source_side) = self.domain_asset_side(source_domain)?;
+        let insurance_domain =
+            self.insurance_domain_index(asset_index, opposite_side(source_side))?;
+        let (_, insurance_spent) = self.domain_insurance_budget_spent(insurance_domain)?;
+        let provider_receivable_atoms = self
+            .source_credit_for_domain(source_domain)?
+            .provider_receivable_num
+            / BOUND_SCALE;
+        let recredit = V16Core::terminal_claim_free_overlap_recredit(
+            provider_receivable_atoms,
+            insurance_spent,
+            *claim_free_residual_remaining,
+        );
+        if recredit == 0 {
+            return Ok(0);
+        }
+
+        let vault_before = self.header.vault.get();
+        self.header.insurance = V16PodU128::new(
+            self.header
+                .insurance
+                .get()
+                .checked_add(recredit)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        );
+        self.set_domain_insurance_spent_core(
+            insurance_domain,
+            insurance_spent
+                .checked_sub(recredit)
+                .ok_or(V16Error::CounterUnderflow)?,
+        )?;
+        *claim_free_residual_remaining = claim_free_residual_remaining
+            .checked_sub(recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        TokenValueFlowProofV16::unallocated_protocol_surplus_to_insurance(
+            recredit,
+            vault_before,
+            self.header.vault.get(),
+        )?
+        .validate()?;
+        Ok(recredit)
+    }
+
+    /// Restores one asset's claim-free terminal residual that is also backed by
+    /// both an outstanding counterparty-provider receivable and historical
+    /// insurance spend on the paired side. The final materialized-portfolio gate
+    /// makes the residual unowned by traders before any reclassification occurs.
+    ///
+    /// This operation is intentionally asset-local: wrapper callers can make
+    /// bounded progress even when the market account contains thousands of
+    /// configured slots.
+    pub fn recredit_terminal_claim_free_residual_for_asset_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<u128> {
+        self.validate_shape()?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved
+            || self.header.materialized_portfolio_count.get() != 0
+            || self.header.c_tot.get() != 0
+            || self.header.pnl_pos_tot.get() != 0
+            || self.header.pnl_matured_pos_tot.get() != 0
+            || self.header.pnl_pos_bound_tot.get() != 0
+            || self.header.pnl_pos_bound_tot_num.get() != 0
+            || self.header.source_claim_bound_total_num.get() != 0
+            || self.header.resolved_payout_blocker_count.get() != 0
+            || self.header.stale_certificate_count.get() != 0
+            || self.header.b_stale_account_count.get() != 0
+            || self.header.negative_pnl_account_count.get() != 0
+        {
+            return Err(V16Error::LockActive);
+        }
+
+        let mut claim_free_residual_remaining = self.residual();
+        let mut recredited_total = 0u128;
+        for side in [SideV16::Long, SideV16::Short] {
+            if claim_free_residual_remaining == 0 {
+                break;
+            }
+            let source_domain = self.insurance_domain_index(asset_index, side)?;
+            let recredited = self
+                .recredit_terminal_claim_free_overlap_for_source_domain_not_atomic(
+                    source_domain,
+                    &mut claim_free_residual_remaining,
+                )?;
+            recredited_total = recredited_total
+                .checked_add(recredited)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        }
+        self.validate_shape()?;
+        Ok(recredited_total)
     }
 
     fn create_and_consume_account_source_credit_for_effective_not_atomic(

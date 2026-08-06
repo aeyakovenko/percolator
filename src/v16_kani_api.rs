@@ -283,6 +283,18 @@ pub fn kani_source_credit_state_realizable_support_for_face(
     V16Core::source_credit_state_realizable_support_for_face(state, face_claim)
 }
 
+pub fn kani_terminal_claim_free_overlap_recredit(
+    provider_receivable_atoms: u128,
+    paired_domain_insurance_spent: u128,
+    claim_free_residual_remaining: u128,
+) -> u128 {
+    V16Core::terminal_claim_free_overlap_recredit(
+        provider_receivable_atoms,
+        paired_domain_insurance_spent,
+        claim_free_residual_remaining,
+    )
+}
+
 pub fn kani_backing_utilization_rate_e9_for_source_state(
     config: V16Config,
     source: SourceCreditStateV16,
@@ -612,6 +624,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             budget,
             old_spent,
             new_spent,
+        )
+    }
+
+    pub fn kani_recredit_terminal_claim_free_overlap_for_source_domain_not_atomic(
+        &mut self,
+        source_domain: usize,
+        claim_free_residual_remaining: &mut u128,
+    ) -> V16Result<u128> {
+        self.recredit_terminal_claim_free_overlap_for_source_domain_not_atomic(
+            source_domain,
+            claim_free_residual_remaining,
         )
     }
 
