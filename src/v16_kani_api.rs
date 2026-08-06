@@ -1092,6 +1092,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::ensure_no_positive_credit_initial_margin(account)
     }
 
+    pub fn kani_trade_account_requires_initial_margin(current: i128, next: i128) -> bool {
+        trade_account_requires_initial_margin(current, next)
+    }
+
     pub fn kani_apply_trade_after_refresh_not_atomic(
         &mut self,
         long_account: &mut PortfolioV16ViewMut<'_>,
@@ -1130,6 +1134,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 fee_b,
                 notional,
                 risk_increasing: applied_risk_increasing,
+                long_requires_initial_margin: true,
+                short_requires_initial_margin: true,
                 long_has_source_claims: applied_long_has_source_claims,
                 short_has_source_claims: applied_short_has_source_claims,
             },

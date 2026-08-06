@@ -1793,6 +1793,8 @@ fn contract_check_kernel_accumulate_batch_trade() {
         fee_b: kani::any(),
         notional: kani::any(),
         risk_increasing: kani::any(),
+        long_requires_initial_margin: kani::any(),
+        short_requires_initial_margin: kani::any(),
         long_has_source_claims: kani::any(),
         short_has_source_claims: kani::any(),
     };

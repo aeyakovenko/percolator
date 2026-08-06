@@ -4971,6 +4971,8 @@ struct TradeApplyOutcomeV16 {
     fee_b: u128,
     notional: u128,
     risk_increasing: bool,
+    long_requires_initial_margin: bool,
+    short_requires_initial_margin: bool,
     long_has_source_claims: bool,
     short_has_source_claims: bool,
 }
@@ -4978,6 +4980,8 @@ struct TradeApplyOutcomeV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TradePositionPreflightV16 {
     risk_increasing: bool,
+    long_requires_initial_margin: bool,
+    short_requires_initial_margin: bool,
     long_lookup: PositionDeltaLookupV16,
     short_lookup: PositionDeltaLookupV16,
     long_old_abs_q: u128,
@@ -13205,8 +13209,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Self::position_delta_lookup_for_asset(long_account, request.asset_index, long_delta)?;
         let short_lookup =
             Self::position_delta_lookup_for_asset(short_account, request.asset_index, short_delta)?;
-        let risk_increasing = position_delta_increases_risk(long_lookup.current_q, long_delta)?
-            || position_delta_increases_risk(short_lookup.current_q, short_delta)?;
+        let long_risk_increasing =
+            position_delta_increases_risk(long_lookup.current_q, long_delta)?;
+        let short_risk_increasing =
+            position_delta_increases_risk(short_lookup.current_q, short_delta)?;
+        let risk_increasing = long_risk_increasing || short_risk_increasing;
         let asset = self
             .markets
             .get(request.asset_index)
@@ -13248,6 +13255,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?;
         Ok(TradePositionPreflightV16 {
             risk_increasing,
+            long_requires_initial_margin: trade_account_requires_initial_margin(
+                long_lookup.current_q,
+                long_lookup.next_q,
+            ),
+            short_requires_initial_margin: trade_account_requires_initial_margin(
+                short_lookup.current_q,
+                short_lookup.next_q,
+            ),
             long_lookup,
             short_lookup,
             long_old_abs_q: long_lookup.current_q.unsigned_abs(),
@@ -14567,6 +14582,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             fee_b,
             notional,
             risk_increasing,
+            long_requires_initial_margin: trade_preflight.long_requires_initial_margin,
+            short_requires_initial_margin: trade_preflight.short_requires_initial_margin,
             long_has_source_claims: trade_preflight.long_has_source_claims,
             short_has_source_claims: trade_preflight.short_has_source_claims,
         })
@@ -14599,22 +14616,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         short_account: &mut PortfolioV16ViewMut<'_>,
         locked: bool,
         risk_increasing: bool,
+        long_requires_initial_margin: bool,
+        short_requires_initial_margin: bool,
         long_has_source_claims: bool,
         short_has_source_claims: bool,
     ) -> V16Result<()> {
         if risk_increasing && !locked {
-            if long_has_source_claims {
+            if long_requires_initial_margin && long_has_source_claims {
                 self.create_initial_margin_source_lien_if_needed(long_account)?;
             }
-            if short_has_source_claims {
+            if short_requires_initial_margin && short_has_source_claims {
                 self.create_initial_margin_source_lien_if_needed(short_account)?;
             }
         }
-        Self::ensure_initial_margin(&long_account.as_view())?;
-        Self::ensure_initial_margin(&short_account.as_view())?;
+        if long_requires_initial_margin {
+            Self::ensure_initial_margin(&long_account.as_view())?;
+        }
+        if short_requires_initial_margin {
+            Self::ensure_initial_margin(&short_account.as_view())?;
+        }
         if locked {
-            Self::ensure_no_positive_credit_initial_margin(&long_account.as_view())?;
-            Self::ensure_no_positive_credit_initial_margin(&short_account.as_view())?;
+            if long_requires_initial_margin {
+                Self::ensure_no_positive_credit_initial_margin(&long_account.as_view())?;
+            }
+            if short_requires_initial_margin {
+                Self::ensure_no_positive_credit_initial_margin(&short_account.as_view())?;
+            }
         }
         self.validate_shape_audit_scan()?;
         self.validate_account_audit_scan(&long_account.as_view())?;
@@ -14715,6 +14742,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             notional: 0,
         };
         let mut risk_increasing = false;
+        let mut long_requires_initial_margin = false;
+        let mut short_requires_initial_margin = false;
         let mut long_has_source_claims = false;
         let mut short_has_source_claims = false;
         let recertify_after_fill = requests.len() == 1;
@@ -14726,6 +14755,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 requests[i],
                 recertify_after_fill,
             )?;
+            long_requires_initial_margin |= applied.long_requires_initial_margin;
+            short_requires_initial_margin |= applied.short_requires_initial_margin;
             Self::accumulate_batch_trade_apply(
                 &mut outcome,
                 &mut risk_increasing,
@@ -14744,6 +14775,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             short_account,
             locked,
             risk_increasing,
+            long_requires_initial_margin,
+            short_requires_initial_margin,
             long_has_source_claims,
             short_has_source_claims,
         )?;
@@ -16947,6 +16980,10 @@ fn position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool
         .ok_or(V16Error::ArithmeticOverflow)?;
     validate_basis_or_zero(next)?;
     Ok(next.unsigned_abs() > current.unsigned_abs())
+}
+
+fn trade_account_requires_initial_margin(current: i128, next: i128) -> bool {
+    next.unsigned_abs() >= current.unsigned_abs()
 }
 
 fn trade_preflight_risk_gate(
