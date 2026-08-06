@@ -9,8 +9,9 @@ use percolator::v16::{
     kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
-    kani_expected_source_credit_rate_num_for_state, kani_first_actionable_slot,
-    kani_health_cert_after_capital_debit, kani_health_requirements_from_base_and_target_lag,
+    kani_commit_declared_liquidation_recovery, kani_expected_source_credit_rate_num_for_state,
+    kani_first_actionable_slot, kani_health_cert_after_capital_debit,
+    kani_health_requirements_from_base_and_target_lag,
     kani_liquidation_close_would_leave_uncovered_loss_with_open_risk,
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
@@ -25,7 +26,7 @@ use percolator::v16::{
     BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut, MarketModeV16,
     PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
@@ -3406,6 +3407,7 @@ fn proof_v16_recovery_mode_blocks_fee_sync_and_pnl_conversion_before_mutation() 
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
+    let start_in_recovery: bool = kani::any();
     let current_slot_raw: u8 = kani::any();
     let stale_lag_raw: u8 = kani::any();
     let resolved_delta_raw: u8 = kani::any();
@@ -3428,10 +3430,17 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
     header.loss_stale_active = if slot_last < current_slot { 1 } else { 0 };
     header.current_slot = V16PodU64::new(current_slot);
     header.slot_last = V16PodU64::new(slot_last);
+    if start_in_recovery {
+        header.mode = 2;
+        header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        ));
+    }
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
     let slot_last_before = header.slot_last;
+    let recovery_reason_before = header.recovery_reason;
     let asset_before = markets[0].engine.asset;
     let long_budget_before = markets[0].engine.insurance_domain_budget_long;
     let short_budget_before = markets[0].engine.insurance_domain_budget_short;
@@ -3452,11 +3461,16 @@ fn proof_v16_public_resolve_market_is_value_neutral_and_clears_loss_stale() {
             && surplus > 255,
         "resolved market transition covers future authenticated slot over wide symbolic value state"
     );
+    kani::cover!(
+        start_in_recovery && c_tot > 255 && insurance > 255,
+        "permissionless Recovery-to-Resolved transition preserves nontrivial senior value"
+    );
     assert_eq!(market.header.mode, 1);
     assert_eq!(market.header.resolved_slot.get(), resolved_slot);
     assert_eq!(market.header.current_slot.get(), resolved_slot);
     assert_eq!(market.header.slot_last, slot_last_before);
     assert_eq!(market.header.loss_stale_active, 0);
+    assert_eq!(market.header.recovery_reason, recovery_reason_before);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
@@ -15283,9 +15297,16 @@ fn proof_v16_frame_earnings_withdraw_touches_only_declared_state() {
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 fn proof_v16_frame_resolve_market_touches_only_declared_state() {
+    let start_in_recovery: bool = kani::any();
     let delta_raw: u8 = kani::any();
     kani::assume(delta_raw >= 1 && delta_raw <= 8);
     let (mut header, mut markets, _) = one_market_view_fixture();
+    if start_in_recovery {
+        header.mode = 2;
+        header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        ));
+    }
     let resolved_slot = header.current_slot.get() + delta_raw as u64;
     let h0 = header;
     let s0 = markets[0].engine;
@@ -15293,7 +15314,7 @@ fn proof_v16_frame_resolve_market_touches_only_declared_state() {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         market.resolve_market_not_atomic(resolved_slot).unwrap();
     }
-    kani::cover!(true, "resolve frame reached");
+    kani::cover!(start_in_recovery, "Recovery-to-Resolved frame reached");
     let mut eh = h0;
     eh.mode = 1;
     eh.resolved_slot = V16PodU64::new(resolved_slot);
@@ -15889,7 +15910,7 @@ fn proof_v16_validator_sound_account_reserves() {
 // asset refresh and every other plan are dispatchable from committed state.
 // Pinning this truth table means a future arm that gates committed-state progress
 // on an observation contradicts a machine-checked theorem. Exhaustive over the
-// six AutoCrankPlanV16 variants; the spec matrix ties the predicate to the real
+// seven AutoCrankPlanV16 variants; the spec matrix ties the predicate to the real
 // dispatch for each reachable class.
 #[kani::proof]
 fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
@@ -15910,6 +15931,7 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     }));
     assert!(!needs_obs(&AutoCrankPlanV16::Liquidate { asset_index: i }));
     assert!(!needs_obs(&AutoCrankPlanV16::NoAction));
+    assert!(!needs_obs(&AutoCrankPlanV16::FinalizeRecovery));
     assert!(!needs_obs(&AutoCrankPlanV16::CloseResolved));
     // The predicate matches DeclareRecovery { .. } regardless of reason, so a
     // concrete variant exercises the arm (the reason enum isn't Arbitrary here).
@@ -16361,4 +16383,84 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
 
     assert!(!kani_should_clear_prior_reset_obligation(false, true, true));
     assert!(!kani_should_clear_prior_reset_obligation(true, true, false));
+}
+
+// Rollback-sensitive auto-crank theorem: no engine error may be swallowed unless
+// the same liquidation call left a complete committed Recovery marker. This is
+// exhaustive over every V16Error, market mode, recovery reason, and missing-reason
+// state. The production integration test drives the real cross-margin liquidation
+// into this kernel; this theorem pins the fail-closed conversion boundary.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
+    let error_tag: u8 = kani::any();
+    let mode_tag: u8 = kani::any();
+    let reason_tag: u8 = kani::any();
+    kani::assume(error_tag < 12);
+    kani::assume(mode_tag < 3);
+    kani::assume(reason_tag <= 8);
+
+    let error = match error_tag {
+        0 => V16Error::InvalidConfig,
+        1 => V16Error::ArithmeticOverflow,
+        2 => V16Error::ProvenanceMismatch,
+        3 => V16Error::HiddenLeg,
+        4 => V16Error::InvalidLeg,
+        5 => V16Error::Stale,
+        6 => V16Error::BStale,
+        7 => V16Error::LockActive,
+        8 => V16Error::NonProgress,
+        9 => V16Error::RecoveryRequired,
+        10 => V16Error::CounterOverflow,
+        _ => V16Error::CounterUnderflow,
+    };
+    let mode = match mode_tag {
+        0 => MarketModeV16::Live,
+        1 => MarketModeV16::Resolved,
+        _ => MarketModeV16::Recovery,
+    };
+    let reason = match reason_tag {
+        0 => Some(PermissionlessRecoveryReasonV16::BelowProgressFloor),
+        1 => Some(PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability),
+        2 => Some(PermissionlessRecoveryReasonV16::AccountBSettlementCannotProgress),
+        3 => Some(PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted),
+        4 => Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress),
+        5 => Some(PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow),
+        6 => Some(PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy),
+        7 => Some(PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery),
+        _ => None,
+    };
+
+    let result = kani_commit_declared_liquidation_recovery(error, mode, reason);
+    let complete_declaration =
+        error == V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_some();
+    if complete_declaration {
+        assert_eq!(
+            result,
+            Ok(PermissionlessProgressOutcomeV16::RecoveryDeclared(
+                reason.unwrap()
+            ))
+        );
+    } else {
+        assert_eq!(result, Err(error));
+    }
+
+    kani::cover!(
+        complete_declaration
+            && reason == Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress),
+        "a fully declared liquidation terminal commits successful recovery progress"
+    );
+    kani::cover!(
+        error == V16Error::RecoveryRequired && mode == MarketModeV16::Live,
+        "a bare recovery-required error is not swallowed"
+    );
+    kani::cover!(
+        error == V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_none(),
+        "an incomplete Recovery marker fails closed"
+    );
+    kani::cover!(
+        error != V16Error::RecoveryRequired && mode == MarketModeV16::Recovery && reason.is_some(),
+        "Recovery state cannot mask an unrelated engine error"
+    );
 }

@@ -6,14 +6,14 @@ use percolator::{
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
     BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
     HealthCertV16, HealthCertV16Account, LiquidationRequestV16, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceRequestV16, ResolvedPayoutLedgerV16,
     ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
     SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    V16Config, V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32,
+    V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
@@ -4065,6 +4065,121 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
     account.validate_with_market(&market.as_view()).unwrap();
 }
 
+#[test]
+fn v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 15);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    header.vault = V16PodU128::new(50);
+    header.insurance = V16PodU128::new(50);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    for (asset_index, market_slot) in markets.iter_mut().enumerate() {
+        let mut asset = market_slot.engine.asset.try_to_runtime().unwrap();
+        asset.slot_last = 10;
+        asset.oi_eff_long_q = 2 * POS_SCALE;
+        asset.oi_eff_short_q = 2 * POS_SCALE;
+        asset.loss_weight_sum_long = 2 * POS_SCALE;
+        asset.loss_weight_sum_short = 2 * POS_SCALE;
+        asset.stored_pos_count_long = 2;
+        asset.stored_pos_count_short = 2;
+        market_slot.engine.asset = AssetStateV16Account::from_runtime(&asset);
+        account_header.legs[asset_index] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index: asset_index as u32,
+            market_id: asset.market_id,
+            side: SideV16::Long,
+            basis_pos_q: POS_SCALE as i128,
+            a_basis: ADL_ONE,
+            k_snap: asset.k_long,
+            f_snap: asset.f_long_num,
+            epoch_snap: asset.epoch_long,
+            loss_weight: POS_SCALE,
+            b_snap: asset.b_long_num,
+            b_rem: 0,
+            b_epoch_snap: asset.epoch_long,
+            b_stale: false,
+            stale: false,
+        });
+    }
+    header.resolved_payout_blocker_count = V16PodU64::new(8);
+    account_header.active_bitmap[0] = V16PodU64::new(0b11);
+    account_header.pnl = V16PodI128::new(-5);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .full_account_refresh_not_atomic(&mut account)
+        .expect("setup must produce a current cross-margin liquidation cert");
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(summary.liquidatable && !summary.recovery_eligible);
+
+    let bitmap_before = account.header.active_bitmap;
+    let pnl_before = account.header.pnl;
+    let capital_before = account.header.capital;
+    let vault_before = market.header.vault;
+    let c_tot_before = market.header.c_tot;
+    let insurance_before = market.header.insurance;
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("recovery-required liquidation must be successful crank progress");
+
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::Liquidate { asset_index: 0 }
+    );
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::RecoveryDeclared(
+            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        ))
+    );
+    assert_eq!(market.header.mode, 2, "market must commit Recovery mode");
+    assert_eq!(account.header.active_bitmap, bitmap_before);
+    assert_eq!(account.header.pnl, pnl_before);
+    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+
+    let recovery_reason_before = market.header.recovery_reason;
+    let finalized = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the next public crank must finalize Recovery into Resolved");
+    assert_eq!(finalized.selected, AutoCrankPlanV16::FinalizeRecovery);
+    assert_eq!(finalized.outcome, AutoCrankOutcomeV16::RecoveryResolved);
+    assert_eq!(
+        market.header.mode, 1,
+        "terminal close must become reachable"
+    );
+    assert_eq!(market.header.recovery_reason, recovery_reason_before);
+    assert_eq!(account.header.active_bitmap, bitmap_before);
+    assert_eq!(account.header.pnl, pnl_before);
+    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
 // ROADMAP 3C step 4 — terminal no-DoS route via the self-classifying crank: a
 // Live account whose outstanding bankruptcy close ledger has EXPIRED (current
 // slot past max_close_slot) is classified expired_close, and the auto-crank
@@ -4560,6 +4675,25 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         AutoCrankPlanV16::DeclareRecovery {
             reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
         },
+        false,
+    );
+
+    // --- A6 terminal Recovery: the next step is a value-neutral transition to
+    // Resolved and needs no oracle observation.
+    assert_observation_independent(
+        "finalize_recovery",
+        || {
+            let (mut header, markets) = market_fixture(1, 100);
+            let account_header = account_fixture(1, 205);
+            header.mode = 2;
+            header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+                PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            ));
+            (header, markets, account_header)
+        },
+        0,
+        10,
+        AutoCrankPlanV16::FinalizeRecovery,
         false,
     );
 

@@ -67,6 +67,14 @@ pub fn kani_select_auto_crank_plan(
     )
 }
 
+pub fn kani_commit_declared_liquidation_recovery(
+    error: V16Error,
+    mode: MarketModeV16,
+    reason: Option<PermissionlessRecoveryReasonV16>,
+) -> V16Result<PermissionlessProgressOutcomeV16> {
+    V16Core::kernel_commit_declared_liquidation_recovery(error, mode, reason)
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,
