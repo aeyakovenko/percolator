@@ -16104,7 +16104,7 @@ fn proof_v16_validator_sound_account_reserves() {
 // asset refresh and every other plan are dispatchable from committed state.
 // Pinning this truth table means a future arm that gates committed-state progress
 // on an observation contradicts a machine-checked theorem. Exhaustive over the
-// seven AutoCrankPlanV16 variants; the spec matrix ties the predicate to the real
+// eight AutoCrankPlanV16 variants; the spec matrix ties the predicate to the real
 // dispatch for each reachable class.
 #[kani::proof]
 fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
@@ -16124,6 +16124,7 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
         asset_index: i
     }));
     assert!(!needs_obs(&AutoCrankPlanV16::Liquidate { asset_index: i }));
+    assert!(!needs_obs(&AutoCrankPlanV16::AdvanceClose));
     assert!(!needs_obs(&AutoCrankPlanV16::NoAction));
     assert!(!needs_obs(&AutoCrankPlanV16::FinalizeRecovery));
     assert!(!needs_obs(&AutoCrankPlanV16::CloseResolved));
@@ -16132,6 +16133,73 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     assert!(!needs_obs(&AutoCrankPlanV16::DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
     }));
+}
+
+// Pending close is a production-dispatchable class, not merely a proof-summary
+// placeholder. It outranks B settlement, liquidation, and refresh, but remains
+// below terminal recovery and resolved close in the selector.
+#[kani::proof]
+fn proof_v16_auto_crank_pending_close_priority_is_total() {
+    let lower = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: true,
+            b_stale: true,
+            pending_close: true,
+            expired_close: false,
+            liquidatable: true,
+            recovery_eligible: false,
+            resolved_winner: false,
+        },
+        3,
+        4,
+        Some(5),
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+    assert_eq!(lower, AutoCrankPlanV16::AdvanceClose);
+
+    let terminal = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: true,
+            b_stale: true,
+            pending_close: true,
+            expired_close: true,
+            liquidatable: true,
+            recovery_eligible: false,
+            resolved_winner: true,
+        },
+        3,
+        4,
+        Some(5),
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+    assert_eq!(
+        terminal,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
+
+    let unattributed_flat_deficit = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: false,
+            b_stale: false,
+            pending_close: false,
+            expired_close: false,
+            liquidatable: false,
+            recovery_eligible: true,
+            resolved_winner: false,
+        },
+        0,
+        0,
+        None,
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+    assert_eq!(
+        unattributed_flat_deficit,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
 }
 
 // LoF — no free open interest: a risk-increasing fill with nonzero size, nonzero

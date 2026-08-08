@@ -1168,11 +1168,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         request: TradeRequestV16,
         recertify_after_fill: bool,
     ) -> V16Result<(u128, u128, u128, bool)> {
+        let long_attributable_asset_before_refresh =
+            Self::terminal_trade_residual_asset_before_refresh(&long_account.as_view())?;
+        let short_attributable_asset_before_refresh =
+            Self::terminal_trade_residual_asset_before_refresh(&short_account.as_view())?;
         let out = self.apply_trade_after_refresh_not_atomic(
             long_account,
             short_account,
             request,
             recertify_after_fill,
+            true,
+            long_attributable_asset_before_refresh,
+            short_attributable_asset_before_refresh,
         )?;
         Ok((out.fee_a, out.fee_b, out.notional, out.risk_increasing))
     }

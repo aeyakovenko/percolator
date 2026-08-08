@@ -1,6 +1,6 @@
 use percolator::{
-    auto_crank_plan_requires_caller_observation, AutoCrankObservationV16, AutoCrankOutcomeV16,
-    AutoCrankPlanV16, AutoCrankWorkV16,
+    active_bitmap_is_empty, auto_crank_plan_requires_caller_observation, AutoCrankObservationV16,
+    AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankWorkV16,
 };
 use percolator::{
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
@@ -15,6 +15,8 @@ use percolator::{
     V16Config, V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32,
     V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
+#[cfg(feature = "fuzz")]
+use percolator::{PermissionlessCrankActionV16, PermissionlessCrankRequestV16};
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
 const FUNDING_COUNTER_PRICE: u64 = 1_000_000;
@@ -4253,6 +4255,333 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
 }
 
 #[test]
+fn v16_trade_final_leg_residual_routes_through_close_and_terminal_recovery() {
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(1, 61);
+    let mut short_header = account_fixture(1, 62);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 250).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(SIZE_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    for (offset, price) in (105u64..=150).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, price)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap();
+    }
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(SIZE_Q),
+                exec_price: 150,
+                fee_bps: 0,
+            },
+        )
+        .expect("risk-reducing final trade must remain available");
+
+    let pending = short.header.close_progress.try_to_runtime().unwrap();
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(short.header.capital.get(), 0);
+    assert_eq!(short.header.pnl.get(), -250);
+    assert!(pending.active && !pending.finalized && pending.residual_remaining != 0);
+    assert_eq!(pending.asset_index, 0);
+    assert_eq!(pending.domain_side, SideV16::Long);
+    assert_eq!(pending.residual_remaining, 250);
+    assert!(
+        market
+            .build_actionable_summary(&short.as_view())
+            .unwrap()
+            .pending_close
+    );
+
+    let work = AutoCrankWorkV16 {
+        now_slot: 11,
+        observations: &[],
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let booked = market
+        .permissionless_auto_crank_not_atomic(&mut short, work)
+        .expect("pending close must have a committed-state continuation");
+    assert_eq!(booked.selected, AutoCrankPlanV16::AdvanceClose);
+    assert!(matches!(
+        booked.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::ResidualBooked(_))
+    ));
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    let finalized = short.header.close_progress.try_to_runtime().unwrap();
+    assert!(finalized.active && finalized.finalized && finalized.residual_remaining == 0);
+
+    let recovery = market
+        .permissionless_auto_crank_not_atomic(&mut short, work)
+        .expect("sticky bankruptcy lock must route to terminal recovery");
+    assert_eq!(
+        recovery.selected,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
+    assert_eq!(market.header.mode, 2);
+
+    let resolved = market
+        .permissionless_auto_crank_not_atomic(&mut short, work)
+        .expect("recovery must finalize permissionlessly");
+    assert_eq!(resolved.selected, AutoCrankPlanV16::FinalizeRecovery);
+    assert_eq!(market.header.mode, 1);
+
+    let loser_close = market
+        .close_resolved_account_not_atomic(&mut short, 0)
+        .expect("the flat bankrupt account must close in Resolved mode");
+    assert!(matches!(
+        loser_close,
+        percolator::ResolvedCloseOutcomeV16::Closed { payout: 0 }
+    ));
+    let mut winner_closed = false;
+    let mut last_winner_close = None;
+    for _ in 0..8 {
+        let close = market
+            .close_resolved_account_not_atomic(&mut long, 0)
+            .expect("the loss-side obligation must make bounded resolved progress");
+        last_winner_close = Some(close);
+        if matches!(close, percolator::ResolvedCloseOutcomeV16::Closed { .. }) {
+            winner_closed = true;
+            break;
+        }
+    }
+    assert!(
+        winner_closed,
+        "the winner must reach terminal payout finitely: last={last_winner_close:?}, \
+         blockers={}, b_stale={}, stale={}, pnl={}, capital={}, bitmap={:?}, asset={:?}",
+        market.header.resolved_payout_blocker_count.get(),
+        long.header.b_stale_state,
+        long.header.stale_state,
+        long.header.pnl.get(),
+        long.header.capital.get(),
+        long.header.active_bitmap,
+        market.markets[0].engine.asset.try_to_runtime().unwrap(),
+    );
+    assert!(active_bitmap_is_empty(
+        long.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(long.header.capital.get(), 0);
+    assert_eq!(long.header.pnl.get(), 0);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_batch_trade_starts_terminal_residual_only_at_final_fill() {
+    const HALF_Q: u128 = 5 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(2, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(2, 63);
+    let mut short_header = account_fixture(2, 64);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 250).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(2 * HALF_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    for (offset, price) in (105u64..=150).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, price)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap();
+    }
+
+    let outcome = market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            &[
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: -signed_q(HALF_Q),
+                    exec_price: 150,
+                    fee_bps: 0,
+                },
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: -signed_q(HALF_Q),
+                    exec_price: 150,
+                    fee_bps: 0,
+                },
+            ],
+        )
+        .expect("an intermediate partial close must not lock the final fill");
+
+    assert_eq!(outcome.fill_count, 2);
+    let pending = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(pending.close_id, 1);
+    assert_eq!(pending.gross_loss_at_close_start, 250);
+    assert_eq!(pending.residual_remaining, 250);
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_trade_does_not_charge_prior_multi_asset_deficit_to_last_closed_asset() {
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(2, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(2, 65);
+    let mut short_header = account_fixture(2, 66);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 2_000).unwrap();
+    market.deposit_not_atomic(&mut short, 250).unwrap();
+    for asset_index in 0..2 {
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index,
+                    size_q: signed_q(SIZE_Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    for (offset, price) in (105u64..=150).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, price)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap();
+    }
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(SIZE_Q),
+                exec_price: 150,
+                fee_bps: 0,
+            },
+        )
+        .expect("the first risk-reducing close must remain available");
+    assert_eq!(short.header.pnl.get(), -250);
+    assert_eq!(
+        short
+            .header
+            .close_progress
+            .try_to_runtime()
+            .unwrap()
+            .residual_remaining,
+        0
+    );
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 1,
+                size_q: -signed_q(SIZE_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .expect("the final risk-reducing close must remain available");
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    let ledger = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.residual_remaining, 0);
+    assert!(
+        market
+            .build_actionable_summary(&short.as_view())
+            .unwrap()
+            .recovery_eligible,
+        "an unattributed flat deficit must recover, not charge asset 1"
+    );
+
+    let work = AutoCrankWorkV16 {
+        now_slot: market.header.current_slot.get(),
+        observations: &[],
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let recovery = market
+        .permissionless_auto_crank_not_atomic(&mut short, work)
+        .expect("unattributed flat deficit must have a terminal continuation");
+    assert_eq!(
+        recovery.selected,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
+    assert_eq!(market.header.mode, 2);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_auto_crank_liquidates_current_account_without_observation() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 14);
@@ -4845,6 +5174,69 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         0,
         10,
         AutoCrankPlanV16::SettleBChunk { asset_index: 0 },
+        false,
+    );
+
+    // --- A3 pending_close: the immutable close ledger carries all dispatch
+    // inputs, so AdvanceClose must not depend on a caller observation.
+    assert_observation_independent(
+        "pending_close",
+        || {
+            const SIZE_Q: u128 = 10 * POS_SCALE;
+            let (mut header, mut markets) = market_fixture(1, 100);
+            header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+            header.config.initial_margin_bps = V16PodU64::new(1_000);
+            header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+            header.config.max_accrual_dt_slots = V16PodU64::new(1);
+            header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+            header.config.public_b_chunk_atoms = V16PodU128::new(100);
+            let mut long_header = account_fixture(1, 211);
+            let mut short_header = account_fixture(1, 212);
+            {
+                let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+                let mut long = PortfolioV16ViewMut::new(&mut long_header);
+                let mut short = PortfolioV16ViewMut::new(&mut short_header);
+                market.deposit_not_atomic(&mut long, 1_000).unwrap();
+                market.deposit_not_atomic(&mut short, 250).unwrap();
+                market
+                    .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                        &mut long,
+                        &mut short,
+                        TradeRequestV16 {
+                            asset_index: 0,
+                            size_q: signed_q(SIZE_Q),
+                            exec_price: 100,
+                            fee_bps: 0,
+                        },
+                    )
+                    .unwrap();
+                for (offset, price) in (105u64..=150).step_by(5).enumerate() {
+                    let slot = 2 + offset as u64;
+                    market
+                        .set_asset_raw_oracle_target_not_atomic(0, price)
+                        .unwrap();
+                    market
+                        .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+                        .unwrap();
+                }
+                market
+                    .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                        &mut long,
+                        &mut short,
+                        TradeRequestV16 {
+                            asset_index: 0,
+                            size_q: -signed_q(SIZE_Q),
+                            exec_price: 150,
+                            fee_bps: 0,
+                        },
+                    )
+                    .unwrap();
+            }
+            (header, markets, short_header)
+        },
+        0,
+        11,
+        AutoCrankPlanV16::AdvanceClose,
         false,
     );
 
