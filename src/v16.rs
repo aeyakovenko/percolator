@@ -15144,9 +15144,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // Residual attribution is sound only when the account entered this
         // public batch nonnegative with exactly one live asset. A pre-existing
         // deficit or multi-asset account has lost per-domain provenance in the
-        // account-global PnL scalar; if it later becomes flat, auto-crank routes
-        // it to conservative terminal Recovery instead of charging the last
-        // touched asset.
+        // account-global PnL scalar; if it later becomes flat, it waits for the
+        // explicit market-level resolution policy instead of charging the last
+        // touched asset or letting one account force market-wide Recovery.
         let long_attributable_asset_before_refresh =
             Self::terminal_trade_residual_asset_before_refresh(&long_account.as_view())?;
         let short_attributable_asset_before_refresh =
