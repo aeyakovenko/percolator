@@ -12375,8 +12375,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
-    ///   recovery_eligible— Live sticky-h-lock completion or an unattributed
-    ///                      flat deficit that requires terminal Recovery
+    ///   recovery_eligible— reserved for selector-level proactive Recovery
     ///   resolved_winner  — Resolved, positive PnL, resolved payout ready
     /// Assembled via the proven actionable_summary_from_signals kernel. Live-only
     /// flags need cert currentness only where their entrypoint does (liquidate),
@@ -12442,18 +12441,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && cert.certified_liq_deficit != 0
             && has_open_risk
             && reset_obligation_asset.is_none();
-        // Bankruptcy h-lock is intentionally sticky in Live mode. Once every
-        // negative-PnL account has been durably settled, there is no further Live
-        // work that can clear it. A flat negative account without a durable close
-        // ledger has also lost asset-local attribution, so it must not charge an
-        // arbitrary domain. Both states route to terminal Recovery instead of
-        // leaving favorable actions locked or inventing attribution.
-        let flat_unattributed_deficit = account.header.pnl.get() < 0
-            && active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
-        let recovery_eligible = live
-            && decode_bool(self.header.bankruptcy_hlock_active)?
-            && !close_outstanding
-            && (self.header.negative_pnl_account_count.get() == 0 || flat_unattributed_deficit);
+        // A completed account-local bankruptcy must not let that account force a
+        // market-wide Recovery. In particular, a permissionless asset can be
+        // attacker-controlled while unrelated assets remain healthy. Outstanding
+        // close expiry remains the proactive Recovery route above; completed or
+        // unattributed deficits wait for an explicit market-level resolution
+        // policy instead of inventing an asset domain or terminating the market.
+        let recovery_eligible = false;
         // resolved_winner routes to close_resolved, which LAZILY captures the
         // payout snapshot itself (initialize_resolved_payout_ledger_if_needed is
         // reached only via close_resolved -> create_resolved_payout_receipt) — so

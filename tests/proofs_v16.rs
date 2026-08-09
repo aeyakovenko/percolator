@@ -16179,7 +16179,11 @@ fn proof_v16_auto_crank_pending_close_priority_is_total() {
         }
     );
 
-    let unattributed_flat_deficit = kani_select_auto_crank_plan(
+    // The selector remains total for a generic proactive-Recovery summary. The
+    // production classifier does not derive this flag from an account-local
+    // completed or unattributed deficit, because that would grant one account
+    // market-wide termination authority.
+    let proactive_recovery = kani_select_auto_crank_plan(
         ActionableSummaryV16 {
             stale: false,
             b_stale: false,
@@ -16195,7 +16199,7 @@ fn proof_v16_auto_crank_pending_close_priority_is_total() {
         PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
     );
     assert_eq!(
-        unattributed_flat_deficit,
+        proactive_recovery,
         AutoCrankPlanV16::DeclareRecovery {
             reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
         }
