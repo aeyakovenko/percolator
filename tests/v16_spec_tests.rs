@@ -2852,6 +2852,115 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
 }
 
 #[test]
+fn v16_resolved_impaired_source_accepts_prospective_terminal_loss() {
+    const Q: u128 = 1_000 * POS_SCALE;
+    const INCREASE_Q: u128 = POS_SCALE;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.initial_margin_bps = 5_000;
+    cfg.max_price_move_bps_per_slot = 500;
+    cfg.max_accrual_dt_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+
+    let mut liened_winner_header = account_fixture(1, 40);
+    let mut liened_peer_header = account_fixture(1, 41);
+    let mut expiry_trigger_header = account_fixture(1, 42);
+    let mut prospective_loser_header = account_fixture(1, 43);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut liened_winner = PortfolioV16ViewMut::new(&mut liened_winner_header);
+    let mut liened_peer = PortfolioV16ViewMut::new(&mut liened_peer_header);
+    let mut expiry_trigger = PortfolioV16ViewMut::new(&mut expiry_trigger_header);
+    let mut prospective_loser = PortfolioV16ViewMut::new(&mut prospective_loser_header);
+
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 3)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut liened_winner, 52_501)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut liened_peer, 1_000_000)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut expiry_trigger, 1_000_000)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut prospective_loser, 1_000_000)
+        .unwrap();
+    for (long, short) in [
+        (&mut liened_winner, &mut liened_peer),
+        (&mut expiry_trigger, &mut prospective_loser),
+    ] {
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                long,
+                short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    for account in [&mut liened_peer, &mut liened_winner, &mut expiry_trigger] {
+        market.full_account_refresh_not_atomic(account).unwrap();
+    }
+    assert_eq!(prospective_loser.header.pnl.get(), 0);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut liened_winner,
+            &mut liened_peer,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(INCREASE_Q),
+                exec_price: 105,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    market.resolve_market_not_atomic(3).unwrap();
+    assert_eq!(
+        market
+            .close_resolved_account_not_atomic(&mut expiry_trigger, 0)
+            .unwrap(),
+        percolator::ResolvedCloseOutcomeV16::ProgressOnly,
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Impaired,
+    );
+
+    market
+        .close_resolved_account_not_atomic(&mut prospective_loser, 0)
+        .expect("an impaired source bucket must accept a prospective terminal loss");
+    assert_eq!(prospective_loser.header.pnl.get(), 0);
+    market.validate_shape().unwrap();
+    prospective_loser
+        .validate_with_market(&market.as_view())
+        .unwrap();
+}
+
+#[test]
 fn v16_live_mark_reversal_unwinds_source_lien_before_claim_burn() {
     const OPEN_Q: u128 = 1_000 * POS_SCALE;
     const INCREASE_Q: u128 = 50 * POS_SCALE;
