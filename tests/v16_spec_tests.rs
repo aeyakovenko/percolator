@@ -3113,6 +3113,51 @@ fn v16_resolved_foreign_expiry_impairs_account_lien_before_release() {
         bucket_before,
         "account-local relabel must not mutate the already-impaired aggregate bucket"
     );
+
+    let mut all_closed = false;
+    let mut last_outcomes = Vec::new();
+    for _ in 0..16 {
+        last_outcomes.clear();
+        for account in [
+            &mut target_peer,
+            &mut trigger_peer,
+            &mut expiry_trigger,
+            &mut target,
+        ] {
+            last_outcomes.push(
+                market
+                    .close_resolved_account_not_atomic(account, 0)
+                    .expect("foreign-expired source claims must retain a terminal continuation"),
+            );
+        }
+        all_closed = [&target_peer, &trigger_peer, &expiry_trigger, &target]
+            .iter()
+            .all(|account| {
+                account.header.capital.get() == 0
+                    && account.header.pnl.get() == 0
+                    && active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
+            });
+        if all_closed {
+            break;
+        }
+    }
+    assert!(
+        all_closed,
+        "foreign-expired source claims did not terminate: last={last_outcomes:?}"
+    );
+    let bucket_after = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    let source_after = market.markets[0]
+        .engine
+        .source_credit_short
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket_after.status, BackingBucketStatusV16::Expired);
+    assert_eq!(bucket_after.impaired_liened_backing_num, 0);
+    assert_eq!(source_after.impaired_liened_backing_num, 0);
     market.validate_shape().unwrap();
     target.validate_with_market(&market.as_view()).unwrap();
 }
