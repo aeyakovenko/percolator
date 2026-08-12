@@ -8164,6 +8164,151 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
     assert_eq!(market.kani_residual(), residual_before);
 }
 
+// A source domain that has already become Impaired during Resolved wind-down
+// cannot accept new recoverable provider principal. Capital consumed while a
+// pending K/F loss is crystallized must instead become terminal junior
+// residual. If a payout snapshot already exists, the same atoms must augment
+// both persisted snapshots and immediately update the common payout rate.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_impaired_capital_backed_loss_routes_to_residual() {
+    let capital_raw: u8 = kani::any();
+    let loss_raw: u8 = kani::any();
+    let junior_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    let snapshot_captured: bool = kani::any();
+    kani::assume((1..=4).contains(&capital_raw));
+    kani::assume((1..=8).contains(&loss_raw));
+    kani::assume(junior_raw <= 8);
+    kani::assume((1..=8).contains(&claim_raw));
+    let capital = capital_raw as u128;
+    let loss = loss_raw as u128;
+    let junior = junior_raw as u128;
+    let claim = claim_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let engine_market_id = markets[0].engine.asset.market_id.get();
+    let impaired_num = BOUND_SCALE;
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: engine_market_id,
+        impaired_liened_backing_num: impaired_num,
+        expiry_slot: 1,
+        status: BackingBucketStatusV16::Impaired,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            impaired_liened_backing_num: impaired_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    header.mode = 1; // Resolved
+    header.resolved_slot = V16PodU64::new(1);
+    header.vault = V16PodU128::new(capital + junior);
+    header.c_tot = V16PodU128::new(capital);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_matured_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    if snapshot_captured {
+        header.payout_snapshot_captured = 1;
+        header.payout_snapshot = V16PodU128::new(junior);
+        header.payout_snapshot_pnl_pos_tot = V16PodU128::new(claim);
+        header.resolved_payout_ledger =
+            ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+                snapshot_residual: junior,
+                terminal_claim_exact_receipts_num: 0,
+                terminal_claim_bound_unreceipted_num: claim_num,
+                current_payout_rate_num: (junior * BOUND_SCALE).min(claim_num),
+                current_payout_rate_den: claim_num,
+                snapshot_slot: 1,
+                payout_halted: false,
+                finalized: false,
+            });
+    }
+
+    let mut account_header = PortfolioAccountV16Account::default();
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+
+    let vault_before = header.vault.get();
+    let bucket_before = markets[0].engine.backing_long;
+    let fresh_total_before = header.source_fresh_backing_total_num.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .kani_reserve_new_capital_backed_loss_for_source_domain_not_atomic(&mut account, 0, 0, loss)
+        .unwrap();
+
+    let expected_backing = loss.min(capital);
+    kani::cover!(loss < capital, "terminal residual route covers loss cap");
+    kani::cover!(loss > capital, "terminal residual route covers capital cap");
+    kani::cover!(
+        snapshot_captured && expected_backing > 0,
+        "terminal residual route updates an existing payout snapshot"
+    );
+    kani::cover!(
+        !snapshot_captured && expected_backing > 0,
+        "terminal residual route works before payout snapshot capture"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), capital - expected_backing);
+    assert_eq!(account.header.capital.get(), capital - expected_backing);
+    assert_eq!(
+        account.header.pnl.get(),
+        -(loss as i128) + expected_backing as i128
+    );
+    assert_eq!(market.kani_residual(), residual_before + expected_backing);
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        fresh_total_before
+    );
+    assert_eq!(market.markets[0].engine.backing_long, bucket_before);
+    assert_eq!(
+        account.header.residual_crystallized_loss_atoms_total.get(),
+        expected_backing
+    );
+    if snapshot_captured {
+        let ledger = market
+            .header
+            .resolved_payout_ledger
+            .try_to_runtime()
+            .unwrap();
+        assert_eq!(
+            market.header.payout_snapshot.get(),
+            junior + expected_backing
+        );
+        assert_eq!(ledger.snapshot_residual, junior + expected_backing);
+        assert_eq!(ledger.terminal_claim_exact_receipts_num, 0);
+        assert_eq!(ledger.terminal_claim_bound_unreceipted_num, claim_num);
+        assert_eq!(ledger.current_payout_rate_den, claim_num);
+        assert_eq!(
+            ledger.current_payout_rate_num,
+            ((junior + expected_backing) * BOUND_SCALE).min(claim_num)
+        );
+    } else {
+        assert_eq!(market.header.payout_snapshot.get(), 0);
+        assert_eq!(
+            market
+                .header
+                .resolved_payout_ledger
+                .try_to_runtime()
+                .unwrap(),
+            ResolvedPayoutLedgerV16::EMPTY
+        );
+    }
+}
+
 // residual() is the JUNIOR (positive-PnL) payout pool and feeds both the resolved
 // payout snapshot and the live haircut. `backing_provider_earnings` (utilization
 // fees owed to LPs) is SENIOR — validate_shape's senior stack includes it — so it

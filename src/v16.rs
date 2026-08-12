@@ -8107,17 +8107,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .residual()
                 .checked_sub(residual_before)
                 .ok_or(V16Error::CounterUnderflow)?;
-            if released != 0 {
-                let (ledger, legacy_snapshot) = V16Core::kernel_credit_post_snapshot_residual(
-                    self.header.resolved_payout_ledger.try_to_runtime()?,
-                    self.header.payout_snapshot.get(),
-                    released,
-                )?;
-                self.header.payout_snapshot = V16PodU128::new(legacy_snapshot);
-                self.header.resolved_payout_ledger =
-                    ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
-            }
+            self.credit_post_snapshot_residual_not_atomic(released)?;
         }
+        Ok(())
+    }
+
+    fn credit_post_snapshot_residual_not_atomic(&mut self, released: u128) -> V16Result<()> {
+        if released == 0 || !decode_bool(self.header.payout_snapshot_captured)? {
+            return Ok(());
+        }
+        let (ledger, legacy_snapshot) = V16Core::kernel_credit_post_snapshot_residual(
+            self.header.resolved_payout_ledger.try_to_runtime()?,
+            self.header.payout_snapshot.get(),
+            released,
+        )?;
+        self.header.payout_snapshot = V16PodU128::new(legacy_snapshot);
+        self.header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
         Ok(())
     }
 
@@ -11184,8 +11189,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.vault.get(),
         )?
         .validate()?;
-        let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
-        self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+        let terminal_impaired = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+            && self.backing_bucket_for_domain(domain)?.status == BackingBucketStatusV16::Impaired;
+        if terminal_impaired {
+            // Once the provider bucket has defaulted, newly crystallized loss is
+            // terminal junior support, not recoverable provider principal.
+            self.credit_post_snapshot_residual_not_atomic(backing)?;
+        } else {
+            let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
+            self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+        }
         Self::record_account_residual_crystallized_loss(account, backing)?;
         account.header.health_cert.valid = 0;
         Ok(())
