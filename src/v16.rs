@@ -820,6 +820,88 @@ impl V16Core {
         ))
     }
 
+    fn crystallize_source_lien_fee_for_effective(
+        source: &mut PortfolioSourceDomainV16Account,
+        impaired_effective: u128,
+    ) -> V16Result<u128> {
+        let live_effective = source.source_lien_effective_reserved.get();
+        if impaired_effective > live_effective {
+            return Err(V16Error::CounterUnderflow);
+        }
+        let live_fee = source.source_lien_capital_at_risk_fee_revenue.get();
+        let impaired_fee = if impaired_effective == live_effective {
+            live_fee
+        } else if impaired_effective == 0 || live_fee == 0 {
+            0
+        } else {
+            wide_mul_div_floor_u128(live_fee, impaired_effective, live_effective)
+        };
+        source.source_lien_capital_at_risk_fee_revenue = V16PodU128::new(
+            live_fee
+                .checked_sub(impaired_fee)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_lien_impaired_capital_at_risk_fee_revenue = V16PodU128::new(
+            source
+                .source_lien_impaired_capital_at_risk_fee_revenue
+                .get()
+                .checked_add(impaired_fee)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        Ok(impaired_fee)
+    }
+
+    fn prepare_account_counterparty_lien_impairment(
+        mut source: PortfolioSourceDomainV16Account,
+    ) -> V16Result<(PortfolioSourceDomainV16Account, u128)> {
+        let face = source.source_claim_counterparty_liened_num.get();
+        let backing_num = source.source_lien_counterparty_backing_num.get();
+        if face == 0 && backing_num == 0 {
+            return Ok((source, 0));
+        }
+        if face == 0 || backing_num == 0 || backing_num % BOUND_SCALE != 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        let effective = backing_num / BOUND_SCALE;
+        if effective == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+
+        Self::crystallize_source_lien_fee_for_effective(&mut source, effective)?;
+        source.source_claim_counterparty_liened_num = V16PodU128::new(0);
+        source.source_claim_liened_num = V16PodU128::new(
+            source
+                .source_claim_liened_num
+                .get()
+                .checked_sub(face)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_claim_impaired_num = V16PodU128::new(
+            source
+                .source_claim_impaired_num
+                .get()
+                .checked_add(face)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        source.source_lien_counterparty_backing_num = V16PodU128::new(0);
+        source.source_lien_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_effective_reserved
+                .get()
+                .checked_sub(effective)
+                .ok_or(V16Error::CounterUnderflow)?,
+        );
+        source.source_lien_impaired_effective_reserved = V16PodU128::new(
+            source
+                .source_lien_impaired_effective_reserved
+                .get()
+                .checked_add(effective)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        source.source_lien_fee_last_slot = V16PodU64::new(0);
+        Ok((source, effective))
+    }
+
     fn terminal_claim_free_overlap_recredit(
         provider_receivable_atoms: u128,
         paired_domain_insurance_spent: u128,
@@ -8897,6 +8979,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok((impaired_burn, impaired_effective_burn))
     }
 
+    fn impair_account_source_credit_counterparty_lien_fields(
+        account: &mut PortfolioV16ViewMut<'_>,
+        domain: usize,
+    ) -> V16Result<u128> {
+        let slot = account
+            .source_domain_slot(domain)?
+            .ok_or(V16Error::InvalidLeg)?;
+        let (source, effective) = V16Core::prepare_account_counterparty_lien_impairment(
+            account.header.source_domains[slot],
+        )?;
+        account.header.source_domains[slot] = source;
+        account.header.health_cert.valid = 0;
+        Ok(effective)
+    }
+
     #[cfg(any(kani, feature = "fuzz"))]
     fn impair_account_source_credit_insurance_lien_fields(
         account: &mut PortfolioV16ViewMut<'_>,
@@ -11839,12 +11936,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 V16PodU64::new(self.header.current_slot.get());
             return Ok(0);
         }
+        let mut bucket = self.backing_bucket_for_domain(domain)?;
+        let fee_through_slot = if bucket.expiry_slot == 0 {
+            self.header.current_slot.get()
+        } else {
+            self.header.current_slot.get().min(bucket.expiry_slot)
+        };
         let fee = V16Core::backing_utilization_fee_quote_atoms_for_lien(
             self.header.config.try_to_runtime_shape()?,
             self.source_credit_for_domain(domain)?,
             lien_backing_num,
             last_slot,
-            self.header.current_slot.get(),
+            fee_through_slot,
         )?;
         // Carry the floored-away fractional accrual forward: when the rent quote
         // floors to zero this interval, do NOT advance the fee cursor, so a later
@@ -11855,8 +11958,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         account.header.source_domains[slot].source_lien_fee_last_slot =
-            V16PodU64::new(self.header.current_slot.get());
-        let mut bucket = self.backing_bucket_for_domain(domain)?;
+            V16PodU64::new(fee_through_slot);
         let (charged, next_capital, next_c_tot, next_earnings) =
             apply_backing_utilization_fee_charge(
                 account.header.capital.get(),
@@ -16293,6 +16395,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let domain = source.domain.get() as usize;
             self.domain_asset_side(domain)?;
             let bucket = self.backing_bucket_for_domain(domain)?;
+            let account_counterparty_backing = source.source_lien_counterparty_backing_num.get();
+            if account_counterparty_backing != 0
+                && bucket.status == BackingBucketStatusV16::Impaired
+            {
+                if bucket.impaired_liened_backing_num < account_counterparty_backing {
+                    return Err(V16Error::CounterUnderflow);
+                }
+                self.collect_account_backing_utilization_fee_for_domain_not_atomic(
+                    account, domain,
+                )?;
+                Self::impair_account_source_credit_counterparty_lien_fields(account, domain)?;
+                self.validate_shape()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(Some(domain));
+            }
             if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= current_slot
             {
                 if source.source_claim_liened_num.get() != 0 {
