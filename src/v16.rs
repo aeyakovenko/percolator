@@ -891,13 +891,11 @@ impl V16Core {
                 .checked_sub(effective)
                 .ok_or(V16Error::CounterUnderflow)?,
         );
-        source.source_lien_impaired_effective_reserved = V16PodU128::new(
-            source
-                .source_lien_impaired_effective_reserved
-                .get()
-                .checked_add(effective)
-                .ok_or(V16Error::CounterOverflow)?,
-        );
+        // Expired counterparty principal already left the recoverable backing
+        // stock. Do not add it to the generic impaired-effective field: that
+        // field is backed by impaired insurance and its burn path releases the
+        // corresponding insurance reservation. Provider audit labels are
+        // retired separately while this account still carries exact provenance.
         source.source_lien_fee_last_slot = V16PodU64::new(0);
         Ok((source, effective))
     }
@@ -2994,6 +2992,51 @@ impl V16Core {
             .impaired_liened_backing_num
             .checked_add(amount)
             .ok_or(V16Error::CounterOverflow)?;
+        Ok((bucket, source))
+    }
+
+    /// Retire provider-backed lien labels after expiry has already forfeited
+    /// their principal into the junior residual pool. The account still carries
+    /// the exact counterparty amount at this point, so this transition preserves
+    /// provenance and remains order-independent across accounts in one domain.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(BackingBucketV16, SourceCreditStateV16)>| match result {
+        Ok((b, s)) => (amount == 0 && *b == bucket && *s == source)
+            || (b.impaired_liened_backing_num == bucket.impaired_liened_backing_num.wrapping_sub(amount)
+                && s.impaired_liened_backing_num == source.impaired_liened_backing_num.wrapping_sub(amount)
+                && b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num
+                && b.valid_liened_backing_num == bucket.valid_liened_backing_num
+                && b.consumed_liened_backing_num == bucket.consumed_liened_backing_num
+                && s.fresh_reserved_backing_num == source.fresh_reserved_backing_num
+                && s.valid_liened_backing_num == source.valid_liened_backing_num
+                && s.spent_backing_num == source.spent_backing_num
+                && s.provider_receivable_num == source.provider_receivable_num
+                && s.insurance_credit_reserved_num == source.insurance_credit_reserved_num
+                && s.valid_liened_insurance_num == source.valid_liened_insurance_num
+                && s.impaired_liened_insurance_num == source.impaired_liened_insurance_num),
+        Err(_) => true,
+    }))]
+    fn prepare_counterparty_impaired_lien_retirement_delta(
+        mut bucket: BackingBucketV16,
+        mut source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        if amount == 0 {
+            return Ok((bucket, source));
+        }
+        Self::validate_bound_num_atom_aligned(amount)?;
+        if bucket.status != BackingBucketStatusV16::Impaired
+            || bucket.fresh_unliened_backing_num != 0
+            || bucket.valid_liened_backing_num != 0
+            || bucket.impaired_liened_backing_num < amount
+            || source.impaired_liened_backing_num < amount
+        {
+            return Err(V16Error::CounterUnderflow);
+        }
+        bucket.impaired_liened_backing_num -= amount;
+        source.impaired_liened_backing_num -= amount;
+        if bucket.impaired_liened_backing_num == 0 {
+            bucket.status = BackingBucketStatusV16::Expired;
+        }
         Ok((bucket, source))
     }
 
@@ -8345,6 +8388,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(());
         }
         let (bucket, source) = V16Core::prepare_counterparty_lien_terminal_release_delta(
+            self.backing_bucket_for_domain(domain)?,
+            self.source_credit_for_domain(domain)?,
+            amount,
+        )?;
+        let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
+            source,
+            self.header.risk_epoch.get(),
+        )?;
+        self.reservation_encumbrance_proof_for_domain_parts(
+            domain,
+            source,
+            bucket,
+            self.insurance_reservation_for_domain(domain)?,
+        )?
+        .validate()?;
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        self.validate_shape()
+    }
+
+    fn retire_source_credit_lien_from_counterparty_impaired_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        self.domain_asset_side(domain)?;
+        if amount == 0 {
+            return Ok(());
+        }
+        let (bucket, source) = V16Core::prepare_counterparty_impaired_lien_retirement_delta(
             self.backing_bucket_for_domain(domain)?,
             self.source_credit_for_domain(domain)?,
             amount,
@@ -16404,6 +16478,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 self.collect_account_backing_utilization_fee_for_domain_not_atomic(
                     account, domain,
+                )?;
+                self.retire_source_credit_lien_from_counterparty_impaired_not_atomic(
+                    domain,
+                    account_counterparty_backing,
                 )?;
                 Self::impair_account_source_credit_counterparty_lien_fields(account, domain)?;
                 self.validate_shape()?;

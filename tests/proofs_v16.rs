@@ -17445,13 +17445,14 @@ fn proof_v16_resolved_foreign_expiry_lien_impairment_is_exact_relabel() {
     );
     assert_eq!(
         after.source_lien_impaired_effective_reserved.get(),
-        prior_impaired_effective as u128 + counter_effective as u128
+        prior_impaired_effective as u128
     );
     assert_eq!(
         after.source_lien_effective_reserved.get()
             + after.source_lien_impaired_effective_reserved.get(),
         source.source_lien_effective_reserved.get()
             + source.source_lien_impaired_effective_reserved.get()
+            - counter_effective as u128
     );
     assert_eq!(after.source_lien_fee_last_slot.get(), 0);
     let expected_impaired_fee = (live_fee as u128) * (counter_effective as u128) / live_effective;
@@ -17468,4 +17469,157 @@ fn proof_v16_resolved_foreign_expiry_lien_impairment_is_exact_relabel() {
             + after.source_lien_impaired_capital_at_risk_fee_revenue.get(),
         live_fee as u128 + impaired_fee as u128
     );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_foreign_expiry_retires_exact_provider_label_only() {
+    let total_raw: u8 = kani::any();
+    let retired_raw: u8 = kani::any();
+    let consumed_raw: u8 = kani::any();
+    let insurance_reserved_raw: u8 = kani::any();
+    let insurance_valid_raw: u8 = kani::any();
+    let insurance_impaired_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&total_raw));
+    kani::assume((1..=total_raw).contains(&retired_raw));
+    kani::assume(insurance_valid_raw <= insurance_reserved_raw);
+    kani::assume(insurance_impaired_raw <= insurance_reserved_raw - insurance_valid_raw);
+
+    let total = total_raw as u128 * BOUND_SCALE;
+    let retired = retired_raw as u128 * BOUND_SCALE;
+    let consumed = consumed_raw as u128 * BOUND_SCALE;
+    let insurance_reserved = insurance_reserved_raw as u128 * BOUND_SCALE;
+    let insurance_valid = insurance_valid_raw as u128 * BOUND_SCALE;
+    let insurance_impaired = insurance_impaired_raw as u128 * BOUND_SCALE;
+    let bucket = BackingBucketV16 {
+        market_id: 9,
+        impaired_liened_backing_num: total,
+        consumed_liened_backing_num: consumed,
+        expiry_slot: 7,
+        utilization_fee_earnings: 3,
+        status: BackingBucketStatusV16::Impaired,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        impaired_liened_backing_num: total,
+        spent_backing_num: consumed,
+        provider_receivable_num: consumed,
+        insurance_credit_reserved_num: insurance_reserved,
+        valid_liened_insurance_num: insurance_valid,
+        impaired_liened_insurance_num: insurance_impaired,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let (after_bucket, after_source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_impaired_lien_retirement_delta(
+            bucket, source, retired,
+        )
+        .unwrap();
+
+    kani::cover!(
+        retired_raw < total_raw,
+        "one account retires its provider label while sibling labels remain"
+    );
+    kani::cover!(
+        retired_raw == total_raw,
+        "the final account normalizes the impaired bucket to expired"
+    );
+    kani::cover!(
+        insurance_impaired_raw > 0,
+        "provider retirement frames an independent impaired insurance rail"
+    );
+    assert_eq!(after_bucket.impaired_liened_backing_num, total - retired);
+    assert_eq!(after_source.impaired_liened_backing_num, total - retired);
+    assert_eq!(after_bucket.fresh_unliened_backing_num, 0);
+    assert_eq!(after_bucket.valid_liened_backing_num, 0);
+    assert_eq!(after_bucket.consumed_liened_backing_num, consumed);
+    assert_eq!(after_bucket.expiry_slot, bucket.expiry_slot);
+    assert_eq!(
+        after_bucket.utilization_fee_earnings,
+        bucket.utilization_fee_earnings
+    );
+    assert_eq!(after_source.fresh_reserved_backing_num, 0);
+    assert_eq!(after_source.valid_liened_backing_num, 0);
+    assert_eq!(after_source.spent_backing_num, consumed);
+    assert_eq!(after_source.provider_receivable_num, consumed);
+    assert_eq!(
+        after_source.insurance_credit_reserved_num,
+        insurance_reserved
+    );
+    assert_eq!(after_source.valid_liened_insurance_num, insurance_valid);
+    assert_eq!(
+        after_source.impaired_liened_insurance_num,
+        insurance_impaired
+    );
+    assert_eq!(
+        after_bucket.status,
+        if retired == total {
+            BackingBucketStatusV16::Expired
+        } else {
+            BackingBucketStatusV16::Impaired
+        }
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_foreign_expiry_provider_retirement_acceptance_is_exact() {
+    let bucket_raw: u8 = kani::any();
+    let source_raw: u8 = kani::any();
+    let amount_raw: u8 = kani::any();
+    let status_raw: u8 = kani::any();
+    let fractional: bool = kani::any();
+    kani::assume(bucket_raw <= 8);
+    kani::assume(source_raw <= 8);
+    kani::assume(amount_raw <= 8);
+    kani::assume(status_raw <= 3);
+
+    let bucket_amount = bucket_raw as u128 * BOUND_SCALE;
+    let source_amount = source_raw as u128 * BOUND_SCALE;
+    let amount = amount_raw as u128 * BOUND_SCALE + u128::from(fractional);
+    let status = match status_raw {
+        0 => BackingBucketStatusV16::Empty,
+        1 => BackingBucketStatusV16::Fresh,
+        2 => BackingBucketStatusV16::Expired,
+        _ => BackingBucketStatusV16::Impaired,
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 9,
+        impaired_liened_backing_num: bucket_amount,
+        status,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        impaired_liened_backing_num: source_amount,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let result =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_impaired_lien_retirement_delta(
+            bucket, source, amount,
+        );
+    let accepted = amount == 0
+        || (!fractional
+            && status == BackingBucketStatusV16::Impaired
+            && amount <= bucket_amount
+            && amount <= source_amount);
+
+    kani::cover!(accepted && amount != 0, "valid provider retirement accepts");
+    kani::cover!(
+        !accepted && fractional,
+        "fractional provider retirement rejects"
+    );
+    kani::cover!(
+        !accepted && !fractional && status != BackingBucketStatusV16::Impaired,
+        "wrong-state provider retirement rejects"
+    );
+    kani::cover!(
+        !accepted && !fractional && amount > bucket_amount,
+        "over-retirement rejects"
+    );
+    assert_eq!(result.is_ok(), accepted);
 }
