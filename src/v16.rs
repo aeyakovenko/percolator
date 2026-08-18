@@ -2360,6 +2360,41 @@ impl V16Core {
         Ok((bucket, source))
     }
 
+    // The caller authenticates that the Fresh bucket has reached expiry.
+    fn prepare_counterparty_backing_expiry_delta(
+        mut bucket: BackingBucketV16,
+        mut source: SourceCreditStateV16,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        let expired_unliened = bucket.fresh_unliened_backing_num;
+        let expired_liened = bucket.valid_liened_backing_num;
+        let expired_total = expired_unliened
+            .checked_add(expired_liened)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if source.fresh_reserved_backing_num < expired_total
+            || source.valid_liened_backing_num < expired_liened
+        {
+            return Err(V16Error::CounterUnderflow);
+        }
+        source.fresh_reserved_backing_num -= expired_total;
+        source.valid_liened_backing_num -= expired_liened;
+        source.impaired_liened_backing_num = source
+            .impaired_liened_backing_num
+            .checked_add(expired_liened)
+            .ok_or(V16Error::CounterOverflow)?;
+        bucket.fresh_unliened_backing_num = 0;
+        bucket.valid_liened_backing_num = 0;
+        bucket.impaired_liened_backing_num = bucket
+            .impaired_liened_backing_num
+            .checked_add(expired_liened)
+            .ok_or(V16Error::CounterOverflow)?;
+        bucket.status = if expired_liened == 0 && bucket.impaired_liened_backing_num == 0 {
+            BackingBucketStatusV16::Expired
+        } else {
+            BackingBucketStatusV16::Impaired
+        };
+        Ok((bucket, source))
+    }
+
     #[cfg(any(kani, feature = "fuzz"))]
     // Contract layer: lien release is the un-pledge relabel — valid liened
     // returns to fresh unliened atom-for-atom, fresh_reserved and all stock
@@ -7692,38 +7727,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         domain: usize,
         now_slot: u64,
     ) -> V16Result<()> {
-        let mut bucket = self.backing_bucket_for_domain(domain)?;
+        let bucket = self.backing_bucket_for_domain(domain)?;
         if bucket.status != BackingBucketStatusV16::Fresh || now_slot < bucket.expiry_slot {
             return Err(V16Error::Stale);
         }
-        let mut source = self.source_credit_for_domain(domain)?;
-        let expired_unliened = bucket.fresh_unliened_backing_num;
-        let expired_liened = bucket.valid_liened_backing_num;
-        let expired_total = expired_unliened
-            .checked_add(expired_liened)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if source.fresh_reserved_backing_num < expired_total
-            || source.valid_liened_backing_num < expired_liened
-        {
-            return Err(V16Error::CounterUnderflow);
-        }
-        source.fresh_reserved_backing_num -= expired_total;
-        source.valid_liened_backing_num -= expired_liened;
-        source.impaired_liened_backing_num = source
-            .impaired_liened_backing_num
-            .checked_add(expired_liened)
-            .ok_or(V16Error::CounterOverflow)?;
-        bucket.fresh_unliened_backing_num = 0;
-        bucket.valid_liened_backing_num = 0;
-        bucket.impaired_liened_backing_num = bucket
-            .impaired_liened_backing_num
-            .checked_add(expired_liened)
-            .ok_or(V16Error::CounterOverflow)?;
-        bucket.status = if expired_liened == 0 && bucket.impaired_liened_backing_num == 0 {
-            BackingBucketStatusV16::Expired
-        } else {
-            BackingBucketStatusV16::Impaired
-        };
+        let (bucket, source) = V16Core::prepare_counterparty_backing_expiry_delta(
+            bucket,
+            self.source_credit_for_domain(domain)?,
+        )?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
         self.refresh_source_credit_domain_after_mutation(domain)

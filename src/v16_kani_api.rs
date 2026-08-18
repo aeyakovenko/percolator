@@ -685,6 +685,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::prepare_counterparty_backing_withdraw_delta(bucket, source, amount)
     }
 
+    pub fn kani_prepare_counterparty_backing_expiry_delta(
+        bucket: BackingBucketV16,
+        source: SourceCreditStateV16,
+    ) -> V16Result<(BackingBucketV16, SourceCreditStateV16)> {
+        V16Core::prepare_counterparty_backing_expiry_delta(bucket, source)
+    }
+
+    pub fn kani_prepare_source_credit_domain_recompute_for_epoch(
+        source: SourceCreditStateV16,
+        risk_epoch: u64,
+    ) -> V16Result<(SourceCreditStateV16, u64)> {
+        V16Core::prepare_source_credit_domain_recompute_for_epoch(source, risk_epoch)
+    }
+
+    pub fn kani_validate_source_domain_ledger_parts(
+        market_id: u64,
+        source: SourceCreditStateV16,
+        bucket: BackingBucketV16,
+        reservation: InsuranceCreditReservationV16,
+    ) -> V16Result<()> {
+        V16Core::validate_source_domain_ledger_parts(market_id, source, bucket, reservation)
+    }
+
     pub fn kani_source_credit_lien_amounts_for_effective(
         effective_credit: u128,
         credit_rate_num: u128,

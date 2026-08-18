@@ -6541,7 +6541,7 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
     // Stock destination of the expired atoms (review finding): expiry forfeits
     // the WHOLE bucket (unliened and liened alike) out of
     // counterparty_backing_principal into the JUNIOR RESIDUAL pool, vault flat.
-    // No class disappears; the junior pool rises by EXACTLY the forfeit — this
+    // No class disappears; the junior pool rises by EXACTLY the forfeit -- this
     // exact equality is also the LoF-horn falsifier (no atoms split off into
     // movable surplus or anywhere else).
     assert_eq!(
@@ -6553,6 +6553,167 @@ fn proof_v16_public_counterparty_backing_expiry_is_value_neutral_and_impairs_lie
     // checkpoint would revert (frozen vault). expire runs validate_shape
     // internally via refresh; assert it explicitly so the property is pinned.
     assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_expiry_preserves_domain_ledger_and_removes_only_usable_backing() {
+    let fresh_raw = kani::any::<u8>() & 7;
+    let liened_candidate = kani::any::<u8>() & 7;
+    let liened_raw = if fresh_raw == 0 && liened_candidate == 0 {
+        1
+    } else {
+        liened_candidate
+    };
+    let impaired_raw = kani::any::<u8>() & 3;
+    let claim_raw = (kani::any::<u8>() & 7) + 1;
+    let exact_claim_raw = (kani::any::<u8>() & 7).min(claim_raw);
+    let insurance_raw = kani::any::<u8>() & 7;
+    let valid_insurance_raw = (kani::any::<u8>() & 7).min(insurance_raw);
+    let impaired_insurance_raw = (kani::any::<u8>() & 7).min(insurance_raw - valid_insurance_raw);
+    let receivable_raw = kani::any::<u8>() & 3;
+    let spent_extra_raw = kani::any::<u8>() & 3;
+    let consumed_insurance_raw = kani::any::<u8>() & 3;
+    let credit_epoch = (kani::any::<u8>() & 7) as u64;
+    let risk_epoch = (kani::any::<u8>() & 7) as u64;
+
+    let fresh_num = fresh_raw as u128 * BOUND_SCALE;
+    let liened_num = liened_raw as u128 * BOUND_SCALE;
+    let impaired_num = impaired_raw as u128 * BOUND_SCALE;
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let exact_claim_num = exact_claim_raw as u128 * BOUND_SCALE;
+    let insurance_num = insurance_raw as u128 * BOUND_SCALE;
+    let valid_insurance_num = valid_insurance_raw as u128 * BOUND_SCALE;
+    let impaired_insurance_num = impaired_insurance_raw as u128 * BOUND_SCALE;
+    let available_insurance_num = insurance_num - valid_insurance_num - impaired_insurance_num;
+    let receivable_num = receivable_raw as u128 * BOUND_SCALE;
+    let spent_num = receivable_num + spent_extra_raw as u128 * BOUND_SCALE;
+    let consumed_insurance_num = consumed_insurance_raw as u128 * BOUND_SCALE;
+    let expired_total_num = fresh_num + liened_num;
+
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: fresh_num,
+        valid_liened_backing_num: liened_num,
+        consumed_liened_backing_num: receivable_num,
+        impaired_liened_backing_num: impaired_num,
+        utilization_fee_earnings: (kani::any::<u8>() & 3) as u128,
+        expiry_slot: 5,
+        status: BackingBucketStatusV16::Fresh,
+    };
+    let reservation = InsuranceCreditReservationV16 {
+        insurance_credit_reserved_num: insurance_num,
+        valid_liened_insurance_num: valid_insurance_num,
+        impaired_liened_insurance_num: impaired_insurance_num,
+        consumed_insurance_num,
+        source_credit_epoch: credit_epoch,
+    };
+    let mut source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: exact_claim_num,
+        fresh_reserved_backing_num: expired_total_num,
+        spent_backing_num: spent_num,
+        provider_receivable_num: receivable_num,
+        valid_liened_backing_num: liened_num,
+        impaired_liened_backing_num: impaired_num,
+        insurance_credit_reserved_num: insurance_num,
+        valid_liened_insurance_num: valid_insurance_num,
+        impaired_liened_insurance_num: impaired_insurance_num,
+        credit_rate_num: 0,
+        credit_epoch,
+    };
+    source.credit_rate_num = kani_expected_source_credit_rate_num_for_state(source).unwrap();
+    let rate_before = source.credit_rate_num;
+    let available_before = kani_available_backing_num_for_source_credit_state(source).unwrap();
+    let pre_valid = MarketGroupV16ViewMut::<u64>::kani_validate_source_domain_ledger_parts(
+        1,
+        source,
+        bucket,
+        reservation,
+    );
+
+    let (expired_bucket, expired_source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+            bucket, source,
+        )
+        .unwrap();
+    let (expired_source, next_risk_epoch) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_source_credit_domain_recompute_for_epoch(
+            expired_source,
+            risk_epoch,
+        )
+        .unwrap();
+    let available_after =
+        kani_available_backing_num_for_source_credit_state(expired_source).unwrap();
+    let post_valid = MarketGroupV16ViewMut::<u64>::kani_validate_source_domain_ledger_parts(
+        1,
+        expired_source,
+        expired_bucket,
+        reservation,
+    );
+    let expected_status = if liened_num == 0 && impaired_num == 0 {
+        BackingBucketStatusV16::Expired
+    } else {
+        BackingBucketStatusV16::Impaired
+    };
+    let expected_rate =
+        (available_insurance_num * CREDIT_RATE_SCALE / claim_num).min(CREDIT_RATE_SCALE);
+
+    kani::cover!(
+        fresh_num > 0 && liened_num == 0,
+        "expiry covers fresh-only backing"
+    );
+    kani::cover!(liened_num > 0, "expiry covers liened backing impairment");
+    kani::cover!(impaired_num > 0, "expiry preserves prior impaired backing");
+    kani::cover!(
+        available_insurance_num == 0,
+        "counterparty-only claim loses all usable credit"
+    );
+    kani::cover!(
+        available_insurance_num > 0 && available_insurance_num < claim_num,
+        "expiry preserves a partial insurance-only credit rate"
+    );
+    kani::cover!(
+        available_insurance_num >= claim_num,
+        "expiry preserves a fully insured credit rate"
+    );
+    kani::cover!(
+        expired_source.credit_rate_num < rate_before,
+        "expiry strictly removes usable counterparty credit"
+    );
+
+    assert!(
+        pre_valid == Ok(())
+            && post_valid == Ok(())
+            && expired_bucket.market_id == bucket.market_id
+            && expired_bucket.fresh_unliened_backing_num == 0
+            && expired_bucket.valid_liened_backing_num == 0
+            && expired_bucket.consumed_liened_backing_num == bucket.consumed_liened_backing_num
+            && expired_bucket.impaired_liened_backing_num == impaired_num + liened_num
+            && expired_bucket.utilization_fee_earnings == bucket.utilization_fee_earnings
+            && expired_bucket.expiry_slot == bucket.expiry_slot
+            && expired_bucket.status == expected_status
+            && expired_source.positive_claim_bound_num == source.positive_claim_bound_num
+            && expired_source.exact_positive_claim_num == source.exact_positive_claim_num
+            && expired_source.fresh_reserved_backing_num == 0
+            && expired_source.spent_backing_num == source.spent_backing_num
+            && expired_source.provider_receivable_num == source.provider_receivable_num
+            && expired_source.valid_liened_backing_num == 0
+            && expired_source.impaired_liened_backing_num == impaired_num + liened_num
+            && expired_source.insurance_credit_reserved_num == source.insurance_credit_reserved_num
+            && expired_source.valid_liened_insurance_num == source.valid_liened_insurance_num
+            && expired_source.impaired_liened_insurance_num == source.impaired_liened_insurance_num
+            && expired_source.credit_rate_num == expected_rate
+            && expired_source.credit_rate_num <= rate_before
+            && expired_source.credit_epoch == credit_epoch + 1
+            && next_risk_epoch == risk_epoch + 1
+            && available_before == fresh_num + available_insurance_num
+            && available_after == available_insurance_num
+            && available_before - available_after == fresh_num
+            && expired_total_num == fresh_num + liened_num,
+        "expiry must preserve a valid domain ledger while removing exactly counterparty support"
+    );
 }
 
 fn check_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state<
