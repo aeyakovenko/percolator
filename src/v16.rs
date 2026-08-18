@@ -716,6 +716,34 @@ impl V16Core {
         Ok((required_face_num, required_backing_num))
     }
 
+    // A realization/cure may consume multiple independently valid liens in one
+    // atomic transition. Persistent account liens remain single-source.
+    fn source_credit_consumption_allocation(
+        required_backing_num: u128,
+        counterparty_available_num: u128,
+        insurance_available_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        if counterparty_available_num >= required_backing_num {
+            return Ok((required_backing_num, 0));
+        }
+        if insurance_available_num >= required_backing_num {
+            return Ok((0, required_backing_num));
+        }
+        if counterparty_available_num
+            .checked_add(insurance_available_num)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            < required_backing_num
+        {
+            return Err(V16Error::LockActive);
+        }
+        Ok((
+            counterparty_available_num,
+            required_backing_num
+                .checked_sub(counterparty_available_num)
+                .ok_or(V16Error::CounterUnderflow)?,
+        ))
+    }
+
     #[inline]
     fn validate_bound_num_atom_aligned(bound_num: u128) -> V16Result<()> {
         if bound_num == 0 {
@@ -9415,23 +9443,49 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         let bucket = self.backing_bucket_for_domain(domain)?;
-        let mut counterparty_credit_consumed = 0;
-        let mut insurance_credit_consumed = 0;
-        if bucket.status == BackingBucketStatusV16::Fresh
+        let counterparty_available_num = if bucket.status == BackingBucketStatusV16::Fresh
             && bucket.expiry_slot > self.header.current_slot.get()
-            && bucket.fresh_unliened_backing_num >= backing_num
         {
+            bucket.fresh_unliened_backing_num
+        } else {
+            0
+        };
+        let reservation = self.insurance_reservation_for_domain(domain)?;
+        let insurance_encumbered_num = reservation
+            .valid_liened_insurance_num
+            .checked_add(reservation.impaired_liened_insurance_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let insurance_available_num = reservation
+            .insurance_credit_reserved_num
+            .checked_sub(insurance_encumbered_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let (counterparty_backing_num, insurance_backing_num) =
+            V16Core::source_credit_consumption_allocation(
+                backing_num,
+                counterparty_available_num,
+                insurance_available_num,
+            )?;
+        if counterparty_backing_num != 0 {
             self.create_and_consume_source_credit_from_counterparty_core_not_atomic(
                 domain,
-                backing_num,
+                counterparty_backing_num,
             )?;
-            counterparty_credit_consumed = effective_credit;
-        } else {
+        }
+        if insurance_backing_num != 0 {
             self.create_and_consume_source_credit_from_insurance_core_not_atomic(
                 domain,
-                backing_num,
+                insurance_backing_num,
             )?;
-            insurance_credit_consumed = effective_credit;
+        }
+        let counterparty_credit_consumed =
+            V16Core::amount_from_bound_num(counterparty_backing_num)?;
+        let insurance_credit_consumed = V16Core::amount_from_bound_num(insurance_backing_num)?;
+        if counterparty_credit_consumed
+            .checked_add(insurance_credit_consumed)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            != effective_credit
+        {
+            return Err(V16Error::InvalidConfig);
         }
         Ok(SourceCreditConsumptionV16 {
             face_burn: V16Core::amount_from_bound_num(required_face_num)?,

@@ -708,6 +708,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::validate_source_domain_ledger_parts(market_id, source, bucket, reservation)
     }
 
+    pub fn kani_consume_source_domain_credit_for_effective_not_atomic(
+        &mut self,
+        domain: usize,
+        effective_credit: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        let consumed =
+            self.consume_source_domain_credit_for_effective_not_atomic(domain, effective_credit)?;
+        Ok((
+            consumed.face_burn,
+            consumed.counterparty_credit_consumed,
+            consumed.insurance_credit_consumed,
+        ))
+    }
+
+    pub fn kani_source_domain_realizable_support_for_face(
+        &self,
+        domain: usize,
+        face_claim: u128,
+    ) -> V16Result<u128> {
+        self.source_domain_realizable_support_for_face(domain, face_claim)
+    }
+
+    pub fn kani_source_credit_consumption_allocation(
+        required_backing_num: u128,
+        counterparty_available_num: u128,
+        insurance_available_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        V16Core::source_credit_consumption_allocation(
+            required_backing_num,
+            counterparty_available_num,
+            insurance_available_num,
+        )
+    }
+
     pub fn kani_source_credit_lien_amounts_for_effective(
         effective_credit: u128,
         credit_rate_num: u128,
@@ -739,6 +773,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             insurance,
             amount,
         )
+    }
+
+    pub fn kani_prepare_insurance_lien_create_delta(
+        reservation: InsuranceCreditReservationV16,
+        source: SourceCreditStateV16,
+        amount: u128,
+    ) -> V16Result<(InsuranceCreditReservationV16, SourceCreditStateV16)> {
+        V16Core::prepare_insurance_lien_create_delta(reservation, source, amount)
     }
 
     pub fn kani_prepare_insurance_lien_terminal_release_delta(

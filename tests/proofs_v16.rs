@@ -14009,6 +14009,213 @@ fn proof_v16_terminal_source_backed_realization_is_stock_conservative_and_no_dou
     );
 }
 
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_advertised_mixed_source_credit_realization_does_not_strand() {
+    const COUNTERPARTY_ATOMS: u128 = 5;
+    const INSURANCE_ATOMS: u128 = 5;
+    const EFFECTIVE_CREDIT: u128 = COUNTERPARTY_ATOMS + INSURANCE_ATOMS;
+
+    let counterparty_num = COUNTERPARTY_ATOMS * BOUND_SCALE;
+    let insurance_num = INSURANCE_ATOMS * BOUND_SCALE;
+    let claim_num = EFFECTIVE_CREDIT * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(EFFECTIVE_CREDIT);
+    header.insurance = V16PodU128::new(INSURANCE_ATOMS);
+    header.pnl_pos_tot = V16PodU128::new(EFFECTIVE_CREDIT);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(EFFECTIVE_CREDIT);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(counterparty_num);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(INSURANCE_ATOMS);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(INSURANCE_ATOMS);
+
+    let market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: counterparty_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: insurance_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: counterparty_num,
+            insurance_credit_reserved_num: insurance_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(INSURANCE_ATOMS);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let advertised = market
+        .kani_source_domain_realizable_support_for_face(0, EFFECTIVE_CREDIT)
+        .unwrap();
+    let consumed = market.kani_consume_source_domain_credit_for_effective_not_atomic(0, advertised);
+
+    assert_eq!(
+        (advertised, consumed),
+        (
+            EFFECTIVE_CREDIT,
+            Ok((EFFECTIVE_CREDIT, COUNTERPARTY_ATOMS, INSURANCE_ATOMS,)),
+        ),
+        "all aggregate backing advertised by the credit rate must be consumable"
+    );
+}
+
+// Realization/cure credit is advertised from the aggregate of counterparty
+// backing and insurance reservation. Prove the production create-and-consume
+// path can use exactly that aggregate without over-drawing either source.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_aggregate_source_credit_realization_is_complete_and_conservative() {
+    let counterparty_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let required_raw: u8 = kani::any();
+    kani::assume(counterparty_raw <= 8);
+    kani::assume(insurance_raw <= 8);
+    kani::assume((1..=12).contains(&required_raw));
+
+    let counterparty_atoms = counterparty_raw as u128;
+    let insurance_atoms = insurance_raw as u128;
+    let required_atoms = required_raw as u128;
+    let counterparty_num = counterparty_atoms * BOUND_SCALE;
+    let insurance_num = insurance_atoms * BOUND_SCALE;
+    let required_num = required_atoms * BOUND_SCALE;
+    let aggregate_sufficient = counterparty_atoms + insurance_atoms >= required_atoms;
+    let allocation = MarketGroupV16ViewMut::<u64>::kani_source_credit_consumption_allocation(
+        required_num,
+        counterparty_num,
+        insurance_num,
+    );
+
+    kani::cover!(
+        counterparty_atoms >= required_atoms && insurance_atoms > 0,
+        "counterparty-only preference is reachable with both sources funded"
+    );
+    kani::cover!(
+        counterparty_atoms < required_atoms
+            && insurance_atoms >= required_atoms
+            && counterparty_atoms > 0,
+        "insurance-only fallback is reachable with partial counterparty backing"
+    );
+    kani::cover!(
+        counterparty_atoms < required_atoms
+            && insurance_atoms < required_atoms
+            && aggregate_sufficient,
+        "mixed-source allocation is reachable when neither source suffices alone"
+    );
+    kani::cover!(
+        !aggregate_sufficient && counterparty_atoms > 0 && insurance_atoms > 0,
+        "insufficient aggregate support fails closed"
+    );
+
+    assert_eq!(allocation.is_ok(), aggregate_sufficient);
+    if !aggregate_sufficient {
+        assert_eq!(allocation, Err(V16Error::LockActive));
+        return;
+    }
+
+    let (counterparty_used_num, insurance_used_num) = allocation.unwrap();
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: counterparty_num,
+        expiry_slot: 2,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        fresh_reserved_backing_num: counterparty_num,
+        insurance_credit_reserved_num: insurance_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let reservation = InsuranceCreditReservationV16 {
+        insurance_credit_reserved_num: insurance_num,
+        ..InsuranceCreditReservationV16::EMPTY
+    };
+    let (bucket_liened, source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            bucket,
+            source,
+            1,
+            counterparty_used_num,
+        )
+        .unwrap();
+    let (reservation_liened, source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_insurance_lien_create_delta(
+            reservation,
+            source,
+            insurance_used_num,
+        )
+        .unwrap();
+    let (bucket_after, source) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
+            bucket_liened,
+            source,
+            counterparty_used_num,
+        )
+        .unwrap();
+    let (reservation_after, source_after, domain_spent, insurance_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_insurance_lien_consume_delta(
+            reservation_liened,
+            source,
+            0,
+            insurance_atoms,
+            insurance_used_num,
+        )
+        .unwrap();
+    let counterparty_used_atoms = counterparty_used_num / BOUND_SCALE;
+    let insurance_used_atoms = insurance_used_num / BOUND_SCALE;
+
+    let branch_policy_exact = if counterparty_atoms >= required_atoms {
+        counterparty_used_atoms == required_atoms && insurance_used_atoms == 0
+    } else if insurance_atoms >= required_atoms {
+        counterparty_used_atoms == 0 && insurance_used_atoms == required_atoms
+    } else {
+        counterparty_used_atoms == counterparty_atoms
+            && insurance_used_atoms == required_atoms - counterparty_atoms
+    };
+    assert!(
+        branch_policy_exact
+            && counterparty_used_atoms + insurance_used_atoms == required_atoms
+            && counterparty_used_atoms <= counterparty_atoms
+            && insurance_used_atoms <= insurance_atoms
+            && bucket_after.fresh_unliened_backing_num
+                == (counterparty_atoms - counterparty_used_atoms) * BOUND_SCALE
+            && bucket_after.valid_liened_backing_num == 0
+            && bucket_after.consumed_liened_backing_num == counterparty_used_num
+            && reservation_after.insurance_credit_reserved_num
+                == (insurance_atoms - insurance_used_atoms) * BOUND_SCALE
+            && reservation_after.valid_liened_insurance_num == 0
+            && reservation_after.consumed_insurance_num == insurance_used_num
+            && source_after.fresh_reserved_backing_num
+                == (counterparty_atoms - counterparty_used_atoms) * BOUND_SCALE
+            && source_after.insurance_credit_reserved_num
+                == (insurance_atoms - insurance_used_atoms) * BOUND_SCALE
+            && source_after.valid_liened_backing_num == 0
+            && source_after.valid_liened_insurance_num == 0
+            && source_after.spent_backing_num == counterparty_used_num
+            && source_after.provider_receivable_num == counterparty_used_num
+            && domain_spent == insurance_used_atoms
+            && insurance_after == insurance_atoms - insurance_used_atoms
+            && source_after.fresh_reserved_backing_num
+                + source_after.insurance_credit_reserved_num
+                + required_num
+                == counterparty_num + insurance_num,
+        "aggregate source support must be exactly consumable without overdraw or double spend"
+    );
+}
+
 // Expiry-liveness primitive (wrapper finding 2026-06-10): the resolved-close
 // realize step must not strand a source-backed winner whose backing has lapsed
 // (bucket still Fresh but expiry_slot <= current_slot — nothing processes
