@@ -10612,30 +10612,36 @@ fn proof_v16_public_counterparty_lien_impair_moves_valid_to_impaired_without_val
     assert_eq!(market.kani_residual(), residual_before + atoms);
 }
 
-#[kani::proof]
-#[kani::unwind(24)]
-#[kani::solver(cadical)]
-fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
+fn check_v16_insurance_lien_consume_spends_only_its_domain_budget<const TARGET_LONG: bool>() {
     // CLEAN-ROOM FIX: master drove kani_apply_insurance_lien_consume_domain_delta,
     // a cfg(kani)/fuzz-only MODEL wrapper that OMITTED the
     // reservation_encumbrance_proof_for_domain_parts(...).validate()? and the exit
     // validate_shape() the engine path consume_source_credit_lien_from_insurance_
     // not_atomic runs (v16.rs) -- so it certified a path the engine never executes,
     // and its single saturated domain never tested the named ISOLATION property.
-    // Fix: drive the REAL engine path and prove DOMAIN ISOLATION -- domain 0 (Long)
-    // is the consume target; the sibling domain 1 (Short) on the same asset carries
-    // its own budget/reservation that MUST survive untouched. The model wrapper is
-    // deleted; the single-domain mutation is independently covered by
-    // proof_v16_public_insurance_lien_consume_debits_only_domain_insurance.
-    let long_raw: u8 = kani::any();
-    let short_raw: u8 = kani::any();
-    kani::assume((1..=8).contains(&long_raw));
-    kani::assume((1..=8).contains(&short_raw));
+    // Fix: drive the REAL engine path and prove DOMAIN ISOLATION in both
+    // directions. The selected domain is consumed while its live sibling on the
+    // same asset MUST survive untouched. The scalar delta theorem below already
+    // covers the wider arithmetic state space, so this public-path frame theorem
+    // uses one Boolean dimension to select unequal, nontrivial domain amounts.
+    let selected_is_three: bool = kani::any();
+    let selected_raw = if selected_is_three { 3u8 } else { 2u8 };
+    let sibling_raw = if selected_is_three { 2u8 } else { 3u8 };
+    let (long_raw, short_raw) = if TARGET_LONG {
+        (selected_raw, sibling_raw)
+    } else {
+        (sibling_raw, selected_raw)
+    };
     let atoms_long = long_raw as u128;
     let atoms_short = short_raw as u128;
     let amount_long = atoms_long * BOUND_SCALE;
     let amount_short = atoms_short * BOUND_SCALE;
     let total_atoms = atoms_long + atoms_short;
+    let (target_domain, target_atoms, target_amount, sibling_atoms) = if TARGET_LONG {
+        (0usize, atoms_long, amount_long, atoms_short)
+    } else {
+        (1usize, atoms_short, amount_short, atoms_long)
+    };
 
     let (mut header, mut markets) = one_market_only_fixture();
     // de-saturated pool: the insurance pool funds BOTH domains' reservations, so
@@ -10644,7 +10650,7 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
     header.insurance = V16PodU128::new(total_atoms);
     header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(total_atoms);
     header.insurance_domain_budget_remaining_total = V16PodU128::new(total_atoms);
-    // domain 0 = Long: the consume target.
+    // Both sides carry fully funded, live reservations.
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(atoms_long);
     markets[0].engine.insurance_reservation_long =
         InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
@@ -10659,7 +10665,6 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
-    // domain 1 = Short: the sibling whose budget/reservation must SURVIVE.
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(atoms_short);
     markets[0].engine.insurance_reservation_short =
         InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
@@ -10677,97 +10682,113 @@ fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
 
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
+    let risk_epoch_before = header.risk_epoch.get();
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
-    // sibling (Short / domain 1) snapshot BEFORE the consume
-    let short_budget_before = market.markets[0].engine.insurance_domain_budget_short.get();
-    let short_spent_before = market.markets[0].engine.insurance_domain_spent_short.get();
-    let short_res_before = market.markets[0]
-        .engine
-        .insurance_reservation_short
-        .try_to_runtime()
-        .unwrap();
-    let short_src_before = market.markets[0]
-        .engine
-        .source_credit_short
-        .try_to_runtime()
-        .unwrap();
+    // Snapshot the complete sibling domain state before consuming either side.
+    // This makes the theorem symmetric and catches side-indexing regressions.
+    let (sibling_budget_before, sibling_spent_before, sibling_res_before, sibling_src_before) =
+        if TARGET_LONG {
+            (
+                market.markets[0].engine.insurance_domain_budget_short.get(),
+                market.markets[0].engine.insurance_domain_spent_short.get(),
+                market.markets[0].engine.insurance_reservation_short,
+                market.markets[0].engine.source_credit_short,
+            )
+        } else {
+            (
+                market.markets[0].engine.insurance_domain_budget_long.get(),
+                market.markets[0].engine.insurance_domain_spent_long.get(),
+                market.markets[0].engine.insurance_reservation_long,
+                market.markets[0].engine.source_credit_long,
+            )
+        };
 
     // REAL engine path (runs the encumbrance-proof validate + exit validate_shape).
     market
-        .consume_source_credit_lien_from_insurance_not_atomic(0, amount_long)
+        .consume_source_credit_lien_from_insurance_not_atomic(target_domain, target_amount)
         .unwrap();
 
-    let reservation = market.markets[0]
-        .engine
-        .insurance_reservation_long
-        .try_to_runtime()
-        .unwrap();
-    let source = market.markets[0]
-        .engine
-        .source_credit_long
-        .try_to_runtime()
-        .unwrap();
-    let short_res_after = market.markets[0]
-        .engine
-        .insurance_reservation_short
-        .try_to_runtime()
-        .unwrap();
-    let short_src_after = market.markets[0]
-        .engine
-        .source_credit_short
-        .try_to_runtime()
-        .unwrap();
+    let (
+        target_budget_after,
+        target_spent_after,
+        target_res_after,
+        target_src_after,
+        sibling_budget_after,
+        sibling_spent_after,
+        sibling_res_after,
+        sibling_src_after,
+    ) = if TARGET_LONG {
+        (
+            market.markets[0].engine.insurance_domain_budget_long.get(),
+            market.markets[0].engine.insurance_domain_spent_long.get(),
+            market.markets[0].engine.insurance_reservation_long,
+            market.markets[0].engine.source_credit_long,
+            market.markets[0].engine.insurance_domain_budget_short.get(),
+            market.markets[0].engine.insurance_domain_spent_short.get(),
+            market.markets[0].engine.insurance_reservation_short,
+            market.markets[0].engine.source_credit_short,
+        )
+    } else {
+        (
+            market.markets[0].engine.insurance_domain_budget_short.get(),
+            market.markets[0].engine.insurance_domain_spent_short.get(),
+            market.markets[0].engine.insurance_reservation_short,
+            market.markets[0].engine.source_credit_short,
+            market.markets[0].engine.insurance_domain_budget_long.get(),
+            market.markets[0].engine.insurance_domain_spent_long.get(),
+            market.markets[0].engine.insurance_reservation_long,
+            market.markets[0].engine.source_credit_long,
+        )
+    };
 
     kani::cover!(
-        atoms_long > 1 && atoms_short > 1,
-        "nontrivial Long consume with a live sibling Short domain"
+        selected_is_three && atoms_long > 1 && atoms_short > 1 && atoms_long != atoms_short,
+        "nontrivial selected-domain consume with a distinct live sibling domain"
     );
 
-    // domain 0 (Long) lien is consumed in full ...
-    assert_eq!(reservation.consumed_insurance_num, amount_long);
-    assert_eq!(reservation.valid_liened_insurance_num, 0);
-    assert_eq!(reservation.insurance_credit_reserved_num, 0);
-    assert_eq!(source.valid_liened_insurance_num, 0);
-    assert_eq!(source.insurance_credit_reserved_num, 0);
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_spent_long.get(),
-        atoms_long
+    // One theorem assertion keeps Kani's automatic reachability checks from
+    // redundantly solving every conjunct. The explicit cover above proves this
+    // successful public path is reachable with distinct nontrivial domains.
+    let selected_exact = target_budget_after == target_atoms
+        && target_spent_after == target_atoms
+        && target_res_after.consumed_insurance_num.get() == target_amount
+        && target_res_after.valid_liened_insurance_num.get() == 0
+        && target_res_after.insurance_credit_reserved_num.get() == 0
+        && target_src_after.valid_liened_insurance_num.get() == 0
+        && target_src_after.insurance_credit_reserved_num.get() == 0;
+    let sibling_unchanged = sibling_budget_after == sibling_budget_before
+        && sibling_spent_after == sibling_spent_before
+        && sibling_res_after == sibling_res_before
+        && sibling_src_after == sibling_src_before;
+    let aggregates_exact = market.header.insurance.get() == sibling_atoms
+        && market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get()
+            == sibling_atoms
+        && market.header.insurance_domain_budget_remaining_total.get() == sibling_atoms
+        && market.header.vault.get() == vault_before
+        && market.header.c_tot.get() == c_tot_before
+        && market.header.risk_epoch.get() == risk_epoch_before + 1;
+    assert!(
+        selected_exact && sibling_unchanged && aggregates_exact,
+        "insurance-lien consumption must be exact and sibling-domain isolated"
     );
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_budget_long.get(),
-        atoms_long
-    );
+}
 
-    // ... and the sibling Short domain (domain 1) is UNTOUCHED -- the named
-    // isolation property: consuming one domain spends ONLY its own budget.
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_budget_short.get(),
-        short_budget_before
-    );
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_spent_short.get(),
-        short_spent_before
-    );
-    assert_eq!(short_res_after, short_res_before);
-    assert_eq!(
-        short_src_after.valid_liened_insurance_num,
-        short_src_before.valid_liened_insurance_num
-    );
-    assert_eq!(
-        short_src_after.insurance_credit_reserved_num,
-        short_src_before.insurance_credit_reserved_num
-    );
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_insurance_lien_consume_spends_only_its_domain_budget() {
+    check_v16_insurance_lien_consume_spends_only_its_domain_budget::<true>();
+}
 
-    // the insurance pool falls by EXACTLY the Long spend; the Short reservation
-    // (atoms_short) still stands, so the pool is not zeroed.
-    assert_eq!(market.header.insurance.get(), atoms_short);
-    assert_eq!(
-        market.header.insurance_domain_budget_remaining_total.get(),
-        atoms_short
-    );
-    assert_eq!(market.header.vault.get(), vault_before);
-    assert_eq!(market.header.c_tot.get(), c_tot_before);
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_short_insurance_lien_consume_spends_only_its_domain_budget() {
+    check_v16_insurance_lien_consume_spends_only_its_domain_budget::<false>();
 }
 
 #[kani::proof]
