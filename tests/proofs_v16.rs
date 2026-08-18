@@ -3,9 +3,9 @@
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
     backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
-    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
-    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_available_backing_num_for_source_credit_state,
+    kani_add_open_interest_for_new_position, kani_amount_from_bound_num,
+    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
+    kani_apply_resolved_payout_receipt_payment, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_expected_source_credit_rate_num_for_state, kani_health_cert_after_capital_debit,
@@ -13668,8 +13668,8 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
 // account validation forces unwind 40 and the per-domain U256 credit math
 // blows up the formula; a single concrete witness passed once at 658s and
 // timed out on three re-runs — permanently on the budget line). The realize
-// primitive therefore has NO direct Kani harness. Its coverage decomposes
-// into already-passing proofs — consume-delta exactness
+// primitive therefore has no direct whole-helper Kani harness. Its coverage
+// decomposes into the composition theorem below plus consume-delta exactness
 // (proof_v16_public_counterparty_lien_consume_creates_receivable_without_
 // value_movement, proof_v16_counterparty_lien_consume_delta_is_receivable_
 // exact_and_fail_closed, proof_v16_counterparty_credit_consumption_reports_
@@ -13678,10 +13678,175 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
 // sum_capped_by_shared_backing), the close-ledger partition equality
 // (proof_v16_close_progress_ledger_residual_equation_is_enforced), and the
 // expired-backing liveness witness (proof_v16_expired_backing_yields_zero_
-// realizable_support_after_expiry) — while the end-to-end realize semantics
-// (exact payout values, no-double-pay, idempotence, ordering, expiry
-// liveness) are asserted at runtime by tests/backing_double_claim_fuzz.rs
-// (5 randomized properties, 300 cases each) and the spec tests.
+// realizable_support_after_expiry). Idempotence, ordering, and expiry liveness
+// are also asserted at runtime by tests/backing_double_claim_fuzz.rs.
+
+// Terminal source-backed realization composition. The whole account helper is
+// solver-intractable because it repeats the 256-bit source-rate divider through
+// full account/market validation. Its exact production pieces are independently
+// callable, however: source support, lien sizing, counterparty create/consume,
+// scaled-to-atom conversion, quote-value flow, and stock reconciliation. This
+// theorem composes those real pieces across zero, partial, and full backing and
+// proves the user-facing property that winner payout plus provider recovery can
+// never double-spend one vault atom or pay more than the original claim face.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_source_backed_realization_is_stock_conservative_and_no_double_pay() {
+    let claim_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let junior_raw: u8 = kani::any();
+    kani::assume((1..=15).contains(&claim_raw));
+    kani::assume(backing_raw <= claim_raw);
+    kani::assume(junior_raw <= 15);
+    let claim = claim_raw as u128;
+    let backing = backing_raw as u128;
+    let junior = junior_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+    let backing_num = backing * BOUND_SCALE;
+    let mut source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: backing_num,
+        ..SourceCreditStateV16::EMPTY
+    };
+    source.credit_rate_num = kani_expected_source_credit_rate_num_for_state(source).unwrap();
+    let bucket = if backing == 0 {
+        BackingBucketV16::empty_for_market(1)
+    } else {
+        BackingBucketV16 {
+            market_id: 1,
+            fresh_unliened_backing_num: backing_num,
+            expiry_slot: 100,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        }
+    };
+    let converted = kani_source_credit_state_realizable_support_for_face(source, claim).unwrap();
+    let (source_after, backing_after, face_burn, reported_converted) = if converted == 0 {
+        (source, backing, 0, 0)
+    } else {
+        let (face_num, consume_num) =
+            MarketGroupV16ViewMut::<u64>::kani_source_credit_lien_amounts_for_effective(
+                converted,
+                source.credit_rate_num,
+            )
+            .unwrap();
+        let (bucket_liened, source_liened) =
+            MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+                bucket,
+                source,
+                1,
+                consume_num,
+            )
+            .unwrap();
+        let (_, source_consumed) =
+            MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
+                bucket_liened,
+                source_liened,
+                consume_num,
+            )
+            .unwrap();
+        let converted_atoms =
+            MarketGroupV16ViewMut::<u64>::kani_counterparty_cure_atoms_from_scaled_backing(
+                consume_num,
+            )
+            .unwrap();
+        (
+            source_consumed,
+            backing - converted,
+            kani_amount_from_bound_num(face_num).unwrap(),
+            converted_atoms,
+        )
+    };
+
+    let vault = backing + junior;
+    let c_tot_after = converted;
+    let residual_before = vault - backing;
+    let residual_after = vault - c_tot_after - backing_after;
+    let flow = TokenValueFlowProofV16::support_to_account_capital(
+        converted, converted, 0, 0, vault, vault,
+    )
+    .unwrap();
+    let stock_before = StockReconciliationProofV16 {
+        token_vault: vault,
+        senior_capital_total: 0,
+        insurance_capital: 0,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: backing,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    let stock_after = StockReconciliationProofV16 {
+        token_vault: vault,
+        senior_capital_total: c_tot_after,
+        insurance_capital: 0,
+        backing_provider_earnings: 0,
+        counterparty_backing_principal: backing_after,
+        settlement_rounding_residue_total: 0,
+        unallocated_protocol_surplus: junior,
+    };
+    let remaining_face = claim - face_burn;
+    let junior_receipt_payout = remaining_face.min(junior);
+    let winner_claim_payout = converted + junior_receipt_payout;
+    let total_external_payout = winner_claim_payout + backing_after;
+
+    kani::cover!(
+        backing == 0 && junior > 0,
+        "terminal realization covers an unbacked claim using only junior receipt value"
+    );
+    kani::cover!(
+        converted > 0 && converted < claim,
+        "terminal realization covers a partially backed claim"
+    );
+    kani::cover!(
+        backing == claim && claim_raw > 8,
+        "terminal realization covers a widened fully backed claim"
+    );
+    let stock_before_total = stock_before.senior_capital_total
+        + stock_before.insurance_capital
+        + stock_before.backing_provider_earnings
+        + stock_before.counterparty_backing_principal
+        + stock_before.settlement_rounding_residue_total
+        + stock_before.unallocated_protocol_surplus;
+    let stock_after_total = stock_after.senior_capital_total
+        + stock_after.insurance_capital
+        + stock_after.backing_provider_earnings
+        + stock_after.counterparty_backing_principal
+        + stock_after.settlement_rounding_residue_total
+        + stock_after.unallocated_protocol_surplus;
+    assert!(
+        reported_converted == converted
+            && converted <= backing
+            && converted <= face_burn
+            && face_burn <= claim
+            && source_after.fresh_reserved_backing_num / BOUND_SCALE == backing_after
+            && source_after.spent_backing_num / BOUND_SCALE == converted
+            && source_after.provider_receivable_num / BOUND_SCALE == converted
+            && source_after.valid_liened_backing_num == 0
+            && source_after.fresh_reserved_backing_num + source_after.provider_receivable_num
+                == backing_num
+            && residual_before == junior
+            && residual_after == residual_before
+            && flow.vault_before == vault
+            && flow.vault_after == vault
+            && flow.debits[TokenValueClassV16::AccountCapital as usize] == converted
+            && flow.credits[TokenValueClassV16::CloseCounterpartyCreditConsumed as usize]
+                == converted
+            && stock_before.token_vault == stock_before_total
+            && stock_after.token_vault == stock_after_total
+            && winner_claim_payout <= claim
+            && total_external_payout <= vault
+            && vault - total_external_payout == junior - junior_receipt_payout
+            && (backing != 0 || (converted == 0 && backing_after == 0))
+            && (backing != claim
+                || (converted == claim
+                    && face_burn == claim
+                    && backing_after == 0
+                    && winner_claim_payout == claim)),
+        "terminal realization preserves stock and cannot double-pay winner/provider claims"
+    );
+}
 
 // Expiry-liveness primitive (wrapper finding 2026-06-10): the resolved-close
 // realize step must not strand a source-backed winner whose backing has lapsed
