@@ -19136,6 +19136,68 @@ fn proof_v16_pending_close_mixed_partial_insurance_and_b_partition_is_exact() {
     );
 }
 
+// DoS theorem for the production pending-close priority boundary. For every
+// small symbolic residual/chunk and either source side, a valid persisted close
+// whose receiving B index is exhausted must be classified recovery-eligible,
+// never as an advance that can only return NonProgress. The production selector
+// contract proves this summary maps to DeclareRecovery; the symbolic recovery-
+// crank theorem proves that selected transition commits value-neutrally for all
+// reasons. Decomposing at those exact production boundaries avoids expanding
+// unrelated 16-leg refresh/liquidation dispatch paths.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_pending_close_at_b_ceiling_selects_recovery() {
+    let residual_raw: u8 = kani::any();
+    let chunk_raw: u8 = kani::any();
+    let source_is_short: bool = kani::any();
+    kani::assume((1..=8).contains(&residual_raw));
+    kani::assume((1..=8).contains(&chunk_raw));
+    let residual = u128::from(residual_raw);
+    let chunk = u128::from(chunk_raw);
+    let domain_side = if source_is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let (mut header, mut markets, mut account_header) =
+        attributed_pending_recovery_close_fixture(residual, chunk, domain_side, false, false);
+    match domain_side {
+        SideV16::Long => markets[0].engine.asset.b_long_num = V16PodU128::new(u128::MAX),
+        SideV16::Short => markets[0].engine.asset.b_short_num = V16PodU128::new(u128::MAX),
+    }
+
+    kani::cover!(
+        source_is_short && residual_raw > 4 && chunk_raw > 4,
+        "short source-domain close reaches its B-index ceiling"
+    );
+    kani::cover!(
+        !source_is_short && residual_raw > 4 && chunk_raw > 4,
+        "long source-domain close reaches its B-index ceiling"
+    );
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market
+        .kani_classify_live_pending_close(
+            &account.as_view(),
+            market.header.current_slot.get(),
+            false,
+        )
+        .expect("a valid unexpired pending close must classify");
+    let reason = PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress;
+    let plan = percolator::v16::kani_select_auto_crank_plan(summary, 0, reason);
+
+    assert!(
+        summary.recovery_eligible
+            && !summary.pending_close
+            && !summary.expired_close
+            && summary.is_actionable()
+            && plan == AutoCrankPlanV16::DeclareRecovery { reason },
+        "B-headroom exhaustion must select the commit-capable recovery route"
+    );
+}
+
 // LoF — no free open interest: a risk-increasing fill with nonzero size, nonzero
 // price, and nonzero fee_bps must charge a STRICTLY POSITIVE fee per side. The
 // pre-fix code derived the fee from trade_notional_floor, which rounds sub-atom

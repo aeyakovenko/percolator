@@ -1320,6 +1320,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 }
 
+pub fn kani_select_auto_crank_plan(
+    summary: ActionableSummaryV16,
+    close_slot: usize,
+    recovery_reason: PermissionlessRecoveryReasonV16,
+) -> AutoCrankPlanV16 {
+    V16Core::select_auto_crank_plan(summary, close_slot, 0, 0, None, recovery_reason)
+}
+
 impl PortfolioSourceDomainV16Account {
     pub fn kani_is_sparse_tail_default(self) -> bool {
         self.is_sparse_tail_default()
