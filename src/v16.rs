@@ -5220,6 +5220,57 @@ pub const V16_MAX_ACCRUAL_PATH_STEPS: usize = 32;
 pub struct AccrualStepV16 {
     pub effective_price: u64,
     pub funding_rate_e9: i128,
+    pub price_move_remainder_before_bps_num: u16,
+    pub price_move_remainder_after_bps_num: u16,
+}
+
+/// Computes one canonical price-cap step while carrying sub-atom movement forward.
+///
+/// The remainder is the numerator left after division by `MAX_MARGIN_BPS`. Carrying it across
+/// calls prevents both caller-selected rounding and permanent low-price target pinning.
+pub fn canonical_accrual_price_step_v16(
+    anchor: u64,
+    target: u64,
+    max_change_bps: u64,
+    exposed: bool,
+    remainder_before_bps_num: u16,
+) -> V16Result<(u64, u16)> {
+    if anchor == 0
+        || target == 0
+        || anchor > MAX_ORACLE_PRICE
+        || target > MAX_ORACLE_PRICE
+        || remainder_before_bps_num as u64 >= MAX_MARGIN_BPS
+    {
+        return Err(V16Error::InvalidConfig);
+    }
+    if !exposed {
+        return Ok((target, 0));
+    }
+    if anchor == target || max_change_bps == 0 {
+        return Ok((anchor, 0));
+    }
+    let numerator = (anchor as u128)
+        .checked_mul(max_change_bps as u128)
+        .and_then(|value| value.checked_add(remainder_before_bps_num as u128))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    let max_delta = numerator / MAX_MARGIN_BPS as u128;
+    let remainder_after = u16::try_from(numerator % MAX_MARGIN_BPS as u128)
+        .map_err(|_| V16Error::ArithmeticOverflow)?;
+    let distance = anchor.abs_diff(target) as u128;
+    if max_delta >= distance {
+        return Ok((target, 0));
+    }
+    let delta = u64::try_from(max_delta).map_err(|_| V16Error::ArithmeticOverflow)?;
+    let next = if target > anchor {
+        anchor
+            .checked_add(delta)
+            .ok_or(V16Error::ArithmeticOverflow)?
+    } else {
+        anchor
+            .checked_sub(delta)
+            .ok_or(V16Error::ArithmeticOverflow)?
+    };
+    Ok((next, remainder_after))
 }
 
 #[repr(C)]
@@ -12537,6 +12588,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         asset_index: usize,
         now_slot: u64,
+        raw_oracle_target_price: u64,
         steps: &[AccrualStepV16],
         protective_progress_committed: bool,
     ) -> V16Result<AccrueAssetOutcomeV16> {
@@ -12544,6 +12596,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live
             || asset_index >= config.max_market_slots as usize
             || asset_index >= self.markets.len()
+            || raw_oracle_target_price == 0
+            || raw_oracle_target_price > MAX_ORACLE_PRICE
             || now_slot < self.header.current_slot.get()
         {
             return Err(V16Error::InvalidConfig);
@@ -12561,16 +12615,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if steps.len() != expected_steps {
             return Err(V16Error::InvalidConfig);
         }
+        let target_changed = asset.raw_oracle_target_price != raw_oracle_target_price;
 
         let mut price_move_count = 0u64;
         let mut funding_count = 0u64;
-        for step in steps {
+        let mut expected_remainder = steps
+            .first()
+            .map(|step| step.price_move_remainder_before_bps_num)
+            .unwrap_or(0);
+        for (index, step) in steps.iter().enumerate() {
             if step.effective_price == 0
                 || step.effective_price > MAX_ORACLE_PRICE
                 || step.funding_rate_e9.unsigned_abs() > config.max_abs_funding_e9_per_slot as u128
+                || (index == 0 && target_changed && step.price_move_remainder_before_bps_num != 0)
+                || step.price_move_remainder_before_bps_num != expected_remainder
             {
                 return Err(V16Error::InvalidConfig);
             }
+            let exposed = asset.oi_eff_long_q != 0 || asset.oi_eff_short_q != 0;
+            let (expected_price, remainder_after) = canonical_accrual_price_step_v16(
+                asset.effective_price,
+                raw_oracle_target_price,
+                config.max_price_move_bps_per_slot,
+                exposed,
+                step.price_move_remainder_before_bps_num,
+            )?;
+            if step.effective_price != expected_price
+                || step.price_move_remainder_after_bps_num != remainder_after
+            {
+                return Err(V16Error::InvalidConfig);
+            }
+            expected_remainder = remainder_after;
             let activity = V16Core::accrual_activity_for_asset_segment(
                 asset,
                 1,
@@ -12578,16 +12653,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 step.funding_rate_e9,
             );
             if activity.equity_active {
-                let price_diff = step.effective_price.abs_diff(asset.effective_price) as u128;
-                let lhs = price_diff
-                    .checked_mul(MAX_MARGIN_BPS as u128)
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                let rhs = (config.max_price_move_bps_per_slot as u128)
-                    .checked_mul(asset.effective_price as u128)
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                if lhs > rhs {
-                    return Err(V16Error::RecoveryRequired);
-                }
                 if !protective_progress_committed {
                     return Err(V16Error::NonProgress);
                 }
@@ -12625,6 +12690,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::CounterOverflow)?;
         }
 
+        asset.raw_oracle_target_price = raw_oracle_target_price;
         self.set_asset_state(asset_index, asset)?;
         self.header.current_slot = V16PodU64::new(now_slot);
         self.header.slot_last = V16PodU64::new(asset.slot_last);
@@ -12634,6 +12700,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .oracle_epoch
                 .get()
                 .checked_add(price_move_count)
+                .and_then(|value| value.checked_add(u64::from(target_changed)))
                 .ok_or(V16Error::CounterOverflow)?,
         );
         self.header.funding_epoch = V16PodU64::new(

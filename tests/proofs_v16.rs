@@ -2,11 +2,11 @@
 
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
-    backing_domain_fee_split_for_lien_delta_num, kani_active_bitmap_set as active_bitmap_set,
-    kani_add_open_interest_for_new_position, kani_apply_backing_provider_earnings_withdraw,
-    kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
-    kani_auto_crank_leg_flags, kani_auto_crank_lifecycle_dispatchable,
-    kani_available_backing_num_for_source_credit_state,
+    backing_domain_fee_split_for_lien_delta_num, canonical_accrual_price_step_v16,
+    kani_active_bitmap_set as active_bitmap_set, kani_add_open_interest_for_new_position,
+    kani_apply_backing_provider_earnings_withdraw, kani_apply_backing_utilization_fee_charge,
+    kani_apply_resolved_payout_receipt_payment, kani_auto_crank_leg_flags,
+    kani_auto_crank_lifecycle_dispatchable, kani_available_backing_num_for_source_credit_state,
     kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_commit_declared_liquidation_recovery, kani_expected_source_credit_rate_num_for_state,
@@ -10068,26 +10068,33 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_canonical_accrual_path_is_partition_invariant() {
-    let first_delta: i8 = kani::any();
-    let second_delta: i8 = kani::any();
+    let target_raw: u8 = kani::any();
+    let cap_raw: u8 = kani::any();
     let first_funding: i8 = kani::any();
     let second_funding: i8 = kani::any();
-    kani::assume((-5..=5).contains(&first_delta));
-    kani::assume((-5..=5).contains(&second_delta));
+    kani::assume((90..=110).contains(&target_raw) && target_raw != 100);
+    kani::assume((1..=100).contains(&cap_raw));
     kani::assume((-10..=10).contains(&first_funding));
     kani::assume((-10..=10).contains(&second_funding));
 
-    let first_price_i16 = 100i16 + first_delta as i16;
-    let second_price_i16 = first_price_i16 + second_delta as i16;
-    kani::assume(first_price_i16 > 0 && second_price_i16 > 0);
+    let target = target_raw as u64;
+    let cap = cap_raw as u64;
+    let (first_price, first_remainder) =
+        canonical_accrual_price_step_v16(100, target, cap, true, 0).unwrap();
+    let (second_price, second_remainder) =
+        canonical_accrual_price_step_v16(first_price, target, cap, true, first_remainder).unwrap();
     let steps = [
         AccrualStepV16 {
-            effective_price: first_price_i16 as u64,
+            effective_price: first_price,
             funding_rate_e9: first_funding as i128,
+            price_move_remainder_before_bps_num: 0,
+            price_move_remainder_after_bps_num: first_remainder,
         },
         AccrualStepV16 {
-            effective_price: second_price_i16 as u64,
+            effective_price: second_price,
             funding_rate_e9: second_funding as i128,
+            price_move_remainder_before_bps_num: first_remainder,
+            price_move_remainder_after_bps_num: second_remainder,
         },
     ];
 
@@ -10095,6 +10102,7 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
     delayed_header.config.max_accrual_dt_slots = V16PodU64::new(2);
     delayed_header.config.min_funding_lifetime_slots = V16PodU64::new(2);
     delayed_header.config.max_abs_funding_e9_per_slot = V16PodU64::new(10);
+    delayed_header.config.max_price_move_bps_per_slot = V16PodU64::new(cap);
     let mut asset = delayed_markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = POS_SCALE;
     asset.oi_eff_short_q = POS_SCALE;
@@ -10109,22 +10117,27 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
     let delayed_outcome = {
         let mut market = MarketGroupV16ViewMut::new(&mut delayed_header, &mut delayed_markets);
         market
-            .accrue_asset_path_to_not_atomic(0, 3, &steps, true)
+            .accrue_asset_path_to_not_atomic(0, 3, target, &steps, true)
             .unwrap()
     };
     {
         let mut market = MarketGroupV16ViewMut::new(&mut split_header, &mut split_markets);
         market
-            .accrue_asset_path_to_not_atomic(0, 2, &steps[..1], true)
+            .accrue_asset_path_to_not_atomic(0, 2, target, &steps[..1], true)
             .unwrap();
         market
-            .accrue_asset_path_to_not_atomic(0, 3, &steps[1..], true)
+            .accrue_asset_path_to_not_atomic(0, 3, target, &steps[1..], true)
             .unwrap();
     }
 
     kani::cover!(
-        first_delta > 0 && second_delta < 0 && first_funding > 0 && second_funding < 0,
-        "canonical path proof covers price and funding direction reversal"
+        first_price == 100 && second_price != 100 && first_funding > 0 && second_funding < 0,
+        "canonical path proof covers carried sub-atom movement and funding direction reversal"
+    );
+    kani::cover!(target > 100, "canonical path proof covers upward movement");
+    kani::cover!(
+        target < 100,
+        "canonical path proof covers downward movement"
     );
     assert_eq!(delayed_outcome.dt, 2);
     assert!(kani_eq_market_group_v16_header_account(
