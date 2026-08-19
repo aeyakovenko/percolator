@@ -43,7 +43,7 @@ use percolator::v16::{
 };
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
-    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, POS_SCALE,
+    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
@@ -5602,6 +5602,104 @@ fn proof_v16_unilateral_reduction_preserves_long_short_oi_symmetry() {
             fully_matched.a_short
         },
         ADL_ONE
+    );
+}
+
+// Bounded-progress companion for the matching side's A-factor. Every valid
+// partial close keeps the scaled A positive; if it falls below the configured
+// safety floor, the exact same production kernel marks only that side
+// DrainOnly. It must not return RecoveryRequired or mutate the closed side.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_matching_oi_reduction_is_positive_or_enters_drain_only() {
+    let closes_short: bool = kani::any();
+    let high_a: bool = kani::any();
+    let position_raw: u8 = kani::any();
+    let close_raw: u8 = kani::any();
+    // The production kernel is scale-free in position_q. Cover every partial
+    // ratio through a 64-unit denominator instead of paying for a wider
+    // symbolic divider in this bounded CI theorem.
+    kani::assume((2..=64).contains(&position_raw));
+    kani::assume((1..position_raw).contains(&close_raw));
+    let position_q = position_raw as u128;
+    let close_q = close_raw as u128;
+    let remaining_q = position_q - close_q;
+    let a_before = if high_a { ADL_ONE } else { MIN_A_SIDE };
+    let expected_a = a_before * remaining_q / position_q;
+    let closed_side = if closes_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let asset = AssetStateV16 {
+        a_long: a_before,
+        a_short: a_before,
+        oi_eff_long_q: position_q,
+        oi_eff_short_q: position_q,
+        mode_long: SideModeV16::Normal,
+        mode_short: SideModeV16::Normal,
+        k_long: 17,
+        k_short: -19,
+        f_long_num: 23,
+        f_short_num: -29,
+        ..AssetStateV16::default()
+    };
+
+    let (after, full_drain) =
+        kani_reduce_matching_open_interest(asset, closed_side, close_q).unwrap();
+    let expected_mode = if expected_a < MIN_A_SIDE {
+        SideModeV16::DrainOnly
+    } else {
+        SideModeV16::Normal
+    };
+    let mut expected = asset;
+    if closes_short {
+        expected.oi_eff_long_q = remaining_q;
+        expected.a_long = expected_a;
+        expected.mode_long = expected_mode;
+    } else {
+        expected.oi_eff_short_q = remaining_q;
+        expected.a_short = expected_a;
+        expected.mode_short = expected_mode;
+    }
+
+    kani::cover!(
+        !high_a && !closes_short && expected_mode == SideModeV16::DrainOnly,
+        "minimum-A long counterparty enters drain-only on partial reduction"
+    );
+    kani::cover!(
+        !high_a && closes_short && expected_mode == SideModeV16::DrainOnly,
+        "minimum-A short counterparty enters drain-only on partial reduction"
+    );
+    kani::cover!(
+        high_a && expected_mode == SideModeV16::Normal && close_q > 1,
+        "well-capitalized A remains normal after a nontrivial partial reduction"
+    );
+    kani::cover!(
+        high_a && expected_mode == SideModeV16::DrainOnly,
+        "deep partial reduction drains even a high-A counterparty side"
+    );
+    assert!(!full_drain);
+    assert!(expected_a > 0);
+    assert!(expected_a <= a_before);
+    assert_eq!(after, expected);
+    assert_eq!(after.oi_eff_long_q == after.oi_eff_short_q, false);
+    assert_eq!(
+        if closes_short {
+            after.oi_eff_long_q
+        } else {
+            after.oi_eff_short_q
+        },
+        remaining_q
+    );
+    assert_eq!(
+        if closes_short {
+            after.mode_long
+        } else {
+            after.mode_short
+        },
+        expected_mode
     );
 }
 
