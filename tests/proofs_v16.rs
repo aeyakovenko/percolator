@@ -9338,6 +9338,162 @@ fn proof_v16_available_source_support_excludes_liened_and_encumbered_amounts() {
     }
 }
 
+// The end-to-end K/F theorem below proves account, junior, and domain claims
+// move together. These four compositional theorems prove the production domain
+// setter used by that path cannot redirect the claim aggregate to a sibling
+// side or another slab asset. Keeping the rate recomputation in the end-to-end
+// theorem only avoids duplicating its expensive symbolic U256 division here.
+fn assert_v16_source_credit_setter_is_exact_and_asset_isolated<
+    const ASSET_INDEX: usize,
+    const TARGET_LONG: bool,
+>() {
+    let old_raw: u8 = kani::any();
+    let delta_raw: u8 = kani::any();
+    let epoch_raw: u8 = kani::any();
+    kani::assume(old_raw <= 3);
+    kani::assume((1..=4).contains(&delta_raw));
+    kani::assume(epoch_raw <= 3);
+    let old_num = old_raw as u128 * BOUND_SCALE;
+    let delta_num = delta_raw as u128 * BOUND_SCALE;
+    let sibling_num = 5 * BOUND_SCALE;
+    let independent_long_num = 7 * BOUND_SCALE;
+    let independent_short_num = 11 * BOUND_SCALE;
+    let target_domain = ASSET_INDEX * 2 + usize::from(!TARGET_LONG);
+    let unrelated = 1 - ASSET_INDEX;
+    let old_epoch = if old_raw == 0 { 0 } else { epoch_raw as u64 };
+    let old_source = if old_raw == 0 {
+        SourceCreditStateV16::EMPTY
+    } else {
+        SourceCreditStateV16 {
+            positive_claim_bound_num: old_num,
+            exact_positive_claim_num: old_num,
+            credit_rate_num: 0,
+            credit_epoch: old_epoch,
+            ..SourceCreditStateV16::EMPTY
+        }
+    };
+    let sibling_source = SourceCreditStateV16 {
+        positive_claim_bound_num: sibling_num,
+        exact_positive_claim_num: sibling_num,
+        credit_rate_num: 0,
+        credit_epoch: 13,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let independent_long_source = SourceCreditStateV16 {
+        positive_claim_bound_num: independent_long_num,
+        exact_positive_claim_num: independent_long_num,
+        credit_rate_num: 0,
+        credit_epoch: 17,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let independent_short_source = SourceCreditStateV16 {
+        positive_claim_bound_num: independent_short_num,
+        exact_positive_claim_num: independent_short_num,
+        credit_rate_num: 0,
+        credit_epoch: 19,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let next_source = SourceCreditStateV16 {
+        positive_claim_bound_num: old_num + delta_num,
+        exact_positive_claim_num: old_num + delta_num,
+        credit_rate_num: 0,
+        credit_epoch: old_epoch + 1,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    if TARGET_LONG {
+        markets[ASSET_INDEX].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&old_source);
+        markets[ASSET_INDEX].engine.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&sibling_source);
+    } else {
+        markets[ASSET_INDEX].engine.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&old_source);
+        markets[ASSET_INDEX].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&sibling_source);
+    }
+    markets[unrelated].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&independent_long_source);
+    markets[unrelated].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&independent_short_source);
+    header.source_claim_bound_total_num =
+        V16PodU128::new(old_num + sibling_num + independent_long_num + independent_short_num);
+    header.vault = V16PodU128::new(31);
+    header.c_tot = V16PodU128::new(13);
+    header.insurance = V16PodU128::new(7);
+    header.risk_epoch = V16PodU64::new(23);
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .kani_set_source_credit_for_domain(target_domain, next_source)
+        .unwrap();
+
+    kani::cover!(old_raw == 0, "source setter covers an empty target domain");
+    kani::cover!(
+        old_raw > 0,
+        "source setter covers an existing target-domain claim"
+    );
+    kani::cover!(delta_raw == 1, "source setter covers a one-atom delta");
+    kani::cover!(delta_raw > 1, "source setter covers a multi-atom delta");
+
+    let mut expected_header = header_before;
+    expected_header.source_claim_bound_total_num =
+        V16PodU128::new(header_before.source_claim_bound_total_num.get() + delta_num);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    let mut expected_selected = slots_before[ASSET_INDEX];
+    if TARGET_LONG {
+        expected_selected.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&next_source);
+    } else {
+        expected_selected.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&next_source);
+    }
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET_INDEX].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slots_before[unrelated],
+        &market.markets[unrelated].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, wrappers_before[0]);
+    assert_eq!(market.markets[1].wrapper, wrappers_before[1]);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_long_source_credit_setter_is_exact_and_asset_isolated() {
+    assert_v16_source_credit_setter_is_exact_and_asset_isolated::<0, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_short_source_credit_setter_is_exact_and_asset_isolated() {
+    assert_v16_source_credit_setter_is_exact_and_asset_isolated::<0, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_long_source_credit_setter_is_exact_and_asset_isolated() {
+    assert_v16_source_credit_setter_is_exact_and_asset_isolated::<1, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_short_source_credit_setter_is_exact_and_asset_isolated() {
+    assert_v16_source_credit_setter_is_exact_and_asset_isolated::<1, false>();
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]

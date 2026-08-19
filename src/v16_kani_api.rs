@@ -502,6 +502,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.domain_asset_side(domain)
     }
 
+    pub fn kani_set_source_credit_for_domain(
+        &mut self,
+        domain: usize,
+        source: SourceCreditStateV16,
+    ) -> V16Result<()> {
+        self.set_source_credit_for_domain(domain, source)
+    }
+
     pub fn kani_insurance_domain_index(
         &self,
         asset_index: usize,
