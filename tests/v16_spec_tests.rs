@@ -267,6 +267,57 @@ fn canonical_up_path(mut price: u64, count: usize) -> (u64, Vec<AccrualStepV16>)
     (target, steps)
 }
 
+#[test]
+fn v16_canonical_accrual_path_scales_indices_after_quantity_adl() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    let (target, steps) = canonical_up_path(INITIAL_PRICE, 1);
+    let step = steps[0];
+    let (mut header, mut markets) = canonical_path_market_fixture(INITIAL_PRICE);
+    let mut long_header = account_fixture(1, 225);
+    let mut short_header = account_fixture(1, 226);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 100_000_000).unwrap();
+        market.deposit_not_atomic(&mut short, 100_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(4 * POS_SCALE),
+                    exec_price: INITIAL_PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_path_to_not_atomic(0, 2, target, &steps, true)
+            .unwrap();
+    }
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    let a_short = ADL_ONE * 3 / 4;
+    let price_delta = i128::from(step.effective_price - INITIAL_PRICE);
+    let funding_index_delta = FUNDING_COUNTER_ATOMS_PER_SLOT as i128;
+    assert_eq!(asset.a_short, a_short);
+    assert_eq!(asset.k_long, price_delta * ADL_ONE as i128);
+    assert_eq!(asset.k_short, -(price_delta * a_short as i128));
+    assert_eq!(asset.f_long_num, -(funding_index_delta * ADL_ONE as i128));
+    assert_eq!(asset.f_short_num, funding_index_delta * a_short as i128);
+}
+
 fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Account {
     let (market_id, _, owner) = ids();
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(

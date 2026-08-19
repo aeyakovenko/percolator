@@ -12720,23 +12720,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
 
             let price_delta = step.effective_price as i128 - asset.effective_price as i128;
-            let k_delta = checked_i128_mul(price_delta, ADL_ONE as i128)?;
-            let funding_delta = if activity.funding_active {
+            let funding_index_delta = if activity.funding_active {
                 let n = step
                     .funding_rate_e9
                     .checked_mul(step.effective_price as i128)
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 floor_div_signed_conservative_i128(n, FUNDING_DEN)
-                    .checked_mul(ADL_ONE as i128)
-                    .ok_or(V16Error::ArithmeticOverflow)?
             } else {
                 0
             };
+            let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
+                V16Core::kernel_adl_scaled_accrual_index_deltas(
+                    price_delta,
+                    funding_index_delta,
+                    asset.a_long,
+                    asset.a_short,
+                )?;
 
-            asset.k_long = add_non_min_i128(asset.k_long, k_delta)?;
-            asset.k_short = add_non_min_i128(asset.k_short, -k_delta)?;
-            asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
-            asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
+            asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
+            asset.k_short = add_non_min_i128(asset.k_short, k_delta_short)?;
+            asset.f_long_num = add_non_min_i128(asset.f_long_num, funding_delta_long)?;
+            asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta_short)?;
             asset.effective_price = step.effective_price;
             asset.slot_last = asset
                 .slot_last
