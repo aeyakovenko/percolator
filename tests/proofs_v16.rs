@@ -4706,6 +4706,204 @@ fn proof_v16_pending_domain_loss_barrier_allows_only_same_side_reductions() {
     }
 }
 
+fn install_flat_pending_obligation(
+    header: &mut MarketGroupV16HeaderAccount,
+    markets: &mut [Market<u64>; 1],
+    account: &mut PortfolioAccountV16Account,
+    side: SideV16,
+    weight: u128,
+    barrier_active: bool,
+) {
+    let market_id = markets[0].engine.asset.market_id.get();
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    match side {
+        SideV16::Long => {
+            asset.stored_pos_count_long = 1;
+            asset.pending_obligation_count_long = 1;
+            asset.loss_weight_sum_long = weight;
+            if barrier_active {
+                markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
+            }
+        }
+        SideV16::Short => {
+            asset.stored_pos_count_short = 1;
+            asset.pending_obligation_count_short = 1;
+            asset.loss_weight_sum_short = weight;
+            if barrier_active {
+                markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+            }
+        }
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(1 + u64::from(barrier_active));
+    header.materialized_portfolio_count = V16PodU64::new(1);
+
+    account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id,
+        side,
+        basis_pos_q: 0,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: weight,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    let mut bitmap = account.active_bitmap.map(V16PodU64::get);
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    account.active_bitmap = bitmap.map(V16PodU64::new);
+    account.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+}
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_released_flat_pending_obligation_is_publicly_actionable() {
+    let is_short: bool = kani::any();
+    let barrier_active: bool = kani::any();
+    let weight_units: u8 = kani::any();
+    kani::assume((1..=8).contains(&weight_units));
+    let weight = (weight_units as u128) * POS_SCALE;
+    let side = if is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    install_flat_pending_obligation(
+        &mut header,
+        &mut markets,
+        &mut account_header,
+        side,
+        weight,
+        barrier_active,
+    );
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+
+    kani::cover!(
+        is_short && barrier_active && weight_units > 4,
+        "classifier retains a blocked nontrivial short obligation"
+    );
+    kani::cover!(
+        is_short && !barrier_active && weight_units > 4,
+        "classifier releases a nontrivial short obligation"
+    );
+    kani::cover!(
+        !is_short && barrier_active && weight_units > 4,
+        "classifier retains a blocked nontrivial long obligation"
+    );
+    kani::cover!(
+        !is_short && !barrier_active && weight_units > 4,
+        "classifier releases a nontrivial long obligation"
+    );
+    assert_eq!(summary.stale, !barrier_active);
+    assert_eq!(summary.is_actionable(), !barrier_active);
+}
+
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_released_flat_pending_obligation_detach_is_value_neutral_progress() {
+    let is_short: bool = kani::any();
+    let weight_units: u8 = kani::any();
+    kani::assume((1..=8).contains(&weight_units));
+    let weight = (weight_units as u128) * POS_SCALE;
+    let side = if is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    install_flat_pending_obligation(
+        &mut header,
+        &mut markets,
+        &mut account_header,
+        side,
+        weight,
+        false,
+    );
+    let asset_before = markets[0].engine.asset.try_to_runtime().unwrap();
+    let wrapper_before = markets[0].wrapper;
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let capital_before = account_header.capital;
+    let pnl_before = account_header.pnl;
+    let reserved_before = account_header.reserved_pnl;
+    let fee_credits_before = account_header.fee_credits;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.kani_clear_leg(&mut account, 0).unwrap();
+
+    kani::cover!(
+        is_short && weight_units > 4,
+        "detach nontrivial short obligation"
+    );
+    kani::cover!(
+        !is_short && weight_units > 4,
+        "detach nontrivial long obligation"
+    );
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert!(account.header.legs[0].try_to_runtime().unwrap().is_empty());
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert!(
+        asset_after.oi_eff_long_q == 0
+            && asset_after.oi_eff_short_q == 0
+            && asset_after.stored_pos_count_long == 0
+            && asset_after.stored_pos_count_short == 0
+            && asset_after.pending_obligation_count_long == 0
+            && asset_after.pending_obligation_count_short == 0
+            && asset_after.loss_weight_sum_long == 0
+            && asset_after.loss_weight_sum_short == 0
+    );
+    assert!(
+        asset_after.market_id == asset_before.market_id
+            && asset_after.lifecycle == asset_before.lifecycle
+            && asset_after.a_long == asset_before.a_long
+            && asset_after.a_short == asset_before.a_short
+            && asset_after.k_long == asset_before.k_long
+            && asset_after.k_short == asset_before.k_short
+            && asset_after.f_long_num == asset_before.f_long_num
+            && asset_after.f_short_num == asset_before.f_short_num
+            && asset_after.b_long_num == asset_before.b_long_num
+            && asset_after.b_short_num == asset_before.b_short_num
+    );
+    assert!(
+        market.markets[0].wrapper == wrapper_before
+            && market.header.vault == vault_before
+            && market.header.c_tot == c_tot_before
+            && market.header.insurance == insurance_before
+            && market.header.resolved_payout_blocker_count.get() == 0
+            && market.header.materialized_portfolio_count.get() == 1
+            && account.header.capital == capital_before
+            && account.header.pnl == pnl_before
+            && account.header.reserved_pnl == reserved_before
+            && account.header.fee_credits == fee_credits_before
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]

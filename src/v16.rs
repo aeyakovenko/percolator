@@ -12649,7 +12649,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &PortfolioV16View<'_>,
     ) -> V16Result<(
         ActionableSummaryV16,
-        (Option<usize>, Option<usize>, Option<usize>, Option<usize>),
+        (
+            Option<usize>,
+            Option<usize>,
+            Option<usize>,
+            Option<usize>,
+            Option<usize>,
+        ),
     )> {
         let mode = decode_market_mode(self.header.mode)?;
         let live = mode == MarketModeV16::Live;
@@ -12669,12 +12675,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let selected_assets = self.auto_crank_selected_assets(account)?;
         let liquidatable_asset = selected_assets.2;
         let reset_obligation_asset = selected_assets.3;
+        let released_obligation_asset = selected_assets.4;
         let has_open_risk = liquidatable_asset.is_some();
         // A close ledger with residual_remaining==0 is already fully booked/covered
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
         // actionable close work. The `active` flag can linger past that.
         let close_outstanding = ledger.has_pending_residual();
-        let stale = live && (!cert_current || reset_obligation_asset.is_some());
+        let stale = live
+            && (!cert_current
+                || reset_obligation_asset.is_some()
+                || released_obligation_asset.is_some());
         let b_stale = live && Self::has_b_stale_leg(account)?;
         // A durable close ledger is independently actionable even after the trade
         // that created it cleared the bankrupt leg. AdvanceClose infers the asset
@@ -12757,11 +12767,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn auto_crank_selected_assets(
         &self,
         account: &PortfolioV16View<'_>,
-    ) -> V16Result<(Option<usize>, Option<usize>, Option<usize>, Option<usize>)> {
+    ) -> V16Result<(
+        Option<usize>,
+        Option<usize>,
+        Option<usize>,
+        Option<usize>,
+        Option<usize>,
+    )> {
         let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let release_allowed = !account
+            .header
+            .close_progress
+            .try_to_runtime()?
+            .has_pending_residual();
         let mut refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut reset_obligation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut released_obligation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
@@ -12790,6 +12812,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 liquidation_flags[slot] = liquidatable;
                 reset_obligation_flags[slot] =
                     reset_obligation || Self::leg_has_exhausted_effective_oi(asset, leg);
+                released_obligation_flags[slot] = release_allowed
+                    && !leg.stale
+                    && !leg.b_stale
+                    && leg.basis_pos_q == 0
+                    && leg.loss_weight != 0
+                    && !self.has_pending_domain_loss_barrier(leg.asset_index as usize, leg.side)?;
             }
             slot += 1;
         }
@@ -12806,12 +12834,44 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let liquidatable_asset = asset_of(V16Core::first_actionable_slot(liquidation_flags))?;
         let reset_obligation_asset =
             asset_of(V16Core::first_actionable_slot(reset_obligation_flags))?;
+        let released_obligation_asset =
+            asset_of(V16Core::first_actionable_slot(released_obligation_flags))?;
         Ok((
             b_stale_asset,
             refresh_asset,
             liquidatable_asset,
             reset_obligation_asset,
+            released_obligation_asset,
         ))
+    }
+
+    fn released_obligation_is_current(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+    ) -> V16Result<bool> {
+        let Some(leg_slot) = Self::active_leg_slot_for_asset(account, asset_index)? else {
+            return Ok(false);
+        };
+        let leg = account.header.legs[leg_slot].try_to_runtime()?;
+        if !leg.active
+            || leg.b_stale
+            || leg.stale
+            || leg.basis_pos_q != 0
+            || leg.loss_weight == 0
+            || account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+            || self.has_pending_domain_loss_barrier(asset_index, leg.side)?
+        {
+            return Ok(false);
+        }
+        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+        Ok(k_target == leg.k_snap
+            && f_target == leg.f_snap
+            && self.b_target_for_leg(asset_index, leg)? == leg.b_snap)
     }
 
     /// THE SINGLE PUBLIC PERMISSIONLESS CRANK (engine.md): the only crank the
@@ -12855,8 +12915,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 outcome: AutoCrankOutcomeV16::RecoveryResolved,
             });
         }
-        let (summary, (b_stale_asset, refresh_asset, liquidatable_asset, _)) =
-            self.build_actionable_summary_and_selected_assets(&account.as_view())?;
+        let (
+            summary,
+            (b_stale_asset, refresh_asset, liquidatable_asset, _, released_obligation_asset),
+        ) = self.build_actionable_summary_and_selected_assets(&account.as_view())?;
         let recovery_reason = if summary.expired_close || summary.recovery_eligible {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {
@@ -12871,6 +12933,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             refresh_asset,
             recovery_reason,
         );
+
+        // Once the originating domain barrier is gone, a current zero-basis leg
+        // carries only a released loss obligation. Detach it directly so the
+        // account and market counters cannot remain locked behind a current
+        // health certificate that would otherwise classify as NoAction.
+        if matches!(plan, AutoCrankPlanV16::RefreshAccount { .. }) {
+            if let Some(asset_index) = released_obligation_asset {
+                if self.released_obligation_is_current(&account.as_view(), asset_index)? {
+                    self.validate_unconfigured_market_tail()?;
+                    self.clear_leg(account, asset_index)?;
+                    self.validate_shape_audit_scan()?;
+                    return Ok(AutoCrankResultV16 {
+                        selected: plan,
+                        outcome: AutoCrankOutcomeV16::Progressed(
+                            PermissionlessProgressOutcomeV16::AccountCurrent,
+                        ),
+                    });
+                }
+            }
+        }
 
         let obs_or_current_asset = |me: &Self, i: usize| -> V16Result<AutoCrankObservationV16> {
             match work
