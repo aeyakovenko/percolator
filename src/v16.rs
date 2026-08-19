@@ -1382,6 +1382,23 @@ impl V16Core {
         Ok((new_vault, new_c_tot, new_capital, capital_credit))
     }
 
+    /// PRODUCTION KERNEL: initialize a forfeited leg's close partition from
+    /// the post-principal deficit plus source support already consumed while
+    /// settling the leg. Both must remain in the close ledger exactly once.
+    pub(crate) fn kernel_forfeit_close_gross_loss(
+        pnl_after_principal: i128,
+        support_consumed: u128,
+    ) -> V16Result<u128> {
+        let residual_after_principal = if pnl_after_principal < 0 {
+            pnl_after_principal.unsigned_abs()
+        } else {
+            0
+        };
+        residual_after_principal
+            .checked_add(support_consumed)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
     /// PRODUCTION KERNEL (value safety, roadmap S-L2 insurance layer): the
     /// insurance-draw core of negative-PnL liquidation. Draw is capped by BOTH
     /// the remaining deficit and the DOMAIN's own available insurance —
@@ -15982,14 +15999,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         let principal_used = self.settle_negative_pnl_from_principal_not_atomic(account)?;
-        let bankruptcy_residual_after_principal = if account.header.pnl.get() < 0 {
-            account.header.pnl.get().unsigned_abs()
-        } else {
-            0
-        };
-        let gross_close_loss = bankruptcy_residual_after_principal
-            .checked_add(support_consumed)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        let gross_close_loss =
+            V16Core::kernel_forfeit_close_gross_loss(account.header.pnl.get(), support_consumed)?;
         if gross_close_loss != 0 {
             self.begin_close_progress_ledger(
                 account,
@@ -16031,17 +16042,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             )?;
             residual_booked = outcome.booked_loss;
             explicit_loss = outcome.explicit_loss;
-            let cleared = residual_booked
-                .checked_add(explicit_loss)
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .min(residual);
-            let cleared_i128 = i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
-            let new_pnl = account
-                .header
-                .pnl
-                .get()
-                .checked_add(cleared_i128)
-                .ok_or(V16Error::ArithmeticOverflow)?;
+            let new_pnl = V16Core::kernel_settle_resolved_pnl_after_booking(
+                account.header.pnl.get(),
+                residual_booked,
+                explicit_loss,
+            )?;
             self.set_account_pnl(account, new_pnl)?;
         }
 

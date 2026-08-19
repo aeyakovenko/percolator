@@ -19,14 +19,15 @@ use percolator::v16::{
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
     AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
-    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
-    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
-    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    BResidualBookingOutcomeV16, BResidualStepV16, BackingBucketStatusV16, BackingBucketV16,
+    BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
+    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
+    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
@@ -9723,6 +9724,188 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     assert_eq!(ok, Ok(()));
     assert_eq!(rejected, Err(V16Error::InvalidLeg));
     assert_eq!(understated_rejected, Err(V16Error::InvalidLeg));
+}
+
+// Route-level forfeit composition theorem. These are the production kernels
+// called by ForfeitRecoveryLeg after K/F and B settlement: principal is senior
+// to domain insurance, every cure atom advances the same close-ledger rank as
+// the account deficit, and a leg is detachable only when both reach zero.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_forfeit_recovery_residual_stack_is_conservative_and_progresses() {
+    let loss = kani::any::<u64>() as u128;
+    let capital = kani::any::<u64>() as u128;
+    let other_junior = kani::any::<u64>() as u128;
+    let support = kani::any::<u64>() as u128;
+    let face_extra = kani::any::<u64>() as u128;
+    let domain_available = kani::any::<u64>() as u128;
+    let insurance_extra = kani::any::<u64>() as u128;
+    let spent = kani::any::<u64>() as u128;
+    let booked_seed = kani::any::<u64>() as u128;
+    let explicit_seed = kani::any::<u64>() as u128;
+    let booking_available: bool = kani::any();
+    let resolved: bool = kani::any();
+    kani::assume(loss > 0);
+
+    let c_tot = capital + other_junior;
+    let insurance = domain_available + insurance_extra;
+    let pnl_before = -(loss as i128);
+    let (principal_used, new_capital, new_c_tot, pnl_after_principal) =
+        MarketGroupV16ViewMut::<u64>::kani_settle_principal_delta(capital, c_tot, pnl_before)
+            .unwrap();
+    let gross_close_loss =
+        MarketGroupV16ViewMut::<u64>::kani_forfeit_close_gross_loss(pnl_after_principal, support)
+            .unwrap();
+
+    if gross_close_loss == 0 {
+        assert_eq!(principal_used, loss);
+        assert_eq!(support, 0);
+        assert_eq!(pnl_after_principal, 0);
+        return;
+    }
+
+    let junior_face_burned = support + face_extra;
+    let ledger = CloseProgressLedgerV16 {
+        active: true,
+        finalized: false,
+        canceled: false,
+        close_id: 1,
+        asset_index: 0,
+        market_id: 1,
+        domain_side: SideV16::Long,
+        gross_loss_at_close_start: gross_close_loss,
+        residual_remaining: gross_close_loss,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let ledger = MarketGroupV16ViewMut::<u64>::kani_advance_close_ledger_delta(
+        ledger,
+        support,
+        junior_face_burned,
+        0,
+        0,
+        0,
+    )
+    .unwrap();
+
+    let (insurance_used, new_insurance, new_spent, pnl_after_insurance) = if pnl_after_principal < 0
+    {
+        MarketGroupV16ViewMut::<u64>::kani_consume_insurance_layer_delta(
+            domain_available,
+            insurance,
+            spent,
+            pnl_after_principal,
+        )
+        .unwrap()
+    } else {
+        (0, insurance, spent, pnl_after_principal)
+    };
+    let ledger = MarketGroupV16ViewMut::<u64>::kani_advance_close_ledger_delta(
+        ledger,
+        0,
+        0,
+        insurance_used,
+        0,
+        0,
+    )
+    .unwrap();
+
+    let residual_after_insurance = pnl_after_insurance.unsigned_abs();
+    let booked = booked_seed.min(residual_after_insurance);
+    let explicit = explicit_seed.min(residual_after_insurance - booked);
+    let remaining = residual_after_insurance - booked - explicit;
+    let requested_booking = BResidualBookingOutcomeV16 {
+        booked_loss: booked,
+        explicit_loss: explicit,
+        delta_b: 0,
+        remaining_after: remaining,
+    };
+    let candidate = if residual_after_insurance == 0 || booking_available {
+        Some(requested_booking)
+    } else {
+        None
+    };
+    let booking = match MarketGroupV16ViewMut::<u64>::kani_bresidual_step(
+        residual_after_insurance,
+        candidate,
+        resolved,
+    ) {
+        BResidualStepV16::Outcome(outcome) => outcome,
+        BResidualStepV16::DeclareRecovery => {
+            kani::cover!(
+                !booking_available && !resolved && residual_after_insurance > 0,
+                "forfeit covers unavailable live booking declaring recovery"
+            );
+            assert!(!booking_available);
+            assert!(!resolved);
+            assert!(residual_after_insurance > 0);
+            assert_eq!(ledger.residual_remaining, residual_after_insurance);
+            assert_eq!(pnl_after_insurance.unsigned_abs(), residual_after_insurance);
+            return;
+        }
+    };
+    let booked = booking.booked_loss;
+    let explicit = booking.explicit_loss;
+    let remaining = booking.remaining_after;
+    let final_pnl = if residual_after_insurance == 0 {
+        pnl_after_insurance
+    } else {
+        MarketGroupV16ViewMut::<u64>::kani_settle_pnl_after_booking_delta(
+            pnl_after_insurance,
+            booked,
+            explicit,
+        )
+        .unwrap()
+    };
+    let final_ledger = MarketGroupV16ViewMut::<u64>::kani_advance_close_ledger_delta(
+        ledger, 0, 0, 0, booked, explicit,
+    )
+    .unwrap();
+
+    kani::cover!(
+        principal_used > 0 && insurance_used > 0 && booked > 0 && explicit > 0 && remaining == 0,
+        "forfeit covers all funded loss layers reaching terminal detachment"
+    );
+    kani::cover!(
+        support > 0 && domain_available == 0 && booked > 0 && remaining > 0,
+        "forfeit covers source support plus partial social-loss progress"
+    );
+    kani::cover!(
+        principal_used == loss && support > 0 && final_ledger.finalized,
+        "forfeit covers source support as the only close-ledger obligation"
+    );
+    kani::cover!(
+        !booking_available
+            && resolved
+            && residual_after_insurance > 0
+            && booked == 0
+            && explicit == residual_after_insurance
+            && remaining == 0,
+        "forfeit covers resolved explicit-loss fallback when B booking is unavailable"
+    );
+
+    assert_eq!(principal_used, capital.min(loss));
+    assert_eq!(new_capital + principal_used, capital);
+    assert_eq!(new_c_tot + principal_used, c_tot);
+    assert_eq!(new_c_tot - new_capital, other_junior);
+    assert!(insurance_used <= domain_available);
+    assert_eq!(new_insurance + insurance_used, insurance);
+    assert_eq!(new_spent, spent + insurance_used);
+    assert_eq!(
+        gross_close_loss,
+        support + insurance_used + booked + explicit + remaining
+    );
+    assert_eq!(final_pnl.unsigned_abs(), remaining);
+    assert_eq!(final_ledger.residual_remaining, remaining);
+    assert_eq!(final_ledger.support_consumed, support);
+    assert_eq!(final_ledger.junior_face_burned, junior_face_burned);
+    assert_eq!(final_ledger.insurance_spent, insurance_used);
+    assert_eq!(final_ledger.b_loss_booked, booked);
+    assert_eq!(final_ledger.explicit_loss_assigned, explicit);
+    assert_eq!(final_ledger.finalized, remaining == 0);
+    if support + insurance_used + booked + explicit > 0 {
+        assert!(final_ledger.residual_remaining < gross_close_loss);
+    }
 }
 
 #[kani::proof]

@@ -950,6 +950,64 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_forfeit_close_gross_loss(
+        pnl_after_principal: i128,
+        support_consumed: u128,
+    ) -> V16Result<u128> {
+        V16Core::kernel_forfeit_close_gross_loss(pnl_after_principal, support_consumed)
+    }
+
+    pub fn kani_settle_principal_delta(
+        capital: u128,
+        c_tot: u128,
+        pnl: i128,
+    ) -> V16Result<(u128, u128, u128, i128)> {
+        V16Core::kernel_settle_principal(capital, c_tot, pnl)
+    }
+
+    pub fn kani_consume_insurance_layer_delta(
+        domain_available: u128,
+        insurance: u128,
+        spent: u128,
+        pnl: i128,
+    ) -> V16Result<(u128, u128, u128, i128)> {
+        V16Core::kernel_consume_insurance_layer(domain_available, insurance, spent, pnl)
+    }
+
+    pub fn kani_advance_close_ledger_delta(
+        ledger: CloseProgressLedgerV16,
+        support_consumed: u128,
+        junior_face_burned: u128,
+        insurance_spent: u128,
+        b_loss_booked: u128,
+        explicit_loss_assigned: u128,
+    ) -> V16Result<CloseProgressLedgerV16> {
+        V16Core::kernel_advance_close_ledger(
+            ledger,
+            support_consumed,
+            junior_face_burned,
+            insurance_spent,
+            b_loss_booked,
+            explicit_loss_assigned,
+        )
+    }
+
+    pub fn kani_bresidual_step(
+        residual_remaining: u128,
+        booked: Option<BResidualBookingOutcomeV16>,
+        resolved: bool,
+    ) -> BResidualStepV16 {
+        V16Core::kernel_bresidual_step(residual_remaining, booked, resolved)
+    }
+
+    pub fn kani_settle_pnl_after_booking_delta(
+        pnl: i128,
+        booked_loss: u128,
+        explicit_loss: u128,
+    ) -> V16Result<i128> {
+        V16Core::kernel_settle_resolved_pnl_after_booking(pnl, booked_loss, explicit_loss)
+    }
+
     pub fn kani_position_change_touches_pending_domain_loss_barrier(
         &self,
         asset_index: usize,
