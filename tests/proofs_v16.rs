@@ -1127,6 +1127,134 @@ fn proof_v16_asset_recovery_transition_is_idempotent_after_recovery() {
     assert_eq!(next_risk_epoch, risk_epoch as u64);
 }
 
+// Public malicious/abandoned-asset shutdown route. Forcing one asset into
+// Recovery may freeze only that asset's raw oracle target and bump the two
+// lifecycle epochs once. Every quote-value field, every insurance/backing
+// domain (including the selected asset's funded domains), and the unrelated
+// asset must be framed exactly. The scalar transition above proves the full
+// lifecycle/epoch arithmetic; these two route harnesses pin both dynamic asset
+// indices in the real zero-copy API.
+fn prove_v16_public_force_asset_recovery_is_selected_only<const SELECTED_INDEX: usize>() {
+    assert!(SELECTED_INDEX < 2);
+    let selected_drain_only: bool = kani::any();
+    let price_raw: u16 = kani::any();
+    let now_slot_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let insurance_slack_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume((1..=10_000).contains(&price_raw));
+    kani::assume((1..=8).contains(&now_slot_raw));
+
+    let selected_index = SELECTED_INDEX;
+    let other_index = 1 - selected_index;
+    let now_slot = u64::from(now_slot_raw);
+    let capital = u128::from(capital_raw);
+    let insurance_slack = u128::from(insurance_slack_raw);
+    let surplus = u128::from(surplus_raw);
+    let domain_atoms = [[2u128, 3u128], [5u128, 7u128]];
+    let domain_total = 17u128;
+    let insurance = domain_total + insurance_slack;
+    let backing_atoms = domain_total;
+
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(domain_total);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_atoms * BOUND_SCALE);
+    header.vault = V16PodU128::new(capital + insurance + backing_atoms + surplus);
+
+    for asset_index in 0..2 {
+        let market_id = markets[asset_index].engine.asset.market_id.get();
+        markets[asset_index].engine.insurance_domain_budget_long =
+            V16PodU128::new(domain_atoms[asset_index][0]);
+        markets[asset_index].engine.insurance_domain_budget_short =
+            V16PodU128::new(domain_atoms[asset_index][1]);
+        let (long_bucket, long_source) =
+            fresh_backing_domain_accounts(market_id, domain_atoms[asset_index][0]);
+        let (short_bucket, short_source) =
+            fresh_backing_domain_accounts(market_id, domain_atoms[asset_index][1]);
+        markets[asset_index].engine.backing_long = long_bucket;
+        markets[asset_index].engine.source_credit_long = long_source;
+        markets[asset_index].engine.backing_short = short_bucket;
+        markets[asset_index].engine.source_credit_short = short_source;
+    }
+    markets[selected_index].wrapper = 0xfeed_0000 + selected_index as u64;
+    markets[other_index].wrapper = 0xcafe_0000 + other_index as u64;
+
+    let mut selected_asset = markets[selected_index]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap();
+    selected_asset.lifecycle = if selected_drain_only {
+        AssetLifecycleV16::DrainOnly
+    } else {
+        AssetLifecycleV16::Active
+    };
+    selected_asset.raw_oracle_target_price = 1;
+    selected_asset.effective_price = u64::from(price_raw);
+    selected_asset.fund_px_last = u64::from(price_raw);
+    markets[selected_index].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+
+    let header_before = header;
+    let selected_before = markets[selected_index];
+    let other_before = markets[other_index];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    market
+        .force_asset_recovery_not_atomic(selected_index, now_slot)
+        .unwrap();
+
+    kani::cover!(
+        selected_drain_only && price_raw > 100,
+        "public force recovery covers a nontrivial DrainOnly asset"
+    );
+    kani::cover!(
+        !selected_drain_only && insurance_slack > 0 && surplus > 0,
+        "public force recovery covers Active with senior and junior slack"
+    );
+
+    let mut expected_header = header_before;
+    expected_header.asset_set_epoch = V16PodU64::new(header_before.asset_set_epoch.get() + 1);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+
+    let mut expected_selected = selected_before;
+    selected_asset.lifecycle = AssetLifecycleV16::Recovery;
+    selected_asset.raw_oracle_target_price = selected_asset.effective_price;
+    expected_selected.engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+    assert_eq!(
+        market.markets[selected_index].wrapper,
+        expected_selected.wrapper
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[selected_index].engine,
+        &expected_selected.engine
+    ));
+    assert_eq!(market.markets[other_index].wrapper, other_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[other_index].engine,
+        &other_before.engine
+    ));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_force_asset_zero_recovery_is_selected_only() {
+    prove_v16_public_force_asset_recovery_is_selected_only::<0>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_force_asset_one_recovery_is_selected_only() {
+    prove_v16_public_force_asset_recovery_is_selected_only::<1>();
+}
+
 #[kani::proof]
 #[kani::solver(cadical)]
 fn proof_v16_loss_stale_trade_scope_allows_only_unrelated_current_assets() {
