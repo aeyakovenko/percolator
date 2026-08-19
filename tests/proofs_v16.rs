@@ -195,11 +195,13 @@ fn two_market_direct_view_fixture() -> (
         market
     };
     let mut account = PortfolioAccountV16Account::default();
-    account
-        .init_empty_in_place(ProvenanceHeaderV16Account::from_runtime(
-            &ProvenanceHeaderV16::new(market_group_id, account_id, owner),
-        ))
-        .unwrap();
+    // Equivalent to init_empty_in_place without expanding its fixed-capacity loops in every proof.
+    account.provenance_header = ProvenanceHeaderV16Account::from_runtime(
+        &ProvenanceHeaderV16::new(market_group_id, account_id, owner),
+    );
+    account.owner = owner;
+    account.legs =
+        [PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY); V16_MAX_PORTFOLIO_ASSETS_N];
     (header, [make_market(1), make_market(2)], account)
 }
 
@@ -10113,6 +10115,290 @@ fn proof_v16_forfeit_recovery_residual_stack_is_conservative_and_progresses() {
     if support + insurance_used + booked + explicit > 0 {
         assert!(final_ledger.residual_remaining < gross_close_loss);
     }
+}
+
+// Public-route dead-leg theorem. In group Recovery, an owner may detach one
+// fully settled leg without touching another live exposure in the same
+// portfolio. This composes the clear-leg kernel contract with the actual
+// forfeit admission/validation path and proves both value neutrality and an
+// exact whole-slot frame for the unrelated asset across symbolic account
+// capital. Asset, side, and quantity are split from the full-domain kernels to
+// keep each production-route proof below the hard timeout.
+fn prove_v16_public_recovery_forfeit_detaches_only_selected_asset(
+    selected_asset: usize,
+    selected_is_short: bool,
+) {
+    let unrelated_asset = 1 - selected_asset;
+    let selected_side = if selected_is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let unrelated_side = if selected_is_short {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let selected_q = 3 * POS_SCALE;
+    let selected_signed_q = if selected_is_short {
+        -(selected_q as i128)
+    } else {
+        selected_q as i128
+    };
+    let unrelated_q = 2 * POS_SCALE;
+    let unrelated_signed_q = if selected_is_short {
+        unrelated_q as i128
+    } else {
+        -(unrelated_q as i128)
+    };
+    let capital = kani::any::<u16>() as u128 + 1;
+    let insurance = 7u128;
+    let surplus = 5u128;
+
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    account_header.capital = V16PodU128::new(capital);
+    markets[unrelated_asset].wrapper = 0x55aa_33cc_0f0f_f0f0;
+
+    let mut selected_state = markets[selected_asset]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap();
+    match selected_side {
+        SideV16::Long => {
+            selected_state.oi_eff_long_q = selected_q;
+            selected_state.stored_pos_count_long = 1;
+            selected_state.loss_weight_sum_long = selected_q;
+        }
+        SideV16::Short => {
+            selected_state.oi_eff_short_q = selected_q;
+            selected_state.stored_pos_count_short = 1;
+            selected_state.loss_weight_sum_short = selected_q;
+        }
+    }
+    markets[selected_asset].engine.asset = AssetStateV16Account::from_runtime(&selected_state);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: selected_asset as u32,
+        market_id: selected_state.market_id,
+        side: selected_side,
+        basis_pos_q: selected_signed_q,
+        a_basis: ADL_ONE,
+        k_snap: if selected_is_short {
+            selected_state.k_short
+        } else {
+            selected_state.k_long
+        },
+        f_snap: if selected_is_short {
+            selected_state.f_short_num
+        } else {
+            selected_state.f_long_num
+        },
+        epoch_snap: if selected_is_short {
+            selected_state.epoch_short
+        } else {
+            selected_state.epoch_long
+        },
+        loss_weight: selected_q,
+        b_snap: if selected_is_short {
+            selected_state.b_short_num
+        } else {
+            selected_state.b_long_num
+        },
+        b_rem: 0,
+        b_epoch_snap: if selected_is_short {
+            selected_state.epoch_short
+        } else {
+            selected_state.epoch_long
+        },
+        b_stale: false,
+        stale: false,
+    });
+
+    let mut unrelated_state = markets[unrelated_asset]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap();
+    match unrelated_side {
+        SideV16::Long => {
+            unrelated_state.oi_eff_long_q = unrelated_q;
+            unrelated_state.stored_pos_count_long = 1;
+            unrelated_state.loss_weight_sum_long = unrelated_q;
+        }
+        SideV16::Short => {
+            unrelated_state.oi_eff_short_q = unrelated_q;
+            unrelated_state.stored_pos_count_short = 1;
+            unrelated_state.loss_weight_sum_short = unrelated_q;
+        }
+    }
+    markets[unrelated_asset].engine.asset = AssetStateV16Account::from_runtime(&unrelated_state);
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: unrelated_asset as u32,
+        market_id: unrelated_state.market_id,
+        side: unrelated_side,
+        basis_pos_q: unrelated_signed_q,
+        a_basis: ADL_ONE,
+        k_snap: if selected_is_short {
+            unrelated_state.k_long
+        } else {
+            unrelated_state.k_short
+        },
+        f_snap: if selected_is_short {
+            unrelated_state.f_long_num
+        } else {
+            unrelated_state.f_short_num
+        },
+        epoch_snap: if selected_is_short {
+            unrelated_state.epoch_long
+        } else {
+            unrelated_state.epoch_short
+        },
+        loss_weight: unrelated_q,
+        b_snap: if selected_is_short {
+            unrelated_state.b_long_num
+        } else {
+            unrelated_state.b_short_num
+        },
+        b_rem: 0,
+        b_epoch_snap: if selected_is_short {
+            unrelated_state.epoch_long
+        } else {
+            unrelated_state.epoch_short
+        },
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+    header.mode = 2;
+    header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+        PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy,
+    ));
+
+    let header_before = header;
+    let selected_before = markets[selected_asset];
+    let unrelated_before = markets[unrelated_asset];
+    let account_before = account_header;
+    let selected_leg = account_before.legs[0].try_to_runtime().unwrap();
+    let active_before = active_bitmap_count_ones(account_before.active_bitmap.map(V16PodU64::get));
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.forfeit_recovery_leg_not_atomic(&mut account, selected_asset, 2);
+    assert!(result.is_ok());
+    let Ok(outcome) = result else {
+        return;
+    };
+
+    kani::cover!(
+        outcome.detached,
+        "dead leg detaches while preserving a nontrivial unrelated wrapper payload"
+    );
+
+    assert!(outcome.detached);
+    assert_eq!(outcome.positive_pnl_forfeited, 0);
+    assert_eq!(outcome.loss_settled, 0);
+    assert_eq!(outcome.support_consumed, 0);
+    assert_eq!(outcome.junior_face_burned, 0);
+    assert_eq!(outcome.principal_used, 0);
+    assert_eq!(outcome.insurance_used, 0);
+    assert_eq!(outcome.residual_booked, 0);
+    assert_eq!(outcome.explicit_loss, 0);
+
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert_eq!(
+        market.markets[unrelated_asset].wrapper,
+        unrelated_before.wrapper
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[unrelated_asset].engine,
+        &unrelated_before.engine
+    ));
+
+    let mut expected_selected = selected_before;
+    let mut expected_asset = selected_before.engine.asset.try_to_runtime().unwrap();
+    match selected_side {
+        SideV16::Long => {
+            expected_asset.stored_pos_count_long -= 1;
+            expected_asset.oi_eff_long_q -= selected_q;
+            expected_asset.loss_weight_sum_long -= selected_leg.loss_weight;
+        }
+        SideV16::Short => {
+            expected_asset.stored_pos_count_short -= 1;
+            expected_asset.oi_eff_short_q -= selected_q;
+            expected_asset.loss_weight_sum_short -= selected_leg.loss_weight;
+        }
+    }
+    expected_selected.engine.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert_eq!(
+        market.markets[selected_asset].wrapper,
+        expected_selected.wrapper
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[selected_asset].engine,
+        &expected_selected.engine
+    ));
+
+    let mut expected_account = account_before;
+    expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    expected_account.active_bitmap[0] =
+        V16PodU64::new(expected_account.active_bitmap[0].get() & !1);
+    expected_account.health_cert.valid = 0;
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert_eq!(active_before, 2);
+    assert_eq!(
+        active_bitmap_count_ones(account.header.active_bitmap.map(V16PodU64::get)),
+        1
+    );
+    assert!(!active_bitmap_get(
+        account.header.active_bitmap.map(V16PodU64::get),
+        0
+    ));
+    assert!(active_bitmap_get(
+        account.header.active_bitmap.map(V16PodU64::get),
+        1
+    ));
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_recovery_forfeit_asset_zero_long_preserves_asset_one() {
+    prove_v16_public_recovery_forfeit_detaches_only_selected_asset(0, false);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_recovery_forfeit_asset_zero_short_preserves_asset_one() {
+    prove_v16_public_recovery_forfeit_detaches_only_selected_asset(0, true);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_recovery_forfeit_asset_one_long_preserves_asset_zero() {
+    prove_v16_public_recovery_forfeit_detaches_only_selected_asset(1, false);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_recovery_forfeit_asset_one_short_preserves_asset_zero() {
+    prove_v16_public_recovery_forfeit_detaches_only_selected_asset(1, true);
 }
 
 #[kani::proof]
