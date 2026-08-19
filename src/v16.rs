@@ -4929,6 +4929,14 @@ pub struct AutoCrankResultV16 {
     pub outcome: AutoCrankOutcomeV16,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AutoCrankSelectedSlotsV16 {
+    active: Option<usize>,
+    risk: Option<usize>,
+    b_stale: Option<usize>,
+    released_obligation: Option<usize>,
+}
+
 /// Scalar request/config guard summary (roadmap 3C fidelity layer): the exact
 /// per-leaf decisions validate_trade_request makes. build_trade_request_guard_
 /// summary computes these from the request + config, and validate_trade_request
@@ -11649,25 +11657,55 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
     }
 
-    /// PRODUCTION CLASSIFIER (roadmap 3C step 4): map the real account/market
-    /// state to the ActionableState summary the self-classifying crank dispatches
-    /// from. Each flag is exactly its production eligibility predicate, MODE-
-    /// GATED so every flag that can be set has a currently-valid dispatch target:
-    ///   stale            — Live, health cert not current (kernel_cert_is_current==false)
-    ///   b_stale          — Live, some active leg flagged b-stale (has_b_stale_leg)
-    ///   pending_close    — Live, a close-progress ledger is active
-    ///   expired_close    — Live, that ledger is past its max-close slot
-    ///   liquidatable     — Live, current cert with nonzero certified liq deficit
-    ///   recovery_eligible— Resolved, unattributed-insolvent negative-PnL recovery
-    ///   resolved_winner  — Resolved, positive PnL, resolved payout ready
-    /// Assembled via the proven actionable_summary_from_signals kernel. Live-only
-    /// flags need cert currentness only where their entrypoint does (liquidate),
-    /// so refresh is selected first for a stale account and the deficit is read
-    /// from a fresh cert on the next step.
-    pub fn build_actionable_summary(
+    fn auto_crank_selected_slots(
         &self,
         account: &PortfolioV16View<'_>,
-    ) -> V16Result<ActionableSummaryV16> {
+        release_allowed: bool,
+    ) -> V16Result<AutoCrankSelectedSlotsV16> {
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let mut selected = AutoCrankSelectedSlotsV16::default();
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            let is_active = active_bitmap_get(bitmap, slot) && leg.active;
+            if is_active {
+                selected.active.get_or_insert(slot);
+                if leg.basis_pos_q != 0 {
+                    selected.risk.get_or_insert(slot);
+                }
+                if leg.b_stale {
+                    selected.b_stale.get_or_insert(slot);
+                }
+                if release_allowed
+                    && !leg.stale
+                    && leg.basis_pos_q == 0
+                    && leg.loss_weight != 0
+                    && !self.has_pending_domain_loss_barrier(leg.asset_index as usize, leg.side)?
+                {
+                    selected.released_obligation.get_or_insert(slot);
+                }
+            }
+            slot += 1;
+        }
+        Ok(selected)
+    }
+
+    fn selected_slot_asset_index(
+        account: &PortfolioV16View<'_>,
+        slot: Option<usize>,
+    ) -> V16Result<Option<usize>> {
+        match slot {
+            Some(slot) => Ok(Some(
+                account.header.legs[slot].try_to_runtime()?.asset_index as usize,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    fn auto_crank_state(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<(ActionableSummaryV16, AutoCrankSelectedSlotsV16)> {
         let mode = decode_market_mode(self.header.mode)?;
         let live = mode == MarketModeV16::Live;
         let resolved = mode == MarketModeV16::Resolved;
@@ -11682,15 +11720,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.header.active_bitmap.map(V16PodU64::get),
         );
         let ledger = account.header.close_progress.try_to_runtime()?;
-
-        let has_open_risk =
-            !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
+        let selected =
+            self.auto_crank_selected_slots(account, live && !ledger.has_pending_residual())?;
+        let has_open_risk = selected.risk.is_some();
         // A close ledger with residual_remaining==0 is already fully booked/covered
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
         // actionable close work. The `active` flag can linger past that.
         let close_outstanding = ledger.active && ledger.residual_remaining > 0;
-        let stale = live && !cert_current;
-        let b_stale = live && Self::has_b_stale_leg(account)?;
+        // A zero-basis weighted leg is an account-local loss obligation retained
+        // while a domain barrier was active. Once the barrier and originating
+        // close residual are gone, it is cleanup work even if its old certificate
+        // still matches every epoch/bitmap.
+        let stale = live && (!cert_current || selected.released_obligation.is_some());
+        let b_stale = live && selected.b_stale.is_some();
         // pending_close is NOT proactively classified: the close-ledger residual is
         // booked ONLY inside the liquidation/resolved path that owns it
         // (book_bankruptcy_residual_chunk_for_account_core) — settle_account_b_chunk
@@ -11730,56 +11772,63 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let resolved_winner =
             resolved && account.header.pnl.get() > 0 && self.resolved_positive_payout_ready()?;
 
-        Ok(V16Core::actionable_summary_from_signals(
-            stale,
-            b_stale,
-            pending_close,
-            expired_close,
-            liquidatable,
-            recovery_eligible,
-            resolved_winner,
+        Ok((
+            V16Core::actionable_summary_from_signals(
+                stale,
+                b_stale,
+                pending_close,
+                expired_close,
+                liquidatable,
+                recovery_eligible,
+                resolved_winner,
+            ),
+            selected,
         ))
     }
 
-    /// PRODUCTION SELF-CLASSIFYING CRANK (roadmap 3C step 4): the keeper no longer
-    /// chooses the action. build_actionable_summary classifies the account and
-    /// the proven select_progress_witness picks the unique, overlap-safe,
-    /// highest-priority continuation, which this dispatches to the matching proven
-    /// entrypoint. The caller supplies only the unavoidable oracle observation +
-    /// action parameters via the hint. Returns the selected continuation (None
-    /// when not actionable) and the dispatched outcome. Each continuation's
-    /// dispatch target is valid in the mode that the classifier gated its flag to.
-    /// ENGINE asset self-selection (engine.md): scan the account's bounded legs and
-    /// return, for each asset-scoped continuation, the engine-chosen asset_index —
-    /// the FIRST active b-stale leg's asset (SettleBChunk), and the FIRST active
-    /// leg's asset (used for both Liquidate and the refresh accrual target). The
-    /// selection is proven in-range / actionable / first-match / complete by the
-    /// first_actionable_slot contract; the slot->asset_index read is by inspection.
-    fn auto_crank_selected_assets(
+    /// PRODUCTION CLASSIFIER: map persisted account/market state to the
+    /// ActionableState summary used by the self-classifying crank. The single
+    /// bounded scan also selects the first active, risk-bearing, B-stale, and
+    /// released-obligation slots; the public summary discards those witnesses.
+    pub fn build_actionable_summary(
+        &self,
         account: &PortfolioV16View<'_>,
-    ) -> V16Result<(Option<usize>, Option<usize>)> {
-        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        let mut active_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
-        let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
-        let mut slot = 0usize;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = account.header.legs[slot].try_to_runtime()?;
-            let active = active_bitmap_get(bitmap, slot) && leg.active;
-            active_flags[slot] = active;
-            b_stale_flags[slot] = active && leg.b_stale;
-            slot += 1;
+    ) -> V16Result<ActionableSummaryV16> {
+        Ok(self.auto_crank_state(account)?.0)
+    }
+
+    fn released_obligation_is_current(
+        &self,
+        account: &PortfolioV16View<'_>,
+        leg_slot: usize,
+    ) -> V16Result<bool> {
+        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N
+            || !active_bitmap_get(account.header.active_bitmap.map(V16PodU64::get), leg_slot)
+        {
+            return Ok(false);
         }
-        let asset_of = |s: Option<usize>| -> V16Result<Option<usize>> {
-            match s {
-                Some(i) => Ok(Some(
-                    account.header.legs[i].try_to_runtime()?.asset_index as usize,
-                )),
-                None => Ok(None),
-            }
-        };
-        let b_stale_asset = asset_of(V16Core::first_actionable_slot(b_stale_flags))?;
-        let active_asset = asset_of(V16Core::first_actionable_slot(active_flags))?;
-        Ok((b_stale_asset, active_asset))
+        let leg = account.header.legs[leg_slot].try_to_runtime()?;
+        if !leg.active
+            || leg.b_stale
+            || leg.stale
+            || leg.basis_pos_q != 0
+            || leg.loss_weight == 0
+            || account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+        {
+            return Ok(false);
+        }
+        let asset_index = leg.asset_index as usize;
+        if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
+            return Ok(false);
+        }
+        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+        Ok(k_target == leg.k_snap
+            && f_target == leg.f_snap
+            && self.b_target_for_leg(asset_index, leg)? == leg.b_snap)
     }
 
     /// THE SINGLE PUBLIC PERMISSIONLESS CRANK (engine.md): the only crank the
@@ -11812,8 +11861,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         work: AutoCrankWorkV16<'_>,
     ) -> V16Result<AutoCrankResultV16> {
-        let summary = self.build_actionable_summary(&account.as_view())?;
-        let (b_stale_asset, active_asset) = Self::auto_crank_selected_assets(&account.as_view())?;
+        let (summary, selected) = self.auto_crank_state(&account.as_view())?;
+        let b_stale_asset = Self::selected_slot_asset_index(&account.as_view(), selected.b_stale)?;
+        let risk_asset = Self::selected_slot_asset_index(&account.as_view(), selected.risk)?;
+        let refresh_asset = Self::selected_slot_asset_index(
+            &account.as_view(),
+            selected.released_obligation.or(selected.active),
+        )?;
         let recovery_reason = if summary.expired_close {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {
@@ -11824,10 +11878,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let plan = V16Core::select_auto_crank_plan(
             summary,
             b_stale_asset.unwrap_or(0),
-            active_asset.unwrap_or(0),
-            active_asset,
+            risk_asset.unwrap_or(0),
+            refresh_asset,
             recovery_reason,
         );
+
+        // A released, already-current zero-basis obligation needs no health or
+        // price arithmetic. Detach it by its selected slot before the generic
+        // refresh path; this is both strict liveness progress and the cheapest CU
+        // continuation. If its K/F/B snapshots still lag, the normal refresh
+        // settles them first and the next crank takes this fast path.
+        if matches!(plan, AutoCrankPlanV16::RefreshAccount { .. }) {
+            if let Some(slot) = selected.released_obligation {
+                if self.released_obligation_is_current(&account.as_view(), slot)? {
+                    self.validate_unconfigured_market_tail()?;
+                    self.clear_leg_at_slot(account, slot)?;
+                    self.validate_shape_audit_scan()?;
+                    return Ok(AutoCrankResultV16 {
+                        selected: plan,
+                        outcome: AutoCrankOutcomeV16::Progressed(
+                            PermissionlessProgressOutcomeV16::AccountCurrent,
+                        ),
+                    });
+                }
+            }
+        }
 
         let obs_or_current_asset = |me: &Self, i: usize| -> V16Result<AutoCrankObservationV16> {
             match work
@@ -12842,10 +12917,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
     ) -> V16Result<()> {
         let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        self.clear_leg_at_slot(account, leg_slot)
+    }
+
+    fn clear_leg_at_slot(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        leg_slot: usize,
+    ) -> V16Result<()> {
+        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N
+            || !active_bitmap_get(account.header.active_bitmap.map(V16PodU64::get), leg_slot)
+        {
+            return Err(V16Error::InvalidLeg);
+        }
         let leg = account.header.legs[leg_slot].try_to_runtime()?;
         if !leg.active || leg.b_stale || leg.stale {
             return Err(V16Error::InvalidLeg);
         }
+        let asset_index = leg.asset_index as usize;
         if account
             .header
             .close_progress
