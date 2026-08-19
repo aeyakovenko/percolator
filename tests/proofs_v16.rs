@@ -15,7 +15,8 @@ use percolator::v16::{
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
     kani_pending_domain_loss_barrier_blocks_position_change, kani_position_delta_increases_risk,
-    kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
+    kani_prepare_asset_recovery_transition, kani_reduce_matching_open_interest,
+    kani_resize_leg_same_side, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
     AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
@@ -5469,6 +5470,138 @@ fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
     assert_eq!(
         guard,
         uncovered && (selected_leg_remains || other_risk_leg_count != 0)
+    );
+}
+
+// Liquidation and rebalance share this O(1) aggregate theorem. Starting from
+// matched long/short effective OI, the selected account-side resize and the
+// anonymous counterparty-side retirement compose to the same exact remainder.
+// This prevents a unilateral close from manufacturing or stranding OI while
+// avoiding any counterparty scan.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_unilateral_reduction_preserves_long_short_oi_symmetry() {
+    let closes_short: bool = kani::any();
+    let position_raw: u8 = kani::any();
+    let close_raw: u8 = kani::any();
+    kani::assume((2..=64).contains(&position_raw));
+    kani::assume((1..position_raw).contains(&close_raw));
+    let position_q = position_raw as u128;
+    let close_q = close_raw as u128;
+    let remaining_q = position_q - close_q;
+    let closed_side = if closes_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let signed_position = if closes_short {
+        -(position_q as i128)
+    } else {
+        position_q as i128
+    };
+    let signed_remaining = if closes_short {
+        -(remaining_q as i128)
+    } else {
+        remaining_q as i128
+    };
+    let leg = PortfolioLegV16 {
+        active: true,
+        side: closed_side,
+        basis_pos_q: signed_position,
+        a_basis: ADL_ONE,
+        loss_weight: position_q,
+        ..PortfolioLegV16::EMPTY
+    };
+    let asset = AssetStateV16 {
+        a_long: ADL_ONE,
+        a_short: ADL_ONE,
+        oi_eff_long_q: position_q,
+        oi_eff_short_q: position_q,
+        loss_weight_sum_long: position_q,
+        loss_weight_sum_short: position_q,
+        stored_pos_count_long: 1,
+        stored_pos_count_short: 1,
+        ..AssetStateV16::default()
+    };
+
+    let (resized_leg, resized_asset) =
+        kani_resize_leg_same_side(leg, asset, signed_remaining, remaining_q, false).unwrap();
+    let (final_asset, full_drain) =
+        kani_reduce_matching_open_interest(resized_asset, closed_side, close_q).unwrap();
+    let expected_opposite_a = ADL_ONE * remaining_q / position_q;
+
+    kani::cover!(
+        !closes_short && close_q > 1 && remaining_q > 1,
+        "long-side nontrivial partial reduction is reachable"
+    );
+    kani::cover!(
+        closes_short && close_q > 1 && remaining_q > 1,
+        "short-side nontrivial partial reduction is reachable"
+    );
+    kani::cover!(
+        close_q + 1 == position_q,
+        "partial reduction reaches the one-unit residual boundary"
+    );
+    assert!(!full_drain);
+    assert_eq!(resized_leg.side, closed_side);
+    assert_eq!(resized_leg.basis_pos_q, signed_remaining);
+    assert_eq!(resized_leg.loss_weight, remaining_q);
+    assert_eq!(final_asset.oi_eff_long_q, remaining_q);
+    assert_eq!(final_asset.oi_eff_short_q, remaining_q);
+    assert_eq!(
+        if closes_short {
+            final_asset.a_long
+        } else {
+            final_asset.a_short
+        },
+        expected_opposite_a
+    );
+    assert_eq!(
+        if closes_short {
+            final_asset.a_short
+        } else {
+            final_asset.a_long
+        },
+        ADL_ONE
+    );
+    assert_eq!(
+        final_asset.loss_weight_sum_long,
+        if closes_short {
+            position_q
+        } else {
+            remaining_q
+        }
+    );
+    assert_eq!(
+        final_asset.loss_weight_sum_short,
+        if closes_short {
+            remaining_q
+        } else {
+            position_q
+        }
+    );
+
+    let overclose = kani_reduce_matching_open_interest(asset, closed_side, position_q + 1);
+    assert_eq!(overclose, Err(V16Error::InvalidLeg));
+    let (fully_matched, did_full_drain) =
+        kani_reduce_matching_open_interest(asset, closed_side, position_q).unwrap();
+    assert!(did_full_drain);
+    assert_eq!(
+        if closes_short {
+            fully_matched.oi_eff_long_q
+        } else {
+            fully_matched.oi_eff_short_q
+        },
+        0
+    );
+    assert_eq!(
+        if closes_short {
+            fully_matched.a_long
+        } else {
+            fully_matched.a_short
+        },
+        ADL_ONE
     );
 }
 

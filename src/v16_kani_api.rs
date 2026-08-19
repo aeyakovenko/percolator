@@ -81,6 +81,30 @@ pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
     )
 }
 
+pub fn kani_resize_leg_same_side(
+    leg: PortfolioLegV16,
+    asset: AssetStateV16,
+    new_signed: i128,
+    new_weight: u128,
+    preserve_pending_obligation_weight: bool,
+) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
+    V16Core::kernel_resize_leg_same_side(
+        leg,
+        asset,
+        new_signed,
+        new_weight,
+        preserve_pending_obligation_weight,
+    )
+}
+
+pub fn kani_reduce_matching_open_interest(
+    asset: AssetStateV16,
+    closed_side: SideV16,
+    close_q: u128,
+) -> V16Result<(AssetStateV16, bool)> {
+    V16Core::kernel_reduce_matching_open_interest(asset, closed_side, close_q)
+}
+
 pub fn kani_liquidation_projected_health_deficit_from_parts(
     certified_equity: i128,
     certified_maintenance_req: u128,

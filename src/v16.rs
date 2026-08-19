@@ -1610,6 +1610,52 @@ impl V16Core {
         Ok((reduce_q, delta))
     }
 
+    /// PRODUCTION KERNEL: retire anonymous counterparty effective OI for a
+    /// unilateral liquidation/rebalance close. Only the opposite side's OI,
+    /// A-factor, and (when necessary) drain mode may change. Returning
+    /// `full_drain` lets the caller perform the existing side-reset transition.
+    pub(crate) fn kernel_reduce_matching_open_interest(
+        mut asset: AssetStateV16,
+        closed_side: SideV16,
+        close_q: u128,
+    ) -> V16Result<(AssetStateV16, bool)> {
+        let opposite = opposite_side(closed_side);
+        let (oi_before, a_before) = match opposite {
+            SideV16::Long => (asset.oi_eff_long_q, asset.a_long),
+            SideV16::Short => (asset.oi_eff_short_q, asset.a_short),
+        };
+        if close_q > oi_before {
+            return Err(V16Error::InvalidLeg);
+        }
+        let oi_after = oi_before - close_q;
+        let a_after = if oi_after == 0 {
+            ADL_ONE
+        } else {
+            let candidate = wide_mul_div_floor_u128(a_before, oi_after, oi_before);
+            if candidate == 0 {
+                return Err(V16Error::RecoveryRequired);
+            }
+            candidate
+        };
+        match opposite {
+            SideV16::Long => {
+                asset.oi_eff_long_q = oi_after;
+                asset.a_long = a_after;
+                if oi_after != 0 && asset.a_long < MIN_A_SIDE {
+                    asset.mode_long = SideModeV16::DrainOnly;
+                }
+            }
+            SideV16::Short => {
+                asset.oi_eff_short_q = oi_after;
+                asset.a_short = a_after;
+                if oi_after != 0 && asset.a_short < MIN_A_SIDE {
+                    asset.mode_short = SideModeV16::DrainOnly;
+                }
+            }
+        }
+        Ok((asset, oi_after == 0))
+    }
+
     /// PRODUCTION KERNEL (engine.md asset self-selection): the bounded first-match
     /// leg/asset scan. Given a per-leg actionability flag array (the caller sets
     /// `flags[i]` to the production predicate for slot i — e.g. an active b-stale
@@ -13793,47 +13839,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if close_q == 0 {
             return Ok(());
         }
-        let opp = opposite_side(closed_side);
-        let mut asset = self.asset_state(asset_index)?;
-        let (opp_oi_before, opp_a_before) = match opp {
-            SideV16::Long => (asset.oi_eff_long_q, asset.a_long),
-            SideV16::Short => (asset.oi_eff_short_q, asset.a_short),
-        };
-        if close_q > opp_oi_before {
-            return Err(V16Error::InvalidLeg);
-        }
-        let opp_oi_after = opp_oi_before - close_q;
-        let opp_a_after = if opp_oi_after == 0 {
-            ADL_ONE
-        } else {
-            let candidate = wide_mul_div_floor_u128(opp_a_before, opp_oi_after, opp_oi_before);
-            if candidate == 0 {
-                self.declare_permissionless_recovery(
-                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
-                )?;
-                return Err(V16Error::RecoveryRequired);
-            }
-            candidate
-        };
-        match opp {
-            SideV16::Long => {
-                asset.oi_eff_long_q = opp_oi_after;
-                asset.a_long = opp_a_after;
-                if opp_oi_after != 0 && asset.a_long < MIN_A_SIDE {
-                    asset.mode_long = SideModeV16::DrainOnly;
+        let asset = self.asset_state(asset_index)?;
+        let (asset, full_drain) =
+            match V16Core::kernel_reduce_matching_open_interest(asset, closed_side, close_q) {
+                Ok(next) => next,
+                Err(V16Error::RecoveryRequired) => {
+                    self.declare_permissionless_recovery(
+                        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+                    )?;
+                    return Err(V16Error::RecoveryRequired);
                 }
-            }
-            SideV16::Short => {
-                asset.oi_eff_short_q = opp_oi_after;
-                asset.a_short = opp_a_after;
-                if opp_oi_after != 0 && asset.a_short < MIN_A_SIDE {
-                    asset.mode_short = SideModeV16::DrainOnly;
-                }
-            }
-        }
+                Err(err) => return Err(err),
+            };
         self.set_asset_state(asset_index, asset)?;
-        if opp_oi_after == 0 {
-            self.begin_full_drain_reset_inner(asset_index, opp)?;
+        if full_drain {
+            let opposite = opposite_side(closed_side);
+            self.begin_full_drain_reset_inner(asset_index, opposite)?;
         }
         Ok(())
     }
