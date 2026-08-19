@@ -5211,6 +5211,17 @@ pub struct AccrueAssetOutcomeV16 {
     pub loss_stale_after: bool,
 }
 
+/// Maximum canonical one-slot accrual steps that one public wrapper call may commit.
+/// Longer gaps remain actionable across additional bounded calls.
+pub const V16_MAX_ACCRUAL_PATH_STEPS: usize = 32;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccrualStepV16 {
+    pub effective_price: u64,
+    pub funding_rate_e9: i128,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TradeRequestV16 {
@@ -12512,6 +12523,132 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             price_move_active: activity.price_move_active,
             funding_active: activity.funding_active,
             equity_active: activity.equity_active,
+            loss_stale_after: asset.slot_last < now_slot,
+        })
+    }
+
+    /// Applies the unique canonical one-slot accrual prefix for this asset.
+    ///
+    /// Requiring the complete bounded prefix prevents a caller from choosing transaction
+    /// boundaries that change price compounding or funding sampling. The wrapper may construct up
+    /// to `V16_MAX_ACCRUAL_PATH_STEPS` deterministic steps; a longer stale interval remains
+    /// actionable through another call with the same authenticated `now_slot`.
+    pub fn accrue_asset_path_to_not_atomic(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+        steps: &[AccrualStepV16],
+        protective_progress_committed: bool,
+    ) -> V16Result<AccrueAssetOutcomeV16> {
+        let config = self.header.config.try_to_runtime_shape()?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
+            || asset_index >= config.max_market_slots as usize
+            || asset_index >= self.markets.len()
+            || now_slot < self.header.current_slot.get()
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        self.require_asset_accruable(asset_index)?;
+        let mut asset = self.asset_state(asset_index)?;
+        if now_slot < asset.slot_last {
+            return Err(V16Error::InvalidConfig);
+        }
+        let expected_steps_u64 = (now_slot - asset.slot_last)
+            .min(config.max_accrual_dt_slots)
+            .min(V16_MAX_ACCRUAL_PATH_STEPS as u64);
+        let expected_steps =
+            usize::try_from(expected_steps_u64).map_err(|_| V16Error::ArithmeticOverflow)?;
+        if steps.len() != expected_steps {
+            return Err(V16Error::InvalidConfig);
+        }
+
+        let mut price_move_count = 0u64;
+        let mut funding_count = 0u64;
+        for step in steps {
+            if step.effective_price == 0
+                || step.effective_price > MAX_ORACLE_PRICE
+                || step.funding_rate_e9.unsigned_abs() > config.max_abs_funding_e9_per_slot as u128
+            {
+                return Err(V16Error::InvalidConfig);
+            }
+            let activity = V16Core::accrual_activity_for_asset_segment(
+                asset,
+                1,
+                step.effective_price,
+                step.funding_rate_e9,
+            );
+            if activity.equity_active {
+                let price_diff = step.effective_price.abs_diff(asset.effective_price) as u128;
+                let lhs = price_diff
+                    .checked_mul(MAX_MARGIN_BPS as u128)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                let rhs = (config.max_price_move_bps_per_slot as u128)
+                    .checked_mul(asset.effective_price as u128)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                if lhs > rhs {
+                    return Err(V16Error::RecoveryRequired);
+                }
+                if !protective_progress_committed {
+                    return Err(V16Error::NonProgress);
+                }
+            }
+
+            let price_delta = step.effective_price as i128 - asset.effective_price as i128;
+            let k_delta = checked_i128_mul(price_delta, ADL_ONE as i128)?;
+            let funding_delta = if activity.funding_active {
+                let n = step
+                    .funding_rate_e9
+                    .checked_mul(step.effective_price as i128)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                floor_div_signed_conservative_i128(n, FUNDING_DEN)
+                    .checked_mul(ADL_ONE as i128)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+            } else {
+                0
+            };
+
+            asset.k_long = add_non_min_i128(asset.k_long, k_delta)?;
+            asset.k_short = add_non_min_i128(asset.k_short, -k_delta)?;
+            asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
+            asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
+            asset.effective_price = step.effective_price;
+            asset.fund_px_last = step.effective_price;
+            asset.slot_last = asset
+                .slot_last
+                .checked_add(1)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            price_move_count = price_move_count
+                .checked_add(u64::from(activity.price_move_active))
+                .ok_or(V16Error::CounterOverflow)?;
+            funding_count = funding_count
+                .checked_add(u64::from(activity.funding_active))
+                .ok_or(V16Error::CounterOverflow)?;
+        }
+
+        self.set_asset_state(asset_index, asset)?;
+        self.header.current_slot = V16PodU64::new(now_slot);
+        self.header.slot_last = V16PodU64::new(asset.slot_last);
+        self.header.loss_stale_active = encode_bool(asset.slot_last < now_slot);
+        self.header.oracle_epoch = V16PodU64::new(
+            self.header
+                .oracle_epoch
+                .get()
+                .checked_add(price_move_count)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        self.header.funding_epoch = V16PodU64::new(
+            self.header
+                .funding_epoch
+                .get()
+                .checked_add(funding_count)
+                .ok_or(V16Error::CounterOverflow)?,
+        );
+        self.validate_shape_audit_scan()?;
+        Ok(AccrueAssetOutcomeV16 {
+            dt: expected_steps_u64,
+            price_move_active: price_move_count != 0,
+            funding_active: funding_count != 0,
+            equity_active: price_move_count != 0 || funding_count != 0,
             loss_stale_after: asset.slot_last < now_slot,
         })
     }

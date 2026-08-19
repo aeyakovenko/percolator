@@ -21,7 +21,7 @@ use percolator::v16::{
     kani_should_clear_prior_reset_obligation, kani_source_claim_domain_first_burn_partition,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
     kani_terminal_claim_free_overlap_recredit, kani_trade_preexisting_oi_reduction_gate,
-    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
+    kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution, AccrualStepV16,
     ActionableSummaryV16, AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
     BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
     CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
@@ -10062,6 +10062,79 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     // Junior-pool isolation: this transition must not move the junior
     // residual pool.
     assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_canonical_accrual_path_is_partition_invariant() {
+    let first_delta: i8 = kani::any();
+    let second_delta: i8 = kani::any();
+    let first_funding: i8 = kani::any();
+    let second_funding: i8 = kani::any();
+    kani::assume((-5..=5).contains(&first_delta));
+    kani::assume((-5..=5).contains(&second_delta));
+    kani::assume((-10..=10).contains(&first_funding));
+    kani::assume((-10..=10).contains(&second_funding));
+
+    let first_price_i16 = 100i16 + first_delta as i16;
+    let second_price_i16 = first_price_i16 + second_delta as i16;
+    kani::assume(first_price_i16 > 0 && second_price_i16 > 0);
+    let steps = [
+        AccrualStepV16 {
+            effective_price: first_price_i16 as u64,
+            funding_rate_e9: first_funding as i128,
+        },
+        AccrualStepV16 {
+            effective_price: second_price_i16 as u64,
+            funding_rate_e9: second_funding as i128,
+        },
+    ];
+
+    let (mut delayed_header, mut delayed_markets, _) = one_market_view_fixture();
+    delayed_header.config.max_accrual_dt_slots = V16PodU64::new(2);
+    delayed_header.config.min_funding_lifetime_slots = V16PodU64::new(2);
+    delayed_header.config.max_abs_funding_e9_per_slot = V16PodU64::new(10);
+    let mut asset = delayed_markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    delayed_markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let mut split_header = delayed_header;
+    let mut split_markets = delayed_markets;
+
+    let delayed_outcome = {
+        let mut market = MarketGroupV16ViewMut::new(&mut delayed_header, &mut delayed_markets);
+        market
+            .accrue_asset_path_to_not_atomic(0, 3, &steps, true)
+            .unwrap()
+    };
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut split_header, &mut split_markets);
+        market
+            .accrue_asset_path_to_not_atomic(0, 2, &steps[..1], true)
+            .unwrap();
+        market
+            .accrue_asset_path_to_not_atomic(0, 3, &steps[1..], true)
+            .unwrap();
+    }
+
+    kani::cover!(
+        first_delta > 0 && second_delta < 0 && first_funding > 0 && second_funding < 0,
+        "canonical path proof covers price and funding direction reversal"
+    );
+    assert_eq!(delayed_outcome.dt, 2);
+    assert!(kani_eq_market_group_v16_header_account(
+        &delayed_header,
+        &split_header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &delayed_markets[0].engine,
+        &split_markets[0].engine
+    ));
 }
 
 #[kani::proof]
