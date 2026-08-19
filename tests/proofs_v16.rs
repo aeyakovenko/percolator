@@ -7073,89 +7073,79 @@ fn proof_v16_counterparty_backing_expiry_preserves_domain_ledger_and_removes_onl
     );
 }
 
-fn check_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state<
+fn fresh_backing_domain_accounts(
+    market_id: u64,
+    amount_atoms: u128,
+) -> (BackingBucketV16Account, SourceCreditStateV16Account) {
+    let amount_num = amount_atoms * BOUND_SCALE;
+    (
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: amount_num,
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        }),
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: amount_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        }),
+    )
+}
+
+// Public provider-principal no-steal theorem. Full-width subtraction and
+// underbacking rejection are proved separately; this composes the real public
+// transition with every concrete domain route in a populated two-asset slab.
+fn assert_v16_public_backing_withdraw_isolates_other_domains<
+    const ASSET_INDEX: usize,
     const TARGET_LONG: bool,
 >() {
-    // Broad subtraction and rejection behavior is covered by the scalar delta
-    // proofs. One Boolean selects the two public-path lifecycle branches:
-    // partial withdrawal with junior surplus, or a full withdrawal that empties
-    // the domain exactly at the junior-pool boundary.
-    let full_withdraw: bool = kani::any();
-    let backing = 3u128;
-    let withdraw = if full_withdraw { 3u128 } else { 1u128 };
-    let surplus = if full_withdraw { 0u128 } else { 4u128 };
+    let larger_withdraw: bool = kani::any();
+    let backing = 4u128;
+    let withdraw = if larger_withdraw { 2u128 } else { 1u128 };
+    let capital = 7u128;
+    let surplus = 4u128;
     let backing_num = backing * BOUND_SCALE;
     let withdraw_num = withdraw * BOUND_SCALE;
     let remaining_num = backing_num - withdraw_num;
-    let target_domain = if TARGET_LONG { 0usize } else { 1usize };
-    let (mut header, mut markets) = one_market_only_fixture();
-    let market_id = markets[0].engine.asset.market_id.get();
-    header.c_tot = V16PodU128::new(7);
-    header.vault = V16PodU128::new(7 + backing + surplus);
-    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
-    let bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
-        market_id,
-        fresh_unliened_backing_num: backing_num,
-        expiry_slot: 10,
-        status: BackingBucketStatusV16::Fresh,
-        ..BackingBucketV16::EMPTY
-    });
-    let source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
-        fresh_reserved_backing_num: backing_num,
-        credit_rate_num: CREDIT_RATE_SCALE,
-        ..SourceCreditStateV16::EMPTY
-    });
+    let target_domain = ASSET_INDEX * 2 + usize::from(!TARGET_LONG);
+    let sibling_backing = 5u128;
+    let total_backing_atoms = backing + sibling_backing;
+    let total_backing_num = total_backing_atoms * BOUND_SCALE;
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    let selected_market_id = markets[ASSET_INDEX].engine.asset.market_id.get();
+    let (target_bucket, target_source) = fresh_backing_domain_accounts(selected_market_id, backing);
+    let (sibling_bucket, sibling_source) =
+        fresh_backing_domain_accounts(selected_market_id, sibling_backing);
     if TARGET_LONG {
-        markets[0].engine.backing_long = bucket;
-        markets[0].engine.source_credit_long = source;
+        markets[ASSET_INDEX].engine.backing_long = target_bucket;
+        markets[ASSET_INDEX].engine.source_credit_long = target_source;
+        markets[ASSET_INDEX].engine.backing_short = sibling_bucket;
+        markets[ASSET_INDEX].engine.source_credit_short = sibling_source;
     } else {
-        markets[0].engine.backing_short = bucket;
-        markets[0].engine.source_credit_short = source;
+        markets[ASSET_INDEX].engine.backing_short = target_bucket;
+        markets[ASSET_INDEX].engine.source_credit_short = target_source;
+        markets[ASSET_INDEX].engine.backing_long = sibling_bucket;
+        markets[ASSET_INDEX].engine.source_credit_long = sibling_source;
     }
+    let unrelated = 1 - ASSET_INDEX;
+    markets[unrelated].engine.insurance_domain_budget_long = V16PodU128::new(13);
+    markets[unrelated].engine.insurance_domain_budget_short = V16PodU128::new(17);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(30);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(30);
+    header.vault = V16PodU128::new(capital + 30 + total_backing_atoms + surplus);
+    header.source_fresh_backing_total_num = V16PodU128::new(total_backing_num);
     let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let residual_before = market.kani_residual();
-    let (sibling_bucket_before, sibling_source_before, sibling_reservation_before) = if TARGET_LONG
-    {
-        (
-            market.markets[0].engine.backing_short,
-            market.markets[0].engine.source_credit_short,
-            market.markets[0].engine.insurance_reservation_short,
-        )
-    } else {
-        (
-            market.markets[0].engine.backing_long,
-            market.markets[0].engine.source_credit_long,
-            market.markets[0].engine.insurance_reservation_long,
-        )
-    };
 
     market
         .withdraw_fresh_counterparty_backing_not_atomic(target_domain, withdraw)
         .unwrap();
-    let (
-        bucket_after,
-        source_after,
-        sibling_bucket_after,
-        sibling_source_after,
-        sibling_reservation_after,
-    ) = if TARGET_LONG {
-        (
-            market.markets[0].engine.backing_long,
-            market.markets[0].engine.source_credit_long,
-            market.markets[0].engine.backing_short,
-            market.markets[0].engine.source_credit_short,
-            market.markets[0].engine.insurance_reservation_short,
-        )
-    } else {
-        (
-            market.markets[0].engine.backing_short,
-            market.markets[0].engine.source_credit_short,
-            market.markets[0].engine.backing_long,
-            market.markets[0].engine.source_credit_long,
-            market.markets[0].engine.insurance_reservation_long,
-        )
-    };
+    let market_id = slots_before[ASSET_INDEX].asset.market_id.get();
     let expected_bucket = BackingBucketV16Account::from_runtime(&if remaining_num == 0 {
         BackingBucketV16::empty_for_market(market_id)
     } else {
@@ -7175,44 +7165,119 @@ fn check_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source
     });
 
     kani::cover!(
-        !full_withdraw,
-        "public backing withdrawal covers partial principal beside junior surplus"
+        larger_withdraw,
+        "backing isolation covers a non-unit provider-principal payout"
     );
     kani::cover!(
-        full_withdraw,
-        "public backing withdrawal covers full principal at zero junior surplus"
+        !larger_withdraw,
+        "backing isolation covers the minimum nonzero provider-principal payout"
     );
-    let selected_exact = bucket_after == expected_bucket && source_after == expected_source;
-    let sibling_framed = sibling_bucket_after == sibling_bucket_before
-        && sibling_source_after == sibling_source_before
-        && sibling_reservation_after == sibling_reservation_before;
-    let stock_exact = market.header.vault.get() == header_before.vault.get() - withdraw
-        && market.header.c_tot.get() == header_before.c_tot.get()
-        && market.header.insurance.get() == header_before.insurance.get()
-        && market.header.backing_provider_earnings_total.get()
-            == header_before.backing_provider_earnings_total.get()
-        && market.header.source_fresh_backing_total_num.get() == remaining_num
-        && market.header.risk_epoch.get() == header_before.risk_epoch.get() + 1
-        && residual_before == surplus
-        && market.kani_residual() == residual_before;
-    assert!(
-        selected_exact && sibling_framed && stock_exact,
-        "public backing withdrawal must debit only selected-domain principal and vault"
+
+    let selected_after = &market.markets[ASSET_INDEX].engine;
+    let selected_before = &slots_before[ASSET_INDEX];
+    let (bucket_after, source_after, sibling_bucket_after, sibling_source_after) = if TARGET_LONG {
+        (
+            selected_after.backing_long,
+            selected_after.source_credit_long,
+            selected_after.backing_short,
+            selected_after.source_credit_short,
+        )
+    } else {
+        (
+            selected_after.backing_short,
+            selected_after.source_credit_short,
+            selected_after.backing_long,
+            selected_after.source_credit_long,
+        )
+    };
+    let (sibling_bucket_before, sibling_source_before) = if TARGET_LONG {
+        (
+            selected_before.backing_short,
+            selected_before.source_credit_short,
+        )
+    } else {
+        (
+            selected_before.backing_long,
+            selected_before.source_credit_long,
+        )
+    };
+    assert_eq!(bucket_after, expected_bucket);
+    assert_eq!(source_after, expected_source);
+    assert_eq!(sibling_bucket_after, sibling_bucket_before);
+    assert_eq!(sibling_source_after, sibling_source_before);
+    assert_eq!(
+        selected_after.insurance_reservation_long,
+        selected_before.insurance_reservation_long
     );
+    assert_eq!(
+        selected_after.insurance_reservation_short,
+        selected_before.insurance_reservation_short
+    );
+    let unrelated = 1 - ASSET_INDEX;
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slots_before[unrelated],
+        &market.markets[unrelated].engine
+    ));
+    assert_eq!(
+        market.header.vault.get(),
+        header_before.vault.get() - withdraw
+    );
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(
+        market.header.backing_provider_earnings_total,
+        header_before.backing_provider_earnings_total
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        header_before.source_fresh_backing_total_num.get() - withdraw_num
+    );
+    assert_eq!(
+        market.header.source_claim_bound_total_num,
+        header_before.source_claim_bound_total_num
+    );
+    assert_eq!(
+        market.header.source_insurance_credit_reserved_total_atoms,
+        header_before.source_insurance_credit_reserved_total_atoms
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total,
+        header_before.insurance_domain_budget_remaining_total
+    );
+    assert_eq!(
+        market.header.risk_epoch.get(),
+        header_before.risk_epoch.get() + 1
+    );
+    assert_eq!(residual_before, surplus);
+    assert_eq!(market.kani_residual(), residual_before);
 }
 
 #[kani::proof]
-#[kani::unwind(48)]
+#[kani::unwind(32)]
 #[kani::solver(cadical)]
-fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {
-    check_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state::<true>();
+fn proof_v16_public_asset_zero_long_backing_withdraw_isolates_other_domains() {
+    assert_v16_public_backing_withdraw_isolates_other_domains::<0, true>();
 }
 
 #[kani::proof]
-#[kani::unwind(48)]
+#[kani::unwind(32)]
 #[kani::solver(cadical)]
-fn proof_v16_public_short_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {
-    check_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state::<false>();
+fn proof_v16_public_asset_zero_short_backing_withdraw_isolates_other_domains() {
+    assert_v16_public_backing_withdraw_isolates_other_domains::<0, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_one_long_backing_withdraw_isolates_other_domains() {
+    assert_v16_public_backing_withdraw_isolates_other_domains::<1, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_one_short_backing_withdraw_isolates_other_domains() {
+    assert_v16_public_backing_withdraw_isolates_other_domains::<1, false>();
 }
 
 #[kani::proof]
