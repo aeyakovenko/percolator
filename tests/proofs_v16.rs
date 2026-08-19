@@ -1584,6 +1584,83 @@ fn proof_v16_sparse_source_domain_validation_accepts_domain_indexed_claim() {
     );
 }
 
+// Full account-validator soundness for a persisted source claim. A successful
+// validation binds the claim to the current asset episode and domain aggregate,
+// and any nonzero source attribution covers the account's entire positive PnL
+// in scaled units. The quotient/remainder claim shape keeps the subtle
+// fractionally-underbound case representable: ceil(claim/BOUND_SCALE) can equal
+// PnL while the exact numerator is still too small.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_account_validator_binds_and_fully_attributes_persisted_source_claim() {
+    let pnl_raw: u8 = kani::any();
+    let claim_whole_raw: u8 = kani::any();
+    let claim_remainder_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&pnl_raw));
+    kani::assume(claim_whole_raw <= 8);
+    kani::assume(claim_remainder_raw <= 8);
+    kani::assume(claim_whole_raw != 0 || claim_remainder_raw != 0);
+    let pnl = pnl_raw as u128;
+    let claim_whole = claim_whole_raw as u128;
+    let claim_remainder = claim_remainder_raw as u128;
+    let claim_num = claim_whole * BOUND_SCALE + claim_remainder;
+    let backing_num = 9 * BOUND_SCALE;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(9);
+    header.pnl_pos_tot = V16PodU128::new(pnl);
+    header.pnl_pos_bound_tot = V16PodU128::new(9);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(backing_num);
+    header.source_claim_bound_total_num = V16PodU128::new(backing_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: backing_num,
+            exact_positive_claim_num: backing_num,
+            fresh_reserved_backing_num: backing_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    account_header.pnl = V16PodI128::new(pnl as i128);
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    // Market validator soundness and aggregate reconciliation are separate
+    // theorems; this fixture is their canonical fully-backed one-domain shape.
+    kani::assume(account.validate_with_market(&market.as_view()) == Ok(()));
+    kani::cover!(
+        claim_whole == pnl && claim_remainder == 0,
+        "account validator accepts an exact nonzero persisted source claim"
+    );
+    kani::cover!(
+        claim_whole == pnl && claim_remainder > 0,
+        "account validator accepts a fractional over-attributed persisted claim"
+    );
+
+    let source = account.header.source_domains[0];
+    let domain_credit = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    assert!(source.is_occupied());
+    assert_eq!(source.domain.get(), 0);
+    assert_eq!(source.source_claim_market_id.get(), market_id);
+    assert!(source.source_claim_bound_num.get() <= domain_credit.positive_claim_bound_num);
+    assert!(source.source_claim_bound_num.get() >= pnl * BOUND_SCALE);
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
