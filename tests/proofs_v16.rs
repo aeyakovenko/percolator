@@ -985,6 +985,69 @@ fn proof_v16_raw_oracle_target_change_invalidates_all_prior_certificates() {
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_nonzero_raw_oracle_target_update_is_selected_only() {
+    let target_raw: u16 = kani::any();
+    let oracle_epoch_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let insurance_slack_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume((1..=10_000).contains(&target_raw));
+
+    let target = u64::from(target_raw);
+    let capital = u128::from(capital_raw);
+    let insurance_slack = u128::from(insurance_slack_raw);
+    let surplus = u128::from(surplus_raw);
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    fund_two_market_domains(&mut header, &mut markets, capital, insurance_slack, surplus);
+    header.oracle_epoch = V16PodU64::new(u64::from(oracle_epoch_raw));
+    markets[0].wrapper = 0xcafe_0000;
+    markets[1].wrapper = 0xfeed_0001;
+
+    let header_before = header;
+    let other_before = markets[0];
+    let selected_before = markets[1];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    market
+        .set_asset_raw_oracle_target_not_atomic(1, target)
+        .unwrap();
+
+    kani::cover!(
+        target < 100 && capital > 0 && insurance_slack > 0,
+        "nonzero asset accepts a lower target with funded senior state"
+    );
+    kani::cover!(
+        target > 100 && surplus > 0,
+        "nonzero asset accepts a higher target with junior slack"
+    );
+    kani::cover!(target == 100, "nonzero asset target update is idempotent");
+
+    let changed = target != 100;
+    let mut expected_header = header_before;
+    expected_header.oracle_epoch =
+        V16PodU64::new(header_before.oracle_epoch.get() + u64::from(changed));
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+
+    let mut expected_selected = selected_before;
+    expected_selected.engine.asset.raw_oracle_target_price = V16PodU64::new(target);
+    assert_eq!(market.markets[1].wrapper, expected_selected.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[1].engine,
+        &expected_selected.engine
+    ));
+    assert_eq!(market.markets[0].wrapper, other_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &other_before.engine
+    ));
+}
+
+#[kani::proof]
 #[kani::solver(cadical)]
 fn proof_v16_persisted_risk_gate_is_complete_for_all_lifecycles_and_side_modes() {
     let lifecycle_raw: u8 = kani::any();
@@ -1127,6 +1190,38 @@ fn proof_v16_asset_recovery_transition_is_idempotent_after_recovery() {
     assert_eq!(next_risk_epoch, risk_epoch as u64);
 }
 
+fn fund_two_market_domains(
+    header: &mut MarketGroupV16HeaderAccount,
+    markets: &mut [Market<u64>; 2],
+    capital: u128,
+    insurance_slack: u128,
+    surplus: u128,
+) {
+    let domain_atoms = [[2u128, 3u128], [5u128, 7u128]];
+    let domain_total = 17u128;
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(domain_total + insurance_slack);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(domain_total);
+    header.source_fresh_backing_total_num = V16PodU128::new(domain_total * BOUND_SCALE);
+    header.vault = V16PodU128::new(capital + domain_total * 2 + insurance_slack + surplus);
+
+    for asset_index in 0..2 {
+        let market_id = markets[asset_index].engine.asset.market_id.get();
+        markets[asset_index].engine.insurance_domain_budget_long =
+            V16PodU128::new(domain_atoms[asset_index][0]);
+        markets[asset_index].engine.insurance_domain_budget_short =
+            V16PodU128::new(domain_atoms[asset_index][1]);
+        let (long_bucket, long_source) =
+            fresh_backing_domain_accounts(market_id, domain_atoms[asset_index][0]);
+        let (short_bucket, short_source) =
+            fresh_backing_domain_accounts(market_id, domain_atoms[asset_index][1]);
+        markets[asset_index].engine.backing_long = long_bucket;
+        markets[asset_index].engine.source_credit_long = long_source;
+        markets[asset_index].engine.backing_short = short_bucket;
+        markets[asset_index].engine.source_credit_short = short_source;
+    }
+}
+
 // Public malicious/abandoned-asset shutdown route. Forcing one asset into
 // Recovery may freeze only that asset's raw oracle target and bump the two
 // lifecycle epochs once. Every quote-value field, every insurance/backing
@@ -1151,33 +1246,8 @@ fn prove_v16_public_force_asset_recovery_is_selected_only<const SELECTED_INDEX: 
     let capital = u128::from(capital_raw);
     let insurance_slack = u128::from(insurance_slack_raw);
     let surplus = u128::from(surplus_raw);
-    let domain_atoms = [[2u128, 3u128], [5u128, 7u128]];
-    let domain_total = 17u128;
-    let insurance = domain_total + insurance_slack;
-    let backing_atoms = domain_total;
-
     let (mut header, mut markets, _) = two_market_direct_view_fixture();
-    header.c_tot = V16PodU128::new(capital);
-    header.insurance = V16PodU128::new(insurance);
-    header.insurance_domain_budget_remaining_total = V16PodU128::new(domain_total);
-    header.source_fresh_backing_total_num = V16PodU128::new(backing_atoms * BOUND_SCALE);
-    header.vault = V16PodU128::new(capital + insurance + backing_atoms + surplus);
-
-    for asset_index in 0..2 {
-        let market_id = markets[asset_index].engine.asset.market_id.get();
-        markets[asset_index].engine.insurance_domain_budget_long =
-            V16PodU128::new(domain_atoms[asset_index][0]);
-        markets[asset_index].engine.insurance_domain_budget_short =
-            V16PodU128::new(domain_atoms[asset_index][1]);
-        let (long_bucket, long_source) =
-            fresh_backing_domain_accounts(market_id, domain_atoms[asset_index][0]);
-        let (short_bucket, short_source) =
-            fresh_backing_domain_accounts(market_id, domain_atoms[asset_index][1]);
-        markets[asset_index].engine.backing_long = long_bucket;
-        markets[asset_index].engine.source_credit_long = long_source;
-        markets[asset_index].engine.backing_short = short_bucket;
-        markets[asset_index].engine.source_credit_short = short_source;
-    }
+    fund_two_market_domains(&mut header, &mut markets, capital, insurance_slack, surplus);
     markets[selected_index].wrapper = 0xfeed_0000 + selected_index as u64;
     markets[other_index].wrapper = 0xcafe_0000 + other_index as u64;
 
