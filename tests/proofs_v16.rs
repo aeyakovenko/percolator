@@ -8189,6 +8189,76 @@ fn proof_v16_mark_asset_drain_only_is_value_neutral_and_epoch_scoped() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+fn proof_v16_public_nonzero_asset_drain_is_selected_only_and_idempotent() {
+    let capital_raw: u8 = kani::any();
+    let insurance_slack_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    let capital = u128::from(capital_raw);
+    let insurance_slack = u128::from(insurance_slack_raw);
+    let surplus = u128::from(surplus_raw);
+
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    fund_two_market_domains(&mut header, &mut markets, capital, insurance_slack, surplus);
+    markets[0].wrapper = 0xcafe_0000;
+    markets[1].wrapper = 0xfeed_0001;
+    let header_before = header;
+    let other_before = markets[0];
+    let selected_before = markets[1];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    market.mark_asset_drain_only_not_atomic(1).unwrap();
+
+    kani::cover!(
+        capital > 0 && insurance_slack > 0 && surplus > 0,
+        "nonzero asset shutdown covers funded senior domains and junior slack"
+    );
+
+    let mut expected_header = header_before;
+    expected_header.asset_set_epoch = V16PodU64::new(header_before.asset_set_epoch.get() + 1);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+
+    let mut expected_selected = selected_before;
+    let mut expected_asset = expected_selected.engine.asset.try_to_runtime().unwrap();
+    expected_asset.lifecycle = AssetLifecycleV16::DrainOnly;
+    expected_selected.engine.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert_eq!(market.markets[1].wrapper, expected_selected.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[1].engine,
+        &expected_selected.engine
+    ));
+    assert_eq!(market.markets[0].wrapper, other_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &other_before.engine
+    ));
+
+    let header_after_first = *market.header;
+    let markets_after_first = [market.markets[0], market.markets[1]];
+    market.mark_asset_drain_only_not_atomic(1).unwrap();
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_after_first,
+        market.header
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_after_first[0].wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &markets_after_first[0].engine
+    ));
+    assert_eq!(market.markets[1].wrapper, markets_after_first[1].wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[1].engine,
+        &markets_after_first[1].engine
+    ));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_retire_nonempty_asset_rejects() {
     let units_raw: u8 = kani::any();
     let retire_slot_raw: u16 = kani::any();
