@@ -18893,35 +18893,55 @@ fn proof_v16_validator_sound_pnl_aggregates() {
     assert!(h.pnl_pos_bound_tot.get() >= h.pnl_pos_tot.get()); // U7
 }
 
-// ROADMAP Phase 1 (Pillar F soundness, U1/U10): validate_shape's Ok-exit implies
-// vault within the TVL cap (U1) and a nonzero market-id counter (U10). Only the
-// non-division-coupled fields are made symbolic.
-//
-// U8 (pnl_pos_bound_tot_num >= pnl_pos*BOUND_SCALE) is INTRACTABLE as a Kani
-// soundness lemma: making pnl_pos_bound_tot_num symbolic forces validate_shape's
-// internal amount_from_bound_num (u128 division by BOUND_SCALE) to bit-blast the
-// division circuit (timed out at 900s — the same wide-arithmetic wall the
-// complex bodies hit). U8 is deferred to reference-model fuzz (Phase 6):
-// bound_num/amount conformance over a stated domain, NOT a Kani lemma.
+// ROADMAP Phase 1 (Pillar F soundness, U1/U8/U10): validate_shape's Ok-exit
+// implies the TVL cap, exact scaled positive-PnL coverage, and a nonzero
+// market-id counter. Decomposing the scaled bound into a symbolic whole and
+// remainder keeps the production ceil division tractable without assuming the
+// U8 conclusion: a fractionally underbound numerator can still round up to an
+// apparently sufficient atom bound and must be rejected by the exact check.
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_validator_sound_bound_and_config() {
     let vault: u128 = kani::any();
     let next_mid: u64 = kani::any();
+    let pnl_pos_raw: u8 = kani::any();
+    let bound_whole_raw: u8 = kani::any();
+    let bound_remainder_raw: u8 = kani::any();
+    kani::assume(pnl_pos_raw <= 8);
+    kani::assume(bound_whole_raw <= 8);
+    kani::assume(bound_remainder_raw <= 8);
+    let pnl_pos = pnl_pos_raw as u128;
+    let bound_whole = bound_whole_raw as u128;
+    let bound_remainder = bound_remainder_raw as u128;
+    let bound_num = bound_whole * BOUND_SCALE + bound_remainder;
+    let bound_atoms = bound_whole + u128::from(bound_remainder != 0);
     let (mut header, mut markets) = one_market_only_fixture();
     header.vault = V16PodU128::new(vault);
     header.next_market_id = V16PodU64::new(next_mid);
+    header.pnl_pos_tot = V16PodU128::new(pnl_pos);
+    header.pnl_pos_bound_tot = V16PodU128::new(bound_atoms);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(bound_num);
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
     kani::assume(market.validate_shape() == Ok(()));
     kani::cover!(
-        vault > 0 && next_mid > 1,
-        "config soundness lemma reachable with nontrivial vault + market-id"
+        vault > 0 && next_mid > 1 && pnl_pos > 0 && bound_remainder > 0 && bound_whole >= pnl_pos,
+        "scaled-bound soundness accepts a nontrivial fractional overbound"
+    );
+    kani::cover!(
+        pnl_pos > 0 && bound_remainder == 0 && bound_whole == pnl_pos,
+        "scaled-bound soundness accepts an exact nonzero bound"
     );
 
     let h = &market.header;
     assert!(h.vault.get() <= MAX_VAULT_TVL); // U1
+    let exact_bound_num = h
+        .pnl_pos_tot
+        .get()
+        .checked_mul(BOUND_SCALE)
+        .expect("bounded witness cannot overflow");
+    assert!(h.pnl_pos_bound_tot_num.get() >= exact_bound_num); // U8
     assert!(h.next_market_id.get() != 0); // U10
 }
 
