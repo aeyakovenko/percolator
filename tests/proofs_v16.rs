@@ -3433,6 +3433,77 @@ fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
     assert_eq!(account.header.pnl, account_pnl_before);
 }
 
+// Production conversion-stock theorem. Source allocation, domain consume, and
+// claim burn are proven separately over their production kernels; this proves
+// the scalar seam used by the real finalizer cannot mint account capital or
+// `c_tot` beyond counterparty + insurance + protocol support.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_production_conversion_delta_is_exact_and_fully_funded() {
+    let capital = kani::any::<u64>() as u128;
+    let c_tot = kani::any::<u64>() as u128;
+    let matured = kani::any::<u64>() as u128;
+    let face_burn = kani::any::<u64>() as u128;
+    let counterparty = kani::any::<u64>() as u128;
+    let insurance = kani::any::<u64>() as u128;
+    let protocol = kani::any::<u64>() as u128;
+    let vault = kani::any::<u64>() as u128;
+    let converted = counterparty + insurance + protocol;
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_released_pnl_conversion_delta(
+        capital,
+        c_tot,
+        matured,
+        converted,
+        face_burn,
+        counterparty,
+        insurance,
+    );
+    let flow = TokenValueFlowProofV16::support_to_account_capital(
+        converted,
+        counterparty,
+        insurance,
+        protocol,
+        vault,
+        vault,
+    );
+
+    kani::cover!(
+        counterparty > 0 && insurance > 0 && protocol == 0,
+        "conversion covers mixed externally funded source support"
+    );
+    kani::cover!(
+        counterparty > 0 && insurance > 0 && protocol > 0 && face_burn > converted,
+        "conversion covers all three support sources and haircut face burn"
+    );
+
+    let (new_capital, new_c_tot, new_matured, reported_protocol) = result.unwrap();
+    assert_eq!(new_capital, capital + converted);
+    assert_eq!(new_c_tot, c_tot + converted);
+    assert_eq!(new_matured, matured.saturating_sub(face_burn));
+    assert_eq!(reported_protocol, protocol);
+    assert_eq!(new_capital - capital, new_c_tot - c_tot);
+    assert_eq!(new_c_tot, c_tot + counterparty + insurance + protocol);
+    assert_eq!(flow.and_then(|proof| proof.validate()), Ok(()));
+
+    if counterparty + insurance > 0 {
+        let unfunded = counterparty + insurance - 1;
+        assert_eq!(
+            MarketGroupV16ViewMut::<u64>::kani_released_pnl_conversion_delta(
+                capital,
+                c_tot,
+                matured,
+                unfunded,
+                face_burn,
+                counterparty,
+                insurance,
+            ),
+            Err(V16Error::CounterUnderflow)
+        );
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]

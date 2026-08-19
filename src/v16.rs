@@ -1312,6 +1312,38 @@ impl V16Core {
         Ok((paid, new_capital, new_c_tot, new_pnl))
     }
 
+    /// PRODUCTION KERNEL: finalize the scalar stock delta after source support
+    /// has been consumed. Account capital and `c_tot` rise by the same exact
+    /// effective amount; the amount is partitioned exhaustively among
+    /// counterparty credit, insurance credit, and protocol surplus.
+    pub(crate) fn kernel_released_pnl_conversion_delta(
+        capital: u128,
+        c_tot: u128,
+        matured_positive_pnl: u128,
+        converted: u128,
+        face_burn: u128,
+        counterparty_credit_consumed: u128,
+        insurance_credit_consumed: u128,
+    ) -> V16Result<(u128, u128, u128, u128)> {
+        let new_capital = capital
+            .checked_add(converted)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let new_c_tot = c_tot
+            .checked_add(converted)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let new_matured_positive_pnl = matured_positive_pnl.saturating_sub(face_burn);
+        let protocol_surplus_consumed = converted
+            .checked_sub(counterparty_credit_consumed)
+            .and_then(|v| v.checked_sub(insurance_credit_consumed))
+            .ok_or(V16Error::CounterUnderflow)?;
+        Ok((
+            new_capital,
+            new_c_tot,
+            new_matured_positive_pnl,
+            protocol_surplus_consumed,
+        ))
+    }
+
     /// PRODUCTION KERNEL (value safety, roadmap S-L2 insurance layer): the
     /// insurance-draw core of negative-PnL liquidation. Draw is capped by BOTH
     /// the remaining deficit and the DOMAIN's own available insurance —
@@ -14754,6 +14786,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 insurance_credit_consumed: 0,
             }
         };
+        self.apply_released_pnl_conversion_after_source_consumption_not_atomic(
+            account,
+            converted,
+            consumption,
+            vault_before,
+        )?;
+        Ok(converted)
+    }
+
+    fn apply_released_pnl_conversion_after_source_consumption_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        converted: u128,
+        consumption: SourceCreditConsumptionV16,
+        vault_before: u128,
+    ) -> V16Result<()> {
         let face_i128 =
             i128::try_from(consumption.face_burn).map_err(|_| V16Error::ArithmeticOverflow)?;
         let new_pnl = account
@@ -14763,31 +14811,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_sub(face_i128)
             .ok_or(V16Error::ArithmeticOverflow)?;
         self.set_account_pnl(account, new_pnl)?;
-        account.header.capital = V16PodU128::new(
-            account
-                .header
-                .capital
-                .get()
-                .checked_add(converted)
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        );
-        self.header.c_tot = V16PodU128::new(
-            self.header
-                .c_tot
-                .get()
-                .checked_add(converted)
-                .ok_or(V16Error::ArithmeticOverflow)?,
-        );
-        self.header.pnl_matured_pos_tot = V16PodU128::new(
-            self.header
-                .pnl_matured_pos_tot
-                .get()
-                .saturating_sub(consumption.face_burn),
-        );
-        let protocol_surplus_consumed = converted
-            .checked_sub(consumption.counterparty_credit_consumed)
-            .and_then(|v| v.checked_sub(consumption.insurance_credit_consumed))
-            .ok_or(V16Error::CounterUnderflow)?;
+        let (new_capital, new_c_tot, new_matured_positive_pnl, protocol_surplus_consumed) =
+            V16Core::kernel_released_pnl_conversion_delta(
+                account.header.capital.get(),
+                self.header.c_tot.get(),
+                self.header.pnl_matured_pos_tot.get(),
+                converted,
+                consumption.face_burn,
+                consumption.counterparty_credit_consumed,
+                consumption.insurance_credit_consumed,
+            )?;
+        account.header.capital = V16PodU128::new(new_capital);
+        self.header.c_tot = V16PodU128::new(new_c_tot);
+        self.header.pnl_matured_pos_tot = V16PodU128::new(new_matured_positive_pnl);
         TokenValueFlowProofV16::support_to_account_capital(
             converted,
             consumption.counterparty_credit_consumed,
@@ -14798,7 +14834,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?
         .validate()?;
         account.header.health_cert.valid = 0;
-        Ok(converted)
+        Ok(())
     }
 
     pub fn convert_released_pnl_to_capital_not_atomic(

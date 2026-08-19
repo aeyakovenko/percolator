@@ -910,6 +910,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.preflight_convert_released_pnl_to_capital(account)
     }
 
+    pub fn kani_released_pnl_conversion_delta(
+        capital: u128,
+        c_tot: u128,
+        matured_positive_pnl: u128,
+        converted: u128,
+        face_burn: u128,
+        counterparty_credit_consumed: u128,
+        insurance_credit_consumed: u128,
+    ) -> V16Result<(u128, u128, u128, u128)> {
+        V16Core::kernel_released_pnl_conversion_delta(
+            capital,
+            c_tot,
+            matured_positive_pnl,
+            converted,
+            face_burn,
+            counterparty_credit_consumed,
+            insurance_credit_consumed,
+        )
+    }
+
     pub fn kani_position_change_touches_pending_domain_loss_barrier(
         &self,
         asset_index: usize,
