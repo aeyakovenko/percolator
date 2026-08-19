@@ -2965,6 +2965,74 @@ fn proof_v16_public_nonzero_retired_canonicalization_is_selected_only() {
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_retired_canonicalization_cannot_erase_domain_insurance() {
+    let long_budget_raw: u8 = kani::any();
+    let short_budget_raw: u8 = kani::any();
+    let capital_raw: u8 = kani::any();
+    let insurance_slack_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume(long_budget_raw != 0 || short_budget_raw != 0);
+
+    let long_budget = u128::from(long_budget_raw);
+    let short_budget = u128::from(short_budget_raw);
+    let selected_budget = long_budget + short_budget;
+    let capital = u128::from(capital_raw);
+    let insurance_slack = u128::from(insurance_slack_raw);
+    let surplus = u128::from(surplus_raw);
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    fund_first_market_domains(&mut header, &mut markets, capital, insurance_slack, surplus);
+    header.current_slot = V16PodU64::new(1);
+    header.insurance = V16PodU128::new(header.insurance.get() + selected_budget);
+    header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(header.insurance_domain_budget_remaining_total.get() + selected_budget);
+    header.vault = V16PodU128::new(header.vault.get() + selected_budget);
+    markets[0].wrapper = 0xcafe_0000;
+    markets[1].wrapper = 0xfeed_0001;
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(long_budget);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(short_budget);
+    let mut retired = markets[1].engine.asset.try_to_runtime().unwrap();
+    retired.lifecycle = AssetLifecycleV16::Retired;
+    retired.retired_slot = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&retired);
+
+    let header_before = header;
+    let markets_before = markets;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    let result = market.canonicalize_retired_empty_asset_slot_not_atomic(1);
+
+    kani::cover!(
+        long_budget > 0 && short_budget == 0 && capital > 0 && insurance_slack > 0 && surplus > 0,
+        "long-domain insurance alone blocks destructive retired-slot cleanup"
+    );
+    kani::cover!(
+        long_budget == 0 && short_budget > 0 && capital > 0 && insurance_slack > 0 && surplus > 0,
+        "short-domain insurance alone blocks destructive retired-slot cleanup"
+    );
+    kani::cover!(
+        long_budget > 0 && short_budget > 0 && capital > 0 && insurance_slack > 0 && surplus > 0,
+        "both selected domains remain protected beside funded unrelated domains"
+    );
+
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    let mut index = 0usize;
+    while index < market.markets.len() {
+        assert_eq!(market.markets[index].wrapper, markets_before[index].wrapper);
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &market.markets[index].engine,
+            &markets_before[index].engine
+        ));
+        index += 1;
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_dynamic_market_slot_slice_len_matches_runtime_capacity() {
