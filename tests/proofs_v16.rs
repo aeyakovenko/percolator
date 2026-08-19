@@ -6358,71 +6358,120 @@ fn proof_v16_backing_provider_earnings_withdraw_cannot_exceed_earnings() {
     }
 }
 
-#[kani::proof]
-#[kani::unwind(48)]
-#[kani::solver(cadical)]
-fn proof_v16_public_backing_provider_earnings_withdraw_debits_only_earned_vault() {
-    let earnings_raw: u8 = kani::any();
-    let withdraw_raw: u8 = kani::any();
-    kani::assume((1..=10).contains(&earnings_raw));
-    kani::assume((1..=10).contains(&withdraw_raw));
-    kani::assume(withdraw_raw <= earnings_raw);
-    let earnings = earnings_raw as u128;
-    let withdraw = withdraw_raw as u128;
-    let (mut header, mut markets, _) = one_market_view_fixture();
-    let market_id = markets[0].engine.asset.market_id.get();
-    header.vault = V16PodU128::new(earnings);
-    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+fn provider_earnings_bucket(market_id: u64, earnings: u128) -> BackingBucketV16Account {
+    BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id,
         utilization_fee_earnings: earnings,
         status: BackingBucketStatusV16::Expired,
         ..BackingBucketV16::EMPTY
-    });
-    let c_tot_before = header.c_tot;
-    let insurance_before = header.insurance;
-    let vault_before = header.vault.get();
+    })
+}
+
+// Public provider-earnings no-steal theorem. The scalar delta proof above is
+// universal over u128 arithmetic; these four finite routes compose that delta
+// with production domain decoding in a populated two-asset slab.
+fn assert_v16_public_provider_earnings_withdraw_isolates_other_domains<
+    const ASSET_INDEX: usize,
+    const TARGET_LONG: bool,
+>() {
+    let full_withdraw: bool = kani::any();
+    let target_domain = ASSET_INDEX * 2 + usize::from(!TARGET_LONG);
+    let domain_earnings = [4u128, 5, 6, 7];
+    let selected_earnings = domain_earnings[target_domain];
+    let withdraw = if full_withdraw { selected_earnings } else { 1 };
+    let total_earnings =
+        domain_earnings[0] + domain_earnings[1] + domain_earnings[2] + domain_earnings[3];
+    let capital = 7u128;
+    let insurance = 3u128;
+    let surplus = 4u128;
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    let market_id_0 = markets[0].engine.asset.market_id.get();
+    let market_id_1 = markets[1].engine.asset.market_id.get();
+    markets[0].engine.backing_long = provider_earnings_bucket(market_id_0, domain_earnings[0]);
+    markets[0].engine.backing_short = provider_earnings_bucket(market_id_0, domain_earnings[1]);
+    markets[1].engine.backing_long = provider_earnings_bucket(market_id_1, domain_earnings[2]);
+    markets[1].engine.backing_short = provider_earnings_bucket(market_id_1, domain_earnings[3]);
+    header.vault = V16PodU128::new(capital + insurance + total_earnings + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.backing_provider_earnings_total = V16PodU128::new(total_earnings);
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    market.refresh_header_aggregate_totals_for_test().unwrap();
-    let total_before = market.header.backing_provider_earnings_total.get();
+    let residual_before = market.kani_residual();
 
     market
-        .withdraw_backing_provider_earnings_not_atomic(0, withdraw)
-        .unwrap();
-    let bucket = market.markets[0]
-        .engine
-        .backing_long
-        .try_to_runtime()
+        .withdraw_backing_provider_earnings_not_atomic(target_domain, withdraw)
         .unwrap();
 
     kani::cover!(
-        withdraw > 1 && bucket.utilization_fee_earnings > 0,
-        "public backing earnings withdraw covers partial earned payout"
+        !full_withdraw,
+        "earnings isolation covers a partial provider payout"
     );
     kani::cover!(
-        withdraw == earnings,
-        "public backing earnings withdraw covers full earned payout"
+        full_withdraw,
+        "earnings isolation covers a full provider payout"
     );
-    assert_eq!(market.header.vault.get(), earnings - withdraw);
-    assert_eq!(bucket.utilization_fee_earnings, earnings - withdraw);
-    assert_eq!(
-        market.header.backing_provider_earnings_total.get(),
-        earnings - withdraw
-    );
-    assert_eq!(vault_before - market.header.vault.get(), withdraw);
-    assert_eq!(
-        total_before - market.header.backing_provider_earnings_total.get(),
-        withdraw
-    );
-    assert_eq!(
-        market.header.vault.get()
-            - market.header.c_tot.get()
-            - market.header.insurance.get()
-            - market.header.backing_provider_earnings_total.get(),
-        0
-    );
-    assert_eq!(market.header.c_tot, c_tot_before);
-    assert_eq!(market.header.insurance, insurance_before);
-    assert_eq!(market.validate_shape(), Ok(()));
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(header_before.vault.get() - withdraw);
+    expected_header.backing_provider_earnings_total =
+        V16PodU128::new(header_before.backing_provider_earnings_total.get() - withdraw);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    let mut expected_selected = slots_before[ASSET_INDEX];
+    let bucket = if TARGET_LONG {
+        &mut expected_selected.backing_long
+    } else {
+        &mut expected_selected.backing_short
+    };
+    let mut bucket = bucket.try_to_runtime().unwrap();
+    bucket.utilization_fee_earnings -= withdraw;
+    if TARGET_LONG {
+        expected_selected.backing_long = BackingBucketV16Account::from_runtime(&bucket);
+    } else {
+        expected_selected.backing_short = BackingBucketV16Account::from_runtime(&bucket);
+    }
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[ASSET_INDEX].engine
+    ));
+    let unrelated = 1 - ASSET_INDEX;
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slots_before[unrelated],
+        &market.markets[unrelated].engine
+    ));
+    assert_eq!(residual_before, surplus);
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_zero_long_earnings_withdraw_isolates_other_domains() {
+    assert_v16_public_provider_earnings_withdraw_isolates_other_domains::<0, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_zero_short_earnings_withdraw_isolates_other_domains() {
+    assert_v16_public_provider_earnings_withdraw_isolates_other_domains::<0, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_one_long_earnings_withdraw_isolates_other_domains() {
+    assert_v16_public_provider_earnings_withdraw_isolates_other_domains::<1, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_one_short_earnings_withdraw_isolates_other_domains() {
+    assert_v16_public_provider_earnings_withdraw_isolates_other_domains::<1, false>();
 }
 
 #[kani::proof]
