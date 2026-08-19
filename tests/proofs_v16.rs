@@ -2896,6 +2896,75 @@ fn proof_v16_canonical_retired_asset_slot_preserves_identity_and_clears_local_le
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_nonzero_retired_canonicalization_is_selected_only() {
+    let price_raw: u16 = kani::any();
+    let retired_slot_raw: u8 = kani::any();
+    let zero_adl: bool = kani::any();
+    let capital_raw: u8 = kani::any();
+    let insurance_slack_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume((1..=10_000).contains(&price_raw));
+    kani::assume((1..=8).contains(&retired_slot_raw));
+
+    let price = u64::from(price_raw);
+    let retired_slot = u64::from(retired_slot_raw);
+    let capital = u128::from(capital_raw);
+    let insurance_slack = u128::from(insurance_slack_raw);
+    let surplus = u128::from(surplus_raw);
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    fund_first_market_domains(&mut header, &mut markets, capital, insurance_slack, surplus);
+    header.current_slot = V16PodU64::new(retired_slot);
+    markets[0].wrapper = 0xcafe_0000;
+    markets[1].wrapper = 0xfeed_0001;
+
+    let mut old_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    old_asset.lifecycle = AssetLifecycleV16::Retired;
+    old_asset.retired_slot = retired_slot;
+    old_asset.raw_oracle_target_price = price;
+    old_asset.effective_price = price;
+    old_asset.fund_px_last = price;
+    if zero_adl {
+        old_asset.a_long = 0;
+        old_asset.a_short = 0;
+    }
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&old_asset);
+
+    let header_before = header;
+    let other_before = markets[0];
+    let selected_wrapper_before = markets[1].wrapper;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    market
+        .canonicalize_retired_empty_asset_slot_not_atomic(1)
+        .unwrap();
+
+    kani::cover!(
+        zero_adl && price > 100 && capital > 0 && insurance_slack > 0 && surplus > 0,
+        "nonzero retired cleanup canonicalizes zero-ADL state beside funded asset zero"
+    );
+
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    assert_eq!(market.markets[1].wrapper, selected_wrapper_before);
+    let expected_selected =
+        MarketGroupV16ViewMut::<u64>::kani_canonical_retired_asset_slot(old_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[1].engine,
+        &expected_selected
+    ));
+    assert_eq!(market.markets[0].wrapper, other_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &other_before.engine
+    ));
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_dynamic_market_slot_slice_len_matches_runtime_capacity() {
