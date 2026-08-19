@@ -1053,6 +1053,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.charge_account_fee_current_not_atomic(account, requested_fee)
     }
 
+    pub fn kani_charge_account_backing_fee_after_preflight_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        provider_domain: usize,
+        provider_fee: u128,
+        insurance_domain: usize,
+        insurance_fee: u128,
+        total_fee: u128,
+    ) -> V16Result<u128> {
+        self.charge_account_backing_fee_after_preflight_not_atomic(
+            account,
+            provider_domain,
+            provider_fee,
+            insurance_domain,
+            insurance_fee,
+            total_fee,
+        )
+    }
+
     pub fn kani_settle_negative_pnl_from_principal_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

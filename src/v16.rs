@@ -8306,27 +8306,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// transition: account capital and `c_tot` decrease by
     /// `provider_fee + insurance_fee`; provider earnings and domain insurance
     /// budget increase by their exact routed amounts; vault is unchanged.
-    pub fn charge_account_backing_fee_not_atomic(
+    fn charge_account_backing_fee_after_preflight_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         provider_domain: usize,
         provider_fee: u128,
         insurance_domain: usize,
         insurance_fee: u128,
+        total_fee: u128,
     ) -> V16Result<u128> {
-        self.domain_asset_side(provider_domain)?;
-        self.domain_asset_side(insurance_domain)?;
-        let total_fee = provider_fee
-            .checked_add(insurance_fee)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if total_fee == 0 {
-            return Ok(0);
-        }
-        account.validate_with_market(&self.as_view())?;
-        self.ensure_favorable_action_current_certificate(&account.as_view())?;
-        if account.header.pnl.get() < 0 || account.header.capital.get() < total_fee {
-            return Err(V16Error::LockActive);
-        }
         let cert = health_cert_after_capital_debit(
             account.header.health_cert.try_to_runtime()?,
             total_fee,
@@ -8385,9 +8373,41 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.vault.get(),
         )?
         .validate()?;
+        Ok(total_fee)
+    }
+
+    pub fn charge_account_backing_fee_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        provider_domain: usize,
+        provider_fee: u128,
+        insurance_domain: usize,
+        insurance_fee: u128,
+    ) -> V16Result<u128> {
+        self.domain_asset_side(provider_domain)?;
+        self.domain_asset_side(insurance_domain)?;
+        let total_fee = provider_fee
+            .checked_add(insurance_fee)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if total_fee == 0 {
+            return Ok(0);
+        }
+        account.validate_with_market(&self.as_view())?;
+        self.ensure_favorable_action_current_certificate(&account.as_view())?;
+        if account.header.pnl.get() < 0 || account.header.capital.get() < total_fee {
+            return Err(V16Error::LockActive);
+        }
+        let charged = self.charge_account_backing_fee_after_preflight_not_atomic(
+            account,
+            provider_domain,
+            provider_fee,
+            insurance_domain,
+            insurance_fee,
+            total_fee,
+        )?;
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()?;
-        Ok(total_fee)
+        Ok(charged)
     }
 
     fn account_source_claim_bound_sum_num(account: &PortfolioV16View<'_>) -> V16Result<u128> {
