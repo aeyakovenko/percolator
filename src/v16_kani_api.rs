@@ -68,16 +68,14 @@ pub fn kani_active_bitmap_set(
 pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
     pnl: i128,
     capital: u128,
-    active_bitmap: V16ActiveBitmap,
-    leg_slot_index: usize,
+    nonzero_risk_leg_count: u32,
     close_q: u128,
     leg_abs_q: u128,
 ) -> V16Result<bool> {
     liquidation_close_would_leave_uncovered_loss_with_open_risk(
         pnl,
         capital,
-        active_bitmap,
-        leg_slot_index,
+        nonzero_risk_leg_count,
         close_q,
         leg_abs_q,
     )
@@ -2003,6 +2001,31 @@ impl V16Core {
 // single public route permissionless_auto_crank_not_atomic). Lets the kani/fuzz
 // suites exercise one caller-chosen primitive action directly.
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_liquidation_close_would_leave_uncovered_loss_for_account(
+        &self,
+        account: &PortfolioV16View<'_>,
+        close_q: u128,
+        leg_abs_q: u128,
+    ) -> V16Result<bool> {
+        let (_, nonzero_risk_leg_count) =
+            self.risk_score_and_nonzero_leg_count_unchecked(account)?;
+        liquidation_close_would_leave_uncovered_loss_with_open_risk(
+            account.header.pnl.get(),
+            account.header.capital.get(),
+            nonzero_risk_leg_count,
+            close_q,
+            leg_abs_q,
+        )
+    }
+
+    pub fn kani_auto_crank_summary_and_plan(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<(ActionableSummaryV16, AutoCrankPlanV16)> {
+        let (summary, plan, _) = self.auto_crank_plan_and_slots(account)?;
+        Ok((summary, plan))
+    }
+
     pub fn kani_permissionless_crank(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

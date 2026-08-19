@@ -18,15 +18,15 @@ use percolator::v16::{
     kani_prepare_asset_recovery_transition, kani_source_credit_state_realizable_support_for_face,
     kani_target_effective_lag_adverse_delta, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution,
-    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
-    BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
-    CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
-    HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, AutoCrankPlanV16,
+    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, BatchTradeOutcomeV16,
+    CloseProgressLedgerV16, CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
     ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
     ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
     SourceCreditStateV16Account, StockReconciliationProofV16, TokenValueClassV16,
@@ -160,6 +160,46 @@ fn one_market_direct_view_fixture() -> (
     )];
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     (header, markets, PortfolioAccountV16Account::default())
+}
+
+fn two_market_direct_view_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+) {
+    let (market_group_id, account_id, owner) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.slot_last = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(1);
+    let make_market = |market_id| {
+        let mut asset = AssetStateV16 {
+            market_id,
+            lifecycle: AssetLifecycleV16::Active,
+            raw_oracle_target_price: 100,
+            effective_price: 100,
+            fund_px_last: 100,
+            slot_last: 1,
+            ..AssetStateV16::default()
+        };
+        asset.mode_long = SideModeV16::Normal;
+        asset.mode_short = SideModeV16::Normal;
+        let mut market = Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(market_id));
+        market.engine.asset = AssetStateV16Account::from_runtime(&asset);
+        market
+    };
+    let mut account = PortfolioAccountV16Account::default();
+    account
+        .init_empty_in_place(ProvenanceHeaderV16Account::from_runtime(
+            &ProvenanceHeaderV16::new(market_group_id, account_id, owner),
+        ))
+        .unwrap();
+    (header, [make_market(1), make_market(2)], account)
 }
 
 fn empty_recovery_slot_for_market(
@@ -4470,6 +4510,147 @@ fn proof_v16_released_flat_pending_obligation_is_publicly_actionable() {
     assert_eq!(summary.is_actionable(), !barrier_active);
 }
 
+// CrankForward composition: an already-released zero-basis obligation and a
+// genuinely risk-bearing leg may coexist in one cross-margin portfolio. A
+// current liquidation deficit must route to the later risk leg regardless of
+// either leg's side; selecting the first merely-active leg would send
+// liquidation to zero quantity and stall permissionless progress. This calls
+// the production classifier and plan builder in one scan. The host regression
+// below exercises both account slot orders through the public crank.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_released_obligation_cannot_mask_liquidation_asset() {
+    // The masking threat is the adversarial account order: the zero-basis
+    // obligation is encountered before the genuinely risk-bearing leg.
+    let released_short: bool = kani::any();
+    let risk_short: bool = kani::any();
+    let released_side = if released_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let risk_side = if risk_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let released_weight = POS_SCALE;
+
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    let released_market_id = markets[0].engine.asset.market_id.get();
+    match released_side {
+        SideV16::Long => {
+            markets[0].engine.asset.stored_pos_count_long = V16PodU64::new(1);
+            markets[0].engine.asset.pending_obligation_count_long = V16PodU64::new(1);
+            markets[0].engine.asset.loss_weight_sum_long = V16PodU128::new(released_weight);
+        }
+        SideV16::Short => {
+            markets[0].engine.asset.stored_pos_count_short = V16PodU64::new(1);
+            markets[0].engine.asset.pending_obligation_count_short = V16PodU64::new(1);
+            markets[0].engine.asset.loss_weight_sum_short = V16PodU128::new(released_weight);
+        }
+    }
+
+    let risk_market_id = markets[1].engine.asset.market_id.get();
+    match risk_side {
+        SideV16::Long => {
+            markets[1].engine.asset.oi_eff_long_q = V16PodU128::new(POS_SCALE);
+            markets[1].engine.asset.loss_weight_sum_long = V16PodU128::new(POS_SCALE);
+            markets[1].engine.asset.stored_pos_count_long = V16PodU64::new(1);
+        }
+        SideV16::Short => {
+            markets[1].engine.asset.oi_eff_short_q = V16PodU128::new(POS_SCALE);
+            markets[1].engine.asset.loss_weight_sum_short = V16PodU128::new(POS_SCALE);
+            markets[1].engine.asset.stored_pos_count_short = V16PodU64::new(1);
+        }
+    }
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    header.materialized_portfolio_count = V16PodU64::new(1);
+
+    let released_leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: released_market_id,
+        side: released_side,
+        basis_pos_q: 0,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: released_weight,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    let risk_leg = PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: risk_market_id,
+        side: risk_side,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    };
+    let (released_slot, risk_slot) = (0usize, 1usize);
+    account_header.legs[released_slot] = PortfolioLegV16Account::from_runtime(&released_leg);
+    account_header.legs[risk_slot] = PortfolioLegV16Account::from_runtime(&risk_leg);
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    bitmap[0] = 3;
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.pnl = V16PodI128::new(-1);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        certified_liq_deficit: 1,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let result = market.kani_auto_crank_summary_and_plan(&account.as_view());
+    let bankruptcy_guard = market.kani_liquidation_close_would_leave_uncovered_loss_for_account(
+        &account.as_view(),
+        POS_SCALE,
+        POS_SCALE,
+    );
+    kani::cover!(
+        released_short && !risk_short,
+        "released short can precede long risk"
+    );
+    assert!(result.is_ok(), "valid mixed account must classify");
+    assert_eq!(
+        bankruptcy_guard,
+        Ok(false),
+        "released zero-basis obligation is not remaining position risk"
+    );
+    let (summary, plan) = match result {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    assert!(
+        summary.stale
+            && summary.liquidatable
+            && summary.is_actionable()
+            && plan == AutoCrankPlanV16::Liquidate { asset_index: 1 }
+    );
+}
+
 // The production detach transition consumes one released obligation exactly
 // once. It removes the account leg and the matching side's stored/pending/weight
 // aggregates without changing OI or any value stock, and leaves the account
@@ -4751,73 +4932,41 @@ fn proof_v16_liquidation_cannot_leave_uncovered_loss_with_other_open_risk() {
     let capital: u128 = kani::any();
     let leg_abs_q: u128 = kani::any();
     let close_q: u128 = kani::any();
+    let other_risk_leg_count_raw: u8 = kani::any();
     kani::assume((1..=MAX_VAULT_TVL).contains(&loss_abs));
     kani::assume(capital <= MAX_VAULT_TVL);
     kani::assume((1..=MAX_TRADE_SIZE_Q).contains(&leg_abs_q));
     kani::assume((1..=leg_abs_q).contains(&close_q));
+    kani::assume((other_risk_leg_count_raw as usize) < V16_MAX_PORTFOLIO_ASSETS_N);
     let loss = -(loss_abs as i128);
-    let mut two_leg_bitmap = V16_EMPTY_ACTIVE_BITMAP;
-    active_bitmap_set(&mut two_leg_bitmap, 0).unwrap();
-    active_bitmap_set(&mut two_leg_bitmap, 1).unwrap();
-    let mut single_leg_bitmap = V16_EMPTY_ACTIVE_BITMAP;
-    active_bitmap_set(&mut single_leg_bitmap, 0).unwrap();
-
-    let close_with_other_risk = kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
+    let other_risk_leg_count = u32::from(other_risk_leg_count_raw);
+    let guard = kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
         loss,
         capital,
-        two_leg_bitmap,
-        0,
+        other_risk_leg_count + 1,
         close_q,
         leg_abs_q,
     )
     .unwrap();
-    let full_close_without_other_risk =
-        kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            loss,
-            capital,
-            single_leg_bitmap,
-            0,
-            leg_abs_q,
-            leg_abs_q,
-        )
-        .unwrap();
-    let partial_close_without_other_risk =
-        kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            loss,
-            capital,
-            single_leg_bitmap,
-            0,
-            close_q,
-            leg_abs_q,
-        )
-        .unwrap();
-    let covered_loss_with_other_risk =
-        kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            loss,
-            loss_abs,
-            two_leg_bitmap,
-            0,
-            close_q,
-            leg_abs_q,
-        )
-        .unwrap();
     let uncovered = loss_abs > capital;
+    let selected_leg_remains = close_q < leg_abs_q;
 
     kani::cover!(
-        uncovered && close_q == leg_abs_q && close_with_other_risk,
+        uncovered && !selected_leg_remains && other_risk_leg_count != 0 && guard,
         "liquidation guard detects symbolic uncovered loss with remaining open risk"
     );
     kani::cover!(
-        uncovered && close_q < leg_abs_q && partial_close_without_other_risk,
-        "liquidation guard detects partial close preserving the only active leg"
+        uncovered && selected_leg_remains && other_risk_leg_count == 0 && guard,
+        "partial close preserves the selected risk leg"
     );
-    assert_eq!(close_with_other_risk, uncovered);
-    assert!(!full_close_without_other_risk);
+    kani::cover!(
+        uncovered && !selected_leg_remains && other_risk_leg_count == 0 && !guard,
+        "full close proceeds when only zero-basis obligations remain"
+    );
     assert_eq!(
-        partial_close_without_other_risk,
-        uncovered && close_q < leg_abs_q
+        guard,
+        uncovered && (selected_leg_remains || other_risk_leg_count != 0)
     );
-    assert!(!covered_loss_with_other_risk);
 }
 
 #[kani::proof]

@@ -3239,6 +3239,151 @@ fn v16_auto_crank_releases_current_flat_pending_obligations_on_both_sides() {
     }
 }
 
+#[test]
+fn v16_auto_crank_mixed_released_obligation_selects_risk_asset() {
+    for released_first in [false, true] {
+        for released_side in [SideV16::Long, SideV16::Short] {
+            for risk_side in [SideV16::Long, SideV16::Short] {
+                let (mut header, mut markets) = market_fixture(2, 100);
+                let mut account_header = account_fixture(2, 23);
+                header.current_slot = V16PodU64::new(10);
+                header.slot_last = V16PodU64::new(10);
+                header.vault = V16PodU128::new(50);
+                header.insurance = V16PodU128::new(50);
+                header.negative_pnl_account_count = V16PodU64::new(1);
+
+                let mut released_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+                released_asset.slot_last = 10;
+                match released_side {
+                    SideV16::Long => {
+                        released_asset.stored_pos_count_long = 1;
+                        released_asset.pending_obligation_count_long = 1;
+                        released_asset.loss_weight_sum_long = POS_SCALE;
+                    }
+                    SideV16::Short => {
+                        released_asset.stored_pos_count_short = 1;
+                        released_asset.pending_obligation_count_short = 1;
+                        released_asset.loss_weight_sum_short = POS_SCALE;
+                    }
+                }
+                markets[0].engine.asset = AssetStateV16Account::from_runtime(&released_asset);
+
+                let mut risk_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+                risk_asset.slot_last = 10;
+                risk_asset.oi_eff_long_q = 2 * POS_SCALE;
+                risk_asset.oi_eff_short_q = 2 * POS_SCALE;
+                risk_asset.loss_weight_sum_long = 2 * POS_SCALE;
+                risk_asset.loss_weight_sum_short = 2 * POS_SCALE;
+                risk_asset.stored_pos_count_long = 2;
+                risk_asset.stored_pos_count_short = 2;
+                markets[1].engine.asset = AssetStateV16Account::from_runtime(&risk_asset);
+                header.resolved_payout_blocker_count = V16PodU64::new(5);
+                header.materialized_portfolio_count = V16PodU64::new(1);
+                account_header.pnl = V16PodI128::new(-5);
+
+                let released_leg = PortfolioLegV16 {
+                    active: true,
+                    asset_index: 0,
+                    market_id: released_asset.market_id,
+                    side: released_side,
+                    basis_pos_q: 0,
+                    a_basis: ADL_ONE,
+                    k_snap: 0,
+                    f_snap: 0,
+                    epoch_snap: 0,
+                    loss_weight: POS_SCALE,
+                    b_snap: 0,
+                    b_rem: 0,
+                    b_epoch_snap: 0,
+                    b_stale: false,
+                    stale: false,
+                };
+                let risk_leg = PortfolioLegV16 {
+                    active: true,
+                    asset_index: 1,
+                    market_id: risk_asset.market_id,
+                    side: risk_side,
+                    basis_pos_q: POS_SCALE as i128,
+                    a_basis: ADL_ONE,
+                    k_snap: match risk_side {
+                        SideV16::Long => risk_asset.k_long,
+                        SideV16::Short => risk_asset.k_short,
+                    },
+                    f_snap: match risk_side {
+                        SideV16::Long => risk_asset.f_long_num,
+                        SideV16::Short => risk_asset.f_short_num,
+                    },
+                    epoch_snap: match risk_side {
+                        SideV16::Long => risk_asset.epoch_long,
+                        SideV16::Short => risk_asset.epoch_short,
+                    },
+                    loss_weight: POS_SCALE,
+                    b_snap: match risk_side {
+                        SideV16::Long => risk_asset.b_long_num,
+                        SideV16::Short => risk_asset.b_short_num,
+                    },
+                    b_rem: 0,
+                    b_epoch_snap: match risk_side {
+                        SideV16::Long => risk_asset.epoch_long,
+                        SideV16::Short => risk_asset.epoch_short,
+                    },
+                    b_stale: false,
+                    stale: false,
+                };
+                let (released_slot, risk_slot) = if released_first { (0, 1) } else { (1, 0) };
+                account_header.legs[released_slot] =
+                    PortfolioLegV16Account::from_runtime(&released_leg);
+                account_header.legs[risk_slot] = PortfolioLegV16Account::from_runtime(&risk_leg);
+                account_header.active_bitmap[0] = V16PodU64::new(3);
+
+                let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+                let mut account = PortfolioV16ViewMut::new(&mut account_header);
+                let cert = market
+                    .full_account_refresh_not_atomic(&mut account)
+                    .expect("setup must produce a current liquidation certificate");
+                assert!(cert.certified_liq_deficit != 0);
+                assert_eq!(account.header.active_bitmap[0].get(), 3);
+                #[cfg(feature = "fuzz")]
+                {
+                    let result = market.kani_auto_crank_summary_and_plan(&account.as_view());
+                    assert_eq!(
+                        result,
+                        Ok((
+                            percolator::ActionableSummaryV16 {
+                                stale: true,
+                                b_stale: false,
+                                pending_close: false,
+                                expired_close: false,
+                                liquidatable: true,
+                                recovery_eligible: false,
+                                resolved_winner: false,
+                            },
+                            AutoCrankPlanV16::Liquidate { asset_index: 1 },
+                        )),
+                        "released_first={released_first}, released_side={released_side:?}, risk_side={risk_side:?}"
+                    );
+                }
+                let dispatched = market
+                    .permissionless_auto_crank_not_atomic(
+                        &mut account,
+                        AutoCrankWorkV16 {
+                            now_slot: 10,
+                            observations: &[],
+                            resolved_close_fee_rate_per_slot: 0,
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    dispatched.selected,
+                    AutoCrankPlanV16::Liquidate { asset_index: 1 },
+                    "public crank misrouted: released_first={released_first}, \
+                     released_side={released_side:?}, risk_side={risk_side:?}"
+                );
+            }
+        }
+    }
+}
+
 // ROADMAP 3C step 4 / NB2 finite-multi-step liveness via the self-classifying
 // crank: an uncertified, underwater account must be driven to a de-risked fixed
 // point by repeated auto-cranks — the classifier ESCALATES (stale -> refresh,

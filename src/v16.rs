@@ -267,29 +267,6 @@ fn active_bitmap_clear(bitmap: &mut V16ActiveBitmap, leg_slot_index: usize) -> V
 }
 
 #[inline]
-fn active_bitmap_with_cleared(
-    mut bitmap: V16ActiveBitmap,
-    leg_slot_index: usize,
-) -> V16Result<V16ActiveBitmap> {
-    active_bitmap_clear(&mut bitmap, leg_slot_index)?;
-    Ok(bitmap)
-}
-
-#[inline]
-fn liquidation_remaining_active_bitmap_after_close(
-    active_bitmap: V16ActiveBitmap,
-    leg_slot_index: usize,
-    close_q: u128,
-    leg_abs_q: u128,
-) -> V16Result<V16ActiveBitmap> {
-    if close_q == leg_abs_q {
-        active_bitmap_with_cleared(active_bitmap, leg_slot_index)
-    } else {
-        Ok(active_bitmap)
-    }
-}
-
-#[inline]
 fn liquidation_uncovered_loss_after_principal(pnl: i128, capital: u128) -> u128 {
     if pnl < 0 {
         pnl.unsigned_abs().saturating_sub(capital)
@@ -302,19 +279,18 @@ fn liquidation_uncovered_loss_after_principal(pnl: i128, capital: u128) -> u128 
 fn liquidation_close_would_leave_uncovered_loss_with_open_risk(
     pnl: i128,
     capital: u128,
-    active_bitmap: V16ActiveBitmap,
-    leg_slot_index: usize,
+    nonzero_risk_leg_count: u32,
     close_q: u128,
     leg_abs_q: u128,
 ) -> V16Result<bool> {
+    if leg_abs_q == 0 || close_q > leg_abs_q {
+        return Err(V16Error::InvalidConfig);
+    }
     let uncovered_loss_after_principal = liquidation_uncovered_loss_after_principal(pnl, capital);
-    let remaining_active_bitmap = liquidation_remaining_active_bitmap_after_close(
-        active_bitmap,
-        leg_slot_index,
-        close_q,
-        leg_abs_q,
-    )?;
-    Ok(uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap))
+    let remaining_risk_leg_count = nonzero_risk_leg_count
+        .checked_sub(u32::from(close_q == leg_abs_q))
+        .ok_or(V16Error::InvalidLeg)?;
+    Ok(uncovered_loss_after_principal != 0 && remaining_risk_leg_count != 0)
 }
 
 fn liquidation_risk_notional_ceil(abs_pos_q: u128, price: u64) -> V16Result<u128> {
@@ -4931,10 +4907,16 @@ pub struct AutoCrankResultV16 {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AutoCrankSelectedSlotsV16 {
-    active: Option<usize>,
-    risk: Option<usize>,
-    b_stale: Option<usize>,
-    released_obligation: Option<usize>,
+    active: Option<AutoCrankSelectedLegV16>,
+    risk: Option<AutoCrankSelectedLegV16>,
+    b_stale: Option<AutoCrankSelectedLegV16>,
+    released_obligation: Option<AutoCrankSelectedLegV16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AutoCrankSelectedLegV16 {
+    slot: usize,
+    asset_index: usize,
 }
 
 /// Scalar request/config guard summary (roadmap 3C fidelity layer): the exact
@@ -11669,12 +11651,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let leg = account.header.legs[slot].try_to_runtime()?;
             let is_active = active_bitmap_get(bitmap, slot) && leg.active;
             if is_active {
-                selected.active.get_or_insert(slot);
+                let witness = AutoCrankSelectedLegV16 {
+                    slot,
+                    asset_index: leg.asset_index as usize,
+                };
+                selected.active.get_or_insert(witness);
                 if leg.basis_pos_q != 0 {
-                    selected.risk.get_or_insert(slot);
+                    selected.risk.get_or_insert(witness);
                 }
                 if leg.b_stale {
-                    selected.b_stale.get_or_insert(slot);
+                    selected.b_stale.get_or_insert(witness);
                 }
                 if release_allowed
                     && !leg.stale
@@ -11682,24 +11668,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     && leg.loss_weight != 0
                     && !self.has_pending_domain_loss_barrier(leg.asset_index as usize, leg.side)?
                 {
-                    selected.released_obligation.get_or_insert(slot);
+                    selected.released_obligation.get_or_insert(witness);
                 }
             }
             slot += 1;
         }
         Ok(selected)
-    }
-
-    fn selected_slot_asset_index(
-        account: &PortfolioV16View<'_>,
-        slot: Option<usize>,
-    ) -> V16Result<Option<usize>> {
-        match slot {
-            Some(slot) => Ok(Some(
-                account.header.legs[slot].try_to_runtime()?.asset_index as usize,
-            )),
-            None => Ok(None),
-        }
     }
 
     fn auto_crank_state(
@@ -11797,6 +11771,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(self.auto_crank_state(account)?.0)
     }
 
+    fn auto_crank_plan_and_slots(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<(
+        ActionableSummaryV16,
+        AutoCrankPlanV16,
+        AutoCrankSelectedSlotsV16,
+    )> {
+        let (summary, selected) = self.auto_crank_state(account)?;
+        let b_stale_asset = selected.b_stale.map(|w| w.asset_index);
+        let risk_asset = selected.risk.map(|w| w.asset_index);
+        let refresh_asset = selected
+            .released_obligation
+            .or(selected.active)
+            .map(|w| w.asset_index);
+        let recovery_reason = if summary.expired_close {
+            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
+        } else {
+            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
+        };
+        let plan = V16Core::select_auto_crank_plan(
+            summary,
+            b_stale_asset.unwrap_or(0),
+            risk_asset.unwrap_or(0),
+            refresh_asset,
+            recovery_reason,
+        );
+        Ok((summary, plan, selected))
+    }
+
     fn released_obligation_is_current(
         &self,
         account: &PortfolioV16View<'_>,
@@ -11861,27 +11865,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         work: AutoCrankWorkV16<'_>,
     ) -> V16Result<AutoCrankResultV16> {
-        let (summary, selected) = self.auto_crank_state(&account.as_view())?;
-        let b_stale_asset = Self::selected_slot_asset_index(&account.as_view(), selected.b_stale)?;
-        let risk_asset = Self::selected_slot_asset_index(&account.as_view(), selected.risk)?;
-        let refresh_asset = Self::selected_slot_asset_index(
-            &account.as_view(),
-            selected.released_obligation.or(selected.active),
-        )?;
-        let recovery_reason = if summary.expired_close {
-            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
-        } else {
-            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
-        };
-        // PRODUCTION KERNEL: the proven plan selector (priority + totality +
-        // engine-selected asset). refresh accrues the first active leg's asset.
-        let plan = V16Core::select_auto_crank_plan(
-            summary,
-            b_stale_asset.unwrap_or(0),
-            risk_asset.unwrap_or(0),
-            refresh_asset,
-            recovery_reason,
-        );
+        let (_, plan, selected) = self.auto_crank_plan_and_slots(&account.as_view())?;
 
         // A released, already-current zero-basis obligation needs no health or
         // price arithmetic. Detach it by its selected slot before the generic
@@ -11889,10 +11873,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // continuation. If its K/F/B snapshots still lag, the normal refresh
         // settles them first and the next crank takes this fast path.
         if matches!(plan, AutoCrankPlanV16::RefreshAccount { .. }) {
-            if let Some(slot) = selected.released_obligation {
-                if self.released_obligation_is_current(&account.as_view(), slot)? {
+            if let Some(released) = selected.released_obligation {
+                if self.released_obligation_is_current(&account.as_view(), released.slot)? {
                     self.validate_unconfigured_market_tail()?;
-                    self.clear_leg_at_slot(account, slot)?;
+                    self.clear_leg_at_slot(account, released.slot)?;
                     self.validate_shape_audit_scan()?;
                     return Ok(AutoCrankResultV16 {
                         selected: plan,
@@ -12379,39 +12363,56 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape_audit_scan()
     }
 
-    fn account_b_loss_bound(account: &PortfolioV16View<'_>) -> V16Result<u128> {
+    fn account_risk_scan(account: &PortfolioV16View<'_>) -> V16Result<(u128, u32)> {
         let mut bound = 0u128;
+        let mut nonzero_leg_count = 0u32;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active && leg.b_stale {
-                bound = bound
-                    .checked_add(leg.loss_weight)
-                    .ok_or(V16Error::ArithmeticOverflow)?;
+            if leg.active {
+                if leg.b_stale {
+                    bound = bound
+                        .checked_add(leg.loss_weight)
+                        .ok_or(V16Error::ArithmeticOverflow)?;
+                }
+                if leg.basis_pos_q != 0 {
+                    nonzero_leg_count += 1;
+                }
             }
             slot += 1;
         }
-        Ok(bound)
+        Ok((bound, nonzero_leg_count))
     }
 
-    fn risk_score_unchecked(&self, account: &PortfolioV16View<'_>) -> V16Result<RiskScoreV16> {
+    fn risk_score_and_nonzero_leg_count_unchecked(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<(RiskScoreV16, u32)> {
         let cert = account.header.health_cert.try_to_runtime()?;
         if !cert.valid {
             return Err(V16Error::Stale);
         }
-        Ok(RiskScoreV16 {
-            certified_liq_deficit: cert.certified_liq_deficit,
-            unsettled_b_loss_bound: Self::account_b_loss_bound(account)?,
-            stale_loss_bound: if decode_bool(account.header.stale_state)? {
-                1
-            } else {
-                0
+        let (unsettled_b_loss_bound, nonzero_leg_count) = Self::account_risk_scan(account)?;
+        Ok((
+            RiskScoreV16 {
+                certified_liq_deficit: cert.certified_liq_deficit,
+                unsettled_b_loss_bound,
+                stale_loss_bound: if decode_bool(account.header.stale_state)? {
+                    1
+                } else {
+                    0
+                },
+                gross_risk_notional: cert.certified_worst_case_loss,
+                active_leg_count: active_bitmap_count_ones(
+                    account.header.active_bitmap.map(V16PodU64::get),
+                ),
             },
-            gross_risk_notional: cert.certified_worst_case_loss,
-            active_leg_count: active_bitmap_count_ones(
-                account.header.active_bitmap.map(V16PodU64::get),
-            ),
-        })
+            nonzero_leg_count,
+        ))
+    }
+
+    fn risk_score_unchecked(&self, account: &PortfolioV16View<'_>) -> V16Result<RiskScoreV16> {
+        Ok(self.risk_score_and_nonzero_leg_count_unchecked(account)?.0)
     }
 
     #[inline(never)]
@@ -13715,7 +13716,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if cert.certified_liq_deficit == 0 {
             return Err(V16Error::NonProgress);
         }
-        let before_score = self.risk_score_unchecked(&account.as_view())?;
+        let (before_score, nonzero_risk_leg_count) =
+            self.risk_score_and_nonzero_leg_count_unchecked(&account.as_view())?;
         let leg_slot =
             Self::require_active_leg_slot_for_asset(&account.as_view(), request.asset_index)?;
         let leg = account.header.legs[leg_slot].try_to_runtime()?;
@@ -13750,8 +13752,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if liquidation_close_would_leave_uncovered_loss_with_open_risk(
             account.header.pnl.get(),
             account.header.capital.get(),
-            account.header.active_bitmap.map(V16PodU64::get),
-            leg_slot,
+            nonzero_risk_leg_count,
             close_q,
             leg.basis_pos_q.unsigned_abs(),
         )? {
