@@ -9786,6 +9786,79 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
     assert_eq!(market.kani_residual(), residual_before);
 }
 
+// Multi-asset oracle-containment frame over the production accrual transition
+// selected by the public crank. Mark/clock progress for one slab slot cannot
+// write another slot or move any value stock.
+fn assert_v16_public_accrual_selected_asset_preserves_unrelated_asset_and_value<
+    const SELECTED: usize,
+>() {
+    let advance_slot: bool = kani::any();
+    let price_up: bool = kani::any();
+    let unrelated = 1 - SELECTED;
+    let now_slot = if advance_slot { 2 } else { 1 };
+    let effective_price = if price_up { 110 } else { 90 };
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    header.c_tot = V16PodU128::new(17);
+    header.insurance = V16PodU128::new(11);
+    header.vault = V16PodU128::new(33);
+
+    let header_before = header;
+    let selected_before = markets[SELECTED].engine;
+    let unrelated_before = markets[unrelated].engine;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let outcome = market
+        .accrue_asset_to_not_atomic(SELECTED, now_slot, effective_price, 0, false)
+        .unwrap();
+
+    kani::cover!(
+        advance_slot && price_up,
+        "selected asset accrual covers next-slot upward mark progress"
+    );
+    kani::cover!(
+        !advance_slot && !price_up,
+        "selected asset accrual covers same-slot downward mark progress"
+    );
+    assert!(!outcome.equity_active);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &unrelated_before,
+        &market.markets[unrelated].engine
+    ));
+    assert_eq!(
+        market.markets[SELECTED].engine.asset.market_id,
+        selected_before.asset.market_id
+    );
+    assert_eq!(
+        market.markets[SELECTED].engine.asset.lifecycle,
+        selected_before.asset.lifecycle
+    );
+
+    let mut expected_header = header_before;
+    expected_header.current_slot = market.header.current_slot;
+    expected_header.slot_last = market.header.slot_last;
+    expected_header.loss_stale_active = market.header.loss_stale_active;
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_v16_public_accrual_asset_zero_preserves_asset_one_and_value() {
+    assert_v16_public_accrual_selected_asset_preserves_unrelated_asset_and_value::<0>();
+}
+
+#[kani::proof]
+#[kani::unwind(96)]
+#[kani::solver(cadical)]
+fn proof_v16_public_accrual_asset_one_preserves_asset_zero_and_value() {
+    assert_v16_public_accrual_selected_asset_preserves_unrelated_asset_and_value::<1>();
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
