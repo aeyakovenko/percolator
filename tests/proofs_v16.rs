@@ -8227,6 +8227,10 @@ fn proof_v16_positive_kf_delta_creates_source_claim_bound() {
     let delta_num = delta_raw as u128 * BOUND_SCALE;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     account_header.pnl = V16PodI128::new(0);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let unrelated_source_before = markets[0].engine.source_credit_long;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -8270,9 +8274,111 @@ fn proof_v16_positive_kf_delta_creates_source_claim_bound() {
             .get(),
         delta_num
     );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_short
+            .fresh_reserved_backing_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_short
+            .credit_rate_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.source_credit_long,
+        unrelated_source_before
+    );
     assert_eq!(market.header.pnl_pos_tot.get(), delta as u128);
     assert_eq!(market.header.pnl_pos_bound_tot_num.get(), delta_num);
     assert_eq!(market.header.source_claim_bound_total_num.get(), delta_num);
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+}
+
+// Production routing theorem for winner-first K/F settlement. Positive deltas
+// create a claim against the opposite side of the same asset; negative deltas
+// reserve realized capital on the losing leg's own side. Zero is a no-op. The
+// state-mutation theorems immediately above and below prove the resulting claim
+// is initially unspendable and that loser backing is capital-capped.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_kf_settlement_routes_value_to_same_asset_counterparty_domain() {
+    let select_second_asset: bool = kani::any();
+    let leg_is_short: bool = kani::any();
+    let net_raw: i16 = kani::any();
+    let asset_index = usize::from(select_second_asset);
+    let leg_side = if leg_is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let net = net_raw as i128;
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    let (positive_domain, negative_domain) = market
+        .kani_kf_settlement_domains(asset_index, leg_side, net)
+        .unwrap();
+
+    kani::cover!(
+        select_second_asset && !leg_is_short && net > 1 && positive_domain.is_some(),
+        "positive long K/F routes on a nonzero slab asset"
+    );
+    kani::cover!(
+        leg_is_short && net > 1 && positive_domain.is_some(),
+        "positive short K/F routes to the opposite long domain"
+    );
+    kani::cover!(
+        net < -1 && negative_domain.is_some(),
+        "negative K/F routes to capital-backed loss"
+    );
+    kani::cover!(
+        net == 0 && positive_domain.is_none() && negative_domain.is_none(),
+        "zero K/F is attribution-neutral"
+    );
+
+    if net > 0 {
+        let domain = positive_domain.unwrap();
+        let (mapped_asset, mapped_side) = market.kani_domain_asset_side(domain).unwrap();
+        assert_eq!(negative_domain, None);
+        assert_eq!(mapped_asset, asset_index);
+        assert_ne!(mapped_side, leg_side);
+        assert_eq!(
+            mapped_side,
+            if leg_is_short {
+                SideV16::Long
+            } else {
+                SideV16::Short
+            }
+        );
+        assert_ne!(domain / 2, 1 - asset_index);
+    } else if net < 0 {
+        let domain = negative_domain.unwrap();
+        let (mapped_asset, mapped_side) = market.kani_domain_asset_side(domain).unwrap();
+        assert_eq!(positive_domain, None);
+        assert_eq!(mapped_asset, asset_index);
+        assert_eq!(mapped_side, leg_side);
+        assert_ne!(domain / 2, 1 - asset_index);
+    } else {
+        assert_eq!(positive_domain, None);
+        assert_eq!(negative_domain, None);
+    }
 }
 
 #[kani::proof]
@@ -8508,6 +8614,8 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
 
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
+    let unrelated_source_before = markets[0].engine.source_credit_short;
+    let unrelated_backing_before = markets[0].engine.backing_short;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let residual_before = market.kani_residual();
@@ -8519,6 +8627,17 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
         .unwrap();
 
     let expected_backing = loss.min(capital);
+    let expected_backing_num = expected_backing * BOUND_SCALE;
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
 
     kani::cover!(
         loss < capital,
@@ -8540,6 +8659,27 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
     assert_eq!(
         account.header.pnl.get(),
         -(loss as i128) + expected_backing as i128
+    );
+    assert_eq!(source.positive_claim_bound_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num, expected_backing_num);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(bucket.fresh_unliened_backing_num, expected_backing_num);
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        expected_backing_num
+    );
+    assert_eq!(
+        market.header.c_tot.get()
+            + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE,
+        c_tot_before
+    );
+    assert_eq!(
+        market.markets[0].engine.source_credit_short,
+        unrelated_source_before
+    );
+    assert_eq!(
+        market.markets[0].engine.backing_short,
+        unrelated_backing_before
     );
     // Junior-pool isolation: the reservation moves capital into backing in
     // lockstep (c_tot -X, counterparty_backing_principal +X), so the junior

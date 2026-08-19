@@ -486,6 +486,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.insurance_domain_index(asset_index, side)
     }
 
+    pub fn kani_kf_settlement_domains(
+        &self,
+        asset_index: usize,
+        side: SideV16,
+        net: i128,
+    ) -> V16Result<(Option<usize>, Option<usize>)> {
+        Ok(match self.kf_settlement_route(asset_index, side, net)? {
+            KfSettlementRouteV16::Noop => (None, None),
+            KfSettlementRouteV16::PositiveClaim { source_domain } => (Some(source_domain), None),
+            KfSettlementRouteV16::NegativeLoss { source_domain } => (None, Some(source_domain)),
+        })
+    }
+
     pub fn kani_backing_bucket_for_domain(&self, domain: usize) -> V16Result<BackingBucketV16> {
         self.backing_bucket_for_domain(domain)
     }

@@ -5617,6 +5617,13 @@ struct SupportLossApplicationV16 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KfSettlementRouteV16 {
+    Noop,
+    PositiveClaim { source_domain: usize },
+    NegativeLoss { source_domain: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SourceCreditConsumptionV16 {
     face_burn: u128,
     counterparty_credit_consumed: u128,
@@ -10755,6 +10762,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::leg_kf_delta_for_settlement_from_asset(asset, leg)
     }
 
+    #[inline]
+    fn kf_settlement_route(
+        &self,
+        asset_index: usize,
+        side: SideV16,
+        net: i128,
+    ) -> V16Result<KfSettlementRouteV16> {
+        validate_non_min_i128(net)?;
+        if net > 0 {
+            return Ok(KfSettlementRouteV16::PositiveClaim {
+                source_domain: self.insurance_domain_index(asset_index, opposite_side(side))?,
+            });
+        }
+        if net < 0 {
+            return Ok(KfSettlementRouteV16::NegativeLoss {
+                source_domain: self.insurance_domain_index(asset_index, side)?,
+            });
+        }
+        Ok(KfSettlementRouteV16::Noop)
+    }
+
     fn settle_leg_kf_effects_at_slot(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -10794,19 +10822,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let (k_now, f_now, _k_delta, f_delta, net) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
-        if net != 0 {
-            if net > 0 {
-                let source_domain =
-                    Some(self.insurance_domain_index(asset_index, opposite_side(leg.side))?);
-                self.apply_signed_kf_delta_to_pnl(account, net, source_domain)?;
-            } else {
+        match self.kf_settlement_route(asset_index, leg.side, net)? {
+            KfSettlementRouteV16::Noop => {}
+            KfSettlementRouteV16::PositiveClaim { source_domain } => {
+                self.apply_signed_kf_delta_to_pnl(account, net, Some(source_domain))?;
+            }
+            KfSettlementRouteV16::NegativeLoss { source_domain } => {
                 let negative_before = account.header.pnl.get().min(0).unsigned_abs();
                 self.apply_signed_kf_delta_to_pnl(account, net, None)?;
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
-                let loss_source_domain = self.insurance_domain_index(asset_index, leg.side)?;
                 self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
                     account,
-                    loss_source_domain,
+                    source_domain,
                     negative_before,
                     negative_after,
                 )?;
