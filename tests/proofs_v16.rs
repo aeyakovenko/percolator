@@ -11871,6 +11871,117 @@ fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed()
     assert_eq!(market.kani_residual(), residual_before);
 }
 
+// Public pooled-insurance no-steal theorem. A withdrawal selected from any of
+// the four domains in a populated two-asset slab must debit vault, aggregate
+// insurance, and exactly that domain in lockstep; every other field is frozen.
+fn assert_v16_public_domain_insurance_withdraw_isolates_other_domains<
+    const ASSET_INDEX: usize,
+    const SIDE_IS_SHORT: bool,
+>() {
+    let larger_amount: bool = kani::any();
+    let partial_withdrawal: bool = kani::any();
+    let pooled_surplus: bool = kani::any();
+    let domain = ASSET_INDEX * 2 + usize::from(SIDE_IS_SHORT);
+    let amount = if larger_amount { 3 } else { 1 };
+    let remaining = if partial_withdrawal { 2 } else { 0 };
+    let selected_budget = amount + remaining;
+    let surplus = if pooled_surplus { 5 } else { 0 };
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(5);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(7);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(9);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(11);
+    if SIDE_IS_SHORT {
+        markets[ASSET_INDEX].engine.insurance_domain_budget_short =
+            V16PodU128::new(selected_budget);
+    } else {
+        markets[ASSET_INDEX].engine.insurance_domain_budget_long = V16PodU128::new(selected_budget);
+    }
+    let total_budget = markets[0].engine.insurance_domain_budget_long.get()
+        + markets[0].engine.insurance_domain_budget_short.get()
+        + markets[1].engine.insurance_domain_budget_long.get()
+        + markets[1].engine.insurance_domain_budget_short.get();
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(total_budget);
+    header.insurance = V16PodU128::new(total_budget + surplus);
+    header.vault = V16PodU128::new(total_budget + surplus);
+
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    market
+        .withdraw_domain_insurance_not_atomic(domain, amount)
+        .unwrap();
+
+    kani::cover!(
+        remaining == 0,
+        "withdraw isolation covers full selected-domain withdrawal"
+    );
+    kani::cover!(
+        remaining > 0 && surplus > 0,
+        "withdraw isolation covers partial withdrawal with pooled surplus"
+    );
+    kani::cover!(
+        larger_amount,
+        "withdraw isolation covers a non-unit external payout"
+    );
+
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(header_before.vault.get() - amount);
+    expected_header.insurance = V16PodU128::new(header_before.insurance.get() - amount);
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(header_before.insurance_domain_budget_remaining_total.get() - amount);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+
+    let mut expected_slots = slots_before;
+    if SIDE_IS_SHORT {
+        expected_slots[ASSET_INDEX].insurance_domain_budget_short = V16PodU128::new(remaining);
+    } else {
+        expected_slots[ASSET_INDEX].insurance_domain_budget_long = V16PodU128::new(remaining);
+    }
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[0],
+        &market.markets[0].engine
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slots[1],
+        &market.markets[1].engine
+    ));
+    assert_eq!(market.kani_residual(), residual_before);
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_zero_long_insurance_withdraw_isolates_other_domains() {
+    assert_v16_public_domain_insurance_withdraw_isolates_other_domains::<0, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_zero_short_insurance_withdraw_isolates_other_domains() {
+    assert_v16_public_domain_insurance_withdraw_isolates_other_domains::<0, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_one_long_insurance_withdraw_isolates_other_domains() {
+    assert_v16_public_domain_insurance_withdraw_isolates_other_domains::<1, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_one_short_insurance_withdraw_isolates_other_domains() {
+    assert_v16_public_domain_insurance_withdraw_isolates_other_domains::<1, true>();
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
