@@ -12403,17 +12403,27 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
     let capital_raw: u8 = kani::any();
     let hidden_loss_raw: u8 = kani::any();
     let requested_fee_raw: u8 = kani::any();
+    let provider_earnings_raw: u8 = kani::any();
+    let counterparty_backing_raw: u8 = kani::any();
+    let junior_surplus_raw: u8 = kani::any();
     kani::assume(hidden_loss_raw > 0);
 
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     let capital = capital_raw as u128;
     let hidden_loss = hidden_loss_raw as u128;
     let requested_fee = requested_fee_raw as u128;
-    header.vault = V16PodU128::new(capital);
+    let provider_earnings = provider_earnings_raw as u128;
+    let counterparty_backing = counterparty_backing_raw as u128;
+    let junior_surplus = junior_surplus_raw as u128;
+    header.vault =
+        V16PodU128::new(capital + provider_earnings + counterparty_backing + junior_surplus);
     header.c_tot = V16PodU128::new(capital);
+    header.backing_provider_earnings_total = V16PodU128::new(provider_earnings);
+    header.source_fresh_backing_total_num = V16PodU128::new(counterparty_backing * BOUND_SCALE);
     account_header.capital = V16PodU128::new(capital);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let residual_before = market.kani_residual();
 
     market
         .kani_apply_signed_kf_delta_to_pnl(&mut account, -(hidden_loss as i128), None)
@@ -12444,6 +12454,10 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
         capital > 10 && hidden_loss > capital && requested_fee > 10,
         "loss-senior fee ordering covers wide no-fee bankrupt K/F loss"
     );
+    kani::cover!(
+        provider_earnings > 0 && counterparty_backing > 0 && junior_surplus > 0,
+        "loss-before-fee ordering composes with every other senior class and junior surplus"
+    );
     assert_eq!(paid, expected_paid);
     assert_eq!(charged, expected_fee);
     assert_eq!(
@@ -12456,11 +12470,27 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
         capital - expected_paid - expected_fee
     );
     assert_eq!(market.header.insurance.get(), expected_fee);
-    assert_eq!(market.header.vault.get(), capital);
     assert_eq!(
-        market.header.c_tot.get() + market.header.insurance.get(),
-        capital - expected_paid
+        market.header.vault.get(),
+        capital + provider_earnings + counterparty_backing + junior_surplus
     );
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        provider_earnings
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        counterparty_backing * BOUND_SCALE
+    );
+    assert_eq!(
+        market.header.c_tot.get()
+            + market.header.insurance.get()
+            + market.header.backing_provider_earnings_total.get()
+            + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE,
+        capital - expected_paid + provider_earnings + counterparty_backing
+    );
+    assert_eq!(residual_before, junior_surplus);
+    assert_eq!(market.kani_residual(), junior_surplus + expected_paid);
     if hidden_loss > capital {
         assert_eq!(expected_fee, 0);
         assert_eq!(market.header.bankruptcy_hlock_active, 1);
@@ -15910,17 +15940,25 @@ fn proof_v16_symbolic_funding_profile_satisfies_mm_envelope_on_small_notionals()
 
 // Clean-room inductive senior-solvency proof (independent of any external PR).
 //
-// validate_shape enforces the senior leg `c_tot + insurance (+ earnings) <= vault`
-// and per-account `capital <= c_tot` via an O(N) loop scan, which makes
-// assume(validate_shape) intractable over full-domain symbolic state. This decomposes
-// the senior-solvency invariant into a loop-free predicate, assumes it over FULLY
-// SYMBOLIC u128/i128 economic scalars (no <=1000 bounds), applies the bare negative-PnL
-// principal-settlement transition, and proves INV(s) => INV(f(s)) plus the exact
-// value-conservation delta laws. Covers fire on partial and full settlement
-// (non-vacuous). No markets/legs are touched by this transition, so unwind(8) holds.
-fn inv_senior_accounting(vault: u128, c_tot: u128, insurance: u128) -> bool {
+// validate_shape enforces the full senior leg `c_tot + insurance + provider
+// earnings + recoverable counterparty backing <= vault` and per-account
+// `capital <= c_tot` via an O(N) loop scan, which makes assume(validate_shape)
+// intractable over full-domain symbolic state. This decomposes that invariant
+// into a loop-free predicate, keeps the unscaled u128/i128 economic scalars
+// fully symbolic, and uses a wide u64 backing-atom range so its scaled header
+// encoding cannot overflow. The production transitions must preserve the
+// complete invariant and leave both additional senior classes unchanged.
+fn inv_senior_accounting(
+    vault: u128,
+    c_tot: u128,
+    insurance: u128,
+    provider_earnings: u128,
+    counterparty_backing: u128,
+) -> bool {
     c_tot
         .checked_add(insurance)
+        .and_then(|v| v.checked_add(provider_earnings))
+        .and_then(|v| v.checked_add(counterparty_backing))
         .map(|s| s <= vault)
         .unwrap_or(false)
 }
@@ -15932,11 +15970,19 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     let vault: u128 = kani::any();
     let c_tot: u128 = kani::any();
     let insurance: u128 = kani::any();
+    let provider_earnings: u128 = kani::any();
+    let counterparty_backing = kani::any::<u64>() as u128;
     let capital: u128 = kani::any();
     let pnl: i128 = kani::any();
 
     // assume(canonical_inv(s)) -- decomposed, loop-free, full-domain symbolic.
-    kani::assume(inv_senior_accounting(vault, c_tot, insurance));
+    kani::assume(inv_senior_accounting(
+        vault,
+        c_tot,
+        insurance,
+        provider_earnings,
+        counterparty_backing,
+    ));
     kani::assume(capital <= c_tot); // per-account capital cannot exceed the aggregate
     kani::assume(pnl > i128::MIN); // engine validate_non_min_i128 precondition
     kani::assume(pnl < 0); // the negative-PnL principal-settlement case
@@ -15948,6 +15994,8 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     header.vault = V16PodU128::new(vault);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
+    header.backing_provider_earnings_total = V16PodU128::new(provider_earnings);
+    header.source_fresh_backing_total_num = V16PodU128::new(counterparty_backing * BOUND_SCALE);
     header.negative_pnl_account_count = V16PodU64::new(1); // the one negative account
 
     let mut acct_header = PortfolioAccountV16Account::default();
@@ -15966,6 +16014,10 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
         capital >= loss,
         "full principal settlement: capital covers loss"
     );
+    kani::cover!(
+        provider_earnings > 0 && counterparty_backing > 0 && capital > 0,
+        "principal settlement preserves every nontrivial senior stock class"
+    );
 
     let result = market.kani_settle_negative_pnl_from_principal_core_not_atomic(&mut account);
     assert!(result.is_ok());
@@ -15979,7 +16031,9 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     assert!(inv_senior_accounting(
         vault_after,
         c_tot_after,
-        insurance_after
+        insurance_after,
+        market.header.backing_provider_earnings_total.get(),
+        counterparty_backing,
     ));
     assert!(account.header.capital.get() <= c_tot_after);
 
@@ -15991,6 +16045,14 @@ fn proof_v16_inductive_settle_negative_pnl_preserves_senior_solvency() {
     assert_eq!(account.header.pnl.get(), expected_pnl);
     assert_eq!(vault_after, vault);
     assert_eq!(insurance_after, insurance);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        provider_earnings
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        counterparty_backing * BOUND_SCALE
+    );
     assert_eq!(c_tot_after, c_tot - paid);
     assert_eq!(account.header.capital.get(), capital - paid);
     if paid < loss {
@@ -16011,12 +16073,20 @@ fn proof_v16_inductive_fee_core_preserves_senior_solvency_and_never_debits_insur
     let vault: u128 = kani::any();
     let c_tot: u128 = kani::any();
     let insurance: u128 = kani::any();
+    let provider_earnings: u128 = kani::any();
+    let counterparty_backing = kani::any::<u64>() as u128;
     let capital: u128 = kani::any();
     let requested_fee: u128 = kani::any();
     let pnl: i128 = kani::any();
 
     // Decomposed canonical senior-accounting invariant over full symbolic scalars.
-    kani::assume(inv_senior_accounting(vault, c_tot, insurance));
+    kani::assume(inv_senior_accounting(
+        vault,
+        c_tot,
+        insurance,
+        provider_earnings,
+        counterparty_backing,
+    ));
     kani::assume(capital <= c_tot);
 
     let (market_id, _, _) = ids();
@@ -16026,6 +16096,8 @@ fn proof_v16_inductive_fee_core_preserves_senior_solvency_and_never_debits_insur
     header.vault = V16PodU128::new(vault);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
+    header.backing_provider_earnings_total = V16PodU128::new(provider_earnings);
+    header.source_fresh_backing_total_num = V16PodU128::new(counterparty_backing * BOUND_SCALE);
 
     let mut acct_header = PortfolioAccountV16Account::default();
     acct_header.capital = V16PodU128::new(capital);
@@ -16046,6 +16118,10 @@ fn proof_v16_inductive_fee_core_preserves_senior_solvency_and_never_debits_insur
         pnl < 0 && requested_fee > 0 && capital > 0,
         "fee core covers negative-PnL no-charge branch"
     );
+    kani::cover!(
+        pnl >= 0 && requested_fee > 0 && provider_earnings > 0 && counterparty_backing > 0,
+        "fee charging preserves every nontrivial senior stock class"
+    );
 
     let result = market.kani_charge_account_fee_current_not_atomic(&mut account, requested_fee);
     assert!(result.is_ok());
@@ -16063,12 +16139,22 @@ fn proof_v16_inductive_fee_core_preserves_senior_solvency_and_never_debits_insur
     assert_eq!(vault_after, vault);
     assert_eq!(c_tot_after, c_tot - charged);
     assert_eq!(insurance_after, insurance + charged);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        provider_earnings
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        counterparty_backing * BOUND_SCALE
+    );
     assert_eq!(account.header.capital.get(), capital - charged);
     assert!(insurance_after >= insurance);
     assert!(inv_senior_accounting(
         vault_after,
         c_tot_after,
-        insurance_after
+        insurance_after,
+        market.header.backing_provider_earnings_total.get(),
+        counterparty_backing,
     ));
     assert!(account.header.capital.get() <= c_tot_after);
 }
