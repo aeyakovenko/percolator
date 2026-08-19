@@ -18871,6 +18871,158 @@ fn proof_v16_pending_close_transition_advances_recovery_leg_without_value_move()
     assert_eq!(market.header.current_slot.get(), 1 + u64::from(delayed));
 }
 
+// LoF / domain-isolation theorem for the insurance-funded branch of the same
+// production pending-close transition. A fully funded source domain must pay
+// the close exactly once from its own budget, finalize the close and barrier,
+// and leave the opposite funded domain, asset state, vault, and account capital
+// untouched. The amount and source side are symbolic; the independent generic
+// insurance-cap theorem covers partial-budget arithmetic, while this theorem
+// closes the route-level ledger/stock/frame composition.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_pending_close_insurance_cure_is_source_local_and_conserving() {
+    let residual_raw: u8 = kani::any();
+    let other_budget_raw: u8 = kani::any();
+    let source_is_short: bool = kani::any();
+    let delayed: bool = kani::any();
+    kani::assume((1..=8).contains(&residual_raw));
+    kani::assume(other_budget_raw <= 8);
+
+    let residual = u128::from(residual_raw);
+    let other_budget = u128::from(other_budget_raw);
+    let domain_side = if source_is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let (mut header, mut markets, mut account_header) =
+        attributed_pending_recovery_close_fixture(residual, 8, domain_side, false, false);
+    header.insurance = V16PodU128::new(residual + other_budget);
+    header.vault = V16PodU128::new(residual + other_budget);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(residual + other_budget);
+    match domain_side {
+        SideV16::Long => {
+            markets[0].engine.insurance_domain_budget_long = V16PodU128::new(residual);
+            markets[0].engine.insurance_domain_budget_short = V16PodU128::new(other_budget);
+        }
+        SideV16::Short => {
+            markets[0].engine.insurance_domain_budget_short = V16PodU128::new(residual);
+            markets[0].engine.insurance_domain_budget_long = V16PodU128::new(other_budget);
+        }
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let header_before = *market.header;
+    let asset_before = market.markets[0].engine.asset;
+    let wrapper_before = market.markets[0].wrapper;
+    let budget_long_before = market.markets[0].engine.insurance_domain_budget_long;
+    let budget_short_before = market.markets[0].engine.insurance_domain_budget_short;
+    let spent_long_before = market.markets[0].engine.insurance_domain_spent_long;
+    let spent_short_before = market.markets[0].engine.insurance_domain_spent_short;
+    let now_slot = market.header.current_slot.get() + u64::from(delayed);
+
+    let result = market
+        .kani_commit_pending_close_advance_not_atomic(&mut account, now_slot, residual, 0, 0)
+        .expect("a fully funded attributed close must consume only its source insurance");
+    let PermissionlessProgressOutcomeV16::CloseAdvanced(cured) = result else {
+        panic!("insurance-funded pending close must use the close continuation");
+    };
+
+    kani::cover!(
+        source_is_short && other_budget_raw > 0 && delayed,
+        "short source cure preserves an independently funded long domain"
+    );
+    kani::cover!(
+        !source_is_short && other_budget_raw > 0 && delayed,
+        "long source cure preserves an independently funded short domain"
+    );
+    assert_eq!(cured.insurance_used, residual);
+    assert_eq!(cured.residual_booked, 0);
+    assert_eq!(cured.explicit_loss, 0);
+    assert_eq!(cured.delta_b, 0);
+    assert_eq!(cured.remaining_after, 0);
+
+    let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.insurance_spent, residual);
+    assert_eq!(ledger.residual_remaining, 0);
+    assert!(ledger.finalized);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert_eq!(market.header.insurance.get(), other_budget);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        other_budget
+    );
+    assert_eq!(market.header.resolved_payout_blocker_count.get(), 2);
+    assert_eq!(market.header.current_slot.get(), now_slot);
+    assert_eq!(market.markets[0].engine.asset, asset_before);
+    assert_eq!(market.markets[0].wrapper, wrapper_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long,
+        budget_long_before
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short,
+        budget_short_before
+    );
+    match domain_side {
+        SideV16::Long => {
+            assert_eq!(
+                market.markets[0].engine.insurance_domain_spent_long.get(),
+                residual
+            );
+            assert_eq!(
+                market.markets[0].engine.insurance_domain_spent_short,
+                spent_short_before
+            );
+            assert_eq!(
+                market.markets[0]
+                    .engine
+                    .pending_domain_loss_barrier_long
+                    .get(),
+                0
+            );
+            assert_eq!(
+                market.markets[0]
+                    .engine
+                    .pending_domain_loss_barrier_short
+                    .get(),
+                0
+            );
+        }
+        SideV16::Short => {
+            assert_eq!(
+                market.markets[0].engine.insurance_domain_spent_short.get(),
+                residual
+            );
+            assert_eq!(
+                market.markets[0].engine.insurance_domain_spent_long,
+                spent_long_before
+            );
+            assert_eq!(
+                market.markets[0]
+                    .engine
+                    .pending_domain_loss_barrier_short
+                    .get(),
+                0
+            );
+            assert_eq!(
+                market.markets[0]
+                    .engine
+                    .pending_domain_loss_barrier_long
+                    .get(),
+                0
+            );
+        }
+    }
+}
+
 // LoF — no free open interest: a risk-increasing fill with nonzero size, nonzero
 // price, and nonzero fee_bps must charge a STRICTLY POSITIVE fee per side. The
 // pre-fix code derived the fee from trade_notional_floor, which rounds sub-atom
