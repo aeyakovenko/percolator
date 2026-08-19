@@ -19023,6 +19023,119 @@ fn proof_v16_pending_close_insurance_cure_is_source_local_and_conserving() {
     }
 }
 
+// LoF / domain-isolation composition theorem for a mixed partial close step.
+// Production consumes the selected source domain's available insurance first,
+// then books at most one bounded B chunk for the exact residual. Those disjoint
+// credits must reduce account PnL and the close ledger by their exact sum, debit
+// only source insurance, and move only the selected asset's loss-side B index.
+// This closes the same-instruction gap between the insurance-only and B-only
+// route theorems above rather than assuming their independent effects compose.
+// Their terminal cases prove finalization; this theorem fixes the pending rank
+// branch and one nontrivial split so the mixed route remains tractable under
+// the per-harness bound. The component theorems prove full-width amounts.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_pending_close_mixed_partial_insurance_and_b_partition_is_exact() {
+    let source_is_short: bool = kani::any();
+    let residual = 4;
+    let insurance = 2;
+    let after_insurance = 2;
+    let chunk = 1;
+    let other_budget = 2;
+    let expected_booked = chunk;
+    let expected_remaining = 1;
+    let domain_side = if source_is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let (mut header, mut markets, mut account_header) =
+        attributed_pending_recovery_close_fixture(residual, chunk, domain_side, false, false);
+    header.insurance = V16PodU128::new(insurance + other_budget);
+    header.vault = V16PodU128::new(insurance + other_budget);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(insurance + other_budget);
+    match domain_side {
+        SideV16::Long => {
+            markets[0].engine.insurance_domain_budget_long = V16PodU128::new(insurance);
+            markets[0].engine.insurance_domain_budget_short = V16PodU128::new(other_budget);
+        }
+        SideV16::Short => {
+            markets[0].engine.insurance_domain_budget_short = V16PodU128::new(insurance);
+            markets[0].engine.insurance_domain_budget_long = V16PodU128::new(other_budget);
+        }
+    }
+
+    kani::cover!(
+        source_is_short,
+        "partial short-source insurance plus partial B has a feasible pre-state"
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let header_before = *market.header;
+    let b_long_before = market.markets[0].engine.asset.b_long_num.get();
+    let b_short_before = market.markets[0].engine.asset.b_short_num.get();
+    let spent_long_before = market.markets[0].engine.insurance_domain_spent_long;
+    let spent_short_before = market.markets[0].engine.insurance_domain_spent_short;
+
+    let result = market
+        .kani_commit_pending_close_advance_not_atomic(
+            &mut account,
+            market.header.current_slot.get(),
+            insurance,
+            after_insurance,
+            expected_booked,
+        )
+        .expect("mixed source insurance and B capacity must advance atomically");
+    let PermissionlessProgressOutcomeV16::CloseAdvanced(outcome) = result else {
+        panic!("mixed pending close must use the close continuation");
+    };
+
+    let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    let b_long_after = market.markets[0].engine.asset.b_long_num.get();
+    let b_short_after = market.markets[0].engine.asset.b_short_num.get();
+    let spent_long_after = market.markets[0].engine.insurance_domain_spent_long.get();
+    let spent_short_after = market.markets[0].engine.insurance_domain_spent_short.get();
+    let side_attribution_holds = match domain_side {
+        SideV16::Long => {
+            b_long_after == b_long_before + expected_booked
+                && b_short_after == b_short_before
+                && spent_long_after == insurance
+                && spent_short_after == spent_short_before.get()
+        }
+        SideV16::Short => {
+            b_short_after == b_short_before + expected_booked
+                && b_long_after == b_long_before
+                && spent_short_after == insurance
+                && spent_long_after == spent_long_before.get()
+        }
+    };
+    assert!(
+        outcome.insurance_used == insurance
+            && outcome.residual_booked == expected_booked
+            && outcome.explicit_loss == 0
+            && outcome.delta_b == expected_booked
+            && outcome.remaining_after == expected_remaining
+            && outcome.insurance_used + outcome.residual_booked + outcome.remaining_after
+                == residual
+            && ledger.insurance_spent == insurance
+            && ledger.b_loss_booked == expected_booked
+            && ledger.explicit_loss_assigned == 0
+            && ledger.residual_remaining == expected_remaining
+            && ledger.finalized == (expected_remaining == 0)
+            && account.header.pnl.get() == -(expected_remaining as i128)
+            && account.header.capital.get() == 0
+            && market.header.negative_pnl_account_count.get() == u64::from(expected_remaining != 0)
+            && market.header.insurance.get() == other_budget
+            && market.header.vault == header_before.vault
+            && market.header.c_tot == header_before.c_tot
+            && market.header.insurance_domain_budget_remaining_total.get() == other_budget
+            && side_attribution_holds,
+        "mixed funding must be an exact, source-local, stock-conserving partition"
+    );
+}
+
 // LoF — no free open interest: a risk-increasing fill with nonzero size, nonzero
 // price, and nonzero fee_bps must charge a STRICTLY POSITIVE fee per side. The
 // pre-fix code derived the fee from trade_notional_floor, which rounds sub-atom
