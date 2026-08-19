@@ -5,7 +5,8 @@ use percolator::{
 use percolator::{
     v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
     BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
-    HealthCertV16, HealthCertV16Account, LiquidationRequestV16, Market,
+    HealthCertV16, HealthCertV16Account, InsuranceCreditReservationV16,
+    InsuranceCreditReservationV16Account, LiquidationRequestV16, Market,
     MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
     PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
@@ -1722,6 +1723,100 @@ fn v16_insurance_lien_consume_rejects_fractional_bound_amount() {
         before_reservation
     );
     assert_eq!(market.markets[0].engine.source_credit_long, before_source);
+}
+
+#[cfg(feature = "fuzz")]
+#[test]
+fn v16_conversion_combines_counterparty_and_insurance_credit() {
+    const COUNTERPARTY_ATOMS: u128 = 5;
+    const INSURANCE_ATOMS: u128 = 5;
+    const EFFECTIVE_CREDIT: u128 = COUNTERPARTY_ATOMS + INSURANCE_ATOMS;
+
+    let counterparty_num = COUNTERPARTY_ATOMS * BOUND_SCALE;
+    let insurance_num = INSURANCE_ATOMS * BOUND_SCALE;
+    let claim_num = EFFECTIVE_CREDIT * BOUND_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 17);
+    header.vault = V16PodU128::new(EFFECTIVE_CREDIT);
+    header.insurance = V16PodU128::new(INSURANCE_ATOMS);
+    header.pnl_pos_tot = V16PodU128::new(EFFECTIVE_CREDIT);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(EFFECTIVE_CREDIT);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(counterparty_num);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(INSURANCE_ATOMS);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(INSURANCE_ATOMS);
+
+    let market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: counterparty_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: insurance_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: counterparty_num,
+            insurance_credit_reserved_num: insurance_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(INSURANCE_ATOMS);
+    account_header.pnl = V16PodI128::new(EFFECTIVE_CREDIT as i128);
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .full_account_refresh_not_atomic(&mut account)
+        .unwrap();
+
+    assert_eq!(
+        market.convert_released_pnl_to_capital_not_atomic(&mut account),
+        Ok(EFFECTIVE_CREDIT)
+    );
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.capital.get(), EFFECTIVE_CREDIT);
+    assert_eq!(market.header.c_tot.get(), EFFECTIVE_CREDIT);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .consumed_liened_backing_num
+            .get(),
+        counterparty_num
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .provider_receivable_num
+            .get(),
+        counterparty_num
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        INSURANCE_ATOMS
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        0
+    );
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 }
 
 #[test]

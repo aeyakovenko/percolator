@@ -9442,6 +9442,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.source_credit_available_backing_num(domain)? < backing_num {
             return Err(V16Error::LockActive);
         }
+        let (counterparty_credit_consumed, insurance_credit_consumed) =
+            self.create_and_consume_source_credit_backing_not_atomic(domain, backing_num)?;
+        if counterparty_credit_consumed
+            .checked_add(insurance_credit_consumed)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            != effective_credit
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(SourceCreditConsumptionV16 {
+            face_burn: V16Core::amount_from_bound_num(required_face_num)?,
+            counterparty_credit_consumed,
+            insurance_credit_consumed,
+        })
+    }
+
+    fn create_and_consume_source_credit_backing_not_atomic(
+        &mut self,
+        domain: usize,
+        backing_num: u128,
+    ) -> V16Result<(u128, u128)> {
         let bucket = self.backing_bucket_for_domain(domain)?;
         let counterparty_available_num = if bucket.status == BackingBucketStatusV16::Fresh
             && bucket.expiry_slot > self.header.current_slot.get()
@@ -9465,6 +9486,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 counterparty_available_num,
                 insurance_available_num,
             )?;
+        V16Core::validate_bound_num_atom_aligned(counterparty_backing_num)?;
         if counterparty_backing_num != 0 {
             self.create_and_consume_source_credit_from_counterparty_core_not_atomic(
                 domain,
@@ -9480,18 +9502,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let counterparty_credit_consumed =
             V16Core::amount_from_bound_num(counterparty_backing_num)?;
         let insurance_credit_consumed = V16Core::amount_from_bound_num(insurance_backing_num)?;
-        if counterparty_credit_consumed
+        let consumed = counterparty_credit_consumed
             .checked_add(insurance_credit_consumed)
-            .ok_or(V16Error::ArithmeticOverflow)?
-            != effective_credit
-        {
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if V16Core::bound_num_from_amount(consumed)? != backing_num {
             return Err(V16Error::InvalidConfig);
         }
-        Ok(SourceCreditConsumptionV16 {
-            face_burn: V16Core::amount_from_bound_num(required_face_num)?,
-            counterparty_credit_consumed,
-            insurance_credit_consumed,
-        })
+        Ok((counterparty_credit_consumed, insurance_credit_consumed))
     }
 
     fn create_and_consume_account_source_credit_for_effective_not_atomic(
@@ -9537,27 +9554,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if take != 0 {
                     let (face_num, backing_num) =
                         V16Core::source_credit_lien_amounts_for_effective(take, rate)?;
-                    let bucket = self.backing_bucket_for_domain(d)?;
-                    if bucket.status == BackingBucketStatusV16::Fresh
-                        && bucket.expiry_slot > self.header.current_slot.get()
-                        && bucket.fresh_unliened_backing_num >= backing_num
+                    let (counterparty_consumed, insurance_consumed) =
+                        self.create_and_consume_source_credit_backing_not_atomic(d, backing_num)?;
+                    if counterparty_consumed
+                        .checked_add(insurance_consumed)
+                        .ok_or(V16Error::ArithmeticOverflow)?
+                        != take
                     {
-                        self.create_and_consume_source_credit_from_counterparty_core_not_atomic(
-                            d,
-                            backing_num,
-                        )?;
-                        counterparty_credit_consumed = counterparty_credit_consumed
-                            .checked_add(take)
-                            .ok_or(V16Error::ArithmeticOverflow)?;
-                    } else {
-                        self.create_and_consume_source_credit_from_insurance_core_not_atomic(
-                            d,
-                            backing_num,
-                        )?;
-                        insurance_credit_consumed = insurance_credit_consumed
-                            .checked_add(take)
-                            .ok_or(V16Error::ArithmeticOverflow)?;
+                        return Err(V16Error::InvalidConfig);
                     }
+                    counterparty_credit_consumed = counterparty_credit_consumed
+                        .checked_add(counterparty_consumed)
+                        .ok_or(V16Error::ArithmeticOverflow)?;
+                    insurance_credit_consumed = insurance_credit_consumed
+                        .checked_add(insurance_consumed)
+                        .ok_or(V16Error::ArithmeticOverflow)?;
                     face_burn_num = face_burn_num
                         .checked_add(face_num)
                         .ok_or(V16Error::ArithmeticOverflow)?;
