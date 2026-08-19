@@ -1008,6 +1008,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::kernel_settle_resolved_pnl_after_booking(pnl, booked_loss, explicit_loss)
     }
 
+    pub fn kani_migrate_resolved_receipt_bound(
+        exact_receipts_num: u128,
+        unreceipted_num: u128,
+        receipt_bound_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        V16Core::kernel_migrate_resolved_receipt_bound(
+            exact_receipts_num,
+            unreceipted_num,
+            receipt_bound_num,
+        )
+    }
+
+    pub fn kani_resolved_payout_rate(
+        snapshot_residual_bound_num: u128,
+        exact_receipts_num: u128,
+        unreceipted_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        V16Core::kernel_resolved_payout_rate(
+            snapshot_residual_bound_num,
+            exact_receipts_num,
+            unreceipted_num,
+        )
+    }
+
     pub fn kani_position_change_touches_pending_domain_loss_barrier(
         &self,
         asset_index: usize,

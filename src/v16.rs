@@ -1464,6 +1464,47 @@ impl V16Core {
         (payout, new_vault)
     }
 
+    /// PRODUCTION KERNEL: migrate one resolved claim bound from the
+    /// unreceipted pool to the exact-receipt pool without changing total claim
+    /// weight. An understated unreceipted pool fails closed.
+    pub(crate) fn kernel_migrate_resolved_receipt_bound(
+        exact_receipts_num: u128,
+        unreceipted_num: u128,
+        receipt_bound_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        if receipt_bound_num > unreceipted_num {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let new_unreceipted_num = unreceipted_num
+            .checked_sub(receipt_bound_num)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let new_exact_receipts_num = exact_receipts_num
+            .checked_add(receipt_bound_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((new_exact_receipts_num, new_unreceipted_num))
+    }
+
+    /// PRODUCTION KERNEL: derive the resolved payout rate from exact and
+    /// unreceipted claim weights. Receipt migration preserves their sum, so it
+    /// must leave this rate unchanged.
+    pub(crate) fn kernel_resolved_payout_rate(
+        snapshot_residual_bound_num: u128,
+        exact_receipts_num: u128,
+        unreceipted_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        let total_bound_num = exact_receipts_num
+            .checked_add(unreceipted_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if total_bound_num == 0 {
+            Ok((1, 1))
+        } else {
+            Ok((
+                snapshot_residual_bound_num.min(total_bound_num),
+                total_bound_num,
+            ))
+        }
+    }
+
     /// PRODUCTION KERNEL (roadmap 3A.1 trade spine): classify a position change
     /// from (current signed, new signed) into its leg route — the EXACT total
     /// decision the position-delta body dispatches on. `delta != 0` is enforced
@@ -14671,21 +14712,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     fn recompute_resolved_payout_rate(&mut self) -> V16Result<()> {
         let mut ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        let total_bound_num = ledger
-            .terminal_claim_exact_receipts_num
-            .checked_add(ledger.terminal_claim_bound_unreceipted_num)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if total_bound_num == 0 {
-            ledger.current_payout_rate_num = 1;
-            ledger.current_payout_rate_den = 1;
+        let snapshot_residual_bound_num = if ledger.terminal_claim_exact_receipts_num == 0
+            && ledger.terminal_claim_bound_unreceipted_num == 0
+        {
+            0
         } else {
-            ledger.current_payout_rate_num = ledger
+            ledger
                 .snapshot_residual
                 .checked_mul(BOUND_SCALE)
                 .ok_or(V16Error::ArithmeticOverflow)?
-                .min(total_bound_num);
-            ledger.current_payout_rate_den = total_bound_num;
-        }
+        };
+        let (rate_num, rate_den) = V16Core::kernel_resolved_payout_rate(
+            snapshot_residual_bound_num,
+            ledger.terminal_claim_exact_receipts_num,
+            ledger.terminal_claim_bound_unreceipted_num,
+        )?;
+        ledger.current_payout_rate_num = rate_num;
+        ledger.current_payout_rate_den = rate_den;
         self.header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
         Ok(())
     }
@@ -14728,25 +14771,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let prior_bound_contribution_num =
             V16Core::bound_num_from_amount(terminal_positive_claim_face)?;
         let mut ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        if V16Core::bound_num_from_amount(terminal_positive_claim_face)?
-            > prior_bound_contribution_num
-            || prior_bound_contribution_num > ledger.terminal_claim_bound_unreceipted_num
-        {
-            ledger.payout_halted = true;
-            self.header.resolved_payout_ledger =
-                ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
-            return Err(V16Error::RecoveryRequired);
-        }
-        ledger.terminal_claim_bound_unreceipted_num = ledger
-            .terminal_claim_bound_unreceipted_num
-            .checked_sub(prior_bound_contribution_num)
-            .ok_or(V16Error::CounterUnderflow)?;
-        ledger.terminal_claim_exact_receipts_num = ledger
-            .terminal_claim_exact_receipts_num
-            .checked_add(V16Core::bound_num_from_amount(
-                terminal_positive_claim_face,
-            )?)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        let (new_exact_receipts_num, new_unreceipted_num) =
+            match V16Core::kernel_migrate_resolved_receipt_bound(
+                ledger.terminal_claim_exact_receipts_num,
+                ledger.terminal_claim_bound_unreceipted_num,
+                prior_bound_contribution_num,
+            ) {
+                Ok(next) => next,
+                Err(V16Error::RecoveryRequired) => {
+                    ledger.payout_halted = true;
+                    self.header.resolved_payout_ledger =
+                        ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
+                    return Err(V16Error::RecoveryRequired);
+                }
+                Err(error) => return Err(error),
+            };
+        ledger.terminal_claim_exact_receipts_num = new_exact_receipts_num;
+        ledger.terminal_claim_bound_unreceipted_num = new_unreceipted_num;
         self.header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
         account.header.resolved_payout_receipt =
             ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {

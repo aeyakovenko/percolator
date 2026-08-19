@@ -550,6 +550,73 @@ fn proof_v16_resolved_receipt_bound_migration_is_exact_or_fails_closed() {
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+// Full-width allocation theorem for the production receipt-migration seam.
+// Receipt materialization may improve precision, but it must not change total
+// claim weight or payout rate, and it cannot consume another user's bound.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_receipt_migration_preserves_claim_weight_and_rate() {
+    let exact_num: u128 = kani::any();
+    let unreceipted_num: u128 = kani::any();
+    let receipt_bound_num: u128 = kani::any();
+    let snapshot_residual_bound_num: u128 = kani::any();
+    kani::assume(exact_num.checked_add(unreceipted_num).is_some());
+    let old_total_num = exact_num + unreceipted_num;
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_migrate_resolved_receipt_bound(
+        exact_num,
+        unreceipted_num,
+        receipt_bound_num,
+    );
+
+    kani::cover!(
+        exact_num > u64::MAX as u128
+            && receipt_bound_num > 0
+            && receipt_bound_num < unreceipted_num
+            && snapshot_residual_bound_num < old_total_num,
+        "migration covers prior receipts, remaining unreceipted claims, and haircut"
+    );
+    kani::cover!(
+        receipt_bound_num > 0 && receipt_bound_num == unreceipted_num,
+        "migration covers materializing the final unreceipted claim"
+    );
+    kani::cover!(
+        exact_num > 0 && receipt_bound_num > unreceipted_num,
+        "migration covers an understated unreceipted pool"
+    );
+    kani::cover!(old_total_num == 0, "migration covers the empty claim pool");
+
+    if receipt_bound_num <= unreceipted_num {
+        let (new_exact_num, new_unreceipted_num) = result.unwrap();
+        assert_eq!(new_exact_num, exact_num + receipt_bound_num);
+        assert_eq!(new_unreceipted_num, unreceipted_num - receipt_bound_num);
+        assert_eq!(new_exact_num + new_unreceipted_num, old_total_num);
+        let old_rate = MarketGroupV16ViewMut::<u64>::kani_resolved_payout_rate(
+            snapshot_residual_bound_num,
+            exact_num,
+            unreceipted_num,
+        )
+        .unwrap();
+        let new_total_num = new_exact_num + new_unreceipted_num;
+        let new_rate = MarketGroupV16ViewMut::<u64>::kani_resolved_payout_rate(
+            snapshot_residual_bound_num,
+            new_exact_num,
+            new_unreceipted_num,
+        )
+        .unwrap();
+        assert_eq!(new_total_num, old_total_num);
+        assert_eq!(new_rate, old_rate);
+    } else {
+        assert_eq!(result, Err(V16Error::RecoveryRequired));
+    }
+
+    assert_eq!(
+        MarketGroupV16ViewMut::<u64>::kani_migrate_resolved_receipt_bound(u128::MAX, 1, 1),
+        Err(V16Error::ArithmeticOverflow)
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
