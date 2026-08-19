@@ -5703,6 +5703,161 @@ fn proof_v16_matching_oi_reduction_is_positive_or_enters_drain_only() {
     );
 }
 
+// The last unilateral close must compose matching-OI retirement with the real
+// side-reset transition. This is the shutdown/liquidation liveness boundary:
+// no value moves, K/F/B are snapshotted exactly, fractional loss remainder is
+// quarantined, and only the fully drained counterparty side enters ResetPending.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_full_matching_oi_reduction_starts_exact_side_reset() {
+    let closes_short: bool = kani::any();
+    let starts_drain_only: bool = kani::any();
+    let close_raw: u8 = kani::any();
+    let remainder_raw: u8 = kani::any();
+    let dust_raw: u8 = kani::any();
+    let stored_raw: u8 = kani::any();
+    let k_raw: i8 = kani::any();
+    let f_raw: i8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let epoch_raw: u8 = kani::any();
+    let risk_epoch_raw: u8 = kani::any();
+    let c_tot_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let surplus_raw: u8 = kani::any();
+    kani::assume((1..=64).contains(&close_raw));
+    kani::assume(remainder_raw <= 8);
+    kani::assume(dust_raw <= 8);
+    kani::assume(stored_raw <= 2);
+
+    let close_q = close_raw as u128;
+    let remainder = remainder_raw as u128;
+    let dust = dust_raw as u128;
+    let start_mode = if starts_drain_only {
+        SideModeV16::DrainOnly
+    } else {
+        SideModeV16::Normal
+    };
+    let closed_side = if closes_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let (mut header, mut markets) = one_market_persisted_slot_fixture();
+    header.risk_epoch = V16PodU64::new(risk_epoch_raw as u64);
+    header.c_tot = V16PodU128::new(c_tot_raw as u128);
+    header.insurance = V16PodU128::new(insurance_raw as u128);
+    header.vault = V16PodU128::new(c_tot_raw as u128 + insurance_raw as u128 + surplus_raw as u128);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    if closes_short {
+        asset.oi_eff_short_q = 0;
+        asset.oi_eff_long_q = close_q;
+        asset.mode_long = start_mode;
+        asset.a_long = if starts_drain_only {
+            MIN_A_SIDE
+        } else {
+            ADL_ONE
+        };
+        asset.k_long = k_raw as i128;
+        asset.f_long_num = f_raw as i128;
+        asset.b_long_num = b_raw as u128;
+        asset.k_epoch_start_long = 101;
+        asset.f_epoch_start_long_num = -103;
+        asset.b_epoch_start_long_num = 107;
+        asset.loss_weight_sum_long = close_q + 1;
+        asset.social_loss_remainder_long_num = remainder;
+        asset.social_loss_dust_long_num = dust;
+        asset.stored_pos_count_long = stored_raw as u64;
+        asset.epoch_long = epoch_raw as u64;
+    } else {
+        asset.oi_eff_long_q = 0;
+        asset.oi_eff_short_q = close_q;
+        asset.mode_short = start_mode;
+        asset.a_short = if starts_drain_only {
+            MIN_A_SIDE
+        } else {
+            ADL_ONE
+        };
+        asset.k_short = k_raw as i128;
+        asset.f_short_num = f_raw as i128;
+        asset.b_short_num = b_raw as u128;
+        asset.k_epoch_start_short = 101;
+        asset.f_epoch_start_short_num = -103;
+        asset.b_epoch_start_short_num = 107;
+        asset.loss_weight_sum_short = close_q + 1;
+        asset.social_loss_remainder_short_num = remainder;
+        asset.social_loss_dust_short_num = dust;
+        asset.stored_pos_count_short = stored_raw as u64;
+        asset.epoch_short = epoch_raw as u64;
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let header_before = header;
+    let slot_before = markets[0].engine;
+
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.kani_reduce_matching_open_interest_for_unilateral_close(0, closed_side, close_q)
+    };
+
+    kani::cover!(
+        !closes_short && !starts_drain_only && remainder > 0 && stored_raw > 0,
+        "long close resets a short side with quarantined remainder and stale-position work"
+    );
+    kani::cover!(
+        closes_short && starts_drain_only && remainder > 0 && stored_raw > 0,
+        "short close resets a drain-only long side with remaining migration work"
+    );
+    kani::cover!(
+        remainder == 0,
+        "full drain also reaches the exact-remainder-free reset path"
+    );
+    assert_eq!(result, Ok(()));
+
+    let mut expected_header = header_before;
+    expected_header.risk_epoch = V16PodU64::new(risk_epoch_raw as u64 + 1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+
+    let mut expected_asset = asset;
+    if closes_short {
+        expected_asset.oi_eff_long_q = 0;
+        expected_asset.a_long = ADL_ONE;
+        expected_asset.mode_long = SideModeV16::ResetPending;
+        expected_asset.k_epoch_start_long = k_raw as i128;
+        expected_asset.f_epoch_start_long_num = f_raw as i128;
+        expected_asset.b_epoch_start_long_num = b_raw as u128;
+        expected_asset.k_long = 0;
+        expected_asset.f_long_num = 0;
+        expected_asset.b_long_num = 0;
+        expected_asset.loss_weight_sum_long = 0;
+        expected_asset.social_loss_remainder_long_num = 0;
+        expected_asset.social_loss_dust_long_num = dust + remainder;
+        expected_asset.epoch_long = epoch_raw as u64 + 1;
+    } else {
+        expected_asset.oi_eff_short_q = 0;
+        expected_asset.a_short = ADL_ONE;
+        expected_asset.mode_short = SideModeV16::ResetPending;
+        expected_asset.k_epoch_start_short = k_raw as i128;
+        expected_asset.f_epoch_start_short_num = f_raw as i128;
+        expected_asset.b_epoch_start_short_num = b_raw as u128;
+        expected_asset.k_short = 0;
+        expected_asset.f_short_num = 0;
+        expected_asset.b_short_num = 0;
+        expected_asset.loss_weight_sum_short = 0;
+        expected_asset.social_loss_remainder_short_num = 0;
+        expected_asset.social_loss_dust_short_num = dust + remainder;
+        expected_asset.epoch_short = epoch_raw as u64 + 1;
+    }
+    let mut expected_slot = slot_before;
+    expected_slot.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_slot,
+        &markets[0].engine
+    ));
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
