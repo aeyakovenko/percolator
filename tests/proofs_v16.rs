@@ -14017,6 +14017,99 @@ fn proof_v16_asset_insurance_withdraw_sequence_is_exact_and_cannot_cross_assets(
     );
 }
 
+// Public pooled-insurance attribution theorem. Crediting any selected domain
+// with already-collected value changes exactly that domain and the aggregate
+// remaining budget. Pooled surplus, the opposite side, and the other asset are
+// byte-exact. This is the engine leaf obligation required by wrapper fee/yield
+// routing; public-sequence composition is checked by the production-SBF fuzzer.
+fn assert_v16_public_domain_insurance_credit_is_exact_and_cannot_cross_assets<
+    const ASSET_INDEX: usize,
+    const SIDE_IS_SHORT: bool,
+>() {
+    let amount_raw: u8 = kani::any();
+    let has_surplus: bool = kani::any();
+    kani::assume((1..=8).contains(&amount_raw));
+    let amount = amount_raw as u128;
+    assert!(ASSET_INDEX < 2);
+    let selected_domain = ASSET_INDEX * 2 + usize::from(SIDE_IS_SHORT);
+    let surplus = if has_surplus { 13u128 } else { 0u128 };
+
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(3);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(5);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(7);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(11);
+    let total_budget = 26u128;
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(total_budget);
+    header.insurance = V16PodU128::new(total_budget + amount + surplus);
+    header.vault = V16PodU128::new(total_budget + amount + surplus);
+
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    market
+        .credit_domain_insurance_budget_not_atomic(selected_domain, amount)
+        .unwrap();
+
+    kani::cover!(
+        amount == 1 && !has_surplus,
+        "domain credit covers the exact-unit tight-pool boundary"
+    );
+    kani::cover!(
+        amount > 1 && has_surplus,
+        "domain credit covers nontrivial amount with pooled surplus"
+    );
+
+    let mut expected_header = header_before;
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(total_budget + amount);
+    let mut expected_slots = slots_before;
+    let selected_slot = &mut expected_slots[ASSET_INDEX];
+    if SIDE_IS_SHORT {
+        selected_slot.insurance_domain_budget_short =
+            V16PodU128::new(selected_slot.insurance_domain_budget_short.get() + amount);
+    } else {
+        selected_slot.insurance_domain_budget_long =
+            V16PodU128::new(selected_slot.insurance_domain_budget_long.get() + amount);
+    }
+    assert!(
+        kani_eq_market_group_v16_header_account(&expected_header, market.header)
+            && kani_eq_engine_asset_slot_v16_account(&expected_slots[0], &market.markets[0].engine,)
+            && kani_eq_engine_asset_slot_v16_account(&expected_slots[1], &market.markets[1].engine,)
+            && market.kani_residual() == residual_before,
+        "domain budget credit must be value-neutral and isolated to its selected domain"
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_zero_long_insurance_credit_cannot_cross_assets() {
+    assert_v16_public_domain_insurance_credit_is_exact_and_cannot_cross_assets::<0, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_zero_short_insurance_credit_cannot_cross_assets() {
+    assert_v16_public_domain_insurance_credit_is_exact_and_cannot_cross_assets::<0, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_one_long_insurance_credit_cannot_cross_assets() {
+    assert_v16_public_domain_insurance_credit_is_exact_and_cannot_cross_assets::<1, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_public_asset_one_short_insurance_credit_cannot_cross_assets() {
+    assert_v16_public_domain_insurance_credit_is_exact_and_cannot_cross_assets::<1, true>();
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
