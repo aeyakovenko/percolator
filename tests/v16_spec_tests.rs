@@ -93,12 +93,14 @@ fn canonical_path_market_fixture(
 
 fn canonical_up_path(mut price: u64, count: usize) -> (u64, Vec<AccrualStepV16>) {
     let target = price.checked_mul(2).unwrap();
+    let cap_anchor = price;
     let mut remainder = 0;
     let steps = (0..count)
         .map(|index| {
             let remainder_before = remainder;
             (price, remainder) =
-                canonical_accrual_price_step_v16(price, target, 100, true, remainder).unwrap();
+                canonical_accrual_price_step_v16(price, target, cap_anchor, 100, true, remainder)
+                    .unwrap();
             AccrualStepV16 {
                 effective_price: price,
                 funding_rate_e9: if index % 2 == 0 { 10_000 } else { -7_500 },
@@ -161,6 +163,8 @@ fn open_one_lot_pair(
 fn v16_canonical_accrual_path_matches_every_complete_transaction_partition() {
     const INITIAL_PRICE: u64 = 1_000_000;
     let (target, steps) = canonical_up_path(INITIAL_PRICE, 10);
+    assert_eq!(target, 2_000_000);
+    assert_eq!(steps.last().unwrap().effective_price, 1_100_000);
 
     let run = |fragmented: bool| {
         let (mut header, mut markets) = canonical_path_market_fixture(INITIAL_PRICE);
@@ -199,6 +203,8 @@ fn v16_canonical_accrual_path_matches_every_complete_transaction_partition() {
     let (fragmented_header, fragmented_asset) = run(true);
     let (delayed_header, delayed_asset) = run(false);
     assert_eq!(delayed_asset, fragmented_asset);
+    assert_eq!(delayed_asset.effective_price.get(), 1_100_000);
+    assert_eq!(delayed_asset.fund_px_last.get(), INITIAL_PRICE);
     assert_eq!(delayed_header.current_slot, fragmented_header.current_slot);
     assert_eq!(delayed_header.slot_last, fragmented_header.slot_last);
     assert_eq!(delayed_header.oracle_epoch, fragmented_header.oracle_epoch);
@@ -272,7 +278,7 @@ fn v16_canonical_accrual_path_carries_sub_atom_price_progress_across_calls() {
     for _ in 0..5 {
         let before = remainder;
         (price, remainder) =
-            canonical_accrual_price_step_v16(price, 200, 20, true, remainder).unwrap();
+            canonical_accrual_price_step_v16(price, 200, 100, 20, true, remainder).unwrap();
         steps.push(AccrualStepV16 {
             effective_price: price,
             funding_rate_e9: 0,

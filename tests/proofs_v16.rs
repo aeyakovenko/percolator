@@ -10080,9 +10080,10 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
     let target = target_raw as u64;
     let cap = cap_raw as u64;
     let (first_price, first_remainder) =
-        canonical_accrual_price_step_v16(100, target, cap, true, 0).unwrap();
+        canonical_accrual_price_step_v16(100, target, 100, cap, true, 0).unwrap();
     let (second_price, second_remainder) =
-        canonical_accrual_price_step_v16(first_price, target, cap, true, first_remainder).unwrap();
+        canonical_accrual_price_step_v16(first_price, target, 100, cap, true, first_remainder)
+            .unwrap();
     let steps = [
         AccrualStepV16 {
             effective_price: first_price,
@@ -10139,6 +10140,8 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
         target < 100,
         "canonical path proof covers downward movement"
     );
+    let linear_cap = u64::try_from((100u128 * cap as u128 * 2) / 10_000).unwrap();
+    assert!(second_price.abs_diff(100) <= linear_cap);
     assert_eq!(delayed_outcome.dt, 2);
     assert!(kani_eq_market_group_v16_header_account(
         &delayed_header,

@@ -5226,19 +5226,25 @@ pub struct AccrualStepV16 {
 
 /// Computes one canonical price-cap step while carrying sub-atom movement forward.
 ///
-/// The remainder is the numerator left after division by `MAX_MARGIN_BPS`. Carrying it across
-/// calls prevents both caller-selected rounding and permanent low-price target pinning.
+/// `cap_anchor` is fixed for the lifetime of one raw-oracle target. Using that stable anchor makes
+/// the cumulative movement exactly the configured linear `max_change_bps * dt` envelope instead
+/// of compounding the cap at caller-selected transaction boundaries. The remainder is the
+/// numerator left after division by `MAX_MARGIN_BPS`; carrying it across calls prevents permanent
+/// low-price target pinning.
 pub fn canonical_accrual_price_step_v16(
-    anchor: u64,
+    current: u64,
     target: u64,
+    cap_anchor: u64,
     max_change_bps: u64,
     exposed: bool,
     remainder_before_bps_num: u16,
 ) -> V16Result<(u64, u16)> {
-    if anchor == 0
+    if current == 0
         || target == 0
-        || anchor > MAX_ORACLE_PRICE
+        || cap_anchor == 0
+        || current > MAX_ORACLE_PRICE
         || target > MAX_ORACLE_PRICE
+        || cap_anchor > MAX_ORACLE_PRICE
         || remainder_before_bps_num as u64 >= MAX_MARGIN_BPS
     {
         return Err(V16Error::InvalidConfig);
@@ -5246,27 +5252,27 @@ pub fn canonical_accrual_price_step_v16(
     if !exposed {
         return Ok((target, 0));
     }
-    if anchor == target || max_change_bps == 0 {
-        return Ok((anchor, 0));
+    if current == target || max_change_bps == 0 {
+        return Ok((current, 0));
     }
-    let numerator = (anchor as u128)
+    let numerator = (cap_anchor as u128)
         .checked_mul(max_change_bps as u128)
         .and_then(|value| value.checked_add(remainder_before_bps_num as u128))
         .ok_or(V16Error::ArithmeticOverflow)?;
     let max_delta = numerator / MAX_MARGIN_BPS as u128;
     let remainder_after = u16::try_from(numerator % MAX_MARGIN_BPS as u128)
         .map_err(|_| V16Error::ArithmeticOverflow)?;
-    let distance = anchor.abs_diff(target) as u128;
+    let distance = current.abs_diff(target) as u128;
     if max_delta >= distance {
         return Ok((target, 0));
     }
     let delta = u64::try_from(max_delta).map_err(|_| V16Error::ArithmeticOverflow)?;
-    let next = if target > anchor {
-        anchor
+    let next = if target > current {
+        current
             .checked_add(delta)
             .ok_or(V16Error::ArithmeticOverflow)?
     } else {
-        anchor
+        current
             .checked_sub(delta)
             .ok_or(V16Error::ArithmeticOverflow)?
     };
@@ -12537,7 +12543,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
         asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
         asset.effective_price = effective_price;
-        asset.fund_px_last = effective_price;
+        // Canonical path accrual uses this persisted nonzero field as its stable price-cap anchor.
+        // A direct price move starts a new trajectory; zero-move funding must preserve an active
+        // trajectory anchor so transaction partitioning cannot change later price movement.
+        if effective_price != old.effective_price || effective_price == old.raw_oracle_target_price
+        {
+            asset.fund_px_last = effective_price;
+        }
         asset.slot_last = asset
             .slot_last
             .checked_add(segment_dt)
@@ -12616,6 +12628,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidConfig);
         }
         let target_changed = asset.raw_oracle_target_price != raw_oracle_target_price;
+        let price_cap_anchor = if target_changed {
+            asset.effective_price
+        } else {
+            asset.fund_px_last
+        };
+        if price_cap_anchor == 0 || price_cap_anchor > MAX_ORACLE_PRICE {
+            return Err(V16Error::InvalidConfig);
+        }
+        if target_changed {
+            asset.fund_px_last = asset.effective_price;
+        }
 
         let mut price_move_count = 0u64;
         let mut funding_count = 0u64;
@@ -12636,6 +12659,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let (expected_price, remainder_after) = canonical_accrual_price_step_v16(
                 asset.effective_price,
                 raw_oracle_target_price,
+                price_cap_anchor,
                 config.max_price_move_bps_per_slot,
                 exposed,
                 step.price_move_remainder_before_bps_num,
@@ -12677,7 +12701,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             asset.f_long_num = add_non_min_i128(asset.f_long_num, -funding_delta)?;
             asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta)?;
             asset.effective_price = step.effective_price;
-            asset.fund_px_last = step.effective_price;
             asset.slot_last = asset
                 .slot_last
                 .checked_add(1)
@@ -12688,6 +12711,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             funding_count = funding_count
                 .checked_add(u64::from(activity.funding_active))
                 .ok_or(V16Error::CounterOverflow)?;
+        }
+
+        if asset.effective_price == raw_oracle_target_price {
+            asset.fund_px_last = asset.effective_price;
         }
 
         asset.raw_oracle_target_price = raw_oracle_target_price;
