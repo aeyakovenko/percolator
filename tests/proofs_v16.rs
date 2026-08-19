@@ -18760,12 +18760,10 @@ fn proof_v16_frame_crank_touches_only_clock_and_cert_state() {
 }
 
 // ROADMAP Phase 1 (Pillar F soundness lemma U3): validate_shape's Ok-exit
-// IMPLIES the senior stack is covered by the vault — c_tot + insurance +
-// backing_provider_earnings_total <= vault. An importable safety-floor lemma
-// (a wrapper proof can consume it): "any state the engine commits has its
-// protected-principal senior layers fully vault-backed" (spec req 6). The
-// cover keeps it non-vacuous (the Ok branch is reachable for symbolic senior
-// fields), so the cover-vacuity gate guards against an unsatisfiable assume.
+// IMPLIES the complete senior stack is covered by the vault — account capital,
+// insurance, provider earnings, and recoverable counterparty backing principal.
+// The latter two are populated in the actual domain ledger, not just copied into
+// header counters, so the audit scan independently reconciles this witness.
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -18773,26 +18771,56 @@ fn proof_v16_validator_sound_senior_stack_within_vault() {
     let vault: u128 = kani::any();
     let c_tot: u128 = kani::any();
     let insurance: u128 = kani::any();
+    let provider_earnings_raw: u8 = kani::any();
+    let backing_atoms_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&provider_earnings_raw));
+    kani::assume((1..=8).contains(&backing_atoms_raw));
+    let provider_earnings = provider_earnings_raw as u128;
+    let backing_atoms = backing_atoms_raw as u128;
+    let backing_num = backing_atoms * BOUND_SCALE;
     let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
     header.vault = V16PodU128::new(vault);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
+    header.backing_provider_earnings_total = V16PodU128::new(provider_earnings);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: backing_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        utilization_fee_earnings: provider_earnings,
+        expiry_slot: 2,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
     // Premise: the engine considers this a committable state.
     kani::assume(market.validate_shape() == Ok(()));
     kani::cover!(
-        c_tot > 0 && insurance > 0 && vault > c_tot,
-        "senior-stack soundness lemma is reachable with nontrivial junior + insurance"
+        c_tot > 0
+            && insurance > 0
+            && provider_earnings > 0
+            && backing_atoms > 0
+            && vault > c_tot + insurance + provider_earnings + backing_atoms,
+        "validator accepts every senior stock class together with junior slack"
     );
 
-    // Conclusion (the importable floor lemma): senior layers are vault-covered.
+    // Conclusion (the importable floor lemma): every senior layer is vault-covered.
     let senior = market
         .header
         .c_tot
         .get()
         .checked_add(market.header.insurance.get())
         .and_then(|v| v.checked_add(market.header.backing_provider_earnings_total.get()))
+        .and_then(|v| {
+            v.checked_add(market.header.source_fresh_backing_total_num.get() / BOUND_SCALE)
+        })
         .expect("senior stack sum cannot overflow a validated state");
     assert!(senior <= market.header.vault.get());
 }
