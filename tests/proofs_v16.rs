@@ -5071,6 +5071,8 @@ fn proof_v16_released_obligation_cannot_mask_liquidation_asset() {
     }
     header.resolved_payout_blocker_count = V16PodU64::new(2);
     header.materialized_portfolio_count = V16PodU64::new(1);
+    header.vault = V16PodU128::new(1);
+    header.c_tot = V16PodU128::new(1);
 
     let released_leg = PortfolioLegV16 {
         active: true,
@@ -5112,6 +5114,7 @@ fn proof_v16_released_obligation_cannot_mask_liquidation_asset() {
     let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
     bitmap[0] = 3;
     account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.capital = V16PodU128::new(1);
     account_header.pnl = V16PodI128::new(-1);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
         cert_oracle_epoch: header.oracle_epoch.get(),
@@ -5152,6 +5155,223 @@ fn proof_v16_released_obligation_cannot_mask_liquidation_asset() {
             && summary.liquidatable
             && summary.is_actionable()
             && plan == AutoCrankPlanV16::Liquidate { asset_index: 1 }
+    );
+}
+
+// A public auto-crank must classify a terminally unsafe liquidation before
+// dispatch. Returning RecoveryRequired after mutating the market cannot make
+// progress on SVM because the transaction atomically rolls that mutation back.
+// This theorem covers the broad state class where the selected full close
+// leaves another live risk leg and principal cannot absorb the account loss.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_unsafe_multileg_liquidation_proactively_declares_recovery() {
+    let first_short: bool = kani::any();
+    let second_short: bool = kani::any();
+    let capital_raw: u8 = kani::any();
+    let excess_loss_raw: u8 = kani::any();
+    let first_size_raw: u8 = kani::any();
+    let second_size_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&capital_raw));
+    kani::assume((1..=8).contains(&excess_loss_raw));
+    kani::assume((1..=8).contains(&first_size_raw));
+    kani::assume((1..=8).contains(&second_size_raw));
+
+    let capital = capital_raw as u128;
+    let loss = capital + excess_loss_raw as u128;
+    let first_size = first_size_raw as u128 * POS_SCALE;
+    let second_size = second_size_raw as u128 * POS_SCALE;
+    let first_side = if first_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let second_side = if second_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    let mut install_risk = |market_index: usize, side: SideV16, size: u128| {
+        let mut asset = markets[market_index].engine.asset.try_to_runtime().unwrap();
+        asset.oi_eff_long_q = size;
+        asset.oi_eff_short_q = size;
+        asset.stored_pos_count_long = 1;
+        asset.stored_pos_count_short = 1;
+        asset.loss_weight_sum_long = size;
+        asset.loss_weight_sum_short = size;
+        markets[market_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+        let basis_pos_q = i128::try_from(size).unwrap();
+        let leg = PortfolioLegV16 {
+            active: true,
+            asset_index: market_index as u32,
+            market_id: asset.market_id,
+            side,
+            basis_pos_q: if side == SideV16::Long {
+                basis_pos_q
+            } else {
+                -basis_pos_q
+            },
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: size,
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: false,
+            stale: false,
+        };
+        account_header.legs[market_index] = PortfolioLegV16Account::from_runtime(&leg);
+    };
+    install_risk(0, first_side, first_size);
+    install_risk(1, second_side, second_size);
+
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    bitmap[0] = 3;
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        certified_equity: -(excess_loss_raw as i128),
+        certified_maintenance_req: first_size_raw as u128 + second_size_raw as u128,
+        certified_liq_deficit: excess_loss_raw as u128,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let (summary, plan) = market
+        .kani_auto_crank_summary_and_plan(&account.as_view())
+        .unwrap();
+
+    kani::cover!(
+        !first_short && second_short && excess_loss_raw > 1,
+        "unsafe long/short multileg liquidation"
+    );
+    kani::cover!(
+        first_short && !second_short && first_size_raw > 1,
+        "unsafe short/long multileg liquidation"
+    );
+    assert!(loss > capital, "fixture must leave uncovered loss");
+    assert!(summary.liquidatable && summary.recovery_eligible);
+    assert_eq!(
+        plan,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
+    );
+}
+
+// A one-leg liquidation can also be terminal before any position mutation: if
+// principal and domain insurance leave a residual larger than the one-step B
+// capacity, production preflight requires Recovery. The public classifier must
+// choose that commit-capable transition rather than dispatching an instruction
+// that returns RecoveryRequired and is rolled back forever by SVM.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_undurable_single_leg_liquidation_proactively_declares_recovery() {
+    let is_short: bool = kani::any();
+    let capital_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&capital_raw));
+    kani::assume((2..=8).contains(&residual_raw));
+
+    let capital = capital_raw as u128;
+    let residual = residual_raw as u128;
+    let gross_loss = capital + residual;
+    let size = POS_SCALE;
+    let side = if is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(residual - 1);
+    header.vault = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(0);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = size;
+    asset.oi_eff_short_q = size;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = size;
+    asset.loss_weight_sum_short = size;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let basis_pos_q = i128::try_from(size).unwrap();
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side,
+        basis_pos_q: if side == SideV16::Long {
+            basis_pos_q
+        } else {
+            -basis_pos_q
+        },
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: size,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    let mut bitmap = V16_EMPTY_ACTIVE_BITMAP;
+    bitmap[0] = 1;
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-(gross_loss as i128));
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        certified_equity: -(residual as i128),
+        certified_maintenance_req: 1,
+        certified_liq_deficit: residual,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let (summary, plan) = market
+        .kani_auto_crank_summary_and_plan(&account.as_view())
+        .unwrap();
+
+    kani::cover!(
+        !is_short && residual_raw > 2 && capital_raw > 1,
+        "undurable long liquidation residual"
+    );
+    kani::cover!(
+        is_short && capital_raw > 1 && residual_raw > 2,
+        "undurable short liquidation residual"
+    );
+    assert!(summary.liquidatable && summary.recovery_eligible);
+    assert_eq!(
+        plan,
+        AutoCrankPlanV16::DeclareRecovery {
+            reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        }
     );
 }
 
@@ -11315,16 +11535,21 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
     kani::assume(surplus_raw <= 1024);
     kani::assume(current_slot_raw > 0);
     kani::assume(now_slot_raw > 0);
-    kani::assume(reason_sel <= 2);
+    kani::assume(reason_sel <= 7);
     let c_tot = c_tot_raw as u128;
     let insurance = insurance_raw as u128;
     let surplus = surplus_raw as u128;
     let current_slot = current_slot_raw as u64;
     let now_slot = now_slot_raw as u64;
     let reason = match reason_sel {
-        0 => PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        0 => PermissionlessRecoveryReasonV16::BelowProgressFloor,
         1 => PermissionlessRecoveryReasonV16::BlockedSegmentHeadroomOrRepresentability,
-        _ => PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        2 => PermissionlessRecoveryReasonV16::AccountBSettlementCannotProgress,
+        3 => PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted,
+        4 => PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        5 => PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+        6 => PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy,
+        _ => PermissionlessRecoveryReasonV16::CounterOrEpochOverflowDeclaredRecovery,
     };
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.current_slot = V16PodU64::new(current_slot);
@@ -11373,8 +11598,12 @@ fn proof_v16_permissionless_recovery_crank_is_accounting_neutral() {
         "permissionless recovery crank covers blocked-segment recovery reason"
     );
     kani::cover!(
-        reason == PermissionlessRecoveryReasonV16::OracleOrTargetUnavailableByAuthenticatedPolicy,
-        "permissionless recovery crank covers oracle-unavailable recovery reason"
+        reason == PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        "permissionless recovery crank covers active-bankrupt recovery reason"
+    );
+    kani::cover!(
+        reason == PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted,
+        "permissionless recovery crank covers B-index recovery reason"
     );
     assert_eq!(
         outcome,

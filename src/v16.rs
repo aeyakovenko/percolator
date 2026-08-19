@@ -5083,6 +5083,7 @@ pub struct AutoCrankResultV16 {
 struct AutoCrankSelectedSlotsV16 {
     active: Option<AutoCrankSelectedLegV16>,
     risk: Option<AutoCrankSelectedLegV16>,
+    multiple_risk_legs: bool,
     b_stale: Option<AutoCrankSelectedLegV16>,
     released_obligation: Option<AutoCrankSelectedLegV16>,
 }
@@ -9492,12 +9493,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(used)
     }
 
-    fn preflight_liquidation_residual_durability(
-        &mut self,
+    fn liquidation_residual_is_durable(
+        &self,
         asset_index: usize,
         bankrupt_side: SideV16,
         account: &PortfolioV16View<'_>,
-    ) -> V16Result<()> {
+    ) -> V16Result<bool> {
         let domain = self.insurance_domain_index(asset_index, opposite_side(bankrupt_side))?;
         let residual_after_principal_and_insurance = if account.header.pnl.get() < 0 {
             account
@@ -9511,14 +9512,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             0
         };
         if residual_after_principal_and_insurance == 0 {
-            return Ok(());
+            return Ok(true);
         }
         let capacity = self.bankruptcy_residual_single_step_capacity(
             asset_index,
             bankrupt_side,
             residual_after_principal_and_insurance,
         )?;
-        if capacity < residual_after_principal_and_insurance {
+        Ok(capacity >= residual_after_principal_and_insurance)
+    }
+
+    fn preflight_liquidation_residual_durability(
+        &mut self,
+        asset_index: usize,
+        bankrupt_side: SideV16,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<()> {
+        if !self.liquidation_residual_is_durable(asset_index, bankrupt_side, account)? {
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
@@ -11878,6 +11888,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 };
                 selected.active.get_or_insert(witness);
                 if leg.basis_pos_q != 0 {
+                    selected.multiple_risk_legs |= selected.risk.is_some();
                     selected.risk.get_or_insert(witness);
                 }
                 if leg.b_stale {
@@ -11946,17 +11957,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
         let liquidatable = live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
-        // Permissionless recovery (declare_permissionless_recovery) is a LIVE-mode
-        // action — it rejects Resolved mode with LockActive. The proactive Live
-        // recovery condition the auto-crank declares is an EXPIRED outstanding
-        // close (expired_close -> DeclareRecovery, reason
-        // ActiveBankruptCloseCannotProgress); every other recovery reason is
-        // declared REACTIVELY inside the dispatched crank op when it detects
-        // non-progress (BIndexHeadroomExhausted, etc.). Resolved bad-debt
-        // wind-down is handled by CloseResolved itself, not by the recovery
-        // selector flag, so recovery_eligible stays in the summary type for the
-        // proven selector but is driven by expired_close.
-        let recovery_eligible = false;
+        // Negative PnL forces liquidation to close the selected leg fully. If
+        // principal cannot absorb that loss, liquidation cannot proceed when
+        // another risk leg would remain or when the residual cannot be durably
+        // booked in its bounded step. Select recovery before dispatch: declaring
+        // it and then returning Err would be rolled back by SVM and make every
+        // permissionless retry repeat the same failure.
+        let uncovered_loss_after_principal = liquidation_uncovered_loss_after_principal(
+            account.header.pnl.get(),
+            account.header.capital.get(),
+        );
+        let recovery_eligible = if liquidatable && uncovered_loss_after_principal != 0 {
+            if selected.multiple_risk_legs {
+                true
+            } else if let Some(risk) = selected.risk {
+                let leg = account.header.legs[risk.slot].try_to_runtime()?;
+                !self.liquidation_residual_is_durable(risk.asset_index, leg.side, account)?
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         // resolved_winner routes to close_resolved, which LAZILY captures the
         // payout snapshot itself (initialize_resolved_payout_ledger_if_needed is
         // reached only via close_resolved -> create_resolved_payout_receipt) — so
@@ -12007,7 +12029,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .released_obligation
             .or(selected.active)
             .map(|w| w.asset_index);
-        let recovery_reason = if summary.expired_close {
+        let recovery_reason = if summary.expired_close || summary.recovery_eligible {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {
             PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow
