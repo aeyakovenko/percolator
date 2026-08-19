@@ -424,6 +424,98 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
 }
 
 #[test]
+fn v16_auto_crank_continues_partial_asset_recovery_close_without_observation() {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 133);
+    let mut short_header = account_fixture(1, 134);
+    header.config.public_b_chunk_atoms = V16PodU128::new(4);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        open_one_lot_pair(&mut market, &mut long, &mut short);
+        assert_eq!(
+            market
+                .sync_account_fee_to_slot_not_atomic(&mut long, 1, 9_999_999)
+                .unwrap(),
+            9_999_999
+        );
+        market
+            .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
+            .unwrap();
+        market.force_asset_recovery_not_atomic(0, 2).unwrap();
+
+        let first = market
+            .forfeit_recovery_leg_not_atomic(&mut long, 0, 1)
+            .expect("the public dead-leg exit must commit its first bounded close chunk");
+        assert!(!first.detached);
+        assert_eq!(first.principal_used, 1);
+        assert_eq!(first.residual_booked, 4);
+        assert_eq!(long.header.pnl.get(), -5);
+
+        let summary = market.build_actionable_summary(&long.as_view()).unwrap();
+        assert!(summary.pending_close && summary.is_actionable());
+
+        let first_crank = market
+            .permissionless_auto_crank_not_atomic(
+                &mut long,
+                AutoCrankWorkV16 {
+                    now_slot: 3,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("the public crank must continue an attributed close without an oracle input");
+        assert_eq!(
+            first_crank.selected,
+            AutoCrankPlanV16::AdvanceClose { asset_index: 0 }
+        );
+        let AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::CloseAdvanced(
+            first_step,
+        )) = first_crank.outcome
+        else {
+            panic!("pending close must dispatch the bounded close continuation");
+        };
+        assert_eq!(first_step.residual_booked, 4);
+        assert_eq!(first_step.remaining_after, 1);
+        assert_eq!(long.header.pnl.get(), -1);
+
+        let second_crank = market
+            .permissionless_auto_crank_not_atomic(
+                &mut long,
+                AutoCrankWorkV16 {
+                    now_slot: 3,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("the final close chunk must remain permissionless");
+        assert_eq!(
+            second_crank.selected,
+            AutoCrankPlanV16::AdvanceClose { asset_index: 0 }
+        );
+        assert_eq!(long.header.pnl.get(), 0);
+        assert_eq!(
+            long.header
+                .close_progress
+                .try_to_runtime()
+                .unwrap()
+                .residual_remaining,
+            0
+        );
+
+        let detached = market
+            .forfeit_recovery_leg_not_atomic(&mut long, 0, 1)
+            .expect("a completed close must make the dead leg detachable");
+        assert!(detached.detached);
+        assert_eq!(long.header.active_bitmap[0].get(), 0);
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
 fn v16_funding_counters_ignore_inactive_accounts_when_market_funding_moves() {
     let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
     let mut long_header = account_fixture(1, 130);

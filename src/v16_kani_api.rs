@@ -1289,6 +1289,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<()> {
         self.begin_close_progress_ledger(account, asset_index, domain_side, gross_loss)
     }
+
+    pub fn kani_commit_pending_close_advance_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        now_slot: u64,
+        insurance_used: u128,
+        residual_after_insurance: u128,
+        b_chunk: u128,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        let ledger_before = account.header.close_progress.try_to_runtime()?;
+        let plan = PendingCloseAdvancePlanV16 {
+            ledger_before,
+            asset_index: ledger_before.asset_index as usize,
+            bankrupt_side: opposite_side(ledger_before.domain_side),
+            insurance_used,
+            residual_after_insurance,
+            b_chunk,
+        };
+        self.commit_pending_close_advance_not_atomic(account, now_slot, plan)
+    }
+
+    pub fn kani_classify_live_pending_close(
+        &self,
+        account: &PortfolioV16View<'_>,
+        now_slot: u64,
+        close_leg_active: bool,
+    ) -> V16Result<ActionableSummaryV16> {
+        self.classify_live_pending_close(account, now_slot, close_leg_active)
+    }
 }
 
 impl PortfolioSourceDomainV16Account {

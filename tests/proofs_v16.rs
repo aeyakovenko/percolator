@@ -18553,6 +18553,9 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     assert!(!needs_obs(&AutoCrankPlanV16::SettleBChunk {
         asset_index: i
     }));
+    assert!(!needs_obs(&AutoCrankPlanV16::AdvanceClose {
+        asset_index: i
+    }));
     assert!(!needs_obs(&AutoCrankPlanV16::Liquidate { asset_index: i }));
     assert!(!needs_obs(&AutoCrankPlanV16::NoAction));
     assert!(!needs_obs(&AutoCrankPlanV16::CloseResolved));
@@ -18561,6 +18564,311 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     assert!(!needs_obs(&AutoCrankPlanV16::DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
     }));
+}
+
+fn attributed_pending_recovery_close_fixture(
+    residual: u128,
+    chunk: u128,
+    domain_side: SideV16,
+    attach_leg: bool,
+    drive_close_begin: bool,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets, mut account_header) = one_market_direct_view_fixture();
+    header.config.public_b_chunk_atoms = V16PodU128::new(chunk);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.bankruptcy_hlock_active = 1;
+    let (market_group_id, account_id, owner) = ids();
+    account_header.provenance_header = ProvenanceHeaderV16Account::from_runtime(
+        &ProvenanceHeaderV16::new(market_group_id, account_id, owner),
+    );
+    account_header.owner = owner;
+    account_header.legs =
+        [PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY); V16_MAX_PORTFOLIO_ASSETS_N];
+    account_header.pnl = V16PodI128::new(-(residual as i128));
+    account_header.last_fee_slot = V16PodU64::new(header.current_slot.get());
+
+    // The selected account owns the bankrupt-side leg. Other portfolios carry
+    // the matching OI and the domain-side loss weight that absorbs this close.
+    // Recovery freezes this asset's K/F indexes, so later authenticated group
+    // slots cannot invalidate the close snapshot.
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+    asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+    if attach_leg {
+        let bankrupt_side = match domain_side {
+            SideV16::Long => SideV16::Short,
+            SideV16::Short => SideV16::Long,
+        };
+        let (k_snap, f_snap, epoch_snap, b_snap) = match bankrupt_side {
+            SideV16::Long => (
+                asset.k_long,
+                asset.f_long_num,
+                asset.epoch_long,
+                asset.b_long_num,
+            ),
+            SideV16::Short => (
+                asset.k_short,
+                asset.f_short_num,
+                asset.epoch_short,
+                asset.b_short_num,
+            ),
+        };
+        account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index: 0,
+            market_id: asset.market_id,
+            side: bankrupt_side,
+            basis_pos_q: if bankrupt_side == SideV16::Long {
+                POS_SCALE as i128
+            } else {
+                -(POS_SCALE as i128)
+            },
+            a_basis: ADL_ONE,
+            k_snap,
+            f_snap,
+            epoch_snap,
+            loss_weight: POS_SCALE,
+            b_snap,
+            b_rem: 0,
+            b_epoch_snap: epoch_snap,
+            b_stale: false,
+            stale: false,
+        });
+        account_header.active_bitmap[0] = V16PodU64::new(1);
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    if drive_close_begin {
+        // This one-slot fixture has exactly two pre-close payout blockers: one
+        // stored long and one stored short. The real close-begin transition
+        // adds the third blocker for its domain barrier.
+        header.resolved_payout_blocker_count = V16PodU64::new(2);
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market
+            .kani_begin_close_progress_ledger(&mut account, 0, domain_side, residual)
+            .unwrap();
+    } else {
+        // Exact persisted post-begin state. The separate classifier theorem
+        // above drives the real begin transition; the accounting theorem starts
+        // at its durable boundary to avoid re-proving that full audit prefix.
+        account_header.close_progress =
+            CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+                active: true,
+                close_id: 1,
+                asset_index: 0,
+                market_id: asset.market_id,
+                domain_side,
+                gross_loss_at_close_start: residual,
+                drift_reference_slot: header.current_slot.get(),
+                max_close_slot: header.current_slot.get()
+                    + header.config.max_bankrupt_close_lifetime_slots.get(),
+                residual_remaining: residual,
+                ..CloseProgressLedgerV16::EMPTY
+            });
+        match domain_side {
+            SideV16::Long => markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1),
+            SideV16::Short => {
+                markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1)
+            }
+        }
+        header.resolved_payout_blocker_count = V16PodU64::new(3);
+    }
+    (header, markets, account_header)
+}
+
+fn asset_frame_unchanged_except_b(before: AssetStateV16, after: AssetStateV16) -> bool {
+    before.market_id == after.market_id
+        && before.retired_slot == after.retired_slot
+        && before.lifecycle == after.lifecycle
+        && before.raw_oracle_target_price == after.raw_oracle_target_price
+        && before.effective_price == after.effective_price
+        && before.fund_px_last == after.fund_px_last
+        && before.slot_last == after.slot_last
+        && before.a_long == after.a_long
+        && before.a_short == after.a_short
+        && before.k_long == after.k_long
+        && before.k_short == after.k_short
+        && before.f_long_num == after.f_long_num
+        && before.f_short_num == after.f_short_num
+        && before.k_epoch_start_long == after.k_epoch_start_long
+        && before.k_epoch_start_short == after.k_epoch_start_short
+        && before.f_epoch_start_long_num == after.f_epoch_start_long_num
+        && before.f_epoch_start_short_num == after.f_epoch_start_short_num
+        && before.b_epoch_start_long_num == after.b_epoch_start_long_num
+        && before.b_epoch_start_short_num == after.b_epoch_start_short_num
+        && before.oi_eff_long_q == after.oi_eff_long_q
+        && before.oi_eff_short_q == after.oi_eff_short_q
+        && before.stored_pos_count_long == after.stored_pos_count_long
+        && before.stored_pos_count_short == after.stored_pos_count_short
+        && before.stale_account_count_long == after.stale_account_count_long
+        && before.stale_account_count_short == after.stale_account_count_short
+        && before.pending_obligation_count_long == after.pending_obligation_count_long
+        && before.pending_obligation_count_short == after.pending_obligation_count_short
+        && before.loss_weight_sum_long == after.loss_weight_sum_long
+        && before.loss_weight_sum_short == after.loss_weight_sum_short
+        && before.social_loss_remainder_long_num == after.social_loss_remainder_long_num
+        && before.social_loss_remainder_short_num == after.social_loss_remainder_short_num
+        && before.social_loss_dust_long_num == after.social_loss_dust_long_num
+        && before.social_loss_dust_short_num == after.social_loss_dust_short_num
+        && before.explicit_unallocated_loss_long == after.explicit_unallocated_loss_long
+        && before.explicit_unallocated_loss_short == after.explicit_unallocated_loss_short
+        && before.epoch_long == after.epoch_long
+        && before.epoch_short == after.epoch_short
+        && before.mode_long == after.mode_long
+        && before.mode_short == after.mode_short
+}
+
+// DoS reachability/classification theorem. Drive the REAL close-begin transition
+// to create a valid, attributed, unexpired close ledger on an attached dead leg,
+// then require the exact production close-priority classifier to expose that
+// persisted residual as public work. The host regression composes this helper
+// through build_actionable_summary and the public dispatcher; keeping the
+// symbolic theorem at the real priority boundary avoids unrelated liquidation
+// branches without replacing production semantics with a model.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_started_attributed_close_is_publicly_actionable() {
+    let residual_raw: u8 = kani::any();
+    let source_is_short: bool = kani::any();
+    kani::assume((1..=8).contains(&residual_raw));
+    let residual = u128::from(residual_raw);
+    let domain_side = if source_is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let (mut header, mut markets, mut account_header) =
+        attributed_pending_recovery_close_fixture(residual, 8, domain_side, true, true);
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market
+        .kani_classify_live_pending_close(
+            &account.as_view(),
+            market.header.current_slot.get(),
+            true,
+        )
+        .unwrap();
+
+    kani::cover!(
+        source_is_short && residual_raw > 4,
+        "unexpired attributed close reaches short source domain"
+    );
+    kani::cover!(
+        !source_is_short && residual_raw > 4,
+        "unexpired attributed close reaches long source domain"
+    );
+    assert!(summary.pending_close);
+    assert!(summary.is_actionable());
+    assert!(!summary.expired_close);
+    assert!(!summary.recovery_eligible);
+    assert!(!summary.stale);
+    assert!(!summary.b_stale);
+    assert!(!summary.liquidatable);
+    assert!(!summary.resolved_winner);
+}
+
+// DoS / bounded-progress theorem over the production A3 accounting transition.
+// The continuation must book a nonzero, chunk-bounded amount to the exact
+// opposing loss side, shrink BOTH the account deficit and close-ledger residual
+// by the same amount, and leave every senior stock class and wrapper byte
+// untouched. Active-leg classification is proved above; the host regression
+// composes an attached Recovery leg through the public dispatcher. This theorem
+// intentionally uses the valid legless continuation state so symbolic execution
+// proves the mutation rather than duplicating the active-leg validator proof.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_pending_close_transition_advances_recovery_leg_without_value_move() {
+    let residual_raw: u8 = kani::any();
+    let chunk_raw: u8 = kani::any();
+    let source_is_short: bool = kani::any();
+    let delayed: bool = kani::any();
+    kani::assume((1..=8).contains(&residual_raw));
+    kani::assume((1..=8).contains(&chunk_raw));
+
+    let residual = u128::from(residual_raw);
+    let chunk = u128::from(chunk_raw);
+    let expected_booked = residual.min(chunk);
+    let expected_remaining = residual - expected_booked;
+    let domain_side = if source_is_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let (mut header, mut markets, mut account_header) =
+        attributed_pending_recovery_close_fixture(residual, chunk, domain_side, false, false);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let wrapper_before = market.markets[0].wrapper;
+    let asset_before = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    let now_slot = market.header.current_slot.get() + u64::from(delayed);
+    let result = market.kani_commit_pending_close_advance_not_atomic(
+        &mut account,
+        now_slot,
+        0,
+        residual,
+        expected_booked,
+    );
+
+    let result = result.expect("a valid attributed close must have a committed-state continuation");
+    let PermissionlessProgressOutcomeV16::CloseAdvanced(booked) = result else {
+        panic!("pending close must dispatch residual booking");
+    };
+    assert_eq!(booked.insurance_used, 0);
+    assert_eq!(booked.residual_booked, expected_booked);
+    assert_eq!(booked.explicit_loss, 0);
+    assert_eq!(booked.delta_b, expected_booked);
+    assert_eq!(booked.remaining_after, expected_remaining);
+
+    let asset_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert!(asset_frame_unchanged_except_b(asset_before, asset_after));
+    match domain_side {
+        SideV16::Long => {
+            assert_eq!(
+                asset_after.b_long_num,
+                asset_before.b_long_num + expected_booked
+            );
+            assert_eq!(asset_after.b_short_num, asset_before.b_short_num);
+        }
+        SideV16::Short => {
+            assert_eq!(
+                asset_after.b_short_num,
+                asset_before.b_short_num + expected_booked
+            );
+            assert_eq!(asset_after.b_long_num, asset_before.b_long_num);
+        }
+    }
+
+    let ledger = account.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.residual_remaining, expected_remaining);
+    assert_eq!(ledger.b_loss_booked, expected_booked);
+    assert_eq!(ledger.finalized, expected_remaining == 0);
+    assert_eq!(account.header.pnl.get(), -(expected_remaining as i128));
+    assert_eq!(
+        market.header.negative_pnl_account_count.get(),
+        u64::from(expected_remaining != 0)
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.markets[0].wrapper, wrapper_before);
+    assert_eq!(market.header.current_slot.get(), 1 + u64::from(delayed));
 }
 
 // LoF — no free open interest: a risk-increasing fill with nonzero size, nonzero

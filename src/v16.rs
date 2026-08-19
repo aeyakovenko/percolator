@@ -187,7 +187,8 @@ pub fn v16_domain_pair_for_asset_index(asset_index: usize) -> V16Result<(usize, 
 pub fn auto_crank_plan_requires_caller_observation(plan: &AutoCrankPlanV16) -> bool {
     match plan {
         AutoCrankPlanV16::RefreshAccount { asset_index } => asset_index.is_none(),
-        AutoCrankPlanV16::SettleBChunk { .. }
+        AutoCrankPlanV16::AdvanceClose { .. }
+        | AutoCrankPlanV16::SettleBChunk { .. }
         | AutoCrankPlanV16::Liquidate { .. }
         | AutoCrankPlanV16::DeclareRecovery { .. }
         | AutoCrankPlanV16::CloseResolved
@@ -1715,30 +1716,33 @@ impl V16Core {
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
     /// the action nor the asset). PROVES: TOTALITY (an actionable account yields a
     /// non-NoAction plan), PRIORITY DETERMINISM (the documented order: recovery >
-    /// resolved-close > b-stale settle > liquidate > refresh), and SELECTED-ASSET
-    /// fidelity (SettleBChunk/Liquidate carry exactly the provided engine-selected
-    /// slot). `pending_close` is classifier-unreachable (build_actionable_summary
-    /// never sets it — a leg-bearing pending close is liquidatable; see the
-    /// AdvanceClose note), so it is required absent here. Pure.
-    #[cfg_attr(all(kani, feature = "contracts"), kani::requires(!summary.pending_close))]
+    /// resolved-close > pending close > b-stale settle > liquidate > refresh), and
+    /// SELECTED-ASSET fidelity (each asset-bearing plan carries exactly the
+    /// engine-selected slot). Pure.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|r: &AutoCrankPlanV16| {
         let recovery = summary.expired_close || summary.recovery_eligible;
         match r {
             AutoCrankPlanV16::NoAction => !summary.is_actionable(),
             AutoCrankPlanV16::DeclareRecovery { reason } => recovery && *reason == recovery_reason,
             AutoCrankPlanV16::CloseResolved => !recovery && summary.resolved_winner,
+            AutoCrankPlanV16::AdvanceClose { asset_index } =>
+                !recovery && !summary.resolved_winner && summary.pending_close
+                    && *asset_index == close_slot,
             AutoCrankPlanV16::SettleBChunk { asset_index } =>
-                !recovery && !summary.resolved_winner && summary.b_stale && *asset_index == b_stale_slot,
+                !recovery && !summary.resolved_winner && !summary.pending_close
+                    && summary.b_stale && *asset_index == b_stale_slot,
             AutoCrankPlanV16::Liquidate { asset_index } =>
-                !recovery && !summary.resolved_winner && !summary.b_stale && summary.liquidatable
-                    && *asset_index == liq_slot,
+                !recovery && !summary.resolved_winner && !summary.pending_close
+                    && !summary.b_stale && summary.liquidatable && *asset_index == liq_slot,
             AutoCrankPlanV16::RefreshAccount { asset_index } =>
-                !recovery && !summary.resolved_winner && !summary.b_stale && !summary.liquidatable
-                    && summary.stale && *asset_index == refresh_asset,
+                !recovery && !summary.resolved_winner && !summary.pending_close
+                    && !summary.b_stale && !summary.liquidatable && summary.stale
+                    && *asset_index == refresh_asset,
         }
     }))]
     pub(crate) fn select_auto_crank_plan(
         summary: ActionableSummaryV16,
+        close_slot: usize,
         b_stale_slot: usize,
         liq_slot: usize,
         refresh_asset: Option<usize>,
@@ -1750,6 +1754,10 @@ impl V16Core {
             }
         } else if summary.resolved_winner {
             AutoCrankPlanV16::CloseResolved
+        } else if summary.pending_close {
+            AutoCrankPlanV16::AdvanceClose {
+                asset_index: close_slot,
+            }
         } else if summary.b_stale {
             AutoCrankPlanV16::SettleBChunk {
                 asset_index: b_stale_slot,
@@ -5049,6 +5057,9 @@ pub enum AutoCrankPlanV16 {
     RefreshAccount {
         asset_index: Option<usize>,
     },
+    AdvanceClose {
+        asset_index: usize,
+    },
     SettleBChunk {
         asset_index: usize,
     },
@@ -5084,8 +5095,19 @@ struct AutoCrankSelectedSlotsV16 {
     active: Option<AutoCrankSelectedLegV16>,
     risk: Option<AutoCrankSelectedLegV16>,
     multiple_risk_legs: bool,
+    close_leg_active: bool,
     b_stale: Option<AutoCrankSelectedLegV16>,
     released_obligation: Option<AutoCrankSelectedLegV16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingCloseAdvancePlanV16 {
+    ledger_before: CloseProgressLedgerV16,
+    asset_index: usize,
+    bankrupt_side: SideV16,
+    insurance_used: u128,
+    residual_after_insurance: u128,
+    b_chunk: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5700,6 +5722,16 @@ pub struct RebalanceOutcomeV16 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BResidualBookingOutcomeV16 {
     pub booked_loss: u128,
+    pub explicit_loss: u128,
+    pub delta_b: u128,
+    pub remaining_after: u128,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingCloseAdvanceOutcomeV16 {
+    pub insurance_used: u128,
+    pub residual_booked: u128,
     pub explicit_loss: u128,
     pub delta_b: u128,
     pub remaining_after: u128,
@@ -11874,6 +11906,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &self,
         account: &PortfolioV16View<'_>,
         release_allowed: bool,
+        close_asset: Option<usize>,
     ) -> V16Result<AutoCrankSelectedSlotsV16> {
         let bitmap = account.header.active_bitmap.map(V16PodU64::get);
         let mut selected = AutoCrankSelectedSlotsV16::default();
@@ -11887,6 +11920,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     asset_index: leg.asset_index as usize,
                 };
                 selected.active.get_or_insert(witness);
+                selected.close_leg_active |= close_asset == Some(witness.asset_index);
                 if leg.basis_pos_q != 0 {
                     selected.multiple_risk_legs |= selected.risk.is_some();
                     selected.risk.get_or_insert(witness);
@@ -11908,6 +11942,106 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(selected)
     }
 
+    fn pending_close_advance_plan(
+        &self,
+        account: &PortfolioV16View<'_>,
+        ledger: CloseProgressLedgerV16,
+        now_slot: u64,
+        close_leg_active: bool,
+    ) -> V16Result<Option<PendingCloseAdvancePlanV16>> {
+        if !ledger.has_pending_residual()
+            || account.header.pnl.get() >= 0
+            || account.header.pnl.get().unsigned_abs() != ledger.residual_remaining
+            || now_slot > ledger.max_close_slot
+        {
+            return Ok(None);
+        }
+        let asset_index = ledger.asset_index as usize;
+        if asset_index >= self.header.config.max_market_slots.get() as usize
+            || asset_index >= self.markets.len()
+            || self.pending_domain_loss_barrier_count(asset_index, ledger.domain_side)? == 0
+        {
+            return Ok(None);
+        }
+        let asset = self.asset_state(asset_index)?;
+        if asset.market_id != ledger.market_id {
+            return Ok(None);
+        }
+        let close_can_drift = decode_market_mode(self.header.mode)? == MarketModeV16::Live
+            && matches!(
+                asset.lifecycle,
+                AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly
+            );
+        if close_leg_active && close_can_drift && now_slot > ledger.drift_reference_slot {
+            return Ok(None);
+        }
+        let domain = self.insurance_domain_index(asset_index, ledger.domain_side)?;
+        let insurance_used = ledger
+            .residual_remaining
+            .min(self.available_domain_insurance(domain)?);
+        let residual_after_insurance = ledger.residual_remaining - insurance_used;
+        let bankrupt_side = opposite_side(ledger.domain_side);
+        let b_chunk = if residual_after_insurance == 0 {
+            0
+        } else {
+            self.bankruptcy_residual_single_step_capacity(
+                asset_index,
+                bankrupt_side,
+                residual_after_insurance,
+            )?
+        };
+        if residual_after_insurance != 0 && b_chunk == 0 {
+            return Ok(None);
+        }
+        Ok(Some(PendingCloseAdvancePlanV16 {
+            ledger_before: ledger,
+            asset_index,
+            bankrupt_side,
+            insurance_used,
+            residual_after_insurance,
+            b_chunk,
+        }))
+    }
+
+    fn pending_close_requires_recovery(
+        &self,
+        account: &PortfolioV16View<'_>,
+        ledger: CloseProgressLedgerV16,
+        now_slot: u64,
+        close_leg_active: bool,
+    ) -> V16Result<bool> {
+        Ok(self
+            .pending_close_advance_plan(account, ledger, now_slot, close_leg_active)?
+            .is_none())
+    }
+
+    fn classify_live_pending_close(
+        &self,
+        account: &PortfolioV16View<'_>,
+        now_slot: u64,
+        close_leg_active: bool,
+    ) -> V16Result<ActionableSummaryV16> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Err(V16Error::LockActive);
+        }
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        if !ledger.has_pending_residual() {
+            return Err(V16Error::NonProgress);
+        }
+        let expired_close = now_slot > ledger.max_close_slot;
+        let recovery_eligible = !expired_close
+            && self.pending_close_requires_recovery(account, ledger, now_slot, close_leg_active)?;
+        Ok(V16Core::actionable_summary_from_signals(
+            false,
+            false,
+            !expired_close && !recovery_eligible,
+            expired_close,
+            false,
+            recovery_eligible,
+            false,
+        ))
+    }
+
     fn auto_crank_state(
         &self,
         account: &PortfolioV16View<'_>,
@@ -11915,6 +12049,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mode = decode_market_mode(self.header.mode)?;
         let live = mode == MarketModeV16::Live;
         let resolved = mode == MarketModeV16::Resolved;
+
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        // A close ledger with residual_remaining==0 is already fully booked/covered
+        // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
+        // actionable close work. The `active` flag can linger past that.
+        let close_outstanding = ledger.has_pending_residual();
+        let selected = self.auto_crank_selected_slots(
+            account,
+            live && !close_outstanding,
+            close_outstanding.then_some(ledger.asset_index as usize),
+        )?;
+        if live && close_outstanding {
+            return Ok((
+                self.classify_live_pending_close(
+                    account,
+                    self.header.current_slot.get(),
+                    selected.close_leg_active,
+                )?,
+                selected,
+            ));
+        }
 
         let cert = account.header.health_cert.try_to_runtime()?;
         let cert_current = V16Core::kernel_cert_is_current(
@@ -11925,38 +12080,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.asset_set_epoch.get(),
             account.header.active_bitmap.map(V16PodU64::get),
         );
-        let ledger = account.header.close_progress.try_to_runtime()?;
-        let selected =
-            self.auto_crank_selected_slots(account, live && !ledger.has_pending_residual())?;
         let has_open_risk = selected.risk.is_some();
-        // A close ledger with residual_remaining==0 is already fully booked/covered
-        // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
-        // actionable close work. The `active` flag can linger past that.
-        let close_outstanding = ledger.active && ledger.residual_remaining > 0;
         // A zero-basis weighted leg is an account-local loss obligation retained
         // while a domain barrier was active. Once the barrier and originating
         // close residual are gone, it is cleanup work even if its old certificate
         // still matches every epoch/bitmap.
         let stale = live && (!cert_current || selected.released_obligation.is_some());
         let b_stale = live && selected.b_stale.is_some();
-        // pending_close is NOT proactively classified: the close-ledger residual is
-        // booked ONLY inside the liquidation/resolved path that owns it
-        // (book_bankruptcy_residual_chunk_for_account_core) — settle_account_b_chunk
-        // does not touch it, so an AdvanceClose->SettleB dispatch would not advance
-        // the ledger. An outstanding Live close with a leg is liquidatable (the
-        // residual is an open deficit), so the Liquidate continuation books the
-        // residual chunk; the leg-less / expired cases are handled by expired_close
-        // -> recovery or are the documented backstopped A3 route. AdvanceClose is
-        // therefore classifier-unreachable (the proven selector still admits it).
-        let pending_close = false;
-        // Expired outstanding close -> terminal recovery (Recover needs no leg).
-        let expired_close =
-            live && close_outstanding && self.header.current_slot.get() > ledger.max_close_slot;
         // liquidatable requires a current certified deficit AND actual open risk:
         // a stale cert can still report a deficit after the position was already
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
-        let liquidatable = live && cert_current && cert.certified_liq_deficit != 0 && has_open_risk;
+        // Pending-close work has higher priority and owns the account deficit.
+        // Do not re-run the lower-priority liquidation durability preflight for
+        // the same account; it cannot affect the selected action.
+        let liquidatable = !close_outstanding
+            && live
+            && cert_current
+            && cert.certified_liq_deficit != 0
+            && has_open_risk;
         // Negative PnL forces liquidation to close the selected leg fully. If
         // principal cannot absorb that loss, liquidation cannot proceed when
         // another risk leg would remain or when the residual cannot be durably
@@ -11967,7 +12109,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.header.pnl.get(),
             account.header.capital.get(),
         );
-        let recovery_eligible = if liquidatable && uncovered_loss_after_principal != 0 {
+        let unsafe_liquidation = if liquidatable && uncovered_loss_after_principal != 0 {
             if selected.multiple_risk_legs {
                 true
             } else if let Some(risk) = selected.risk {
@@ -11979,6 +12121,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             false
         };
+        let recovery_eligible = unsafe_liquidation;
         // resolved_winner routes to close_resolved, which LAZILY captures the
         // payout snapshot itself (initialize_resolved_payout_ledger_if_needed is
         // reached only via close_resolved -> create_resolved_payout_receipt) — so
@@ -11993,8 +12136,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             V16Core::actionable_summary_from_signals(
                 stale,
                 b_stale,
-                pending_close,
-                expired_close,
+                false,
+                false,
                 liquidatable,
                 recovery_eligible,
                 resolved_winner,
@@ -12036,6 +12179,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         let plan = V16Core::select_auto_crank_plan(
             summary,
+            account.header.close_progress.asset_index.get() as usize,
             b_stale_asset.unwrap_or(0),
             risk_asset.unwrap_or(0),
             refresh_asset,
@@ -12078,6 +12222,121 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && self.b_target_for_leg(asset_index, leg)? == leg.b_snap)
     }
 
+    fn prepare_pending_close_advance(
+        &self,
+        account: &PortfolioV16View<'_>,
+        now_slot: u64,
+        close_leg_active: bool,
+    ) -> V16Result<Option<PendingCloseAdvancePlanV16>> {
+        self.validate_account_scalar_preflight(account)?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Err(V16Error::LockActive);
+        }
+        if now_slot < self.header.current_slot.get() {
+            return Err(V16Error::Stale);
+        }
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        self.pending_close_advance_plan(account, ledger, now_slot, close_leg_active)
+    }
+
+    fn commit_pending_close_advance_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        now_slot: u64,
+        plan: PendingCloseAdvancePlanV16,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        if account.header.close_progress.try_to_runtime()? != plan.ledger_before
+            || account.header.pnl.get().min(0).unsigned_abs()
+                != plan.ledger_before.residual_remaining
+            || now_slot < self.header.current_slot.get()
+        {
+            return Err(V16Error::NonProgress);
+        }
+        self.header.current_slot = V16PodU64::new(now_slot);
+        let insurance_used = self.consume_domain_insurance_for_negative_pnl(
+            plan.asset_index,
+            plan.bankrupt_side,
+            account,
+        )?;
+        if insurance_used != plan.insurance_used {
+            return Err(V16Error::NonProgress);
+        }
+        if insurance_used != 0 {
+            self.advance_close_progress_ledger_unexpired_core(account, 0, 0, insurance_used, 0, 0)?;
+        }
+
+        let residual = account.header.pnl.get().min(0).unsigned_abs();
+        if residual != plan.residual_after_insurance {
+            return Err(V16Error::NonProgress);
+        }
+        let booking = if residual == 0 {
+            if plan.b_chunk != 0 {
+                return Err(V16Error::NonProgress);
+            }
+            BResidualBookingOutcomeV16 {
+                booked_loss: 0,
+                explicit_loss: 0,
+                delta_b: 0,
+                remaining_after: 0,
+            }
+        } else {
+            let outcome = self.book_live_bankruptcy_residual_chunk_preflighted(
+                plan.asset_index,
+                plan.bankrupt_side,
+                residual,
+                plan.b_chunk,
+            )?;
+            self.advance_close_progress_ledger_unexpired_core(
+                account,
+                0,
+                0,
+                0,
+                outcome.booked_loss,
+                outcome.explicit_loss,
+            )?;
+            let new_pnl = V16Core::kernel_settle_resolved_pnl_after_booking(
+                account.header.pnl.get(),
+                outcome.booked_loss,
+                outcome.explicit_loss,
+            )?;
+            self.set_account_pnl(account, new_pnl)?;
+            outcome
+        };
+
+        let ledger_after = account.header.close_progress.try_to_runtime()?;
+        if ledger_after.residual_remaining >= plan.ledger_before.residual_remaining
+            || ledger_after.residual_remaining != account.header.pnl.get().min(0).unsigned_abs()
+        {
+            return Err(V16Error::NonProgress);
+        }
+        Ok(PermissionlessProgressOutcomeV16::CloseAdvanced(
+            PendingCloseAdvanceOutcomeV16 {
+                insurance_used,
+                residual_booked: booking.booked_loss,
+                explicit_loss: booking.explicit_loss,
+                delta_b: booking.delta_b,
+                remaining_after: ledger_after.residual_remaining,
+            },
+        ))
+    }
+
+    fn advance_pending_close_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        now_slot: u64,
+        close_leg_active: bool,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        let Some(plan) =
+            self.prepare_pending_close_advance(&account.as_view(), now_slot, close_leg_active)?
+        else {
+            self.header.current_slot = V16PodU64::new(now_slot);
+            return self.declare_permissionless_recovery(
+                PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            );
+        };
+        self.commit_pending_close_advance_not_atomic(account, now_slot, plan)
+    }
+
     /// THE SINGLE PUBLIC PERMISSIONLESS CRANK (engine.md): the only crank the
     /// wrapper should call — order-insensitive and engine-selected, built for a
     /// swarm of opportunistic keepers whose transactions land out of order. The
@@ -12097,8 +12356,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///    matches the observation that step needs, derives the liquidation fee from
     ///    CONFIG (never the caller), and dispatches one bounded primitive.
     /// 5. On `Ok(result)`, mirror any wrapper-owned token/custody movement keyed off
-    ///    `result.selected` (the `AutoCrankPlanV16`): refresh / settle-B move no
-    ///    custody; liquidate / close-resolved may. `NoAction` => nothing was needed.
+    ///    `result.selected` (the `AutoCrankPlanV16`): refresh / advance-close /
+    ///    settle-B move no custody; liquidate / close-resolved may. `NoAction` =>
+    ///    nothing was needed.
     ///    `Err(NonProgress)` => the selected step needed an observation the caller
     ///    did not supply (currently the no-active-asset refresh fallback, or a
     ///    stale/late tx whose task changed) — no mutation, so SVM rollback is a
@@ -12190,6 +12450,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     ai,
                     obs,
                     PermissionlessCrankActionV16::Refresh,
+                )?)
+            }
+            AutoCrankPlanV16::AdvanceClose { asset_index } => {
+                if account.header.close_progress.asset_index.get() as usize != asset_index {
+                    return Err(V16Error::NonProgress);
+                }
+                AutoCrankOutcomeV16::Progressed(self.advance_pending_close_not_atomic(
+                    account,
+                    work.now_slot,
+                    selected.close_leg_active,
                 )?)
             }
             AutoCrankPlanV16::SettleBChunk { asset_index } => {
@@ -13532,25 +13802,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn advance_close_progress_ledger(
+    fn advance_close_progress_ledger_unexpired_from(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
+        ledger: CloseProgressLedgerV16,
         support_consumed: u128,
         junior_face_burned: u128,
         insurance_spent: u128,
         b_loss_booked: u128,
         explicit_loss_assigned: u128,
     ) -> V16Result<()> {
-        if support_consumed == 0
-            && junior_face_burned == 0
-            && insurance_spent == 0
-            && b_loss_booked == 0
-            && explicit_loss_assigned == 0
-        {
-            return Ok(());
-        }
-        let ledger = account.header.close_progress.try_to_runtime()?;
-        self.ensure_close_progress_not_expired(ledger)?;
         let was_pending = ledger.has_pending_residual();
         let domain_side = ledger.domain_side;
         let asset_index = ledger.asset_index as usize;
@@ -13577,6 +13838,85 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
         account.header.health_cert.valid = 0;
+        Ok(())
+    }
+
+    fn advance_close_progress_ledger_unexpired_core(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        support_consumed: u128,
+        junior_face_burned: u128,
+        insurance_spent: u128,
+        b_loss_booked: u128,
+        explicit_loss_assigned: u128,
+    ) -> V16Result<()> {
+        if support_consumed == 0
+            && junior_face_burned == 0
+            && insurance_spent == 0
+            && b_loss_booked == 0
+            && explicit_loss_assigned == 0
+        {
+            return Ok(());
+        }
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        self.advance_close_progress_ledger_unexpired_from(
+            account,
+            ledger,
+            support_consumed,
+            junior_face_burned,
+            insurance_spent,
+            b_loss_booked,
+            explicit_loss_assigned,
+        )
+    }
+
+    fn advance_close_progress_ledger_core(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        support_consumed: u128,
+        junior_face_burned: u128,
+        insurance_spent: u128,
+        b_loss_booked: u128,
+        explicit_loss_assigned: u128,
+    ) -> V16Result<()> {
+        if support_consumed == 0
+            && junior_face_burned == 0
+            && insurance_spent == 0
+            && b_loss_booked == 0
+            && explicit_loss_assigned == 0
+        {
+            return Ok(());
+        }
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        self.ensure_close_progress_not_expired(ledger)?;
+        self.advance_close_progress_ledger_unexpired_from(
+            account,
+            ledger,
+            support_consumed,
+            junior_face_burned,
+            insurance_spent,
+            b_loss_booked,
+            explicit_loss_assigned,
+        )
+    }
+
+    fn advance_close_progress_ledger(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        support_consumed: u128,
+        junior_face_burned: u128,
+        insurance_spent: u128,
+        b_loss_booked: u128,
+        explicit_loss_assigned: u128,
+    ) -> V16Result<()> {
+        self.advance_close_progress_ledger_core(
+            account,
+            support_consumed,
+            junior_face_burned,
+            insurance_spent,
+            b_loss_booked,
+            explicit_loss_assigned,
+        )?;
         account.validate_with_market(&self.as_view())
     }
 
@@ -13612,6 +13952,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             residual_remaining,
             self.header.config.public_b_chunk_atoms.get(),
         );
+        // Exact common case: with one full unit of loss weight and no carried
+        // remainder, one quote atom advances B by one unit. This is also the
+        // maximal safe chunk under the remaining B-index headroom.
+        if weight_sum == SOCIAL_LOSS_DEN && rem == 0 {
+            return Ok(candidate.min(u128::MAX - b_now));
+        }
         if candidate != 0 {
             if let Some(delta_b) = candidate
                 .checked_mul(SOCIAL_LOSS_DEN)
@@ -13724,6 +14070,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 Err(V16Error::RecoveryRequired)
             }
         }
+    }
+
+    fn book_live_bankruptcy_residual_chunk_preflighted(
+        &mut self,
+        asset_index: usize,
+        bankrupt_side: SideV16,
+        residual_remaining: u128,
+        engine_chunk: u128,
+    ) -> V16Result<BResidualBookingOutcomeV16> {
+        self.validate_configured_asset_index(asset_index)?;
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
+            || engine_chunk == 0
+            || engine_chunk > residual_remaining
+        {
+            return Err(V16Error::NonProgress);
+        }
+        let loss_side = opposite_side(bankrupt_side);
+        let mut asset = self.asset_state(asset_index)?;
+        let outcome = V16Core::apply_bankruptcy_residual_chunk_to_loss_side(
+            &mut asset,
+            loss_side,
+            engine_chunk,
+            residual_remaining,
+        )?
+        .ok_or(V16Error::NonProgress)?;
+        self.set_asset_state(asset_index, asset)?;
+        self.header.bankruptcy_hlock_active = 1;
+        Ok(outcome)
     }
 
     fn book_bankruptcy_residual_chunk_for_account_core(
@@ -14611,7 +14985,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let insurance_used =
             self.consume_domain_insurance_for_negative_pnl(asset_index, bankrupt_side, account)?;
         if insurance_used != 0 {
-            self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
+            self.advance_close_progress_ledger_core(account, 0, 0, insurance_used, 0, 0)?;
         }
 
         let residual = if account.header.pnl.get() < 0 {
@@ -16120,7 +16494,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 gross_close_loss,
             )?;
             if support_consumed != 0 {
-                self.advance_close_progress_ledger(
+                self.advance_close_progress_ledger_core(
                     account,
                     support_consumed,
                     junior_face_burned,
@@ -16637,6 +17011,7 @@ pub enum PermissionlessProgressOutcomeV16 {
     AccountCurrent,
     AccountBChunk(AccountBSettlementChunkV16),
     ResidualBooked(BResidualBookingOutcomeV16),
+    CloseAdvanced(PendingCloseAdvanceOutcomeV16),
     RecoveryDeclared(PermissionlessRecoveryReasonV16),
 }
 
@@ -17110,6 +17485,11 @@ fn social_loss_book_split(
     if weight_sum == 0 {
         return Err(V16Error::InvalidConfig);
     }
+    // Exact dominant case: a full unit of loss weight with no carry maps one
+    // quote atom to one B-index unit. Avoid wide multiply/divide on SBF.
+    if weight_sum == SOCIAL_LOSS_DEN && carried_rem == 0 {
+        return Ok((engine_chunk, 0));
+    }
     let numerator = engine_chunk
         .checked_mul(SOCIAL_LOSS_DEN)
         .and_then(|v| v.checked_add(carried_rem))
@@ -17120,6 +17500,9 @@ fn social_loss_book_split(
 fn loss_weight_for_basis(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
     if a_basis == 0 {
         return Err(V16Error::InvalidLeg);
+    }
+    if a_basis == SOCIAL_WEIGHT_SCALE {
+        return Ok(abs_basis_q);
     }
     checked_mul_div_ceil_u256(
         U256::from_u128(abs_basis_q),
