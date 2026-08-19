@@ -13941,6 +13941,82 @@ fn proof_v16_public_asset_one_short_insurance_withdraw_isolates_other_domains() 
     assert_v16_public_domain_insurance_withdraw_isolates_other_domains::<1, true>();
 }
 
+// Wrapper-composition no-steal theorem. Asset-level insurance withdrawal uses
+// the exact public engine capacities and spends asset 0's long domain before
+// its short domain. The full-domain leaf proofs above cover arbitrary amounts
+// for each debit; this theorem closes the control-flow seam for both a long-only
+// request and a request crossing into short, while an independently funded
+// asset 1 and pooled surplus remain byte-exact.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_insurance_withdraw_sequence_is_exact_and_cannot_cross_assets() {
+    let crosses_sides: bool = kani::any();
+    let has_surplus: bool = kani::any();
+    let requested = if crosses_sides { 6u128 } else { 2u128 };
+    let surplus = if has_surplus { 13u128 } else { 0u128 };
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(3);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(5);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(7);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(11);
+    let total_budget = 26u128;
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(total_budget);
+    header.insurance = V16PodU128::new(total_budget + surplus);
+    header.vault = V16PodU128::new(total_budget + surplus);
+
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let mut remaining = requested;
+    let long_capacity = market.domain_insurance_withdraw_capacity(0).unwrap();
+    let long_debit = long_capacity.min(remaining);
+    if long_debit != 0 {
+        market
+            .withdraw_domain_insurance_not_atomic(0, long_debit)
+            .unwrap();
+        remaining -= long_debit;
+    }
+    let short_debit = remaining;
+    if short_debit != 0 {
+        let short_capacity = market.domain_insurance_withdraw_capacity(1).unwrap();
+        assert!(short_debit <= short_capacity);
+        market
+            .withdraw_domain_insurance_not_atomic(1, short_debit)
+            .unwrap();
+    }
+
+    kani::cover!(
+        !crosses_sides && has_surplus,
+        "asset insurance withdrawal uses only the long domain with pooled surplus"
+    );
+    kani::cover!(
+        crosses_sides && !has_surplus,
+        "asset insurance withdrawal exhausts long then continues in short"
+    );
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(header_before.vault.get() - requested);
+    expected_header.insurance = V16PodU128::new(header_before.insurance.get() - requested);
+    expected_header.insurance_domain_budget_remaining_total =
+        V16PodU128::new(header_before.insurance_domain_budget_remaining_total.get() - requested);
+    let mut expected_asset_zero = slots_before[0];
+    expected_asset_zero.insurance_domain_budget_long = V16PodU128::new(3 - long_debit);
+    expected_asset_zero.insurance_domain_budget_short = V16PodU128::new(5 - short_debit);
+    assert!(
+        long_debit == requested.min(3)
+            && short_debit == requested - long_debit
+            && kani_eq_market_group_v16_header_account(&expected_header, market.header)
+            && kani_eq_engine_asset_slot_v16_account(
+                &expected_asset_zero,
+                &market.markets[0].engine,
+            )
+            && kani_eq_engine_asset_slot_v16_account(&slots_before[1], &market.markets[1].engine,)
+            && market.kani_residual() == residual_before,
+        "asset withdrawal must debit only its two domains and conserve pooled value"
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
