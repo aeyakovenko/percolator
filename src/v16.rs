@@ -1344,6 +1344,44 @@ impl V16Core {
         ))
     }
 
+    /// PRODUCTION KERNEL: consume a close-cancel escrow exactly once and move
+    /// it, plus any new external deposit, into account capital. Only the new
+    /// deposit increases vault; capital and `c_tot` receive the same credit.
+    pub(crate) fn kernel_cure_close_stock_delta(
+        vault: u128,
+        c_tot: u128,
+        capital: u128,
+        cancel_deposit_escrow: u128,
+        optional_deposit: u128,
+        certified_equity: i128,
+        certified_initial_req: u128,
+    ) -> V16Result<(u128, u128, u128, u128)> {
+        let capital_credit = cancel_deposit_escrow
+            .checked_add(optional_deposit)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let new_vault = vault
+            .checked_add(optional_deposit)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if new_vault > MAX_VAULT_TVL {
+            return Err(V16Error::InvalidConfig);
+        }
+        let new_capital = capital
+            .checked_add(capital_credit)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let new_c_tot = c_tot
+            .checked_add(capital_credit)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let capital_credit_i128 =
+            i128::try_from(capital_credit).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let cured_equity = certified_equity
+            .checked_add(capital_credit_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if cured_equity < 0 || (cured_equity as u128) < certified_initial_req {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok((new_vault, new_c_tot, new_capital, capital_credit))
+    }
+
     /// PRODUCTION KERNEL (value safety, roadmap S-L2 insurance layer): the
     /// insurance-draw core of negative-PnL liquidation. Draw is capped by BOTH
     /// the remaining deficit and the DOMAIN's own available insurance —
@@ -15011,35 +15049,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let ledger = account.header.close_progress.try_to_runtime()?;
         let vault_before = self.header.vault.get();
         let escrow_before = account.header.cancel_deposit_escrow.get();
-        let escrow_total = escrow_before
-            .checked_add(optional_deposit)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let new_vault = self
-            .header
-            .vault
-            .get()
-            .checked_add(optional_deposit)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let new_capital = account
-            .header
-            .capital
-            .get()
-            .checked_add(escrow_total)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let new_c_tot = self
-            .header
-            .c_tot
-            .get()
-            .checked_add(escrow_total)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let escrow_i128 = i128::try_from(escrow_total).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let cured_equity = cert
-            .certified_equity
-            .checked_add(escrow_i128)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if cured_equity < 0 || (cured_equity as u128) < cert.certified_initial_req {
-            return Err(V16Error::InvalidConfig);
-        }
+        let (new_vault, new_c_tot, new_capital, escrow_total) =
+            V16Core::kernel_cure_close_stock_delta(
+                self.header.vault.get(),
+                self.header.c_tot.get(),
+                account.header.capital.get(),
+                escrow_before,
+                optional_deposit,
+                cert.certified_equity,
+                cert.certified_initial_req,
+            )?;
 
         self.header.vault = V16PodU128::new(new_vault);
         self.header.c_tot = V16PodU128::new(new_c_tot);

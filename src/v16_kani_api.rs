@@ -930,6 +930,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_cure_close_stock_delta(
+        vault: u128,
+        c_tot: u128,
+        capital: u128,
+        cancel_deposit_escrow: u128,
+        optional_deposit: u128,
+        certified_equity: i128,
+        certified_initial_req: u128,
+    ) -> V16Result<(u128, u128, u128, u128)> {
+        V16Core::kernel_cure_close_stock_delta(
+            vault,
+            c_tot,
+            capital,
+            cancel_deposit_escrow,
+            optional_deposit,
+            certified_equity,
+            certified_initial_req,
+        )
+    }
+
     pub fn kani_position_change_touches_pending_domain_loss_barrier(
         &self,
         asset_index: usize,

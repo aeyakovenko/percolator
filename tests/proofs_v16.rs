@@ -15370,6 +15370,74 @@ fn proof_v16_cure_and_cancel_close_rejects_without_active_close() {
     assert_eq!(account.header.cancel_deposit_escrow.get(), 0);
 }
 
+// Successful close-cure stock theorem over the production scalar seam. The
+// escrow is already in vault but outside c_tot; curing may transfer it into
+// capital exactly once, while only the optional external deposit raises vault.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_production_close_cure_consumes_escrow_without_minting_value() {
+    let c_tot = kani::any::<u64>() as u128;
+    let capital = kani::any::<u64>() as u128;
+    let escrow = kani::any::<u64>() as u128;
+    let other_stock = kani::any::<u64>() as u128;
+    let optional_deposit = kani::any::<u64>() as u128;
+    let certified_equity = kani::any::<i64>() as i128;
+    let certified_initial_req = kani::any::<u64>() as u128;
+    let vault = c_tot + escrow + other_stock;
+    kani::assume(vault + optional_deposit <= MAX_VAULT_TVL);
+
+    let capital_credit = escrow + optional_deposit;
+    let cured_equity = certified_equity + capital_credit as i128;
+    let margin_ok = cured_equity >= 0 && cured_equity as u128 >= certified_initial_req;
+    let result = MarketGroupV16ViewMut::<u64>::kani_cure_close_stock_delta(
+        vault,
+        c_tot,
+        capital,
+        escrow,
+        optional_deposit,
+        certified_equity,
+        certified_initial_req,
+    );
+
+    kani::cover!(
+        margin_ok && escrow > 0 && optional_deposit == 0,
+        "cure covers an escrow-only internal stock transfer"
+    );
+    kani::cover!(
+        margin_ok && certified_equity < 0 && escrow > 0 && optional_deposit > 0,
+        "cure covers mixed escrow and external deposit restoring negative equity"
+    );
+    kani::cover!(
+        !margin_ok && capital_credit > 0,
+        "cure covers rejection when funded credit is still below initial margin"
+    );
+
+    if margin_ok {
+        let (new_vault, new_c_tot, new_capital, reported_credit) = result.unwrap();
+        assert_eq!(reported_credit, capital_credit);
+        assert_eq!(new_vault, vault + optional_deposit);
+        assert_eq!(new_c_tot, c_tot + capital_credit);
+        assert_eq!(new_capital, capital + capital_credit);
+        assert_eq!(new_vault - vault, optional_deposit);
+        assert_eq!(new_c_tot - c_tot, new_capital - capital);
+        assert_eq!(new_vault, new_c_tot + other_stock);
+        assert_eq!(
+            TokenValueFlowProofV16::close_cure_to_account_capital(
+                optional_deposit,
+                escrow,
+                reported_credit,
+                vault,
+                new_vault,
+            )
+            .and_then(|proof| proof.validate()),
+            Ok(())
+        );
+    } else {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+    }
+}
+
 // ============ INTRACTABLE-TIER GRIND: realize-body verdict ============
 // CONCLUSIVELY INTRACTABLE (full elimination, 2026-06-10): the terminal-
 // realization full-backing witness exceeds the 900s budget under EVERY
