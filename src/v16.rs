@@ -2829,6 +2829,23 @@ impl V16Core {
         Ok((bucket, source))
     }
 
+    /// PRODUCTION KERNEL: canonicalize only an economically empty expired
+    /// bucket. Retirement must not erase consumed principal, impaired backing,
+    /// or provider earnings merely because the freshness period ended.
+    fn kernel_retirement_backing_normalization(bucket: BackingBucketV16) -> BackingBucketV16 {
+        if bucket.status == BackingBucketStatusV16::Expired
+            && bucket.fresh_unliened_backing_num == 0
+            && bucket.valid_liened_backing_num == 0
+            && bucket.consumed_liened_backing_num == 0
+            && bucket.impaired_liened_backing_num == 0
+            && bucket.utilization_fee_earnings == 0
+        {
+            BackingBucketV16::empty_for_market(bucket.market_id)
+        } else {
+            bucket
+        }
+    }
+
     /// PRODUCTION KERNEL: one step of the compact source-domain expiry scan.
     /// The first sparse-tail entry terminates the scan; otherwise the first
     /// occupied lapsed Fresh bucket is selected and terminates the scan.
@@ -17331,6 +17348,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             AssetLifecycleV16::Active
             | AssetLifecycleV16::DrainOnly
             | AssetLifecycleV16::Recovery => {
+                self.expire_lapsed_source_backing_for_asset_not_atomic(asset_index, now_slot)?;
                 self.require_empty_asset_lifecycle_state(asset_index)?;
                 let (next_asset_set_epoch, next_risk_epoch) =
                     self.checked_asset_set_epoch_bump()?;
@@ -17342,11 +17360,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.validate_shape()
             }
             AssetLifecycleV16::Retired => {
+                self.expire_lapsed_source_backing_for_asset_not_atomic(asset_index, now_slot)?;
                 self.require_empty_asset_lifecycle_state(asset_index)?;
                 self.validate_shape()
             }
             _ => Err(V16Error::LockActive),
         }
+    }
+
+    /// Retirement is the terminal consumer for one asset, so it must normalize
+    /// both of that asset's source domains before testing whether the slot is
+    /// empty. This is constant work and also covers a lapsed bucket that no
+    /// portfolio references, which account-local auto-crank discovery cannot
+    /// otherwise select.
+    fn expire_lapsed_source_backing_for_asset_not_atomic(
+        &mut self,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> V16Result<()> {
+        for side in [SideV16::Long, SideV16::Short] {
+            let domain = self.insurance_domain_index(asset_index, side)?;
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= now_slot {
+                self.expire_source_backing_bucket_not_atomic(domain, now_slot)?;
+            }
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            let normalized = V16Core::kernel_retirement_backing_normalization(bucket);
+            if normalized != bucket {
+                self.set_backing_bucket_for_domain(domain, normalized)?;
+            }
+        }
+        Ok(())
     }
 
     /// Restarts an empty Recovery/Retired asset with a fresh market_id.

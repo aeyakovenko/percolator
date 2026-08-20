@@ -2290,6 +2290,72 @@ fn v16_canonicalize_retired_empty_asset_slot_clears_inert_domain_state() {
 }
 
 #[test]
+fn v16_retire_normalizes_unreferenced_lapsed_backing() {
+    const BACKING: u128 = 7;
+    const EXPIRY_SLOT: u64 = 5;
+    const DOMAIN: usize = 2;
+
+    let (mut header, mut markets) = market_fixture(2, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(DOMAIN, BACKING, EXPIRY_SLOT)
+            .unwrap();
+    }
+    let vault_before = header.vault.get();
+    let bucket_before = markets[1].engine.backing_long.try_to_runtime().unwrap();
+    assert_eq!(bucket_before.status, BackingBucketStatusV16::Fresh);
+    assert_eq!(
+        bucket_before.fresh_unliened_backing_num,
+        BACKING * BOUND_SCALE
+    );
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert_eq!(
+            market.retire_empty_asset_not_atomic(1, EXPIRY_SLOT - 1),
+            Err(V16Error::LockActive),
+            "fresh principal remains a retirement blocker"
+        );
+    }
+    assert_eq!(header.vault.get(), vault_before);
+    assert_eq!(
+        markets[1].engine.asset.try_to_runtime().unwrap().lifecycle,
+        AssetLifecycleV16::Active
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .retire_empty_asset_not_atomic(1, EXPIRY_SLOT)
+        .unwrap();
+    let bucket = market.markets[1]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[1]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.status, BackingBucketStatusV16::Empty);
+    assert_eq!(bucket.expiry_slot, 0);
+    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num, 0);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_reused_market_slot_rejects_old_market_id_leg() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 16);

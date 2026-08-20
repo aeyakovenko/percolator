@@ -876,6 +876,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::prepare_counterparty_backing_expiry_delta(bucket, source, now_slot)
     }
 
+    pub fn kani_retirement_backing_normalization(bucket: BackingBucketV16) -> BackingBucketV16 {
+        V16Core::kernel_retirement_backing_normalization(bucket)
+    }
+
     pub fn kani_lapsed_source_backing_scan_step(
         selected: Option<usize>,
         sparse_tail: bool,
