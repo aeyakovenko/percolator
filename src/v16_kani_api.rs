@@ -47,6 +47,20 @@ pub fn kani_should_clear_prior_reset_obligation(
     )
 }
 
+pub fn kani_auto_crank_refresh_asset(
+    refresh_asset: Option<usize>,
+    reset_obligation_asset: Option<usize>,
+) -> Option<usize> {
+    V16Core::kernel_auto_crank_refresh_asset(refresh_asset, reset_obligation_asset)
+}
+
+pub fn kani_refresh_detached_selected_leg(
+    selected_leg_before: bool,
+    selected_leg_after: bool,
+) -> bool {
+    V16Core::kernel_refresh_detached_selected_leg(selected_leg_before, selected_leg_after)
+}
+
 pub fn kani_first_actionable_slot(flags: [bool; V16_MAX_PORTFOLIO_ASSETS_N]) -> Option<usize> {
     V16Core::first_actionable_slot(flags)
 }

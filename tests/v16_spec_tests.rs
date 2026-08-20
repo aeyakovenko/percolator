@@ -5003,6 +5003,84 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
 }
 
 #[test]
+fn v16_auto_crank_detaches_prior_reset_obligation_after_asset_recovery() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 23);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.slot_last = 10;
+    asset.epoch_long = 1;
+    asset.mode_long = SideModeV16::ResetPending;
+    asset.oi_eff_long_q = 0;
+    asset.oi_eff_short_q = 0;
+    asset.loss_weight_sum_long = 0;
+    asset.loss_weight_sum_short = 0;
+    asset.stored_pos_count_long = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_epoch_start_long,
+        f_snap: asset.f_epoch_start_long_num,
+        epoch_snap: 0,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_epoch_start_long_num,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let cleanup = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("Recovery must retain permissionless prior-reset cleanup");
+
+    assert_eq!(
+        cleanup.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(0)
+        }
+    );
+    assert_eq!(
+        cleanup.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+    );
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert!(!account.header.legs[0].try_to_runtime().unwrap().active);
+    let cleaned = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(cleaned.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(cleaned.mode_long, SideModeV16::ResetPending);
+    assert_eq!(cleaned.stored_pos_count_long, 0);
+    market
+        .finalize_side_reset_not_atomic(0, SideV16::Long)
+        .expect("the cleaned Recovery side must finalize");
+    let finalized = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(finalized.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(finalized.mode_long, SideModeV16::Normal);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut account_header = account_fixture(2, 23);

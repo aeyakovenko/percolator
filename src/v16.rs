@@ -1880,6 +1880,20 @@ impl V16Core {
         !already_cleared && prior_reset_obligation && !pending_close_residual
     }
 
+    fn kernel_auto_crank_refresh_asset(
+        refresh_asset: Option<usize>,
+        reset_obligation_asset: Option<usize>,
+    ) -> Option<usize> {
+        refresh_asset.or(reset_obligation_asset)
+    }
+
+    fn kernel_refresh_detached_selected_leg(
+        selected_leg_before: bool,
+        selected_leg_after: bool,
+    ) -> bool {
+        selected_leg_before && !selected_leg_after
+    }
+
     /// PRODUCTION KERNEL: a liquidation error is successful public progress only
     /// when the same call committed the matching Recovery state. Every other
     /// error, including an incomplete Recovery marker, remains unchanged.
@@ -12993,7 +13007,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let protective_progress = match request.action {
             PermissionlessCrankActionV16::Refresh => {
-                let touches_accrued_asset = request.asset_index
+                let selected_leg_before = request.asset_index
                     < self.header.config.max_market_slots.get() as usize
                     && Self::active_leg_slot_for_asset(&account.as_view(), request.asset_index)?
                         .is_some();
@@ -13015,7 +13029,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         });
                     }
                 }
-                touches_accrued_asset
+                let selected_leg_after = request.asset_index
+                    < self.header.config.max_market_slots.get() as usize
+                    && Self::active_leg_slot_for_asset(&account.as_view(), request.asset_index)?
+                        .is_some();
+                if V16Core::kernel_refresh_detached_selected_leg(
+                    selected_leg_before,
+                    selected_leg_after,
+                ) {
+                    self.validate_shape_audit_scan()?;
+                    return Ok(PermissionlessProgressOutcomeV16::AccountCurrent);
+                }
+                selected_leg_before
             }
             PermissionlessCrankActionV16::SettleB { asset_index } => {
                 let out = self.settle_account_b_chunk(
@@ -13374,7 +13399,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let (
             summary,
-            (b_stale_asset, refresh_asset, liquidatable_asset, _, released_obligation_asset),
+            (
+                b_stale_asset,
+                refresh_asset,
+                liquidatable_asset,
+                reset_obligation_asset,
+                released_obligation_asset,
+            ),
         ) = self.build_actionable_summary_and_selected_assets(&account.as_view(), work.now_slot)?;
         let recovery_reason = if summary.expired_close || summary.recovery_eligible {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
@@ -13387,7 +13418,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             summary,
             b_stale_asset.unwrap_or(0),
             liquidatable_asset.unwrap_or(0),
-            refresh_asset,
+            V16Core::kernel_auto_crank_refresh_asset(refresh_asset, reset_obligation_asset),
             recovery_reason,
         );
 
