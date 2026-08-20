@@ -896,6 +896,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_live_account_refresh_required(
+        live: bool,
+        cert_current: bool,
+        reset_obligation: bool,
+        released_obligation: bool,
+        lapsed_source_backing: bool,
+    ) -> bool {
+        V16Core::kernel_live_account_refresh_required(
+            live,
+            cert_current,
+            reset_obligation,
+            released_obligation,
+            lapsed_source_backing,
+        )
+    }
+
     pub fn kani_source_credit_lien_amounts_for_effective(
         effective_credit: u128,
         credit_rate_num: u128,

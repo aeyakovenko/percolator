@@ -7493,6 +7493,37 @@ fn proof_v16_live_source_backing_expiry_is_bounded_complete_and_isolated() {
 }
 
 #[kani::proof]
+fn proof_v16_lapsed_source_backing_forces_live_refresh_even_with_current_cert() {
+    let live: bool = kani::any();
+    let cert_current: bool = kani::any();
+    let reset_obligation: bool = kani::any();
+    let released_obligation: bool = kani::any();
+    let lapsed_source_backing: bool = kani::any();
+
+    let required = MarketGroupV16ViewMut::<u64>::kani_live_account_refresh_required(
+        live,
+        cert_current,
+        reset_obligation,
+        released_obligation,
+        lapsed_source_backing,
+    );
+    assert_eq!(
+        required,
+        live && (!cert_current || reset_obligation || released_obligation || lapsed_source_backing)
+    );
+    if live && lapsed_source_backing {
+        assert!(required);
+    }
+    if !live {
+        assert!(!required);
+    }
+
+    kani::cover!(live && cert_current && lapsed_source_backing && required);
+    kani::cover!(live && cert_current && !lapsed_source_backing && !required);
+    kani::cover!(!live && lapsed_source_backing && !required);
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {
