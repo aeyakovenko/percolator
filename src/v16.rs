@@ -12483,17 +12483,41 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
         raw_oracle_target_price: u64,
     ) -> V16Result<()> {
-        self.validate_configured_asset_index(asset_index)?;
-        if decode_market_mode(self.header.mode)? != MarketModeV16::Live
-            || raw_oracle_target_price == 0
-            || raw_oracle_target_price > MAX_ORACLE_PRICE
-        {
+        self.set_asset_raw_oracle_targets_not_atomic(&[(asset_index, raw_oracle_target_price)])
+    }
+
+    /// Stages distinct per-asset oracle targets and validates the resulting market once. A batch
+    /// is one committed observation event, so any number of changed targets advances the global
+    /// oracle epoch exactly once.
+    pub fn set_asset_raw_oracle_targets_not_atomic(
+        &mut self,
+        targets: &[(usize, u64)],
+    ) -> V16Result<()> {
+        if targets.is_empty() || decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::InvalidConfig);
         }
-        self.require_asset_mark_pushable(asset_index)?;
-        let mut asset = self.asset_state(asset_index)?;
-        let target_changed = asset.raw_oracle_target_price != raw_oracle_target_price;
-        let next_oracle_epoch = if target_changed {
+
+        let mut changed = false;
+        let mut i = 0usize;
+        while i < targets.len() {
+            let (asset_index, target) = targets[i];
+            self.validate_configured_asset_index(asset_index)?;
+            if target == 0 || target > MAX_ORACLE_PRICE {
+                return Err(V16Error::InvalidConfig);
+            }
+            self.require_asset_mark_pushable(asset_index)?;
+            let mut prior = 0usize;
+            while prior < i {
+                if targets[prior].0 == asset_index {
+                    return Err(V16Error::InvalidConfig);
+                }
+                prior += 1;
+            }
+            changed |= self.asset_state(asset_index)?.raw_oracle_target_price != target;
+            i += 1;
+        }
+
+        let next_oracle_epoch = if changed {
             Some(
                 self.header
                     .oracle_epoch
@@ -12504,8 +12528,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             None
         };
-        asset.raw_oracle_target_price = raw_oracle_target_price;
-        self.set_asset_state(asset_index, asset)?;
+        for &(asset_index, target) in targets {
+            let mut asset = self.asset_state(asset_index)?;
+            asset.raw_oracle_target_price = target;
+            self.set_asset_state(asset_index, asset)?;
+        }
         if let Some(next) = next_oracle_epoch {
             self.header.oracle_epoch = V16PodU64::new(next);
         }

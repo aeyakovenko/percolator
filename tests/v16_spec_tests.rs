@@ -1984,6 +1984,51 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
 }
 
 #[test]
+fn v16_public_raw_oracle_target_batch_updates_distinct_assets_with_one_epoch() {
+    let (mut header, mut markets) = market_fixture(3, 100);
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let oracle_epoch_before = header.oracle_epoch.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .set_asset_raw_oracle_targets_not_atomic(&[(0, 111), (1, 90), (2, 125)])
+        .unwrap();
+
+    assert_eq!(
+        market.markets[0].engine.asset.raw_oracle_target_price.get(),
+        111
+    );
+    assert_eq!(
+        market.markets[1].engine.asset.raw_oracle_target_price.get(),
+        90
+    );
+    assert_eq!(
+        market.markets[2].engine.asset.raw_oracle_target_price.get(),
+        125
+    );
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+
+    market
+        .set_asset_raw_oracle_targets_not_atomic(&[(2, 125), (0, 111), (1, 90)])
+        .unwrap();
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
+    assert_eq!(
+        market.set_asset_raw_oracle_targets_not_atomic(&[(0, 112), (0, 113)]),
+        Err(V16Error::InvalidConfig)
+    );
+    assert_eq!(
+        market.markets[0].engine.asset.raw_oracle_target_price.get(),
+        111
+    );
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_public_empty_asset_oracle_anchor_reset_rejects_any_group_position_state() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut other_asset = markets[1].engine.asset.try_to_runtime().unwrap();
