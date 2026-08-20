@@ -2356,6 +2356,40 @@ fn v16_retire_normalizes_unreferenced_lapsed_backing() {
 }
 
 #[test]
+fn v16_resolved_clock_advance_is_monotonic_and_value_neutral() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let markets_before = markets.clone();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(5).unwrap();
+    market.advance_resolved_slot_not_atomic(9).unwrap();
+    assert_eq!(market.header.current_slot.get(), 9);
+    assert_eq!(market.header.resolved_slot.get(), 5);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.markets, &markets_before);
+
+    assert_eq!(
+        market.advance_resolved_slot_not_atomic(8),
+        Err(V16Error::Stale)
+    );
+    assert_eq!(market.header.current_slot.get(), 9);
+
+    let (mut live_header, mut live_markets) = market_fixture(1, 100);
+    let live_slot = live_header.current_slot;
+    let mut live = MarketGroupV16ViewMut::new(&mut live_header, &mut live_markets);
+    assert_eq!(
+        live.advance_resolved_slot_not_atomic(9),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(live.header.current_slot, live_slot);
+}
+
+#[test]
 fn v16_reused_market_slot_rejects_old_market_id_leg() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 16);

@@ -2846,6 +2846,23 @@ impl V16Core {
         }
     }
 
+    /// PRODUCTION KERNEL: admit an authenticated clock observation into terminal
+    /// settlement. Resolved routes do not accrue markets, but expiry-sensitive
+    /// backing still requires a monotonic current slot.
+    fn kernel_advance_resolved_slot(
+        mode: MarketModeV16,
+        current_slot: u64,
+        authenticated_slot: u64,
+    ) -> V16Result<u64> {
+        if mode != MarketModeV16::Resolved {
+            return Err(V16Error::LockActive);
+        }
+        if authenticated_slot < current_slot {
+            return Err(V16Error::Stale);
+        }
+        Ok(authenticated_slot)
+    }
+
     /// PRODUCTION KERNEL: one step of the compact source-domain expiry scan.
     /// The first sparse-tail entry terminates the scan; otherwise the first
     /// occupied lapsed Fresh bucket is selected and terminates the scan.
@@ -13501,6 +13518,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             AutoCrankPlanV16::FinalizeRecovery => return Err(V16Error::InvalidConfig),
             AutoCrankPlanV16::CloseResolved => {
+                self.advance_resolved_slot_not_atomic(work.now_slot)?;
                 AutoCrankOutcomeV16::ResolvedClose(self.close_resolved_account_not_atomic(
                     account,
                     work.resolved_close_fee_rate_per_slot,
@@ -16848,6 +16866,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.current_slot = V16PodU64::new(resolved_slot);
         self.header.loss_stale_active = 0;
         self.validate_shape()
+    }
+
+    /// Advances only the clock used by resolved settlement. The wrapper must
+    /// authenticate `authenticated_slot` (for Solana, from the Clock sysvar).
+    /// No price, funding, value, claim, or lifecycle field is changed.
+    pub fn advance_resolved_slot_not_atomic(&mut self, authenticated_slot: u64) -> V16Result<()> {
+        let next = V16Core::kernel_advance_resolved_slot(
+            decode_market_mode(self.header.mode)?,
+            self.header.current_slot.get(),
+            authenticated_slot,
+        )?;
+        self.header.current_slot = V16PodU64::new(next);
+        Ok(())
     }
 
     // A resolved-payout receipt that has been paid its full entitlement at the TERMINAL

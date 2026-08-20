@@ -880,6 +880,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::kernel_retirement_backing_normalization(bucket)
     }
 
+    pub fn kani_advance_resolved_slot(
+        mode: MarketModeV16,
+        current_slot: u64,
+        authenticated_slot: u64,
+    ) -> V16Result<u64> {
+        V16Core::kernel_advance_resolved_slot(mode, current_slot, authenticated_slot)
+    }
+
     pub fn kani_lapsed_source_backing_scan_step(
         selected: Option<usize>,
         sparse_tail: bool,

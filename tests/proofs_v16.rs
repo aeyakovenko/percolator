@@ -8384,6 +8384,50 @@ fn proof_v16_retirement_backing_normalization_never_erases_obligations() {
 }
 
 #[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_clock_advance_is_exact_and_monotonic() {
+    let current_slot: u64 = kani::any();
+    let authenticated_slot: u64 = kani::any();
+    let resolved: bool = kani::any();
+    let mode = if resolved {
+        MarketModeV16::Resolved
+    } else {
+        MarketModeV16::Live
+    };
+    let result = MarketGroupV16ViewMut::<u64>::kani_advance_resolved_slot(
+        mode,
+        current_slot,
+        authenticated_slot,
+    );
+
+    kani::cover!(
+        resolved && authenticated_slot == current_slot,
+        "resolved clock accepts the exact current slot"
+    );
+    kani::cover!(
+        resolved && authenticated_slot > current_slot,
+        "resolved clock accepts a later authenticated slot"
+    );
+    kani::cover!(
+        resolved && authenticated_slot < current_slot,
+        "resolved clock rejects rewind"
+    );
+    kani::cover!(
+        !resolved,
+        "non-resolved mode rejects terminal clock admission"
+    );
+
+    if resolved && authenticated_slot >= current_slot {
+        assert_eq!(result, Ok(authenticated_slot));
+        assert!(result.unwrap() >= current_slot);
+    } else if resolved {
+        assert_eq!(result, Err(V16Error::Stale));
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_positive_pnl_requires_full_source_claim_attribution() {
