@@ -12677,6 +12677,52 @@ fn proof_v16_public_credit_domain_insurance_budget_is_value_neutral_and_backed()
 }
 
 #[kani::proof]
+#[kani::unwind(32)]
+#[kani::solver(cadical)]
+fn proof_v16_public_bulk_domain_budget_credit_conserves_value_and_exact_deltas() {
+    let long_raw: u8 = kani::any();
+    let short_raw: u8 = kani::any();
+    kani::assume(long_raw > 0 && short_raw > 0);
+    let long = long_raw as u128;
+    let short = short_raw as u128;
+    let total = long + short;
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.vault = V16PodU128::new(total);
+    header.insurance = V16PodU128::new(total);
+    let vault_before = header.vault.get();
+    let insurance_before = header.insurance.get();
+    let c_tot_before = header.c_tot.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+
+    market
+        .credit_domain_insurance_budgets_not_atomic(&[(0, long), (1, short)])
+        .unwrap();
+
+    kani::cover!(
+        long > 1 && short > 1,
+        "bulk domain budget credit covers two nontrivial fee deltas"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        total
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        long
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        short
+    );
+    assert_eq!(market.kani_residual(), residual_before);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_domain_insurance_withdraw_delta_is_budget_scoped_and_value_conserving() {

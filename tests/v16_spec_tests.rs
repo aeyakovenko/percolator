@@ -2467,6 +2467,40 @@ fn v16_domain_insurance_deposit_and_withdraw_use_engine_budget_accounting() {
 }
 
 #[test]
+fn v16_domain_insurance_bulk_credit_accumulates_duplicates_with_one_exact_delta() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    header.vault = V16PodU128::new(21);
+    header.insurance = V16PodU128::new(21);
+    let vault_before = header.vault.get();
+    let insurance_before = header.insurance.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .credit_domain_insurance_budgets_not_atomic(&[(0, 3), (2, 5), (0, 7), (3, 6)])
+        .unwrap();
+
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        21
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        10
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        5
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_short.get(),
+        6
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
 fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
     let (mut header, mut markets) = market_fixture(1, 100);
     header.vault = V16PodU128::new(10);

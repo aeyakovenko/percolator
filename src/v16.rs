@@ -9909,16 +9909,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(next_total)
     }
 
-    fn set_domain_insurance_budget_not_atomic(
-        &mut self,
-        domain: usize,
-        budget: u128,
-    ) -> V16Result<()> {
-        self.set_domain_insurance_budget_core(domain, budget, self.header.insurance.get())?;
-        self.validate_source_domain_ledger(domain)?;
-        self.validate_shape()
-    }
-
     /// Credits already-collected insurance to a domain budget without changing vault
     /// or total insurance.
     pub fn credit_domain_insurance_budget_not_atomic(
@@ -9926,11 +9916,33 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         domain: usize,
         amount: u128,
     ) -> V16Result<()> {
-        let (budget, _) = self.domain_insurance_budget_spent(domain)?;
-        let next_budget = budget
-            .checked_add(amount)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        self.set_domain_insurance_budget_not_atomic(domain, next_budget)
+        self.credit_domain_insurance_budgets_not_atomic(&[(domain, amount)])
+    }
+
+    /// Credits multiple already-collected fee amounts and validates the resulting market once.
+    /// Duplicate domains are permitted and accumulate in input order.
+    pub fn credit_domain_insurance_budgets_not_atomic(
+        &mut self,
+        credits: &[(usize, u128)],
+    ) -> V16Result<()> {
+        if credits.is_empty() {
+            return Err(V16Error::InvalidConfig);
+        }
+        for &(domain, amount) in credits {
+            let (budget, _) = self.domain_insurance_budget_spent(domain)?;
+            let next_budget = budget
+                .checked_add(amount)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.set_domain_insurance_budget_core(
+                domain,
+                next_budget,
+                self.header.insurance.get(),
+            )?;
+        }
+        for &(domain, _) in credits {
+            self.validate_source_domain_ledger(domain)?;
+        }
+        self.validate_shape()
     }
 
     /// Deposits external quote into insurance and credits the same domain budget.
