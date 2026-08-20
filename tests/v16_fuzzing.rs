@@ -3,9 +3,9 @@
 use percolator::{
     EngineAssetSlotV16Account, LiquidationRequestV16, Market, MarketGroupV16HeaderAccount,
     MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioV16View,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16, PortfolioV16View,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodU128,
+    V16Config, V16Error, V16PodU128, MAX_VAULT_TVL,
 };
 use percolator::{BOUND_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
 use proptest::prelude::*;
@@ -35,6 +35,34 @@ fn fuzz_account(account_id: [u8; 32]) -> PortfolioAccountV16Account {
     let mut account = PortfolioAccountV16Account::default();
     account.init_empty_in_place(header).unwrap();
     account
+}
+
+#[test]
+fn v16_b_settlement_budget_is_loss_atoms_not_index_delta() {
+    const TARGET_B: u128 = 107_486_458_947_473_684_210_526_315;
+    const LOSS_WEIGHT: u128 = 19_000_000;
+
+    let (market_id, _, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    assert_eq!(cfg.public_b_chunk_atoms, MAX_VAULT_TVL);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let leg = PortfolioLegV16 {
+        active: true,
+        loss_weight: LOSS_WEIGHT,
+        ..PortfolioLegV16::default()
+    };
+    let full_loss = LOSS_WEIGHT.checked_mul(TARGET_B).unwrap() / SOCIAL_LOSS_DEN;
+    assert!(full_loss > 0 && full_loss < MAX_VAULT_TVL);
+
+    let chunk = market
+        .kani_account_b_settlement_chunk_from_leg(leg, TARGET_B, MAX_VAULT_TVL)
+        .unwrap();
+
+    assert_eq!(chunk.delta_b, TARGET_B);
+    assert_eq!(chunk.loss, full_loss);
+    assert_eq!(chunk.remaining_after, 0);
 }
 
 fn assert_fuzz_invariants(
