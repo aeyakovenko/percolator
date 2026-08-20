@@ -2144,6 +2144,40 @@ fn v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset() {
 }
 
 #[test]
+fn v16_restart_with_preserved_domain_budget_remains_tradeable() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.deposit_domain_insurance_not_atomic(0, 500).unwrap();
+        market.force_asset_recovery_not_atomic(0, 2).unwrap();
+        market
+            .restart_empty_asset_preserving_insurance_budget_not_atomic(0, 250, 3)
+            .unwrap();
+    }
+
+    let mut long_header = account_fixture(1, 231);
+    let mut short_header = account_fixture(1, 232);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 10_000).unwrap();
+    market.deposit_not_atomic(&mut short, 10_000).unwrap();
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 250,
+                fee_bps: 0,
+            },
+        )
+        .expect("a restarted active asset with preserved insurance remains tradeable");
+}
+
+#[test]
 fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
     let (mut header, mut markets) = market_fixture(2, 100);
     {
