@@ -8366,11 +8366,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn first_lapsed_source_backing_for_account(
+    fn first_lapsed_source_backing_for_account_at_slot(
         &self,
         account: &PortfolioV16View<'_>,
+        now_slot: u64,
     ) -> V16Result<Option<usize>> {
-        let current_slot = self.header.current_slot.get();
         let mut selected = None;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -8391,7 +8391,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 domain,
                 bucket_status,
                 expiry_slot,
-                current_slot,
+                now_slot,
             );
             selected = next_selected;
             if stop {
@@ -8406,10 +8406,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &PortfolioV16View<'_>,
     ) -> V16Result<Option<usize>> {
-        let Some(domain) = self.first_lapsed_source_backing_for_account(account)? else {
+        let current_slot = self.header.current_slot.get();
+        let Some(domain) =
+            self.first_lapsed_source_backing_for_account_at_slot(account, current_slot)?
+        else {
             return Ok(None);
         };
-        self.expire_source_backing_bucket_not_atomic(domain, self.header.current_slot.get())?;
+        self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
         Ok(Some(domain))
     }
 
@@ -13038,14 +13041,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &self,
         account: &PortfolioV16View<'_>,
     ) -> V16Result<ActionableSummaryV16> {
+        self.build_actionable_summary_at_slot(account, self.header.current_slot.get())
+    }
+
+    /// Classifies clock-driven work against an authenticated execution slot even
+    /// when no oracle observation was supplied to advance the committed market
+    /// slot. The caller must authenticate `now_slot`; execution remains bounded
+    /// to one selected continuation.
+    pub fn build_actionable_summary_at_slot(
+        &self,
+        account: &PortfolioV16View<'_>,
+        now_slot: u64,
+    ) -> V16Result<ActionableSummaryV16> {
         Ok(self
-            .build_actionable_summary_and_selected_assets(account)?
+            .build_actionable_summary_and_selected_assets(account, now_slot)?
             .0)
     }
 
     fn build_actionable_summary_and_selected_assets(
         &self,
         account: &PortfolioV16View<'_>,
+        now_slot: u64,
     ) -> V16Result<(
         ActionableSummaryV16,
         (
@@ -13056,6 +13072,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Option<usize>,
         ),
     )> {
+        if now_slot < self.header.current_slot.get() {
+            return Err(V16Error::InvalidConfig);
+        }
         let mode = decode_market_mode(self.header.mode)?;
         let live = mode == MarketModeV16::Live;
         let resolved = mode == MarketModeV16::Resolved;
@@ -13076,7 +13095,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let reset_obligation_asset = selected_assets.3;
         let released_obligation_asset = selected_assets.4;
         let lapsed_source_backing = self
-            .first_lapsed_source_backing_for_account(account)?
+            .first_lapsed_source_backing_for_account_at_slot(account, now_slot)?
             .is_some();
         let has_open_risk = liquidatable_asset.is_some();
         // A close ledger with residual_remaining==0 is already fully booked/covered
@@ -13097,8 +13116,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // redirect the residual.
         let pending_close = live && close_outstanding;
         // Expired outstanding close -> terminal recovery (Recover needs no leg).
-        let expired_close =
-            live && close_outstanding && self.header.current_slot.get() > ledger.max_close_slot;
+        let expired_close = live && close_outstanding && now_slot > ledger.max_close_slot;
         // liquidatable requires a current certified deficit AND actual open risk.
         // Prior-reset obligations are settled/detached first through Refresh so
         // they cannot block side finalization or poison liquidation dispatch:
@@ -13323,7 +13341,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (
             summary,
             (b_stale_asset, refresh_asset, liquidatable_asset, _, released_obligation_asset),
-        ) = self.build_actionable_summary_and_selected_assets(&account.as_view())?;
+        ) = self.build_actionable_summary_and_selected_assets(&account.as_view(), work.now_slot)?;
         let recovery_reason = if summary.expired_close || summary.recovery_eligible {
             PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress
         } else {

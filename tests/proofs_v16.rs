@@ -7493,6 +7493,55 @@ fn proof_v16_live_source_backing_expiry_is_bounded_complete_and_isolated() {
 }
 
 #[kani::proof]
+fn proof_v16_lapsed_source_backing_scan_uses_full_width_authenticated_slot() {
+    let sparse_tail: bool = kani::any();
+    let occupied: bool = kani::any();
+    let fresh: bool = kani::any();
+    let domain: usize = kani::any();
+    let expiry_slot: u64 = kani::any();
+    let authenticated_slot: u64 = kani::any();
+    let status = if fresh {
+        BackingBucketStatusV16::Fresh
+    } else {
+        BackingBucketStatusV16::Empty
+    };
+
+    let (selected, stop) = MarketGroupV16ViewMut::<u64>::kani_lapsed_source_backing_scan_step(
+        None,
+        sparse_tail,
+        occupied,
+        domain,
+        status,
+        expiry_slot,
+        authenticated_slot,
+    );
+    let lapsed = !sparse_tail && occupied && fresh && expiry_slot <= authenticated_slot;
+    assert_eq!(selected, lapsed.then_some(domain));
+    assert_eq!(stop, sparse_tail || lapsed);
+
+    kani::cover!(
+        !sparse_tail && occupied && fresh && expiry_slot < authenticated_slot && stop,
+        "past expiry is actionable"
+    );
+    kani::cover!(
+        !sparse_tail && occupied && fresh && expiry_slot == authenticated_slot && stop,
+        "equal-slot expiry is actionable"
+    );
+    kani::cover!(
+        !sparse_tail && occupied && fresh && expiry_slot > authenticated_slot && !stop,
+        "future expiry is not actionable"
+    );
+    kani::cover!(
+        sparse_tail && stop && selected.is_none(),
+        "sparse tail stops"
+    );
+    kani::cover!(
+        !sparse_tail && occupied && !fresh && !stop,
+        "non-Fresh backing is not selected"
+    );
+}
+
+#[kani::proof]
 fn proof_v16_lapsed_source_backing_forces_live_refresh_even_with_current_cert() {
     let live: bool = kani::any();
     let cert_current: bool = kani::any();

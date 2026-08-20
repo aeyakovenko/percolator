@@ -4475,12 +4475,13 @@ fn v16_auto_crank_releases_current_flat_pending_obligations_on_both_sides() {
                 .unwrap()
                 .stale
         );
+        let current_slot = market.header.current_slot.get();
 
         let result = market
             .permissionless_auto_crank_not_atomic(
                 &mut account,
                 AutoCrankWorkV16 {
-                    now_slot: 0,
+                    now_slot: current_slot,
                     observations: &[],
                     resolved_close_fee_rate_per_slot: 0,
                 },
@@ -4681,10 +4682,27 @@ fn v16_auto_crank_expires_one_lapsed_live_source_domain_per_step() {
 fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 23);
+    let mut counterparty_header = account_fixture(1, 24);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
-        market.deposit_not_atomic(&mut account, 100).unwrap();
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        market.deposit_not_atomic(&mut account, 10_000).unwrap();
+        market
+            .deposit_not_atomic(&mut counterparty, 10_000)
+            .unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut account,
+                &mut counterparty,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
         market
             .deposit_fresh_counterparty_backing_not_atomic(1, 40, 5)
             .unwrap();
@@ -4696,12 +4714,9 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
             .unwrap();
         assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
 
-        // Advancing time at an unchanged price/funding point does not bump any
-        // certificate epoch. Expiry must therefore be an independent classifier
-        // input rather than relying on an unrelated epoch to make the cert stale.
-        market
-            .accrue_asset_to_not_atomic(0, 10, 100, 0, true)
-            .unwrap();
+        // The committed market slot remains before expiry and every certificate
+        // epoch is current. Authenticated execution time must nevertheless make
+        // the lapsed bucket actionable without an oracle hint.
         let cert = account.header.health_cert.try_to_runtime().unwrap();
         assert_eq!(cert.cert_oracle_epoch, market.header.oracle_epoch.get());
         assert_eq!(cert.cert_funding_epoch, market.header.funding_epoch.get());
@@ -4711,19 +4726,50 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
             market.header.asset_set_epoch.get()
         );
 
-        let summary = market.build_actionable_summary(&account.as_view()).unwrap();
-        assert!(summary.stale, "lapsed source backing must select Refresh");
-        let observations = [AutoCrankObservationV16 {
-            asset_index: 0,
-            effective_price: 100,
-            funding_rate_e9: 0,
-        }];
+        assert!(
+            !market
+                .build_actionable_summary(&account.as_view())
+                .unwrap()
+                .stale
+        );
+        assert!(
+            market
+                .build_actionable_summary_at_slot(&account.as_view(), 10)
+                .unwrap()
+                .stale
+        );
+
+        let catchup = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: 10,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            catchup.outcome,
+            AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+        );
+        assert_eq!(market.header.current_slot.get(), 10);
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .backing_short
+                .try_to_runtime()
+                .unwrap()
+                .status,
+            BackingBucketStatusV16::Fresh
+        );
+
         let result = market
             .permissionless_auto_crank_not_atomic(
                 &mut account,
                 AutoCrankWorkV16 {
                     now_slot: 10,
-                    observations: &observations,
+                    observations: &[],
                     resolved_close_fee_rate_per_slot: 0,
                 },
             )
@@ -4742,8 +4788,8 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
         assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
         assert_eq!(bucket.fresh_unliened_backing_num, 0);
         assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
-        assert_eq!(market.header.vault.get(), 140);
-        assert_eq!(account.header.capital.get(), 100);
+        assert_eq!(market.header.vault.get(), 20_040);
+        assert_eq!(account.header.capital.get(), 10_000);
         assert_eq!(account.header.pnl.get(), 40);
         market.validate_shape().unwrap();
         account.validate_with_market(&market.as_view()).unwrap();
