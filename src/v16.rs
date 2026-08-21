@@ -5616,6 +5616,93 @@ struct PositionDeltaLookupV16 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PositionSlotMapV16 {
+    assets: [u32; V16_MAX_PORTFOLIO_ASSETS_N],
+    positions: [i128; V16_MAX_PORTFOLIO_ASSETS_N],
+}
+
+impl PositionSlotMapV16 {
+    fn from_account(account: &PortfolioV16View<'_>) -> V16Result<Self> {
+        let mut out = Self {
+            assets: [u32::MAX; V16_MAX_PORTFOLIO_ASSETS_N],
+            positions: [0; V16_MAX_PORTFOLIO_ASSETS_N],
+        };
+        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let in_bitmap = active_bitmap_get(bitmap, slot);
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if in_bitmap {
+                if !leg.active || out.assets[..slot].contains(&leg.asset_index) {
+                    return Err(V16Error::HiddenLeg);
+                }
+                out.assets[slot] = leg.asset_index;
+                out.positions[slot] = signed_position(leg);
+            } else if leg.active || !leg.is_empty() {
+                return Err(V16Error::HiddenLeg);
+            }
+            slot += 1;
+        }
+        Ok(out)
+    }
+
+    fn plan_delta(
+        &mut self,
+        asset_index: usize,
+        delta_q: i128,
+    ) -> V16Result<PositionDeltaLookupV16> {
+        let asset_index = u32::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?;
+        let existing_slot = self.assets.iter().position(|asset| *asset == asset_index);
+        let current_q = existing_slot.map_or(0, |slot| self.positions[slot]);
+        let next_q = current_q
+            .checked_add(delta_q)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        validate_basis_or_zero(next_q)?;
+        let mut empty_slot = None;
+        match V16Core::kernel_classify_position_delta(current_q, next_q) {
+            PositionRouteV16::Attach => {
+                let slot = self
+                    .assets
+                    .iter()
+                    .position(|asset| *asset == u32::MAX)
+                    .ok_or(V16Error::InvalidLeg)?;
+                empty_slot = Some(slot);
+                self.assets[slot] = asset_index;
+                self.positions[slot] = next_q;
+            }
+            PositionRouteV16::Clear => {
+                let slot = existing_slot.ok_or(V16Error::InvalidLeg)?;
+                self.assets[slot] = u32::MAX;
+                self.positions[slot] = 0;
+            }
+            PositionRouteV16::Flip => {
+                let slot = existing_slot.ok_or(V16Error::InvalidLeg)?;
+                self.assets[slot] = u32::MAX;
+                self.positions[slot] = 0;
+                let slot = self
+                    .assets
+                    .iter()
+                    .position(|asset| *asset == u32::MAX)
+                    .ok_or(V16Error::InvalidLeg)?;
+                empty_slot = Some(slot);
+                self.assets[slot] = asset_index;
+                self.positions[slot] = next_q;
+            }
+            PositionRouteV16::Resize => {
+                let slot = existing_slot.ok_or(V16Error::InvalidLeg)?;
+                self.positions[slot] = next_q;
+            }
+        }
+        Ok(PositionDeltaLookupV16 {
+            existing_slot,
+            empty_slot,
+            current_q,
+            next_q,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AccountRefreshCertOutcomeV16 {
     Certified(HealthCertV16),
     BChunk(AccountBSettlementChunkV16),
@@ -13675,22 +13762,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
-    fn empty_leg_slot(account: &PortfolioV16View<'_>) -> V16Result<usize> {
-        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        let mut slot = 0usize;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            let leg = account.header.legs[slot].try_to_runtime()?;
-            if !active_bitmap_get(bitmap, slot) && !leg.active {
-                if !leg.is_empty() {
-                    return Err(V16Error::HiddenLeg);
-                }
-                return Ok(slot);
-            }
-            slot += 1;
-        }
-        Err(V16Error::InvalidLeg)
-    }
-
     fn asset_state(&self, asset_index: usize) -> V16Result<AssetStateV16> {
         if asset_index >= self.header.config.max_market_slots.get() as usize
             || asset_index >= self.markets.len()
@@ -14393,12 +14464,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_account: &PortfolioV16View<'_>,
         short_account: &PortfolioV16View<'_>,
         request: TradeRequestV16,
+        long_lookup: PositionDeltaLookupV16,
+        short_lookup: PositionDeltaLookupV16,
     ) -> V16Result<TradePositionPreflightV16> {
         let (_, long_delta, short_delta) = Self::trade_signed_size_deltas(request.size_q)?;
-        let long_lookup =
-            Self::position_delta_lookup_for_asset(long_account, request.asset_index, long_delta)?;
-        let short_lookup =
-            Self::position_delta_lookup_for_asset(short_account, request.asset_index, short_delta)?;
         let long_risk_increasing =
             position_delta_increases_risk(long_lookup.current_q, long_delta)?;
         let short_risk_increasing =
@@ -14443,27 +14512,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             target_effective_lag,
             blocked_by_pending_domain_barrier,
         )?;
-        let long_requires_initial_margin =
-            trade_account_requires_initial_margin(long_lookup.current_q, long_lookup.next_q);
-        let short_requires_initial_margin =
-            trade_account_requires_initial_margin(short_lookup.current_q, short_lookup.next_q);
         Ok(TradePositionPreflightV16 {
             risk_increasing,
-            long_requires_initial_margin,
-            short_requires_initial_margin,
+            long_requires_initial_margin: trade_account_requires_initial_margin(
+                long_lookup.current_q,
+                long_lookup.next_q,
+            ),
+            short_requires_initial_margin: trade_account_requires_initial_margin(
+                short_lookup.current_q,
+                short_lookup.next_q,
+            ),
             long_lookup,
             short_lookup,
             long_old_abs_q: long_lookup.current_q.unsigned_abs(),
             short_old_abs_q: short_lookup.current_q.unsigned_abs(),
             long_new_abs_q: long_lookup.next_q.unsigned_abs(),
             short_new_abs_q: short_lookup.next_q.unsigned_abs(),
-            // Source-claim presence is consumed only when this account needs initial margin.
-            // Strict reductions cannot create an initial-margin lien, so rescanning every source
-            // domain for every reducing batch leg is dead work at maximum portfolio shape.
-            long_has_source_claims: long_requires_initial_margin
-                && Self::account_has_source_claims(long_account)?,
-            short_has_source_claims: short_requires_initial_margin
-                && Self::account_has_source_claims(short_account)?,
+            long_has_source_claims: Self::account_has_source_claims(long_account)?,
+            short_has_source_claims: Self::account_has_source_claims(short_account)?,
         })
     }
 
@@ -14472,56 +14538,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
         delta_q: i128,
     ) -> V16Result<PositionDeltaLookupV16> {
-        let bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        let mut existing_slot = None;
-        let mut empty_slot = None;
-        let mut current_q = 0i128;
-        let mut slot = 0usize;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            let in_bitmap = active_bitmap_get(bitmap, slot);
-            let leg = account.header.legs[slot].try_to_runtime()?;
-            if in_bitmap {
-                if !leg.active {
-                    return Err(V16Error::HiddenLeg);
-                }
-                if leg.asset_index as usize == asset_index {
-                    if existing_slot.is_some() {
-                        return Err(V16Error::HiddenLeg);
-                    }
-                    existing_slot = Some(slot);
-                    current_q = signed_position(leg);
-                }
-            } else if leg.active || !leg.is_empty() {
-                return Err(V16Error::HiddenLeg);
-            } else if empty_slot.is_none() {
-                empty_slot = Some(slot);
-            }
-            slot += 1;
-        }
-        let next_q = current_q
-            .checked_add(delta_q)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        validate_basis_or_zero(next_q)?;
-        Ok(PositionDeltaLookupV16 {
-            existing_slot,
-            empty_slot,
-            current_q,
-            next_q,
-        })
-    }
-
-    fn attach_leg(
-        &mut self,
-        account: &mut PortfolioV16ViewMut<'_>,
-        asset_index: usize,
-        side: SideV16,
-        basis_pos_q: i128,
-    ) -> V16Result<()> {
-        if Self::active_leg_slot_for_asset(&account.as_view(), asset_index)?.is_some() {
-            return Err(V16Error::InvalidLeg);
-        }
-        let leg_slot = Self::empty_leg_slot(&account.as_view())?;
-        self.attach_leg_at_slot(account, asset_index, side, basis_pos_q, leg_slot)
+        PositionSlotMapV16::from_account(account)?.plan_delta(asset_index, delta_q)
     }
 
     fn attach_leg_at_slot(
@@ -14577,8 +14594,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         allow_attributed_terminal_trade: bool,
     ) -> V16Result<()> {
         let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        self.clear_leg_at_slot_inner(
+            account,
+            asset_index,
+            leg_slot,
+            allow_attributed_terminal_trade,
+        )
+    }
+
+    fn clear_leg_at_slot_inner(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        leg_slot: usize,
+        allow_attributed_terminal_trade: bool,
+    ) -> V16Result<()> {
+        if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+            return Err(V16Error::InvalidLeg);
+        }
         let leg = account.header.legs[leg_slot].try_to_runtime()?;
-        if !leg.active || leg.b_stale || leg.stale {
+        if !active_bitmap_get(account.header.active_bitmap.map(V16PodU64::get), leg_slot)
+            || !leg.active
+            || leg.asset_index as usize != asset_index
+            || leg.b_stale
+            || leg.stale
+        {
             return Err(V16Error::InvalidLeg);
         }
         let close_progress = account.header.close_progress.try_to_runtime()?;
@@ -14785,16 +14825,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.set_asset_state(asset_index, asset)?;
                 return Ok(());
             }
-            return self.clear_leg_inner(account, asset_index, !settle_existing);
+            return self.clear_leg_at_slot_inner(account, asset_index, leg_slot, !settle_existing);
         }
         if route == PositionRouteV16::Flip {
-            self.clear_leg(account, asset_index)?;
+            self.clear_leg_at_slot_inner(account, asset_index, leg_slot, false)?;
             let side = if new > 0 {
                 SideV16::Long
             } else {
                 SideV16::Short
             };
-            return self.attach_leg(account, asset_index, side, new);
+            let empty_slot = lookup.empty_slot.ok_or(V16Error::InvalidLeg)?;
+            return self.attach_leg_at_slot(account, asset_index, side, new, empty_slot);
         }
         let old_leg = account.header.legs[leg_slot].try_to_runtime()?;
         let new_weight = loss_weight_for_basis(new.unsigned_abs(), old_leg.a_basis)?;
@@ -15832,6 +15873,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_account: &mut PortfolioV16ViewMut<'_>,
         short_account: &mut PortfolioV16ViewMut<'_>,
         request: TradeRequestV16,
+        position_lookups: (PositionDeltaLookupV16, PositionDeltaLookupV16),
         recertify_after_fill: bool,
         is_final_batch_fill: bool,
         long_attributable_asset_before_refresh: Option<usize>,
@@ -15842,6 +15884,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             &long_account.as_view(),
             &short_account.as_view(),
             request,
+            position_lookups.0,
+            position_lookups.1,
         )?;
         let risk_increasing = trade_preflight.risk_increasing;
         self.require_asset_risk_change_allowed(request.asset_index, risk_increasing)?;
@@ -16079,12 +16123,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut long_has_source_claims = false;
         let mut short_has_source_claims = false;
         let recertify_after_fill = requests.len() == 1;
+        let mut long_position_map = PositionSlotMapV16::from_account(&long_account.as_view())?;
+        let mut short_position_map = PositionSlotMapV16::from_account(&short_account.as_view())?;
         let mut i = 0usize;
         while i < requests.len() {
+            let (_, long_delta, short_delta) = Self::trade_signed_size_deltas(requests[i].size_q)?;
+            let request_position_lookups = (
+                long_position_map.plan_delta(requests[i].asset_index, long_delta)?,
+                short_position_map.plan_delta(requests[i].asset_index, short_delta)?,
+            );
             let applied = self.apply_trade_after_refresh_not_atomic(
                 long_account,
                 short_account,
                 requests[i],
+                request_position_lookups,
                 recertify_after_fill,
                 i + 1 == requests.len(),
                 long_attributable_asset_before_refresh,
