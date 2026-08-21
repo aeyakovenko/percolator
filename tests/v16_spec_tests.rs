@@ -1,6 +1,6 @@
 use percolator::{
-    active_bitmap_is_empty, auto_crank_plan_requires_caller_observation, AutoCrankObservationV16,
-    AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankWorkV16,
+    active_bitmap_count_ones, active_bitmap_is_empty, auto_crank_plan_requires_caller_observation,
+    AutoCrankObservationV16, AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankWorkV16,
 };
 use percolator::{
     canonical_accrual_price_step_v16, v16_domain_count_for_market_slots, AccrualStepV16,
@@ -10,9 +10,9 @@ use percolator::{
     PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
     PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceRequestV16,
-    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
-    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
-    SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error,
+    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account,
+    ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
+    SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     V16_EMPTY_ACTIVE_BITMAP,
 };
@@ -1523,6 +1523,94 @@ fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_close_detaches_one_solvent_leg_per_call() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut long_header = account_fixture(2, 203);
+    let mut short_header = account_fixture(2, 204);
+    let requests = [
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        TradeRequestV16 {
+            asset_index: 1,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+    ];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, &requests)
+        .unwrap();
+    let resolved_slot = market.header.current_slot.get();
+    market.resolve_market_not_atomic(resolved_slot).unwrap();
+
+    let first = market
+        .close_resolved_account_not_atomic(&mut long, 0)
+        .expect("the first resolved continuation must clear one leg");
+    assert_eq!(first, ResolvedCloseOutcomeV16::ProgressOnly);
+    assert_eq!(
+        active_bitmap_count_ones(long.header.active_bitmap.map(V16PodU64::get)),
+        1
+    );
+    assert_eq!(long.header.capital.get(), 1_000);
+
+    let second = market
+        .close_resolved_account_not_atomic(&mut long, 0)
+        .expect("the final resolved continuation must clear and pay");
+    assert_eq!(second, ResolvedCloseOutcomeV16::Closed { payout: 1_000 });
+    assert!(active_bitmap_is_empty(
+        long.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(long.header.capital.get(), 0);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_auto_crank_closes_capital_only_account() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 205);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    let resolved_slot = market.header.current_slot.get();
+    market.resolve_market_not_atomic(resolved_slot).unwrap();
+
+    let summary = market
+        .build_actionable_summary(&account.as_view())
+        .expect("capital-only resolved account must classify");
+    assert!(summary.resolved_winner);
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: resolved_slot,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("permissionless close must return capital");
+    assert_eq!(result.selected, AutoCrankPlanV16::CloseResolved);
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { payout: 1_000 })
+    );
+    assert_eq!(account.header.capital.get(), 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 }
 
 #[test]

@@ -2510,14 +2510,15 @@ fn contract_check_kernel_cert_is_current() {
 
 // ROADMAP 3C step 3 (A7 close-rank fidelity): full-domain contract check that
 // build_resolved_close_rank maps each real per-component signal to its rank flag
-// (b-stale, negative PnL, live leg via non-empty bitmap, capital, receipt,
-// recovery). unwind(16): the active-bitmap is-empty scan / memcmp.
+// (b-stale, signed PnL, live leg via non-empty bitmap, source claim, capital,
+// receipt, recovery). unwind(16): the active-bitmap is-empty scan / memcmp.
 #[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::build_resolved_close_rank)]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn contract_check_build_resolved_close_rank() {
     let _ = V16Core::build_resolved_close_rank(
+        kani::any(),
         kani::any(),
         kani::any(),
         kani::any(),

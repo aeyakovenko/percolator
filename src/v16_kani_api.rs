@@ -1394,11 +1394,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::resolved_receipt_claimable_against_ledger(receipt, ledger)
     }
 
-    pub fn kani_realize_source_backed_claims_for_resolved_close_not_atomic(
+    pub fn kani_realize_one_source_domain_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<u128> {
-        self.realize_source_backed_claims_for_resolved_close_not_atomic(account)
+    ) -> V16Result<bool> {
+        self.realize_one_source_domain_for_resolved_close_not_atomic(account)
     }
 
     pub fn kani_create_resolved_payout_receipt_if_needed(
@@ -2025,7 +2025,9 @@ pub enum TradeRejectReasonV16 {
 pub struct ResolvedCloseRankV16 {
     pub b_stale: bool,           // outstanding B settlement
     pub negative_pnl: bool,      // unsettled negative PnL
+    pub positive_pnl: bool,      // terminal positive face remains
     pub active_leg: bool,        // an open leg remains
+    pub source_claim: bool,      // source attribution remains to realize/demote
     pub receipt_claim: bool,     // an unpaid resolved receipt claim
     pub capital: bool,           // residual capital to disburse
     pub recovery_required: bool, // the explicit recovery predicate holds
@@ -2034,7 +2036,13 @@ pub struct ResolvedCloseRankV16 {
 impl ResolvedCloseRankV16 {
     #[cfg_attr(not(kani), allow(dead_code))] // PROOF-ONLY: used by kernel_resolved_close_progress (fidelity model)
     pub fn has_pending(self) -> bool {
-        self.b_stale || self.negative_pnl || self.active_leg || self.receipt_claim || self.capital
+        self.b_stale
+            || self.negative_pnl
+            || self.positive_pnl
+            || self.active_leg
+            || self.source_claim
+            || self.receipt_claim
+            || self.capital
     }
 }
 
@@ -2278,13 +2286,14 @@ impl V16Core {
     /// real resolved-close per-component signals to the compact rank summary that
     /// kernel_resolved_close_progress classifies. Each rank flag is EXACTLY its
     /// production predicate — b-stale bit, negative PnL, a live leg (non-empty
-    /// active bitmap), residual capital, an open receipt, and the explicit
-    /// recovery predicate — so the close-rank summary faithfully represents the
-    /// real account/market state (no hidden pending component outside it). Pure.
+    /// active bitmap), positive face, source attribution, residual capital, an
+    /// open receipt, and the explicit recovery predicate. Pure.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|r: &ResolvedCloseRankV16| {
         r.b_stale == b_stale
             && r.negative_pnl == (pnl < 0)
+            && r.positive_pnl == (pnl > 0)
             && r.active_leg == !active_bitmap_is_empty(active_bitmap)
+            && r.source_claim == source_claim
             && r.capital == (capital > 0)
             && r.receipt_claim == receipt_present
             && r.recovery_required == recovery_required
@@ -2294,6 +2303,7 @@ impl V16Core {
         b_stale: bool,
         pnl: i128,
         active_bitmap: V16ActiveBitmap,
+        source_claim: bool,
         capital: u128,
         receipt_present: bool,
         recovery_required: bool,
@@ -2301,7 +2311,9 @@ impl V16Core {
         ResolvedCloseRankV16 {
             b_stale,
             negative_pnl: pnl < 0,
+            positive_pnl: pnl > 0,
             active_leg: !active_bitmap_is_empty(active_bitmap),
+            source_claim,
             capital: capital > 0,
             receipt_claim: receipt_present,
             recovery_required,
