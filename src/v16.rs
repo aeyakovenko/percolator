@@ -14443,24 +14443,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             target_effective_lag,
             blocked_by_pending_domain_barrier,
         )?;
+        let long_requires_initial_margin =
+            trade_account_requires_initial_margin(long_lookup.current_q, long_lookup.next_q);
+        let short_requires_initial_margin =
+            trade_account_requires_initial_margin(short_lookup.current_q, short_lookup.next_q);
         Ok(TradePositionPreflightV16 {
             risk_increasing,
-            long_requires_initial_margin: trade_account_requires_initial_margin(
-                long_lookup.current_q,
-                long_lookup.next_q,
-            ),
-            short_requires_initial_margin: trade_account_requires_initial_margin(
-                short_lookup.current_q,
-                short_lookup.next_q,
-            ),
+            long_requires_initial_margin,
+            short_requires_initial_margin,
             long_lookup,
             short_lookup,
             long_old_abs_q: long_lookup.current_q.unsigned_abs(),
             short_old_abs_q: short_lookup.current_q.unsigned_abs(),
             long_new_abs_q: long_lookup.next_q.unsigned_abs(),
             short_new_abs_q: short_lookup.next_q.unsigned_abs(),
-            long_has_source_claims: Self::account_has_source_claims(long_account)?,
-            short_has_source_claims: Self::account_has_source_claims(short_account)?,
+            // Source-claim presence is consumed only when this account needs initial margin.
+            // Strict reductions cannot create an initial-margin lien, so rescanning every source
+            // domain for every reducing batch leg is dead work at maximum portfolio shape.
+            long_has_source_claims: long_requires_initial_margin
+                && Self::account_has_source_claims(long_account)?,
+            short_has_source_claims: short_requires_initial_margin
+                && Self::account_has_source_claims(short_account)?,
         })
     }
 
