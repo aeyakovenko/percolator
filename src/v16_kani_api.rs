@@ -1302,10 +1302,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Self::terminal_trade_residual_asset_before_refresh(&long_account.as_view())?;
         let short_attributable_asset_before_refresh =
             Self::terminal_trade_residual_asset_before_refresh(&short_account.as_view())?;
+        let (_, long_delta, short_delta) = Self::trade_signed_size_deltas(request.size_q)?;
+        let position_lookups = (
+            Self::position_delta_lookup_for_asset(
+                &long_account.as_view(),
+                request.asset_index,
+                long_delta,
+            )?,
+            Self::position_delta_lookup_for_asset(
+                &short_account.as_view(),
+                request.asset_index,
+                short_delta,
+            )?,
+        );
         let out = self.apply_trade_after_refresh_not_atomic(
             long_account,
             short_account,
             request,
+            position_lookups,
             recertify_after_fill,
             true,
             long_attributable_asset_before_refresh,
