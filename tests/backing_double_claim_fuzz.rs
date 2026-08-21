@@ -204,14 +204,16 @@ proptest! {
 
     /// A source-backed winner's claim is realizable against its domain backing at
     /// the current credit rate in Live (convert_released_pnl_to_capital). Resolution
-    /// must not strip that entitlement: at resolved close the winner must be paid
-    /// exactly the Live-realizable portion — funded by consuming the backing —
-    /// instead of being haircut from a pool that excludes the very backing
-    /// underwriting the claim while the provider exits whole.
+    /// must not strip either component of that entitlement: resolved close first
+    /// converts the Live-realizable portion using source backing, then retains the
+    /// source haircut remainder as ordinary junior face against the terminal pool.
+    /// Otherwise a tiny source rate can burn a large claim and strand unrelated
+    /// junior value in the vault.
     #[test]
     fn terminal_close_realizes_backed_source_claim(
         pnl in 1u128..=1_000_000u128,
         backing_frac in 1u128..=1000u128,
+        extra_residual in 0u128..=1_000_000u128,
     ) {
         let backing = (pnl.saturating_mul(backing_frac) / 1000).max(1).min(pnl);
         // The engine's Live entitlement, mirrored exactly (floored credit rate,
@@ -222,9 +224,12 @@ proptest! {
         let rate = (backing_num * CREDIT_RATE_SCALE / claim_num).min(CREDIT_RATE_SCALE);
         let realizable =
             ((claim_num * rate / CREDIT_RATE_SCALE) / BOUND_SCALE).min(backing).min(pnl);
+        let retained_terminal_face = pnl - realizable;
+        let terminal_junior_payout = retained_terminal_face.min(extra_residual);
+        let expected_payout = realizable + terminal_junior_payout;
 
         let (mut header, mut markets, mut account_header) =
-            resolved_market_with_backed_winner(pnl, backing, 0);
+            resolved_market_with_backed_winner(pnl, backing, extra_residual);
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
         prop_assert_eq!(market.validate_shape(), Ok(()));
@@ -238,21 +243,17 @@ proptest! {
         prop_assert!(closed, "backed winner did not fully close");
         let paid = vault_before - market.header.vault.get();
 
-        // The Live-realizable portion of the claim must reach the winner...
-        prop_assert_eq!(paid, realizable);
+        // Source-backed atoms become capital, while the haircut remainder keeps
+        // its place in the terminal junior pool rather than disappearing.
+        prop_assert_eq!(paid, expected_payout);
         // ...a fully-backed claim realizes in full...
         if backing >= pnl {
             prop_assert_eq!(paid, pnl);
         }
-        // ...and the provider keeps exactly the unconsumed remainder.
-        prop_assert_eq!(market.header.vault.get(), backing - paid);
+        prop_assert_eq!(market.header.vault.get(), backing + extra_residual - paid);
         prop_assert_eq!(market.validate_shape(), Ok(()));
 
-        // NO DOUBLE-PAY (review finding 3): the winner is paid AT MOST its face
-        // (here exactly the realizable portion <= face); the unrealized
-        // remainder is burned with the consumed face, not also paid through the
-        // receipt pool. The account is fully extinguished (pnl=0, capital=0), so
-        // no surviving face can be double-paid.
+        // The two disjoint payout layers never exceed the original face.
         prop_assert!(paid <= pnl);
         prop_assert_eq!(account.header.pnl.get(), 0);
         prop_assert_eq!(account.header.capital.get(), 0);
@@ -264,7 +265,7 @@ proptest! {
         if let ResolvedCloseOutcomeV16::Closed { payout } = outcome2 {
             prop_assert_eq!(payout, 0);
         }
-        prop_assert_eq!(market.header.vault.get(), backing - paid);
+        prop_assert_eq!(market.header.vault.get(), backing + extra_residual - paid);
     }
 }
 

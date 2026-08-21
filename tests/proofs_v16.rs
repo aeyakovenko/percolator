@@ -9690,6 +9690,46 @@ fn proof_v16_resolved_receipt_payment_cannot_exceed_terminal_claim() {
 }
 
 #[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_source_haircut_retains_junior_face() {
+    let positive_face: u128 = kani::any();
+    let converted: u128 = kani::any();
+    let source_face_burn: u128 = kani::any();
+    let retain_haircut_face: bool = kani::any();
+
+    let result = MarketGroupV16ViewMut::<u64>::kani_kernel_released_pnl_conversion_partition(
+        positive_face,
+        converted,
+        source_face_burn,
+        retain_haircut_face,
+    );
+    if converted > source_face_burn || source_face_burn > positive_face {
+        assert_eq!(result, Err(V16Error::InvalidConfig));
+        return;
+    }
+
+    let (pnl_debit, retained_haircut_face) = result.unwrap();
+    let remaining_face = positive_face - pnl_debit;
+    assert_eq!(pnl_debit + remaining_face, positive_face);
+    if retain_haircut_face {
+        assert_eq!(pnl_debit, converted);
+        assert_eq!(retained_haircut_face, source_face_burn - converted);
+        assert_eq!(
+            converted + retained_haircut_face + (positive_face - source_face_burn),
+            positive_face
+        );
+        kani::cover!(
+            converted < source_face_burn,
+            "terminal partition retains a nonzero source haircut as junior face"
+        );
+    } else {
+        assert_eq!(pnl_debit, source_face_burn);
+        assert_eq!(retained_haircut_face, 0);
+    }
+}
+
+#[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_resolved_receipt_claimable_is_rate_monotone_and_overpaid_fails_closed() {

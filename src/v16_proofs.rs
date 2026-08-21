@@ -2338,6 +2338,26 @@ fn contract_check_kernel_resolved_payout_step() {
     let _ = V16Core::kernel_resolved_payout_step(claimable, vault);
 }
 
+// INV-067: full-domain contract check for the conversion partition used by
+// resolved close. A source haircut can change attribution, but only atoms
+// actually converted to capital may leave terminal junior claim face.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_released_pnl_conversion_partition)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_released_pnl_conversion_partition() {
+    let positive_face: u128 = kani::any();
+    let converted: u128 = kani::any();
+    let source_face_burn: u128 = kani::any();
+    let retain_haircut_face: bool = kani::any();
+    let _ = V16Core::kernel_released_pnl_conversion_partition(
+        positive_face,
+        converted,
+        source_face_burn,
+        retain_haircut_face,
+    );
+}
+
 // ROADMAP Phase 3A.1 (Pillar S, trade spine): full-domain contract check of the
 // position-route classifier — the exact (Attach/Clear/Flip/Resize) decision the
 // position-delta body dispatches on. Production (apply_position_delta_with_lookup

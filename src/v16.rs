@@ -1599,6 +1599,46 @@ impl V16Core {
         (payout, new_vault)
     }
 
+    /// Separates elective live source-credit conversion from mandatory terminal
+    /// settlement. At terminal, only value actually converted to capital leaves
+    /// the junior claim face; the source haircut remainder stays in the receipt
+    /// pool instead of becoming ownerless vault residue.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
+        Ok((pnl_debit, retained_haircut_face)) => {
+            converted <= source_face_burn
+                && source_face_burn <= positive_face
+                && *pnl_debit <= positive_face
+                && positive_face.wrapping_sub(*pnl_debit).wrapping_add(*pnl_debit)
+                    == positive_face
+                && if retain_haircut_face {
+                    *pnl_debit == converted
+                        && *retained_haircut_face == source_face_burn - converted
+                        && converted
+                            .wrapping_add(*retained_haircut_face)
+                            .wrapping_add(positive_face - source_face_burn)
+                            == positive_face
+                } else {
+                    *pnl_debit == source_face_burn && *retained_haircut_face == 0
+                }
+        }
+        Err(_) => converted > source_face_burn || source_face_burn > positive_face,
+    }))]
+    pub(crate) fn kernel_released_pnl_conversion_partition(
+        positive_face: u128,
+        converted: u128,
+        source_face_burn: u128,
+        retain_haircut_face: bool,
+    ) -> V16Result<(u128, u128)> {
+        if converted > source_face_burn || source_face_burn > positive_face {
+            return Err(V16Error::InvalidConfig);
+        }
+        if retain_haircut_face {
+            Ok((converted, source_face_burn - converted))
+        } else {
+            Ok((source_face_burn, 0))
+        }
+    }
+
     /// Recompute the resolved payout rate from the ledger's current residual
     /// and outstanding claim bound. This deliberately contains no wide
     /// division: receipts apply the resulting fraction when they are paid.
@@ -6124,6 +6164,12 @@ struct SourceCreditConsumptionV16 {
     face_burn: u128,
     counterparty_credit_consumed: u128,
     insurance_credit_consumed: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReleasedPnlConversionDispositionV16 {
+    ConsumeHaircutFace,
+    RetainHaircutFaceForTerminalReceipt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11152,6 +11198,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         source_face_burn_num: u128,
     ) -> V16Result<()> {
         self.set_account_pnl_inner(account, new_pnl, None, source_face_burn_num)
+    }
+
+    fn set_account_pnl_after_terminal_source_conversion(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        new_pnl: i128,
+    ) -> V16Result<()> {
+        let old_pos = account.header.pnl.get().max(0) as u128;
+        let new_pos = new_pnl.max(0) as u128;
+        let pnl_debit = old_pos
+            .checked_sub(new_pos)
+            .ok_or(V16Error::InvalidConfig)?;
+        let pnl_debit_num = V16Core::bound_num_from_amount(pnl_debit)?;
+        let source_claim_num = Self::account_source_claim_bound_sum_num(&account.as_view())?;
+        if source_claim_num < pnl_debit_num {
+            return Err(V16Error::InvalidConfig);
+        }
+
+        // A resolved receipt has no source-domain lane. Consume all remaining
+        // source attribution, then mark only the actual PnL debit as pre-burned.
+        // Every excess source face is thereby demoted to ordinary junior face
+        // and remains eligible for that terminal receipt.
+        self.burn_account_source_claim_bound_num(account, source_claim_num)?;
+        self.set_account_pnl_inner(account, new_pnl, None, pnl_debit_num)
     }
 
     fn set_account_pnl_after_domain_first_source_claim_burn(
@@ -16436,6 +16506,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn convert_released_pnl_to_capital_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
+        disposition: ReleasedPnlConversionDispositionV16,
     ) -> V16Result<u128> {
         let pos = account.header.pnl.get().max(0) as u128;
         let released = pos.saturating_sub(account.header.reserved_pnl.get());
@@ -16475,15 +16546,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 insurance_credit_consumed: 0,
             }
         };
-        let face_i128 =
-            i128::try_from(consumption.face_burn).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let retain_haircut_face = matches!(
+            disposition,
+            ReleasedPnlConversionDispositionV16::RetainHaircutFaceForTerminalReceipt
+        );
+        let (pnl_debit, _retained_haircut_face) =
+            V16Core::kernel_released_pnl_conversion_partition(
+                pos,
+                converted,
+                consumption.face_burn,
+                retain_haircut_face,
+            )?;
+        let face_i128 = i128::try_from(pnl_debit).map_err(|_| V16Error::ArithmeticOverflow)?;
         let new_pnl = account
             .header
             .pnl
             .get()
             .checked_sub(face_i128)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        self.set_account_pnl(account, new_pnl)?;
+        if retain_haircut_face {
+            self.set_account_pnl_after_terminal_source_conversion(account, new_pnl)?;
+        } else {
+            self.set_account_pnl(account, new_pnl)?;
+        }
         account.header.capital = V16PodU128::new(
             account
                 .header
@@ -16503,7 +16588,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header
                 .pnl_matured_pos_tot
                 .get()
-                .saturating_sub(consumption.face_burn),
+                .saturating_sub(pnl_debit),
         );
         let protocol_surplus_consumed = converted
             .checked_sub(consumption.counterparty_credit_consumed)
@@ -16527,7 +16612,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
         self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
-        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
+        let converted = self.convert_released_pnl_to_capital_core_not_atomic(
+            account,
+            ReleasedPnlConversionDispositionV16::ConsumeHaircutFace,
+        )?;
         if converted != 0 {
             self.validate_shape()?;
             account.validate_with_market(&self.as_view())?;
@@ -17017,7 +17105,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         // Terminal: PnL reservations no longer gate realization.
         account.header.reserved_pnl = V16PodU128::new(0);
-        let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
+        let converted = self.convert_released_pnl_to_capital_core_not_atomic(
+            account,
+            ReleasedPnlConversionDispositionV16::RetainHaircutFaceForTerminalReceipt,
+        )?;
         // If the payout snapshot was captured before this account realized (another
         // winner closed first), the realized face is still counted in the ledger's
         // unreceipted bound. Refine it out, or the stale bound dilutes the payout

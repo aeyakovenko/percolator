@@ -572,6 +572,20 @@ impl MarketGroupV16HeaderAccount {
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_kernel_released_pnl_conversion_partition(
+        positive_face: u128,
+        converted: u128,
+        source_face_burn: u128,
+        retain_haircut_face: bool,
+    ) -> V16Result<(u128, u128)> {
+        V16Core::kernel_released_pnl_conversion_partition(
+            positive_face,
+            converted,
+            source_face_burn,
+            retain_haircut_face,
+        )
+    }
+
     pub fn kani_kernel_credit_post_snapshot_residual(
         ledger: ResolvedPayoutLedgerV16,
         legacy_snapshot: u128,
