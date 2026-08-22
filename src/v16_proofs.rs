@@ -2678,6 +2678,17 @@ fn contract_check_kernel_bresidual_step() {
     let _ = V16Core::kernel_bresidual_step(residual_remaining, booked, resolved);
 }
 
+// Exhaustive scalar routing for terminal forfeit: the formerly rollback-only
+// zero-capacity branch is uniquely classified as successful Recovery progress.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_forfeit_residual_step)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_forfeit_residual_step() {
+    let residual_remaining: u128 = kani::any();
+    let booking_capacity: u128 = kani::any();
+    let _ = V16Core::kernel_forfeit_residual_step(residual_remaining, booking_capacity);
+}
+
 // ROADMAP workstream B.2 (cross-layer conservation): book_bankruptcy_residual_
 // chunk_for_account_core calls the inner booking step on ledger.residual_remaining
 // and then advances the close ledger by the outcome's (booked_loss, explicit_loss).

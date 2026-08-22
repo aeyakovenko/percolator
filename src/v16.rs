@@ -2409,6 +2409,33 @@ impl V16Core {
         }
     }
 
+    /// Select the terminal owner-forfeit residual route. An unbookable positive
+    /// residual commits Recovery as a successful transition so SVM rollback
+    /// cannot erase the only path to resolved settlement.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|r: &ForfeitResidualStepV16| {
+        match r {
+            ForfeitResidualStepV16::NoResidual => residual_remaining == 0,
+            ForfeitResidualStepV16::Book => {
+                residual_remaining != 0 && booking_capacity != 0
+            }
+            ForfeitResidualStepV16::CommitRecovery => {
+                residual_remaining != 0 && booking_capacity == 0
+            }
+        }
+    }))]
+    pub(crate) fn kernel_forfeit_residual_step(
+        residual_remaining: u128,
+        booking_capacity: u128,
+    ) -> ForfeitResidualStepV16 {
+        if residual_remaining == 0 {
+            ForfeitResidualStepV16::NoResidual
+        } else if booking_capacity == 0 {
+            ForfeitResidualStepV16::CommitRecovery
+        } else {
+            ForfeitResidualStepV16::Book
+        }
+    }
+
     /// PRODUCTION KERNEL (roadmap workstream B.2, resolved-bankruptcy PnL
     /// settlement): reduce an account's NEGATIVE PnL by the loss the residual
     /// booking just absorbed. `cleared = min(booked_loss + explicit_loss, |pnl|)`
@@ -6535,6 +6562,13 @@ pub struct BResidualBookingOutcomeV16 {
 pub enum BResidualStepV16 {
     Outcome(BResidualBookingOutcomeV16),
     DeclareRecovery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForfeitResidualStepV16 {
+    NoResidual,
+    Book,
+    CommitRecovery,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18550,27 +18584,57 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         let mut residual_booked = 0u128;
         let mut explicit_loss = 0u128;
-        if residual != 0 {
-            let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
-                account,
-                asset_index,
-                leg.side,
-                residual,
-            )?;
-            residual_booked = outcome.booked_loss;
-            explicit_loss = outcome.explicit_loss;
-            let cleared = residual_booked
-                .checked_add(explicit_loss)
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .min(residual);
-            let cleared_i128 = i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
-            let new_pnl = account
-                .header
-                .pnl
-                .get()
-                .checked_add(cleared_i128)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            self.set_account_pnl(account, new_pnl)?;
+        let booking_capacity = if residual == 0 {
+            0
+        } else {
+            self.bankruptcy_residual_single_step_capacity(asset_index, leg.side, residual)?
+        };
+        match V16Core::kernel_forfeit_residual_step(residual, booking_capacity) {
+            ForfeitResidualStepV16::NoResidual => {}
+            ForfeitResidualStepV16::CommitRecovery => {
+                // The opposing side may already have completed terminal wind-down.
+                // Returning RecoveryRequired would make SVM rollback the only
+                // terminal transition. The close ledger retains the exact debt.
+                self.declare_permissionless_recovery(
+                    PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+                )?;
+                self.validate_shape()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(DeadLegForfeitOutcomeV16 {
+                    detached: false,
+                    positive_pnl_forfeited,
+                    loss_settled: total_loss_settled,
+                    support_consumed,
+                    junior_face_burned,
+                    principal_used,
+                    insurance_used,
+                    residual_booked: 0,
+                    explicit_loss: 0,
+                });
+            }
+            ForfeitResidualStepV16::Book => {
+                let outcome = self.book_bankruptcy_residual_chunk_for_account_core(
+                    account,
+                    asset_index,
+                    leg.side,
+                    residual,
+                )?;
+                residual_booked = outcome.booked_loss;
+                explicit_loss = outcome.explicit_loss;
+                let cleared = residual_booked
+                    .checked_add(explicit_loss)
+                    .ok_or(V16Error::ArithmeticOverflow)?
+                    .min(residual);
+                let cleared_i128 =
+                    i128::try_from(cleared).map_err(|_| V16Error::ArithmeticOverflow)?;
+                let new_pnl = account
+                    .header
+                    .pnl
+                    .get()
+                    .checked_add(cleared_i128)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+                self.set_account_pnl(account, new_pnl)?;
+            }
         }
 
         let detached = account.header.pnl.get() >= 0
