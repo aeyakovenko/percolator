@@ -17,7 +17,9 @@ use percolator::{
     V16_EMPTY_ACTIVE_BITMAP,
 };
 #[cfg(feature = "fuzz")]
-use percolator::{PermissionlessCrankActionV16, PermissionlessCrankRequestV16};
+use percolator::{
+    MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16, SOCIAL_LOSS_DEN,
+};
 use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 
 const FUNDING_COUNTER_PRICE: u64 = 1_000_000;
@@ -3414,6 +3416,52 @@ fn v16_permissionless_recovery_crank_is_value_neutral_and_idempotent() {
     assert_eq!(account.header.pnl, pnl_before);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[cfg(feature = "fuzz")]
+#[test]
+fn v16_b_index_headroom_exhaustion_declares_value_neutral_recovery() {
+    // This is the deployed-arithmetic boundary half of the liveness argument.
+    // The generic residual-step contract proves the resulting capacity split;
+    // this test executes the production U256 calculation at absolute B-index
+    // saturation and checks that it enters recovery without moving value.
+    for residual in [1, u64::MAX as u128] {
+        let (mut header, mut markets) = market_fixture(1, 100);
+        header.config.public_b_chunk_atoms = V16PodU128::new(1);
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.oi_eff_long_q = POS_SCALE;
+        asset.oi_eff_short_q = POS_SCALE;
+        asset.stored_pos_count_long = 1;
+        asset.stored_pos_count_short = 1;
+        asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+        asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+        asset.b_short_num = u128::MAX;
+        asset.social_loss_remainder_short_num = 0;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        let asset_before = markets[0].engine.asset;
+        let vault_before = header.vault;
+        let c_tot_before = header.c_tot;
+        let insurance_before = header.insurance;
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let capacity = market
+            .kani_bankruptcy_residual_single_step_capacity(0, SideV16::Long, residual)
+            .unwrap();
+        let result =
+            market.kani_book_bankruptcy_residual_chunk_internal(0, SideV16::Long, residual);
+
+        assert_eq!(capacity, 0);
+        assert_eq!(result, Err(V16Error::RecoveryRequired));
+        assert_eq!(market.header.mode, MarketModeV16::Recovery as u8);
+        assert_eq!(
+            market.header.recovery_reason.try_to_runtime().unwrap(),
+            Some(PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted)
+        );
+        assert_eq!(market.header.vault, vault_before);
+        assert_eq!(market.header.c_tot, c_tot_before);
+        assert_eq!(market.header.insurance, insurance_before);
+        assert_eq!(market.markets[0].engine.asset, asset_before);
+    }
 }
 
 #[test]
