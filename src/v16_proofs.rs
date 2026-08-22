@@ -1573,6 +1573,17 @@ fn contract_check_kernel_attach_leg() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_normalize_social_loss_carry)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_normalize_social_loss_carry() {
+    let remainder: u128 = kani::any();
+    let dust: u128 = kani::any();
+    let explicit_loss: u128 = kani::any();
+    let _ = V16Core::kernel_normalize_social_loss_carry(remainder, dust, explicit_loss);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::kernel_clear_leg)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]

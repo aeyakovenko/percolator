@@ -687,6 +687,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::kernel_begin_full_drain_reset(asset, side)
     }
 
+    pub fn kani_kernel_normalize_social_loss_carry(
+        remainder: u128,
+        dust: u128,
+        explicit_loss: u128,
+    ) -> V16Result<(u128, u128)> {
+        V16Core::kernel_normalize_social_loss_carry(remainder, dust, explicit_loss)
+    }
+
     pub fn kani_kernel_clear_leg(
         leg: PortfolioLegV16,
         asset: AssetStateV16,

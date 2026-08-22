@@ -918,6 +918,14 @@ social_loss_remainder_side_num < SOCIAL_LOSS_DEN
 social_loss_dust_side_num < SOCIAL_LOSS_DEN
 ```
 
+When a side reset or leg clear combines two valid sub-atom social-loss carries,
+the sum is normalized modulo `SOCIAL_LOSS_DEN`. Crossing the denominator adds
+one to the side-local `explicit_unallocated_loss` audit counter; that counter
+saturates and never creates payout capacity. Remainder, dust, and explicit-loss
+audit fields remain durable while the asset has any live economic obligation.
+An otherwise empty asset may clear only those inert fields atomically with
+retirement so historical rounding cannot permanently block terminal progress.
+
 ```text
 abs(K_side) + A_side * MAX_ORACLE_PRICE <= i128::MAX
 abs(F_side_num) + A_side * MAX_ORACLE_PRICE * cfg_max_abs_funding_e9_per_slot * cfg_max_accrual_dt_slots <= i128::MAX

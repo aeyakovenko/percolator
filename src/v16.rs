@@ -2485,6 +2485,49 @@ impl V16Core {
         Ok(leg)
     }
 
+    /// Normalize two sub-atom social-loss carries without making a valid exit
+    /// fallible. Crossing one atom records a side-local explicit loss and keeps
+    /// only the fractional remainder as dust. The explicit counter is audit
+    /// state, so saturation preserves liveness without creating payout value.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| match result {
+        Ok((next_dust, next_explicit)) => {
+            let total = remainder.wrapping_add(dust);
+            remainder < SOCIAL_LOSS_DEN
+                && dust < SOCIAL_LOSS_DEN
+                && *next_dust == if total >= SOCIAL_LOSS_DEN {
+                total.wrapping_sub(SOCIAL_LOSS_DEN)
+            } else {
+                total
+            }
+                && *next_explicit == explicit_loss.saturating_add(if total >= SOCIAL_LOSS_DEN { 1 } else { 0 })
+                && *next_dust < SOCIAL_LOSS_DEN
+                && *next_explicit >= explicit_loss
+        }
+        Err(_) => remainder >= SOCIAL_LOSS_DEN || dust >= SOCIAL_LOSS_DEN,
+    }))]
+    pub(crate) fn kernel_normalize_social_loss_carry(
+        remainder: u128,
+        dust: u128,
+        explicit_loss: u128,
+    ) -> V16Result<(u128, u128)> {
+        if remainder >= SOCIAL_LOSS_DEN || dust >= SOCIAL_LOSS_DEN {
+            return Err(V16Error::InvalidConfig);
+        }
+        let total = remainder
+            .checked_add(dust)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let crossed_atom = total >= SOCIAL_LOSS_DEN;
+        let next_dust = if crossed_atom {
+            total - SOCIAL_LOSS_DEN
+        } else {
+            total
+        };
+        Ok((
+            next_dust,
+            explicit_loss.saturating_add(u128::from(crossed_atom)),
+        ))
+    }
+
     /// PRODUCTION KERNEL: move an exhausted side behind a reset epoch without
     /// touching the opposite side. Prior-epoch legs can then detach without
     /// subtracting their stored basis from already-zero effective OI.
@@ -2500,10 +2543,14 @@ impl V16Core {
                 {
                     return Err(V16Error::LockActive);
                 }
-                quarantine_remainder(
-                    &mut asset.social_loss_remainder_long_num,
-                    &mut asset.social_loss_dust_long_num,
+                let (dust, explicit_loss) = V16Core::kernel_normalize_social_loss_carry(
+                    asset.social_loss_remainder_long_num,
+                    asset.social_loss_dust_long_num,
+                    asset.explicit_unallocated_loss_long,
                 )?;
+                asset.social_loss_remainder_long_num = 0;
+                asset.social_loss_dust_long_num = dust;
+                asset.explicit_unallocated_loss_long = explicit_loss;
                 asset.k_epoch_start_long = asset.k_long;
                 asset.f_epoch_start_long_num = asset.f_long_num;
                 asset.b_epoch_start_long_num = asset.b_long_num;
@@ -2525,10 +2572,14 @@ impl V16Core {
                 {
                     return Err(V16Error::LockActive);
                 }
-                quarantine_remainder(
-                    &mut asset.social_loss_remainder_short_num,
-                    &mut asset.social_loss_dust_short_num,
+                let (dust, explicit_loss) = V16Core::kernel_normalize_social_loss_carry(
+                    asset.social_loss_remainder_short_num,
+                    asset.social_loss_dust_short_num,
+                    asset.explicit_unallocated_loss_short,
                 )?;
+                asset.social_loss_remainder_short_num = 0;
+                asset.social_loss_dust_short_num = dust;
+                asset.explicit_unallocated_loss_short = explicit_loss;
                 asset.k_epoch_start_short = asset.k_short;
                 asset.f_epoch_start_short_num = asset.f_short_num;
                 asset.b_epoch_start_short_num = asset.b_short_num;
@@ -2571,11 +2622,20 @@ impl V16Core {
                         a.oi_eff_long_q == asset.oi_eff_long_q
                             && a.loss_weight_sum_long == asset.loss_weight_sum_long
                             && a.social_loss_dust_long_num == asset.social_loss_dust_long_num
+                            && a.explicit_unallocated_loss_long == asset.explicit_unallocated_loss_long
                     } else {
                         a.oi_eff_long_q == asset.oi_eff_long_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
                             && a.loss_weight_sum_long == asset.loss_weight_sum_long.wrapping_sub(leg.loss_weight)
-                            && a.social_loss_dust_long_num == asset.social_loss_dust_long_num.wrapping_add(leg.b_rem)
-                            && (leg.b_rem == 0 || a.social_loss_dust_long_num < SOCIAL_LOSS_DEN)
+                            && a.social_loss_dust_long_num == if leg.b_rem == 0 {
+                                asset.social_loss_dust_long_num
+                            } else if asset.social_loss_dust_long_num.wrapping_add(leg.b_rem) >= SOCIAL_LOSS_DEN {
+                                asset.social_loss_dust_long_num.wrapping_add(leg.b_rem).wrapping_sub(SOCIAL_LOSS_DEN)
+                            } else {
+                                asset.social_loss_dust_long_num.wrapping_add(leg.b_rem)
+                            }
+                            && a.explicit_unallocated_loss_long == asset.explicit_unallocated_loss_long.saturating_add(
+                                if leg.b_rem != 0 && asset.social_loss_dust_long_num.wrapping_add(leg.b_rem) >= SOCIAL_LOSS_DEN { 1 } else { 0 }
+                            )
                     })
                     && a.oi_eff_short_q == asset.oi_eff_short_q
                     && a.loss_weight_sum_short == asset.loss_weight_sum_short
@@ -2589,11 +2649,20 @@ impl V16Core {
                         a.oi_eff_short_q == asset.oi_eff_short_q
                             && a.loss_weight_sum_short == asset.loss_weight_sum_short
                             && a.social_loss_dust_short_num == asset.social_loss_dust_short_num
+                            && a.explicit_unallocated_loss_short == asset.explicit_unallocated_loss_short
                     } else {
                         a.oi_eff_short_q == asset.oi_eff_short_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
                             && a.loss_weight_sum_short == asset.loss_weight_sum_short.wrapping_sub(leg.loss_weight)
-                            && a.social_loss_dust_short_num == asset.social_loss_dust_short_num.wrapping_add(leg.b_rem)
-                            && (leg.b_rem == 0 || a.social_loss_dust_short_num < SOCIAL_LOSS_DEN)
+                            && a.social_loss_dust_short_num == if leg.b_rem == 0 {
+                                asset.social_loss_dust_short_num
+                            } else if asset.social_loss_dust_short_num.wrapping_add(leg.b_rem) >= SOCIAL_LOSS_DEN {
+                                asset.social_loss_dust_short_num.wrapping_add(leg.b_rem).wrapping_sub(SOCIAL_LOSS_DEN)
+                            } else {
+                                asset.social_loss_dust_short_num.wrapping_add(leg.b_rem)
+                            }
+                            && a.explicit_unallocated_loss_short == asset.explicit_unallocated_loss_short.saturating_add(
+                                if leg.b_rem != 0 && asset.social_loss_dust_short_num.wrapping_add(leg.b_rem) >= SOCIAL_LOSS_DEN { 1 } else { 0 }
+                            )
                     })
                     && a.oi_eff_long_q == asset.oi_eff_long_q
                     && a.loss_weight_sum_long == asset.loss_weight_sum_long
@@ -2624,8 +2693,8 @@ impl V16Core {
                 && a.stale_account_count_short == asset.stale_account_count_short
                 && a.social_loss_remainder_long_num == asset.social_loss_remainder_long_num
                 && a.social_loss_remainder_short_num == asset.social_loss_remainder_short_num
-                && a.explicit_unallocated_loss_long == asset.explicit_unallocated_loss_long
-                && a.explicit_unallocated_loss_short == asset.explicit_unallocated_loss_short
+                && (leg.side == SideV16::Long || a.explicit_unallocated_loss_long == asset.explicit_unallocated_loss_long)
+                && (leg.side == SideV16::Short || a.explicit_unallocated_loss_short == asset.explicit_unallocated_loss_short)
                 && a.epoch_long == asset.epoch_long
                 && a.epoch_short == asset.epoch_short
                 && a.mode_long == asset.mode_long
@@ -2647,18 +2716,22 @@ impl V16Core {
                     && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
             }
         };
-        let dust_after_clear = if !prior_reset_epoch && leg.b_rem != 0 {
-            let current_dust = match leg.side {
-                SideV16::Long => asset.social_loss_dust_long_num,
-                SideV16::Short => asset.social_loss_dust_short_num,
+        let normalized_carry = if !prior_reset_epoch && leg.b_rem != 0 {
+            let (dust, explicit_loss) = match leg.side {
+                SideV16::Long => (
+                    asset.social_loss_dust_long_num,
+                    asset.explicit_unallocated_loss_long,
+                ),
+                SideV16::Short => (
+                    asset.social_loss_dust_short_num,
+                    asset.explicit_unallocated_loss_short,
+                ),
             };
-            let new_dust = current_dust
-                .checked_add(leg.b_rem)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            if new_dust >= SOCIAL_LOSS_DEN {
-                return Err(V16Error::RecoveryRequired);
-            }
-            Some(new_dust)
+            Some(V16Core::kernel_normalize_social_loss_carry(
+                leg.b_rem,
+                dust,
+                explicit_loss,
+            )?)
         } else {
             None
         };
@@ -2675,8 +2748,9 @@ impl V16Core {
                         .ok_or(V16Error::CounterUnderflow)?;
                 }
                 if !prior_reset_epoch {
-                    if let Some(new_dust) = dust_after_clear {
+                    if let Some((new_dust, explicit_loss)) = normalized_carry {
                         asset.social_loss_dust_long_num = new_dust;
+                        asset.explicit_unallocated_loss_long = explicit_loss;
                     }
                     asset.oi_eff_long_q = asset
                         .oi_eff_long_q
@@ -2700,8 +2774,9 @@ impl V16Core {
                         .ok_or(V16Error::CounterUnderflow)?;
                 }
                 if !prior_reset_epoch {
-                    if let Some(new_dust) = dust_after_clear {
+                    if let Some((new_dust, explicit_loss)) = normalized_carry {
                         asset.social_loss_dust_short_num = new_dust;
+                        asset.explicit_unallocated_loss_short = explicit_loss;
                     }
                     asset.oi_eff_short_q = asset
                         .oi_eff_short_q
@@ -14206,13 +14281,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn require_empty_asset_lifecycle_state(&self, asset_index: usize) -> V16Result<()> {
-        self.require_empty_asset_lifecycle_state_with_spent_policy(asset_index, false)
+        self.require_empty_asset_lifecycle_state_with_policy(asset_index, false, false)
     }
 
-    fn require_empty_asset_lifecycle_state_with_spent_policy(
+    fn require_empty_asset_lifecycle_state_with_policy(
         &self,
         asset_index: usize,
         allow_terminal_spent_budget: bool,
+        allow_terminal_social_loss_audit: bool,
     ) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
         let asset = self.asset_state(asset_index)?;
@@ -14264,12 +14340,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.pending_obligation_count_short != 0
             || asset.loss_weight_sum_long != 0
             || asset.loss_weight_sum_short != 0
-            || asset.social_loss_remainder_long_num != 0
-            || asset.social_loss_remainder_short_num != 0
-            || asset.social_loss_dust_long_num != 0
-            || asset.social_loss_dust_short_num != 0
-            || asset.explicit_unallocated_loss_long != 0
-            || asset.explicit_unallocated_loss_short != 0
+            || (!allow_terminal_social_loss_audit
+                && (asset.social_loss_remainder_long_num != 0
+                    || asset.social_loss_remainder_short_num != 0
+                    || asset.social_loss_dust_long_num != 0
+                    || asset.social_loss_dust_short_num != 0
+                    || asset.explicit_unallocated_loss_long != 0
+                    || asset.explicit_unallocated_loss_short != 0))
             || spent_blocks_empty
             || !long_source.is_empty_amount_shape()
             || !short_source.is_empty_amount_shape()
@@ -17977,9 +18054,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             | AssetLifecycleV16::DrainOnly
             | AssetLifecycleV16::Recovery => {
                 self.expire_lapsed_source_backing_for_asset_not_atomic(asset_index, now_slot)?;
-                self.require_empty_asset_lifecycle_state(asset_index)?;
+                self.require_empty_asset_lifecycle_state_with_policy(asset_index, false, true)?;
                 let (next_asset_set_epoch, next_risk_epoch) =
                     self.checked_asset_set_epoch_bump()?;
+                Self::clear_terminal_social_loss_audit(&mut asset);
                 asset.lifecycle = AssetLifecycleV16::Retired;
                 asset.retired_slot = now_slot;
                 self.set_asset_state(asset_index, asset)?;
@@ -17989,11 +18067,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             AssetLifecycleV16::Retired => {
                 self.expire_lapsed_source_backing_for_asset_not_atomic(asset_index, now_slot)?;
-                self.require_empty_asset_lifecycle_state(asset_index)?;
+                self.require_empty_asset_lifecycle_state_with_policy(asset_index, false, true)?;
+                Self::clear_terminal_social_loss_audit(&mut asset);
+                self.set_asset_state(asset_index, asset)?;
                 self.validate_shape()
             }
             _ => Err(V16Error::LockActive),
         }
+    }
+
+    fn clear_terminal_social_loss_audit(asset: &mut AssetStateV16) {
+        asset.social_loss_remainder_long_num = 0;
+        asset.social_loss_remainder_short_num = 0;
+        asset.social_loss_dust_long_num = 0;
+        asset.social_loss_dust_short_num = 0;
+        asset.explicit_unallocated_loss_long = 0;
+        asset.explicit_unallocated_loss_short = 0;
     }
 
     /// Retirement is the terminal consumer for one asset, so it must normalize
@@ -18096,7 +18185,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ) {
             return Err(V16Error::LockActive);
         }
-        self.require_empty_asset_lifecycle_state_with_spent_policy(asset_index, true)?;
+        self.require_empty_asset_lifecycle_state_with_policy(asset_index, true, true)?;
         let slot = self.markets[asset_index].engine_slot_mut();
         let (budget_long, spent_long) = Self::clear_terminal_spent_domain_budget_pair(
             slot.insurance_domain_budget_long,
@@ -19275,21 +19364,6 @@ fn fraction_ge(lhs_num: u128, lhs_den: u128, rhs_num: u128, rhs_den: u128) -> V1
         .checked_mul(U256::from_u128(lhs_den))
         .ok_or(V16Error::ArithmeticOverflow)?;
     Ok(lhs >= rhs)
-}
-
-fn quarantine_remainder(remainder: &mut u128, dust: &mut u128) -> V16Result<()> {
-    if *remainder == 0 {
-        return Ok(());
-    }
-    let new_dust = dust
-        .checked_add(*remainder)
-        .ok_or(V16Error::ArithmeticOverflow)?;
-    if new_dust >= SOCIAL_LOSS_DEN {
-        return Err(V16Error::RecoveryRequired);
-    }
-    *dust = new_dust;
-    *remainder = 0;
-    Ok(())
 }
 
 fn validate_non_min_i128(v: i128) -> V16Result<()> {

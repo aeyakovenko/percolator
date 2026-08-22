@@ -8230,6 +8230,12 @@ fn proof_v16_retire_nonempty_asset_rejects() {
 fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let with_senior_balances: bool = kani::any();
     let retire_slot_raw: u8 = kani::any();
+    let long_remainder_raw: u8 = kani::any();
+    let short_remainder_raw: u8 = kani::any();
+    let long_dust_raw: u8 = kani::any();
+    let short_dust_raw: u8 = kani::any();
+    let long_explicit_raw: u8 = kani::any();
+    let short_explicit_raw: u8 = kani::any();
     kani::assume((1..=10).contains(&retire_slot_raw));
     let c_tot = if with_senior_balances { 7 } else { 0 };
     let insurance = if with_senior_balances { 3 } else { 0 };
@@ -8238,6 +8244,14 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     header.vault = V16PodU128::new(c_tot + insurance);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
+    let mut asset_before = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset_before.social_loss_remainder_long_num = long_remainder_raw as u128;
+    asset_before.social_loss_remainder_short_num = short_remainder_raw as u128;
+    asset_before.social_loss_dust_long_num = long_dust_raw as u128;
+    asset_before.social_loss_dust_short_num = short_dust_raw as u128;
+    asset_before.explicit_unallocated_loss_long = long_explicit_raw as u128;
+    asset_before.explicit_unallocated_loss_short = short_explicit_raw as u128;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset_before);
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -8256,6 +8270,12 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
     assert_eq!(asset.retired_slot, retire_slot);
+    assert_eq!(asset.social_loss_remainder_long_num, 0);
+    assert_eq!(asset.social_loss_remainder_short_num, 0);
+    assert_eq!(asset.social_loss_dust_long_num, 0);
+    assert_eq!(asset.social_loss_dust_short_num, 0);
+    assert_eq!(asset.explicit_unallocated_loss_long, 0);
+    assert_eq!(asset.explicit_unallocated_loss_short, 0);
     assert_eq!(market.header.current_slot.get(), retire_slot);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
@@ -18503,11 +18523,12 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
     let loss_weight: u128 = kani::any();
     let remainder: u128 = kani::any();
     let dust: u128 = kani::any();
+    let explicit_loss: u128 = kani::any();
     kani::assume(epoch < u64::MAX);
     kani::assume(stored_count > 0);
     kani::assume((1..=MAX_POSITION_ABS_Q).contains(&basis_abs));
     kani::assume(remainder < SOCIAL_LOSS_DEN);
-    kani::assume(dust < SOCIAL_LOSS_DEN - remainder);
+    kani::assume(dust < SOCIAL_LOSS_DEN);
 
     let mut asset = AssetStateV16::default();
     asset.lifecycle = AssetLifecycleV16::Recovery;
@@ -18523,6 +18544,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             asset.loss_weight_sum_long = loss_weight;
             asset.social_loss_remainder_long_num = remainder;
             asset.social_loss_dust_long_num = dust;
+            asset.explicit_unallocated_loss_long = explicit_loss;
             asset.epoch_long = epoch;
             asset.mode_long = mode;
         }
@@ -18537,6 +18559,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             asset.loss_weight_sum_short = loss_weight;
             asset.social_loss_remainder_short_num = remainder;
             asset.social_loss_dust_short_num = dust;
+            asset.explicit_unallocated_loss_short = explicit_loss;
             asset.epoch_short = epoch;
             asset.mode_short = mode;
         }
@@ -18545,6 +18568,14 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
     let reset =
         MarketGroupV16ViewMut::<u64>::kani_kernel_begin_full_drain_reset(asset, side).unwrap();
     let mut expected_reset = before;
+    let carry_total = dust + remainder;
+    let crossed_atom = carry_total >= SOCIAL_LOSS_DEN;
+    let normalized_dust = if crossed_atom {
+        carry_total - SOCIAL_LOSS_DEN
+    } else {
+        carry_total
+    };
+    let normalized_explicit = explicit_loss.saturating_add(u128::from(crossed_atom));
     match side {
         SideV16::Long => {
             expected_reset.k_epoch_start_long = k;
@@ -18555,7 +18586,8 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             expected_reset.b_long_num = 0;
             expected_reset.loss_weight_sum_long = 0;
             expected_reset.social_loss_remainder_long_num = 0;
-            expected_reset.social_loss_dust_long_num = dust + remainder;
+            expected_reset.social_loss_dust_long_num = normalized_dust;
+            expected_reset.explicit_unallocated_loss_long = normalized_explicit;
             expected_reset.a_long = ADL_ONE;
             expected_reset.epoch_long = epoch + 1;
             expected_reset.mode_long = SideModeV16::ResetPending;
@@ -18569,7 +18601,8 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
             expected_reset.b_short_num = 0;
             expected_reset.loss_weight_sum_short = 0;
             expected_reset.social_loss_remainder_short_num = 0;
-            expected_reset.social_loss_dust_short_num = dust + remainder;
+            expected_reset.social_loss_dust_short_num = normalized_dust;
+            expected_reset.explicit_unallocated_loss_short = normalized_explicit;
             expected_reset.a_short = ADL_ONE;
             expected_reset.epoch_short = epoch + 1;
             expected_reset.mode_short = SideModeV16::ResetPending;
@@ -18604,6 +18637,11 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
         "reset+clear covers DrainOnly"
     );
     kani::cover!(remainder > 0, "reset+clear quarantines nonzero remainder");
+    kani::cover!(crossed_atom, "reset+clear normalizes a whole-atom carry");
+    kani::cover!(
+        crossed_atom && explicit_loss == u128::MAX,
+        "reset+clear saturates terminal audit history"
+    );
     kani::cover!(stored_count > 1, "reset+clear preserves sibling residues");
     kani::cover!(
         k != 0 && f != 0 && b != 0,

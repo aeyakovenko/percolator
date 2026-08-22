@@ -4,15 +4,16 @@ use percolator::{
 };
 use percolator::{
     canonical_accrual_price_step_v16, v16_domain_count_for_market_slots, AccrualStepV16,
-    AssetLifecycleV16, AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16,
-    BackingBucketV16Account, EngineAssetSlotV16Account, HealthCertV16, HealthCertV16Account,
-    LiquidationRequestV16, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
-    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
-    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceRequestV16,
-    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account,
-    ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
-    SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error,
+    AssetLifecycleV16, AssetStateV16, AssetStateV16Account, BackingBucketStatusV16,
+    BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account, HealthCertV16,
+    HealthCertV16Account, LiquidationRequestV16, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16,
+    PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account,
+    PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, RebalanceRequestV16, ResolvedCloseOutcomeV16,
+    ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16,
+    ResolvedPayoutReceiptV16Account, SideModeV16, SideV16, SourceCreditStateV16,
+    SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     V16_EMPTY_ACTIVE_BITMAP,
 };
@@ -2443,6 +2444,57 @@ fn v16_retire_normalizes_unreferenced_lapsed_backing() {
         AssetLifecycleV16::Retired
     );
     market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_retire_normalizes_only_inert_social_loss_audit_state() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.social_loss_remainder_long_num = SOCIAL_LOSS_DEN - 1;
+    asset.social_loss_remainder_short_num = 1;
+    asset.social_loss_dust_long_num = 1;
+    asset.social_loss_dust_short_num = SOCIAL_LOSS_DEN - 1;
+    asset.explicit_unallocated_loss_long = 7;
+    asset.explicit_unallocated_loss_short = u128::MAX;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.retire_empty_asset_not_atomic(0, 1).unwrap();
+    let retired = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(retired.lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(retired.social_loss_remainder_long_num, 0);
+    assert_eq!(retired.social_loss_remainder_short_num, 0);
+    assert_eq!(retired.social_loss_dust_long_num, 0);
+    assert_eq!(retired.social_loss_dust_short_num, 0);
+    assert_eq!(retired.explicit_unallocated_loss_long, 0);
+    assert_eq!(retired.explicit_unallocated_loss_short, 0);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    market.validate_shape().unwrap();
+
+    let (mut live_header, mut live_markets) = market_fixture(1, 100);
+    let mut live_asset = live_markets[0].engine.asset.try_to_runtime().unwrap();
+    live_asset.social_loss_dust_long_num = 1;
+    live_asset.explicit_unallocated_loss_long = 1;
+    live_asset.oi_eff_long_q = POS_SCALE;
+    live_asset.oi_eff_short_q = POS_SCALE;
+    live_asset.stored_pos_count_long = 1;
+    live_asset.stored_pos_count_short = 1;
+    live_asset.loss_weight_sum_long = POS_SCALE;
+    live_asset.loss_weight_sum_short = POS_SCALE;
+    live_markets[0].engine.asset = AssetStateV16Account::from_runtime(&live_asset);
+    let slot_before = live_markets[0].engine;
+
+    let mut live = MarketGroupV16ViewMut::new(&mut live_header, &mut live_markets);
+    assert_eq!(
+        live.retire_empty_asset_not_atomic(0, 1),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(live.markets[0].engine, slot_before);
 }
 
 #[test]
@@ -5296,6 +5348,104 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
     );
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+#[cfg(feature = "fuzz")]
+fn v16_fractional_social_loss_carry_normalizes_on_reset_and_clear() {
+    for side in [SideV16::Long, SideV16::Short] {
+        let mut reset_asset = AssetStateV16::default();
+        reset_asset.lifecycle = AssetLifecycleV16::Active;
+        let remainder = SOCIAL_LOSS_DEN / 2 + 1;
+        let dust = SOCIAL_LOSS_DEN / 2;
+        match side {
+            SideV16::Long => {
+                reset_asset.oi_eff_long_q = 0;
+                reset_asset.stored_pos_count_long = 1;
+                reset_asset.social_loss_remainder_long_num = remainder;
+                reset_asset.social_loss_dust_long_num = dust;
+                reset_asset.explicit_unallocated_loss_long = 7;
+            }
+            SideV16::Short => {
+                reset_asset.oi_eff_short_q = 0;
+                reset_asset.stored_pos_count_short = 1;
+                reset_asset.social_loss_remainder_short_num = remainder;
+                reset_asset.social_loss_dust_short_num = dust;
+                reset_asset.explicit_unallocated_loss_short = 7;
+            }
+        }
+
+        let reset =
+            MarketGroupV16ViewMut::<u64>::kani_kernel_begin_full_drain_reset(reset_asset, side)
+                .expect("a valid fractional carry must not block reset");
+        match side {
+            SideV16::Long => {
+                assert_eq!(reset.social_loss_remainder_long_num, 0);
+                assert_eq!(reset.social_loss_dust_long_num, 1);
+                assert_eq!(reset.explicit_unallocated_loss_long, 8);
+            }
+            SideV16::Short => {
+                assert_eq!(reset.social_loss_remainder_short_num, 0);
+                assert_eq!(reset.social_loss_dust_short_num, 1);
+                assert_eq!(reset.explicit_unallocated_loss_short, 8);
+            }
+        }
+
+        let mut clear_asset = AssetStateV16::default();
+        clear_asset.lifecycle = AssetLifecycleV16::Active;
+        let basis_q = POS_SCALE;
+        match side {
+            SideV16::Long => {
+                clear_asset.oi_eff_long_q = basis_q;
+                clear_asset.loss_weight_sum_long = basis_q;
+                clear_asset.stored_pos_count_long = 1;
+                clear_asset.social_loss_dust_long_num = SOCIAL_LOSS_DEN / 2;
+                clear_asset.explicit_unallocated_loss_long = 11;
+            }
+            SideV16::Short => {
+                clear_asset.oi_eff_short_q = basis_q;
+                clear_asset.loss_weight_sum_short = basis_q;
+                clear_asset.stored_pos_count_short = 1;
+                clear_asset.social_loss_dust_short_num = SOCIAL_LOSS_DEN / 2;
+                clear_asset.explicit_unallocated_loss_short = 11;
+            }
+        }
+        let basis_pos_q = match side {
+            SideV16::Long => basis_q as i128,
+            SideV16::Short => -(basis_q as i128),
+        };
+        let leg = PortfolioLegV16 {
+            active: true,
+            side,
+            basis_pos_q,
+            loss_weight: basis_q,
+            b_rem: SOCIAL_LOSS_DEN / 2,
+            ..PortfolioLegV16::EMPTY
+        };
+        let cleared = MarketGroupV16ViewMut::<u64>::kani_kernel_clear_leg(leg, clear_asset)
+            .expect("a valid fractional carry must not block leg clear");
+        match side {
+            SideV16::Long => {
+                assert_eq!(cleared.social_loss_dust_long_num, 0);
+                assert_eq!(cleared.explicit_unallocated_loss_long, 12);
+            }
+            SideV16::Short => {
+                assert_eq!(cleared.social_loss_dust_short_num, 0);
+                assert_eq!(cleared.explicit_unallocated_loss_short, 12);
+            }
+        }
+    }
+
+    assert_eq!(
+        MarketGroupV16ViewMut::<u64>::kani_kernel_normalize_social_loss_carry(
+            SOCIAL_LOSS_DEN - 1,
+            1,
+            u128::MAX,
+        )
+        .unwrap(),
+        (0, u128::MAX),
+        "audit-counter saturation must remain a successful value-neutral normalization"
+    );
 }
 
 #[test]
