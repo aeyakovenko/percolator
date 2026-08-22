@@ -6465,6 +6465,59 @@ fn v16_auto_crank_classifies_payout_ready_resolved_winner_without_snapshot() {
     assert!(!summary.recovery_eligible && !summary.stale && !summary.liquidatable);
 }
 
+#[test]
+fn v16_auto_crank_normalizes_empty_resolved_account_fee_anchor() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 43);
+    account_header.last_fee_slot = V16PodU64::new(0);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.resolve_market_not_atomic(1).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(account.header.cancel_deposit_escrow.get(), 0);
+    assert_eq!(account.header.last_fee_slot.get(), 0);
+    assert_eq!(market.header.resolved_slot.get(), 1);
+
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(
+        summary.resolved_winner,
+        "an empty account with a stale resolved fee anchor still has one bounded normalization step"
+    );
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 1,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(result.selected, AutoCrankPlanV16::CloseResolved);
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { payout: 0 })
+    );
+    assert_eq!(account.header.last_fee_slot.get(), 1);
+    assert!(
+        !market
+            .build_actionable_summary(&account.as_view())
+            .unwrap()
+            .is_actionable(),
+        "the one-step fee-anchor normalization must reach a fixed point"
+    );
+}
+
 // ROADMAP 3C step 4 — b-stale dispatch arm: an account with a b-stale active leg
 // is classified b_stale (priority over the stale-cert refresh), and the auto-crank
 // dispatches the B-chunk settle without requiring oracle observations.

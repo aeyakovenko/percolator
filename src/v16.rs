@@ -13577,12 +13577,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // policy instead of inventing an asset domain or terminating the market.
         let recovery_eligible = false;
         // Resolved close is also the bounded cleanup route for capital-only
-        // accounts, zero-PnL source attribution, active legs, and receipts. Gating
-        // solely on positive PnL would make those states invisible to the only
-        // permissionless crank. A flat positive-PnL account still waits until the
-        // payout blocker census is clear, because close_resolved would otherwise
-        // return a successful no-op; pre-payout cleanup work remains actionable.
-        let resolved_pending = resolved && !account.is_empty_for_dematerialization()?;
+        // accounts, zero-PnL source attribution, active legs, receipts, and the
+        // final resolved-slot fee-anchor sync. The fee anchor is deliberately not
+        // part of economic emptiness, but close_resolved still has to advance it
+        // before the account is fully normalized. Gating solely on economic
+        // emptiness would hide that bounded step from the only permissionless
+        // crank. A flat positive-PnL account still waits until the payout blocker
+        // census is clear, because close_resolved would otherwise return a
+        // successful no-op; pre-payout cleanup work remains actionable.
+        let resolved_fee_sync_pending =
+            resolved && account.header.last_fee_slot.get() < self.header.resolved_slot.get();
+        let resolved_pending =
+            resolved && (!account.is_empty_for_dematerialization()? || resolved_fee_sync_pending);
         let resolved_pre_payout_progress =
             !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
                 || decode_bool(account.header.b_stale_state)?
@@ -13590,7 +13596,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 || account.header.pnl.get() <= 0
                 || Self::account_has_source_liens(account)
                 || lapsed_source_backing
-                || ledger.has_pending_residual();
+                || ledger.has_pending_residual()
+                || resolved_fee_sync_pending;
         let resolved_winner = resolved_pending
             && (resolved_pre_payout_progress || self.resolved_positive_payout_ready()?);
 
