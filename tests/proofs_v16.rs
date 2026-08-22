@@ -4048,7 +4048,7 @@ fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
-fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
+fn proof_v16_historical_bankruptcy_hlock_does_not_override_account_scope() {
     let claim_raw: u8 = kani::any();
     kani::assume(claim_raw > 0);
     let claim = claim_raw as u128;
@@ -4089,19 +4089,11 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
     account_header.source_domains[0].domain = V16PodU32::new(0);
     account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
     account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
-    // CLEAN-ROOM FIX (was vacuous): master welded bankruptcy_hlock_active = 1 and
-    // passed instruction_candidate = false, so h_lock_lane returns HMax on the
-    // bankruptcy bit BEFORE reading any of the source-backed fixture — the entire
-    // source-credit/backing/cert state above was inert and assert_eq!(lane, HMax)
-    // could not fail for ANY implementation. Fix: make the bankruptcy bit AND the
-    // instruction-candidate flag symbolic and assert the EXACT discriminant
-    // lane == HMax  <=>  (bit OR candidate). The HMin arm is the real content: it
-    // proves the source-backed positive-PnL fixture triggers NONE of the
-    // account-side hmax conditions (stale, b-stale, loss-stale live leg, pending
-    // close residual, domain loss barrier), so the bankruptcy bit / candidate is
-    // the operative discriminant before any source-backed value exit. (Fixture
-    // mode is Live and threshold_stress_active is 0, so those market-side
-    // disjuncts are inactive.)
+    // The market-wide bankruptcy bit is historical and has no clear transition.
+    // It remains part of the global lane, but it cannot override an account's
+    // independently checked source-domain backing. The account-scoped lane still
+    // rejects an instruction that can itself create bankruptcy and every local
+    // stale/close/domain barrier represented by the production view.
     let hlock_active: bool = kani::any();
     let instruction_candidate: bool = kani::any();
     header.bankruptcy_hlock_active = if hlock_active { 1 } else { 0 };
@@ -4118,7 +4110,7 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
 
     kani::cover!(
         claim > 1 && hlock_active && !instruction_candidate,
-        "bankruptcy h-lock bit alone selects hmax for nontrivial source-backed PnL"
+        "historical bankruptcy bit alone leaves an unrelated backed account in hmin"
     );
     kani::cover!(
         claim > 1 && !hlock_active && instruction_candidate,
@@ -4128,7 +4120,7 @@ fn proof_v16_bankruptcy_hlock_selects_hmax_before_source_backed_value_exit() {
         claim > 1 && !hlock_active && !instruction_candidate,
         "source-backed positive PnL alone does NOT force hmax (HMin arm)"
     );
-    let expected = if hlock_active || instruction_candidate {
+    let expected = if instruction_candidate {
         HLockLaneV16::HMax
     } else {
         HLockLaneV16::HMin

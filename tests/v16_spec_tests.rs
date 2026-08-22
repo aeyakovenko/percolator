@@ -4492,7 +4492,7 @@ fn v16_principal_loss_crystallizes_residual_budget_monotonically() {
 }
 
 #[test]
-fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
+fn v16_source_backed_conversion_ignores_unrelated_historical_bankruptcy() {
     let (mut header, mut markets) = market_fixture(1, 1);
     let mut account_header = account_fixture(1, 18);
     let claim = 20u128;
@@ -4507,6 +4507,7 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
     header.pnl_pos_bound_tot = V16PodU128::new(claim);
     header.source_claim_bound_total_num = V16PodU128::new(claim_num);
     header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    header.bankruptcy_hlock_active = 1;
     account_header.pnl = V16PodI128::new(claim as i128);
     account_header.source_domains[0].domain = V16PodU32::new(0);
     account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
