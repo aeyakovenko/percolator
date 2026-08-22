@@ -5689,6 +5689,73 @@ fn v16_resolved_close_migrates_legacy_normal_adl_residue_before_detach() {
 }
 
 #[test]
+fn v16_resolved_close_caps_adl_reduced_basis_before_reset_detach() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 28);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.a_long = ADL_ONE / 2;
+    asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: (2 * POS_SCALE) as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: 2 * POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    market.resolve_market_not_atomic(1).unwrap();
+
+    let first = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("resolved close must consume the remaining effective OI");
+    assert_eq!(first, percolator::ResolvedCloseOutcomeV16::ProgressOnly);
+    let residue = account.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(residue.basis_pos_q, POS_SCALE as i128);
+    let reset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(reset.oi_eff_long_q, 0);
+    assert_eq!(reset.oi_eff_short_q, POS_SCALE);
+    assert_eq!(reset.mode_long, SideModeV16::ResetPending);
+
+    let second = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("the prior-epoch stored residue must detach and pay capital");
+    assert_eq!(
+        second,
+        percolator::ResolvedCloseOutcomeV16::Closed { payout: 1_000 }
+    );
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(market.header.vault.get(), 0);
+    let terminal = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(terminal.oi_eff_long_q, 0);
+    assert_eq!(terminal.oi_eff_short_q, POS_SCALE);
+    assert_eq!(terminal.stored_pos_count_long, 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 27);

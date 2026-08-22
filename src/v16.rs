@@ -17879,7 +17879,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
             if leg.active {
-                self.clear_resolved_close_leg(account, leg.asset_index as usize)?;
+                let asset_index = leg.asset_index as usize;
+                let asset = self.asset_state(asset_index)?;
+                let side_effective_oi_q = match leg.side {
+                    SideV16::Long => asset.oi_eff_long_q,
+                    SideV16::Short => asset.oi_eff_short_q,
+                };
+                let stored_abs_q = leg.basis_pos_q.unsigned_abs();
+                if side_effective_oi_q != 0 && side_effective_oi_q < stored_abs_q {
+                    let (_, delta_q) = V16Core::kernel_reduce_position_delta(
+                        leg.basis_pos_q,
+                        leg.side,
+                        side_effective_oi_q,
+                    )?;
+                    self.apply_position_delta(account, asset_index, delta_q)?;
+                    self.begin_side_reset_if_effective_oi_exhausted(asset_index, leg.side)?;
+                    return Ok(());
+                }
+                self.clear_resolved_close_leg(account, asset_index)?;
                 return Ok(());
             }
             slot += 1;
