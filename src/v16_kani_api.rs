@@ -469,6 +469,23 @@ pub fn kani_adl_scaled_accrual_index_deltas(
     )
 }
 
+pub fn kani_mark_kf_stale_cohorts(
+    asset: AssetStateV16,
+    long_changed: bool,
+    short_changed: bool,
+    cohort_epoch: u64,
+) -> V16Result<AssetStateV16> {
+    V16Core::kernel_mark_kf_stale_cohorts(asset, long_changed, short_changed, cohort_epoch)
+}
+
+pub fn kani_settle_kf_stale_cohort(
+    asset: AssetStateV16,
+    side: SideV16,
+    leg_kf_epoch_snap: u64,
+) -> V16Result<(AssetStateV16, u64)> {
+    V16Core::kernel_settle_kf_stale_cohort(asset, side, leg_kf_epoch_snap)
+}
+
 pub fn kani_trade_preexisting_oi_reduction_gate(
     oi_long_q: u128,
     oi_short_q: u128,
@@ -1662,6 +1679,8 @@ pub fn kani_eq_asset_state_v16_account(a: &AssetStateV16Account, b: &AssetStateV
         && a.k_short.get() == b.k_short.get()
         && a.f_long_num.get() == b.f_long_num.get()
         && a.f_short_num.get() == b.f_short_num.get()
+        && a.kf_epoch_long.get() == b.kf_epoch_long.get()
+        && a.kf_epoch_short.get() == b.kf_epoch_short.get()
         && a.k_epoch_start_long.get() == b.k_epoch_start_long.get()
         && a.k_epoch_start_short.get() == b.k_epoch_start_short.get()
         && a.f_epoch_start_long_num.get() == b.f_epoch_start_long_num.get()
@@ -1804,6 +1823,7 @@ pub fn kani_eq_portfolio_leg_v16_account(
         && a.a_basis.get() == b.a_basis.get()
         && a.k_snap.get() == b.k_snap.get()
         && a.f_snap.get() == b.f_snap.get()
+        && a.kf_epoch_snap.get() == b.kf_epoch_snap.get()
         && a.epoch_snap.get() == b.epoch_snap.get()
         && a.loss_weight.get() == b.loss_weight.get()
         && a.b_snap.get() == b.b_snap.get()

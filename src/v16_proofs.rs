@@ -1425,6 +1425,7 @@ fn contract_check_kernel_resize_leg_same_side() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        kf_epoch_snap: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -1447,6 +1448,8 @@ fn contract_check_kernel_resize_leg_same_side() {
         k_short: kani::any(),
         f_long_num: kani::any(),
         f_short_num: kani::any(),
+        kf_epoch_long: kani::any(),
+        kf_epoch_short: kani::any(),
         k_epoch_start_long: kani::any(),
         k_epoch_start_short: kani::any(),
         f_epoch_start_long_num: kani::any(),
@@ -1517,6 +1520,8 @@ fn contract_check_kernel_attach_leg() {
         k_short: kani::any(),
         f_long_num: kani::any(),
         f_short_num: kani::any(),
+        kf_epoch_long: kani::any(),
+        kf_epoch_short: kani::any(),
         k_epoch_start_long: kani::any(),
         k_epoch_start_short: kani::any(),
         f_epoch_start_long_num: kani::any(),
@@ -1601,6 +1606,7 @@ fn contract_check_kernel_clear_leg() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        kf_epoch_snap: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -1623,6 +1629,8 @@ fn contract_check_kernel_clear_leg() {
         k_short: kani::any(),
         f_long_num: kani::any(),
         f_short_num: kani::any(),
+        kf_epoch_long: kani::any(),
+        kf_epoch_short: kani::any(),
         k_epoch_start_long: kani::any(),
         k_epoch_start_short: kani::any(),
         f_epoch_start_long_num: kani::any(),
@@ -1682,6 +1690,7 @@ fn contract_check_kernel_advance_leg_b_snap() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        kf_epoch_snap: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -2117,6 +2126,7 @@ fn liveness_b_stale_leg_has_advancing_chunk() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        kf_epoch_snap: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -2899,4 +2909,25 @@ fn contract_check_select_auto_crank_plan() {
         refresh_asset,
         recovery_reason,
     );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_mark_kf_stale_cohorts)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_mark_kf_stale_cohorts() {
+    let asset: AssetStateV16 = kani::any();
+    let long_changed: bool = kani::any();
+    let short_changed: bool = kani::any();
+    let cohort_epoch: u64 = kani::any();
+    let _ = V16Core::kernel_mark_kf_stale_cohorts(asset, long_changed, short_changed, cohort_epoch);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_settle_kf_stale_cohort)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_settle_kf_stale_cohort() {
+    let asset: AssetStateV16 = kani::any();
+    let side: SideV16 = kani::any();
+    let leg_kf_epoch_snap: u64 = kani::any();
+    let _ = V16Core::kernel_settle_kf_stale_cohort(asset, side, leg_kf_epoch_snap);
 }

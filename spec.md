@@ -809,6 +809,7 @@ Asset {
     A_long, A_short
     K_long, K_short
     F_long_num, F_short_num
+    KF_epoch_long, KF_epoch_short
 
     B_long_num, B_short_num
     B_epoch_start_long_num, B_epoch_start_short_num
@@ -847,7 +848,7 @@ PortfolioAccount {
     fee_credits_i <= 0 and != i128::MIN
 
     active_bitmap
-    legs[0..N)
+    legs[0..N)                   // each leg stores KF_epoch_snap
     account_claim_bound_contributions
     source_credit_lien_keys[0..bounded]
 
@@ -862,6 +863,15 @@ PortfolioAccount {
 ```
 
 Each account has at most one canonical signed net leg per asset. Same-asset opposite exposure MUST net into that leg.
+
+Whenever a side's K or F target changes, its `KF_epoch` advances to that
+change's authenticated asset settlement slot and its
+`stale_account_count` resets to that side's stored-position count. Settling a
+leg with an older `KF_epoch_snap` decrements the count exactly once and advances
+the leg snapshot to the current epoch, even when intervening index movement has
+returned K/F to the leg's prior arithmetic values. Risk-increasing trades remain
+blocked until both affected side cohorts are empty; bounded unilateral reduction
+remains available to a current owner while another account is stale.
 
 -------------------------------------------------------------------------------
 5. Global invariants

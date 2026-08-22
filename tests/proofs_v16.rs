@@ -17,11 +17,11 @@ use percolator::v16::{
     kani_liquidation_engine_close_request_q, kani_liquidation_fee_from_raw_fee,
     kani_liquidation_partial_search_hi, kani_liquidation_projected_health_deficit_from_parts,
     kani_liquidation_projected_healthy_after_close, kani_loss_stale_trade_scope_allowed,
-    kani_pending_domain_loss_barrier_blocks_position_change,
+    kani_mark_kf_stale_cohorts, kani_pending_domain_loss_barrier_blocks_position_change,
     kani_position_change_requires_unit_adl, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_refresh_detached_selected_leg,
-    kani_select_auto_crank_plan, kani_should_clear_prior_reset_obligation,
-    kani_source_claim_domain_first_burn_partition,
+    kani_select_auto_crank_plan, kani_settle_kf_stale_cohort,
+    kani_should_clear_prior_reset_obligation, kani_source_claim_domain_first_burn_partition,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
     kani_terminal_claim_free_overlap_recredit, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution, AccrualStepV16,
@@ -1362,6 +1362,160 @@ fn proof_v16_adl_position_change_gate_is_route_complete_and_exit_live() {
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
+fn proof_v16_kf_accrual_marks_each_stored_cohort_exactly_once() {
+    let stored_long: u64 = kani::any();
+    let stored_short: u64 = kani::any();
+    let stale_long: u64 = kani::any();
+    let stale_short: u64 = kani::any();
+    let epoch_long: u64 = kani::any();
+    let epoch_short: u64 = kani::any();
+    let cohort_epoch: u64 = kani::any();
+    let long_changed: bool = kani::any();
+    let short_changed: bool = kani::any();
+    kani::assume(stale_long <= stored_long);
+    kani::assume(stale_short <= stored_short);
+
+    let mut asset = AssetStateV16::default();
+    asset.stored_pos_count_long = stored_long;
+    asset.stored_pos_count_short = stored_short;
+    asset.stale_account_count_long = stale_long;
+    asset.stale_account_count_short = stale_short;
+    asset.kf_epoch_long = epoch_long;
+    asset.kf_epoch_short = epoch_short;
+    let result = kani_mark_kf_stale_cohorts(asset, long_changed, short_changed, cohort_epoch);
+
+    let nonmonotonic = (long_changed && cohort_epoch <= epoch_long)
+        || (short_changed && cohort_epoch <= epoch_short);
+    if nonmonotonic {
+        assert!(result.is_err());
+        return;
+    }
+    let marked = result.unwrap();
+
+    kani::cover!(
+        long_changed && short_changed && stored_long > 0 && stored_short > 0,
+        "a price/funding move marks both nonempty cohorts"
+    );
+    kani::cover!(
+        long_changed && !short_changed && stale_short > 0,
+        "one-sided target movement preserves the other stale cohort"
+    );
+    assert_eq!(
+        marked.stale_account_count_long,
+        if long_changed {
+            stored_long
+        } else {
+            stale_long
+        }
+    );
+    assert_eq!(
+        marked.stale_account_count_short,
+        if short_changed {
+            stored_short
+        } else {
+            stale_short
+        }
+    );
+    assert_eq!(
+        marked.kf_epoch_long,
+        if long_changed {
+            cohort_epoch
+        } else {
+            epoch_long
+        }
+    );
+    assert_eq!(
+        marked.kf_epoch_short,
+        if short_changed {
+            cohort_epoch
+        } else {
+            epoch_short
+        }
+    );
+    assert!(marked.stale_account_count_long <= marked.stored_pos_count_long);
+    assert!(marked.stale_account_count_short <= marked.stored_pos_count_short);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_kf_settlement_disposes_one_cohort_member_without_underflow() {
+    let stored_long: u64 = kani::any();
+    let stored_short: u64 = kani::any();
+    let stale_long: u64 = kani::any();
+    let stale_short: u64 = kani::any();
+    let epoch_long: u64 = kani::any();
+    let epoch_short: u64 = kani::any();
+    let leg_kf_epoch_snap: u64 = kani::any();
+    let settle_long: bool = kani::any();
+    let side = if settle_long {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    kani::assume(stale_long <= stored_long);
+    kani::assume(stale_short <= stored_short);
+
+    let mut asset = AssetStateV16::default();
+    asset.stored_pos_count_long = stored_long;
+    asset.stored_pos_count_short = stored_short;
+    asset.stale_account_count_long = stale_long;
+    asset.stale_account_count_short = stale_short;
+    asset.kf_epoch_long = epoch_long;
+    asset.kf_epoch_short = epoch_short;
+    let current_epoch = if settle_long { epoch_long } else { epoch_short };
+    let result = kani_settle_kf_stale_cohort(asset, side, leg_kf_epoch_snap);
+
+    let selected_count = if settle_long { stale_long } else { stale_short };
+    if leg_kf_epoch_snap > current_epoch
+        || (leg_kf_epoch_snap < current_epoch && selected_count == 0)
+    {
+        assert!(result.is_err());
+        return;
+    }
+    let (settled, settled_epoch) = result.unwrap();
+    assert_eq!(settled_epoch, current_epoch);
+    let (repeated_with_current_leg, repeated_epoch) =
+        kani_settle_kf_stale_cohort(settled, side, settled_epoch).unwrap();
+
+    let expected_long = match side {
+        SideV16::Long if leg_kf_epoch_snap < epoch_long => stale_long - 1,
+        _ => stale_long,
+    };
+    let expected_short = match side {
+        SideV16::Short if leg_kf_epoch_snap < epoch_short => stale_short - 1,
+        _ => stale_short,
+    };
+    kani::cover!(
+        side == SideV16::Long && leg_kf_epoch_snap < epoch_long && stale_long > 0,
+        "settling a counted long leg strictly decreases the cohort"
+    );
+    kani::cover!(
+        side == SideV16::Short && leg_kf_epoch_snap < epoch_short && stale_short > 0,
+        "settling a counted short leg strictly decreases the cohort"
+    );
+    kani::cover!(
+        leg_kf_epoch_snap == current_epoch,
+        "a leg already in the current generation does not consume another member"
+    );
+    assert_eq!(settled.stale_account_count_long, expected_long);
+    assert_eq!(settled.stale_account_count_short, expected_short);
+    assert_eq!(repeated_epoch, settled_epoch);
+    assert_eq!(
+        repeated_with_current_leg.stale_account_count_long,
+        settled.stale_account_count_long
+    );
+    assert_eq!(
+        repeated_with_current_leg.stale_account_count_short,
+        settled.stale_account_count_short
+    );
+    assert!(settled.stale_account_count_long <= settled.stored_pos_count_long);
+    assert!(settled.stale_account_count_short <= settled.stored_pos_count_short);
+}
+
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
 fn proof_v16_adl_scaled_accrual_kernel_matches_every_valid_factor() {
     let a_long_raw: u64 = kani::any();
     let a_short_raw: u64 = kani::any();
@@ -1464,6 +1618,7 @@ fn adl_partition_settlement_net(
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: abs_basis_q,
         b_snap: 0,
@@ -3616,6 +3771,7 @@ fn proof_v16_nonflat_withdraw_rejects_before_value_exit() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset.b_long_num,
@@ -3943,6 +4099,7 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
         b_snap: 0,
@@ -5091,6 +5248,7 @@ fn install_flat_pending_obligation(
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: weight,
         b_snap: 0,
@@ -8089,6 +8247,7 @@ fn proof_v16_reused_asset_slot_rejects_stale_market_id_leg() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         // exact ceil(abs * SOCIAL_WEIGHT_SCALE / a_basis); with a_basis == ADL_ONE
         // == SOCIAL_WEIGHT_SCALE this is abs itself, so validate_active_leg passes
@@ -8151,6 +8310,7 @@ fn proof_v16_duplicate_asset_legs_reject_before_double_counting_support() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
         b_snap: 0,
@@ -10273,6 +10433,7 @@ fn proof_v16_resolved_two_active_legs_are_unattributed_for_bankruptcy() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset0.b_long_num,
@@ -10296,6 +10457,7 @@ fn proof_v16_resolved_two_active_legs_are_unattributed_for_bankruptcy() {
         a_basis: ADL_ONE,
         k_snap: asset1.k_short,
         f_snap: asset1.f_short_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset1.epoch_short,
         loss_weight: POS_SCALE,
         b_snap: asset1.b_short_num,
@@ -11946,6 +12108,7 @@ fn run_funding_target_sign_case(positive_funding: bool, units: i128) -> (i128, i
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
         b_snap: 0,
