@@ -8264,6 +8264,10 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let short_explicit_raw: u8 = kani::any();
     let long_spent_raw: u8 = kani::any();
     let short_spent_raw: u8 = kani::any();
+    let long_domain_spent_raw: u8 = kani::any();
+    let short_domain_spent_raw: u8 = kani::any();
+    let k_long_raw: i8 = kani::any();
+    let f_short_raw: i8 = kani::any();
     kani::assume((1..=10).contains(&retire_slot_raw));
     let c_tot = if with_senior_balances { 7 } else { 0 };
     let insurance = if with_senior_balances { 3 } else { 0 };
@@ -8279,7 +8283,19 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     asset_before.social_loss_dust_short_num = short_dust_raw as u128;
     asset_before.explicit_unallocated_loss_long = long_explicit_raw as u128;
     asset_before.explicit_unallocated_loss_short = short_explicit_raw as u128;
+    asset_before.k_long = i128::from(k_long_raw);
+    asset_before.f_short_num = i128::from(f_short_raw);
+    asset_before.k_epoch_start_short = i128::from(k_long_raw);
+    asset_before.f_epoch_start_long_num = i128::from(f_short_raw);
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset_before);
+    markets[0].engine.insurance_domain_budget_long =
+        V16PodU128::new(u128::from(long_domain_spent_raw));
+    markets[0].engine.insurance_domain_spent_long =
+        V16PodU128::new(u128::from(long_domain_spent_raw));
+    markets[0].engine.insurance_domain_budget_short =
+        V16PodU128::new(u128::from(short_domain_spent_raw));
+    markets[0].engine.insurance_domain_spent_short =
+        V16PodU128::new(u128::from(short_domain_spent_raw));
     markets[0].engine.source_credit_long =
         SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
             spent_backing_num: long_spent_raw as u128,
@@ -8309,8 +8325,12 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
             && with_senior_balances
             && long_spent_raw > 0
             && short_spent_raw > 0
+            && long_domain_spent_raw > 0
+            && short_domain_spent_raw > 0
+            && k_long_raw != 0
+            && f_short_raw != 0
             && asset.lifecycle == AssetLifecycleV16::Retired,
-        "empty asset can retire and clear spent-only source audit without moving senior balances"
+        "one retirement clears spent-only domain/source and price/funding audit without moving senior balances"
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
     assert_eq!(asset.retired_slot, retire_slot);
@@ -8320,6 +8340,26 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     assert_eq!(asset.social_loss_dust_short_num, 0);
     assert_eq!(asset.explicit_unallocated_loss_long, 0);
     assert_eq!(asset.explicit_unallocated_loss_short, 0);
+    assert_eq!(asset.k_long, 0);
+    assert_eq!(asset.f_short_num, 0);
+    assert_eq!(asset.k_epoch_start_short, 0);
+    assert_eq!(asset.f_epoch_start_long_num, 0);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        0
+    );
     assert_eq!(
         market.markets[0]
             .engine

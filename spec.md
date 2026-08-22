@@ -927,8 +927,9 @@ the sum is normalized modulo `SOCIAL_LOSS_DEN`. Crossing the denominator adds
 one to the side-local `explicit_unallocated_loss` audit counter; that counter
 saturates and never creates payout capacity. Remainder, dust, and explicit-loss
 audit fields remain durable while the asset has any live economic obligation.
-An otherwise empty asset may clear only those inert fields atomically with
-retirement so historical rounding cannot permanently block terminal progress.
+An otherwise empty asset may clear only those inert fields inside the single
+retirement transition so historical rounding cannot permanently block terminal
+progress; callers do not need a preparatory cleanup transition.
 After every source claim, provider receivable, backing amount, lien, and insurance
 reservation is zero, cumulative `spent_backing_num` is likewise audit-only and is
 cleared atomically with retirement. A nonzero provider receivable or consumed backing
