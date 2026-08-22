@@ -17442,17 +17442,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() < 0 {
             self.settle_resolved_bankruptcy_negative_pnl(account)?;
         }
-        let detached_leg = self.detach_solvent_active_legs_for_resolved_close(account)?;
+        self.detach_solvent_active_legs_for_resolved_close(account)?;
         if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
             || account.header.pnl.get() < 0
             || decode_bool(account.header.b_stale_state)?
             || decode_bool(account.header.stale_state)?
         {
-            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
-        }
-        if detached_leg && Self::account_has_source_claims(&account.as_view())? {
-            self.validate_shape()?;
-            account.validate_with_market(&self.as_view())?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
@@ -17530,7 +17525,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn detach_solvent_active_legs_for_resolved_close(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<bool> {
+    ) -> V16Result<()> {
         if account.header.pnl.get() < 0
             || decode_bool(account.header.b_stale_state)?
             || decode_bool(account.header.stale_state)?
@@ -17540,7 +17535,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .try_to_runtime()?
                 .has_pending_residual()
         {
-            return Ok(false);
+            return Ok(());
         }
 
         let configured_max = self.header.config.max_market_slots.get() as usize;
@@ -17549,14 +17544,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let leg = account.header.legs[slot].try_to_runtime()?;
             if leg.active {
                 if leg.b_stale || leg.stale {
-                    return Ok(false);
+                    return Ok(());
                 }
                 let asset_index = leg.asset_index as usize;
                 if asset_index >= configured_max {
                     return Err(V16Error::InvalidLeg);
                 }
                 if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-                    return Ok(false);
+                    return Ok(());
                 }
                 let asset = self.asset_state(asset_index)?;
                 if Self::leg_has_exhausted_effective_oi(asset, leg) {
@@ -17564,10 +17559,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 }
                 let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
                 if k_target != leg.k_snap || f_target != leg.f_snap {
-                    return Ok(false);
+                    return Ok(());
                 }
                 if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
-                    return Ok(false);
+                    return Ok(());
                 }
             }
             slot += 1;
@@ -17580,11 +17575,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let leg = account.header.legs[slot].try_to_runtime()?;
             if leg.active {
                 self.clear_resolved_close_leg(account, leg.asset_index as usize)?;
-                return Ok(true);
+                return Ok(());
             }
             slot += 1;
         }
-        Ok(false)
+        Ok(())
     }
 
     pub fn deposit_not_atomic(
