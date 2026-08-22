@@ -15590,11 +15590,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let empty_slot = lookup.empty_slot.ok_or(V16Error::InvalidLeg)?;
             return self.attach_leg_at_slot(account, asset_index, side, new, empty_slot);
         }
-        let old_leg = account.header.legs[leg_slot].try_to_runtime()?;
-        let new_weight = loss_weight_for_basis(new.unsigned_abs(), old_leg.a_basis)?;
         let preserve_pending_obligation_weight =
             same_side_risk_reduction_or_flat_obligation(current, new)
-                && self.has_pending_domain_loss_barrier(asset_index, old_leg.side)?;
+                && self.has_pending_domain_loss_barrier(asset_index, current_leg.side)?;
+        self.resize_leg_same_side_at_slot(
+            account,
+            asset_index,
+            leg_slot,
+            new,
+            preserve_pending_obligation_weight,
+        )
+    }
+
+    #[inline(never)]
+    fn resize_leg_same_side_at_slot(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        leg_slot: usize,
+        new: i128,
+        preserve_pending_obligation_weight: bool,
+    ) -> V16Result<()> {
+        let old_leg = account.header.legs[leg_slot].try_to_runtime()?;
+        let new_weight = loss_weight_for_basis(new.unsigned_abs(), old_leg.a_basis)?;
         let asset = self.asset_state(asset_index)?;
         let (new_leg, new_asset) = V16Core::kernel_resize_leg_same_side(
             old_leg,
