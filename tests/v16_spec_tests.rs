@@ -3700,6 +3700,85 @@ fn v16_resolved_impaired_source_accepts_prospective_terminal_loss() {
 }
 
 #[test]
+fn v16_resolved_close_normalizes_prospective_lapsed_source_before_settlement() {
+    const Q: u128 = 1_000 * POS_SCALE;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.max_price_move_bps_per_slot = 500;
+    cfg.max_accrual_dt_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+
+    let mut long_header = account_fixture(1, 50);
+    let mut short_header = account_fixture(1, 51);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 3)
+        .unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    market.resolve_market_not_atomic(4).unwrap();
+
+    assert_eq!(long.header.pnl.get(), 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Fresh,
+    );
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut long, 0),
+        Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly),
+    );
+    assert_eq!(long.header.pnl.get(), 0);
+    assert!(long.header.legs[0].try_to_runtime().unwrap().active);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired,
+    );
+
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut long, 0),
+        Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly),
+    );
+    assert!(long.header.pnl.get() > 0);
+    assert!(!long.header.legs[0].try_to_runtime().unwrap().active);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_resolved_foreign_expiry_impairs_account_lien_before_release() {
     const Q: u128 = 1_000 * POS_SCALE;
     const INCREASE_Q: u128 = POS_SCALE;

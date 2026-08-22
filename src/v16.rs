@@ -17397,6 +17397,39 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(None)
     }
 
+    /// Normalize at most one lapsed source bucket that an active resolved leg
+    /// may touch while settling its pending K/F delta. The account has no claim
+    /// for a prospective positive delta yet, so account-local source discovery
+    /// cannot find this prerequisite. Scanning both domains of each bounded
+    /// active leg avoids duplicating the settlement arithmetic and is safely
+    /// conservative: an elapsed Fresh bucket must be normalized regardless of
+    /// which side's pending delta is nonzero.
+    fn expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic(
+        &mut self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<Option<usize>> {
+        let current_slot = self.header.current_slot.get();
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                let asset_index = leg.asset_index as usize;
+                for side in [SideV16::Long, SideV16::Short] {
+                    let domain = self.insurance_domain_index(asset_index, side)?;
+                    let bucket = self.backing_bucket_for_domain(domain)?;
+                    if bucket.status == BackingBucketStatusV16::Fresh
+                        && bucket.expiry_slot <= current_slot
+                    {
+                        self.expire_source_backing_bucket_not_atomic(domain, current_slot)?;
+                        return Ok(Some(domain));
+                    }
+                }
+            }
+            slot += 1;
+        }
+        Ok(None)
+    }
+
     fn claim_resolved_payout_topup_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -17486,6 +17519,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
             }
+        }
+        if self
+            .expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic(
+                &account.as_view(),
+            )?
+            .is_some()
+        {
+            self.validate_shape()?;
+            account.validate_with_market(&self.as_view())?;
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
         if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
             .settle_account_side_effects_not_atomic(
