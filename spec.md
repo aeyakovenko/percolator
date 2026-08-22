@@ -873,6 +873,15 @@ returned K/F to the leg's prior arithmetic values. Risk-increasing trades remain
 blocked until both affected side cohorts are empty; bounded unilateral reduction
 remains available to a current owner while another account is stale.
 
+Entering asset Recovery does not erase or discharge an outstanding K/F cohort.
+The self-classifying permissionless crank MUST prefer an ordinary Active or
+DrainOnly refresh when one exists; otherwise it MUST select the first active
+Recovery leg as a committed-state refresh target. That Recovery step settles
+already-committed K/F/B and source-expiry work and recertifies the account
+without accruing the frozen asset, liquidating it, detaching a live position, or
+forfeiting positive PnL. The settled position remains available to a matched
+risk-reducing owner trade.
+
 -------------------------------------------------------------------------------
 5. Global invariants
 -------------------------------------------------------------------------------
@@ -1575,7 +1584,14 @@ Public wrappers MUST NOT expose caller-controlled:
 - recovery fallback price, recovery reference price, fallback deviation cap, or recovery value-transfer bound;
 - cross-instance netting or merged health.
 
-Wrappers MUST expose full refresh, hinted crank, bounded catchup, active close continuation, account-B settlement, source-credit/lien revalidation, domain-lock/pending-loss/pending-obligation continuation, permissionless recovery, cure-and-cancel, dead-leg forfeit/detach, resolved claim receipt, and rebalance-on-touch.
+Wrappers MUST expose one self-classifying permissionless crank that selects its
+action and asset from current engine state; caller observations are authenticated
+inputs for the selected work, not caller-selected actions. That route composes
+bounded refresh/catchup, active-close continuation, account-B settlement,
+source-credit/lien revalidation, pending-loss/pending-obligation continuation,
+permissionless recovery, and resolved close. Wrappers MUST also expose the
+owner-authorized risk-reducing, cure-and-cancel, dead-leg forfeit/detach,
+resolved-claim, and rebalance-on-touch routes required for user exits.
 
 -------------------------------------------------------------------------------
 14. Required proof and TDD coverage

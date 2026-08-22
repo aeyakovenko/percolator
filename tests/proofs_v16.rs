@@ -18419,10 +18419,9 @@ fn proof_v16_detached_refresh_leg_skips_post_refresh_accrual() {
 
 // Permissionless mixed-lifecycle liveness theorem. Symbolic masks cover every
 // ordering and multiplicity across the full 16-leg account shape. Recovery
-// obligations must never be selected as ordinary refresh/liquidation targets;
-// when any Active or DrainOnly leg exists, first-match selection and both plans
-// must carry a dispatchable leg. Recovery-only portfolios advertise no fake
-// liquidation target.
+// legs never become ordinary accrual/liquidation targets. An Active/DrainOnly
+// refresh retains priority when present; otherwise the first Recovery leg is a
+// complete committed-state refresh fallback rather than a false NoAction.
 #[kani::proof]
 #[kani::unwind(18)]
 #[kani::solver(cadical)]
@@ -18437,9 +18436,11 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
 
     let dispatchable_mask = active_mask | drain_only_mask;
     let mut dispatchable_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
     let mut slot = 0usize;
     while slot < V16_MAX_PORTFOLIO_ASSETS_N {
         let bit = 1u16 << slot;
+        let active = (recovery_mask | dispatchable_mask) & bit != 0;
         let lifecycle = if recovery_mask & bit != 0 {
             AssetLifecycleV16::Recovery
         } else if active_mask & bit != 0 {
@@ -18451,11 +18452,31 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
         };
         let dispatchable = kani_auto_crank_lifecycle_dispatchable(lifecycle);
         assert_eq!(dispatchable, dispatchable_mask & bit != 0);
+        let (b_stale, refresh, liquidatable, reset_obligation) = kani_auto_crank_leg_flags(
+            active,
+            lifecycle,
+            POS_SCALE as i128,
+            POS_SCALE,
+            SideModeV16::Normal,
+            0,
+            0,
+            false,
+        );
+        assert!(!b_stale);
+        assert_eq!(refresh, dispatchable_mask & bit != 0);
+        assert_eq!(liquidatable, dispatchable_mask & bit != 0);
+        assert!(!reset_obligation);
+        if recovery_mask & bit != 0 {
+            assert!(!refresh);
+            assert!(!liquidatable);
+            assert!(!dispatchable);
+        }
         dispatchable_flags[slot] = dispatchable;
+        liquidation_flags[slot] = liquidatable;
         slot += 1;
     }
 
-    let selected = kani_first_actionable_slot(dispatchable_flags);
+    let selected_dispatchable = kani_first_actionable_slot(dispatchable_flags);
     let mut recovery_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
     slot = 0;
     while slot < V16_MAX_PORTFOLIO_ASSETS_N {
@@ -18463,28 +18484,45 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
         slot += 1;
     }
     let first_recovery = kani_first_actionable_slot(recovery_flags).unwrap();
+    let selected_refresh =
+        kani_auto_crank_refresh_asset(selected_dispatchable, Some(first_recovery)).unwrap();
+    assert_eq!(
+        selected_refresh,
+        selected_dispatchable.unwrap_or(first_recovery)
+    );
+    let refresh_plan = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: true,
+            b_stale: false,
+            pending_close: false,
+            expired_close: false,
+            liquidatable: false,
+            recovery_eligible: false,
+            resolved_winner: false,
+        },
+        0,
+        0,
+        Some(selected_refresh),
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    );
+    assert_eq!(
+        refresh_plan,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(selected_refresh)
+        }
+    );
 
+    let selected_liquidation = kani_first_actionable_slot(liquidation_flags);
     if dispatchable_mask == 0 {
-        assert!(selected.is_none());
-        let plan = kani_select_auto_crank_plan(
-            ActionableSummaryV16 {
-                stale: false,
-                b_stale: false,
-                pending_close: false,
-                expired_close: false,
-                liquidatable: false,
-                recovery_eligible: false,
-                resolved_winner: false,
-            },
-            0,
-            0,
-            None,
-            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
-        );
-        assert_eq!(plan, AutoCrankPlanV16::NoAction);
+        assert!(selected_dispatchable.is_none());
+        assert!(selected_liquidation.is_none());
+        assert_eq!(selected_refresh, first_recovery);
+        assert!(recovery_mask & (1u16 << selected_refresh) != 0);
     } else {
-        let selected = selected.unwrap();
+        let selected = selected_liquidation.unwrap();
         let selected_bit = 1u16 << selected;
+        assert_eq!(Some(selected), selected_dispatchable);
+        assert_eq!(selected_refresh, selected);
         assert!(dispatchable_mask & selected_bit != 0);
         assert!(recovery_mask & selected_bit == 0);
         slot = 0;
@@ -18493,27 +18531,6 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
             slot += 1;
         }
 
-        let refresh = kani_select_auto_crank_plan(
-            ActionableSummaryV16 {
-                stale: true,
-                b_stale: false,
-                pending_close: false,
-                expired_close: false,
-                liquidatable: false,
-                recovery_eligible: false,
-                resolved_winner: false,
-            },
-            0,
-            selected,
-            Some(selected),
-            PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
-        );
-        assert_eq!(
-            refresh,
-            AutoCrankPlanV16::RefreshAccount {
-                asset_index: Some(selected)
-            }
-        );
         let liquidate = kani_select_auto_crank_plan(
             ActionableSummaryV16 {
                 stale: false,
@@ -18538,11 +18555,11 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
 
         kani::cover!(
             first_recovery < selected,
-            "Recovery obligation can precede dispatchable work"
+            "Recovery refresh work can precede liquidation work"
         );
         kani::cover!(
             selected < first_recovery,
-            "dispatchable work can precede Recovery obligation"
+            "liquidation work can precede Recovery refresh work"
         );
         kani::cover!(
             active_mask & selected_bit != 0,
@@ -18556,7 +18573,11 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
 
     kani::cover!(
         dispatchable_mask == 0,
-        "Recovery-only account has no fake liquidation target"
+        "Recovery-only account selects committed-state refresh and no liquidation"
+    );
+    kani::cover!(
+        dispatchable_mask != 0,
+        "ordinary refresh retains priority over Recovery fallback"
     );
 }
 
