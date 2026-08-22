@@ -2966,7 +2966,7 @@ fn proof_v16_terminal_spent_domain_cleanup_is_value_neutral_and_remaining_budget
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v16_public_terminal_spent_cleanup_then_restart_preserves_value() {
+fn proof_v16_public_terminal_restart_normalizes_inert_history_preserves_value() {
     let restart_retired: bool = kani::any();
     let long_spent_raw: u8 = kani::any();
     let short_spent_raw: u8 = kani::any();
@@ -2974,6 +2974,11 @@ fn proof_v16_public_terminal_spent_cleanup_then_restart_preserves_value() {
     let insurance_raw: u8 = kani::any();
     let surplus_raw: u8 = kani::any();
     let price_raw: u16 = kani::any();
+    let k_long_raw: i8 = kani::any();
+    let k_short_raw: i8 = kani::any();
+    let f_long_raw: i8 = kani::any();
+    let f_short_raw: i8 = kani::any();
+    let source_spent_raw: u8 = kani::any();
     kani::assume(long_spent_raw != 0 || short_spent_raw != 0);
     kani::assume((1..=10_000).contains(&price_raw));
 
@@ -3017,39 +3022,29 @@ fn proof_v16_public_terminal_spent_cleanup_then_restart_preserves_value() {
     asset.fund_px_last = 100;
     asset.slot_last = current_slot;
     asset.retired_slot = if restart_retired { current_slot } else { 0 };
+    asset.k_long = i128::from(k_long_raw);
+    asset.k_short = i128::from(k_short_raw);
+    asset.f_long_num = i128::from(f_long_raw);
+    asset.f_short_num = i128::from(f_short_raw);
+    asset.k_epoch_start_long = i128::from(k_short_raw);
+    asset.k_epoch_start_short = i128::from(k_long_raw);
+    asset.f_epoch_start_long_num = i128::from(f_short_raw);
+    asset.f_epoch_start_short_num = i128::from(f_long_raw);
+    asset.social_loss_dust_long_num = u128::from(source_spent_raw);
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_spent);
     markets[0].engine.insurance_domain_spent_long = V16PodU128::new(long_spent);
     markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_spent);
     markets[0].engine.insurance_domain_spent_short = V16PodU128::new(short_spent);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: u128::from(source_spent_raw),
+            ..SourceCreditStateV16::EMPTY
+        });
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     assert_eq!(market.validate_shape(), Ok(()));
     let residual_before = market.kani_residual();
-
-    market
-        .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(0)
-        .unwrap();
-    assert_eq!(market.header.vault.get(), vault);
-    assert_eq!(market.header.c_tot.get(), capital);
-    assert_eq!(market.header.insurance.get(), insurance);
-    assert_eq!(market.kani_residual(), residual_before);
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_budget_long.get(),
-        0
-    );
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_spent_long.get(),
-        0
-    );
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_budget_short.get(),
-        0
-    );
-    assert_eq!(
-        market.markets[0].engine.insurance_domain_spent_short.get(),
-        0
-    );
 
     market
         .restart_empty_asset_preserving_insurance_budget_not_atomic(
@@ -3060,8 +3055,14 @@ fn proof_v16_public_terminal_spent_cleanup_then_restart_preserves_value() {
         .unwrap();
 
     kani::cover!(
-        long_spent != 0 && short_spent != 0 && capital != 0 && insurance != 0,
-        "cleanup and restart cover both spent domains with unrelated senior value"
+        long_spent != 0
+            && short_spent != 0
+            && source_spent_raw != 0
+            && k_long_raw != 0
+            && f_short_raw != 0
+            && capital != 0
+            && insurance != 0,
+        "restart normalizes spent, source, social, and K/F history with unrelated senior value"
     );
     kani::cover!(restart_retired, "cleanup and restart cover Retired assets");
     kani::cover!(
@@ -3079,6 +3080,14 @@ fn proof_v16_public_terminal_spent_cleanup_then_restart_preserves_value() {
     assert_eq!(restarted.insurance_domain_budget_short.get(), 0);
     assert_eq!(restarted.insurance_domain_spent_long.get(), 0);
     assert_eq!(restarted.insurance_domain_spent_short.get(), 0);
+    assert_eq!(restarted_asset.k_long, 0);
+    assert_eq!(restarted_asset.k_short, 0);
+    assert_eq!(restarted_asset.f_long_num, 0);
+    assert_eq!(restarted_asset.f_short_num, 0);
+    assert_eq!(
+        restarted.source_credit_long.try_to_runtime().unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
     assert_eq!(market.header.vault.get(), vault);
     assert_eq!(market.header.c_tot.get(), capital);
     assert_eq!(market.header.insurance.get(), insurance);
@@ -3093,7 +3102,7 @@ fn proof_v16_public_terminal_spent_cleanup_then_restart_preserves_value() {
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v16_terminal_spent_cleanup_cannot_erase_provider_receivable() {
+fn proof_v16_terminal_restart_cannot_erase_provider_receivable() {
     let receivable_raw: u8 = kani::any();
     kani::assume(receivable_raw != 0);
     let receivable = u128::from(receivable_raw) * BOUND_SCALE;
@@ -3142,7 +3151,7 @@ fn proof_v16_terminal_spent_cleanup_cannot_erase_provider_receivable() {
     let slot_before = markets[0].engine;
     let wrapper_before = markets[0].wrapper;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let result = market.clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(0);
+    let result = market.restart_empty_asset_preserving_insurance_budget_not_atomic(0, 100, 6);
 
     kani::cover!(
         receivable > BOUND_SCALE,

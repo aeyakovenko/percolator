@@ -14294,7 +14294,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn require_empty_asset_lifecycle_state(&self, asset_index: usize) -> V16Result<()> {
-        self.require_empty_asset_lifecycle_state_with_policy(asset_index, false, false, false)
+        self.require_empty_asset_lifecycle_state_with_policy(
+            asset_index,
+            false,
+            false,
+            false,
+            false,
+        )
     }
 
     fn require_empty_asset_lifecycle_state_with_policy(
@@ -14303,6 +14309,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         allow_terminal_spent_budget: bool,
         allow_terminal_social_loss_audit: bool,
         allow_terminal_source_spent_audit: bool,
+        allow_terminal_price_funding_history: bool,
     ) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
         let asset = self.asset_state(asset_index)?;
@@ -14332,14 +14339,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || asset.mode_short != SideModeV16::Normal
             || !((asset.a_long == ADL_ONE && asset.a_short == ADL_ONE)
                 || (asset.a_long == 0 && asset.a_short == 0))
-            || asset.k_long != 0
-            || asset.k_short != 0
-            || asset.f_long_num != 0
-            || asset.f_short_num != 0
-            || asset.k_epoch_start_long != 0
-            || asset.k_epoch_start_short != 0
-            || asset.f_epoch_start_long_num != 0
-            || asset.f_epoch_start_short_num != 0
+            || (!allow_terminal_price_funding_history
+                && (asset.k_long != 0
+                    || asset.k_short != 0
+                    || asset.f_long_num != 0
+                    || asset.f_short_num != 0
+                    || asset.k_epoch_start_long != 0
+                    || asset.k_epoch_start_short != 0
+                    || asset.f_epoch_start_long_num != 0
+                    || asset.f_epoch_start_short_num != 0))
             || asset.b_long_num != 0
             || asset.b_short_num != 0
             || asset.b_epoch_start_long_num != 0
@@ -18087,11 +18095,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     false,
                     true,
                     true,
+                    true,
                 )?;
                 let (next_asset_set_epoch, next_risk_epoch) =
                     self.checked_asset_set_epoch_bump()?;
                 self.clear_terminal_source_spent_audit(asset_index)?;
                 Self::clear_terminal_social_loss_audit(&mut asset);
+                Self::clear_terminal_price_funding_history(&mut asset);
                 asset.lifecycle = AssetLifecycleV16::Retired;
                 asset.retired_slot = now_slot;
                 self.set_asset_state(asset_index, asset)?;
@@ -18106,9 +18116,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     false,
                     true,
                     true,
+                    true,
                 )?;
                 self.clear_terminal_source_spent_audit(asset_index)?;
                 Self::clear_terminal_social_loss_audit(&mut asset);
+                Self::clear_terminal_price_funding_history(&mut asset);
                 self.set_asset_state(asset_index, asset)?;
                 self.validate_shape()
             }
@@ -18123,6 +18135,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset.social_loss_dust_short_num = 0;
         asset.explicit_unallocated_loss_long = 0;
         asset.explicit_unallocated_loss_short = 0;
+    }
+
+    fn clear_terminal_price_funding_history(asset: &mut AssetStateV16) {
+        asset.k_long = 0;
+        asset.k_short = 0;
+        asset.f_long_num = 0;
+        asset.f_short_num = 0;
+        asset.k_epoch_start_long = 0;
+        asset.k_epoch_start_short = 0;
+        asset.f_epoch_start_long_num = 0;
+        asset.f_epoch_start_short_num = 0;
     }
 
     fn clear_terminal_source_spent_audit(&mut self, asset_index: usize) -> V16Result<()> {
@@ -18164,9 +18187,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Restarts an empty Recovery/Retired asset with a fresh market_id.
     ///
-    /// Domain insurance budgets are preserved exactly. All position, loss,
-    /// source-credit, backing, reservation, spent, and barrier state must already
-    /// be empty, so stale legs from the old market_id fail closed after restart.
+    /// Remaining domain insurance budgets are preserved exactly. Audit-only spent budgets,
+    /// source/social-loss history, and K/F indices are normalized inside this transition after
+    /// proving all positions, claims, backing, receivables, liens, reservations, and barriers are
+    /// empty, so stale legs from the old market_id fail closed after restart.
     pub fn restart_empty_asset_preserving_insurance_budget_not_atomic(
         &mut self,
         asset_index: usize,
@@ -18189,7 +18213,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::LockActive);
         }
-        self.require_empty_asset_lifecycle_state(asset_index)?;
+        self.normalize_terminal_empty_asset_history_not_atomic(asset_index)?;
 
         let market_id = self.header.next_market_id.get();
         if market_id == 0 {
@@ -18220,25 +18244,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    /// Clears spent-only insurance-domain ledgers on an otherwise empty terminal asset.
+    /// Canonicalizes audit-only history on an otherwise empty terminal asset.
     ///
-    /// This is value-neutral: it may only erase a domain whose remaining budget
-    /// is already zero (`budget == spent`). If `budget > spent`, callers must
-    /// withdraw the remaining domain budget before terminal cleanup.
-    pub fn clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(
+    /// This is value-neutral: spent insurance may clear only when its remaining budget is zero
+    /// (`budget == spent`), and source, social-loss, price, and funding history may clear only
+    /// after every position, claim, backing amount, receivable, lien, reservation, and barrier is
+    /// gone. Any live obligation rejects before mutation.
+    fn normalize_terminal_empty_asset_history_not_atomic(
         &mut self,
         asset_index: usize,
     ) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
-        let asset = self.asset_state(asset_index)?;
-        if !matches!(
-            asset.lifecycle,
-            AssetLifecycleV16::Recovery | AssetLifecycleV16::Retired
-        ) {
-            return Err(V16Error::LockActive);
-        }
-        self.require_empty_asset_lifecycle_state_with_policy(asset_index, true, true, true)?;
-        let slot = self.markets[asset_index].engine_slot_mut();
+        self.require_empty_asset_lifecycle_state_with_policy(asset_index, true, true, true, true)?;
+        let slot = self.markets[asset_index].engine_slot();
         let (budget_long, spent_long) = Self::clear_terminal_spent_domain_budget_pair(
             slot.insurance_domain_budget_long,
             slot.insurance_domain_spent_long,
@@ -18247,6 +18265,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot.insurance_domain_budget_short,
             slot.insurance_domain_spent_short,
         )?;
+        let mut asset = self.asset_state(asset_index)?;
+        Self::clear_terminal_social_loss_audit(&mut asset);
+        Self::clear_terminal_price_funding_history(&mut asset);
+        self.clear_terminal_source_spent_audit(asset_index)?;
+        self.set_asset_state(asset_index, asset)?;
+        let slot = self.markets[asset_index].engine_slot_mut();
         slot.insurance_domain_budget_long = budget_long;
         slot.insurance_domain_spent_long = spent_long;
         slot.insurance_domain_budget_short = budget_short;

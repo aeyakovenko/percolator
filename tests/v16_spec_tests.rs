@@ -2247,7 +2247,7 @@ fn v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset() {
 }
 
 #[test]
-fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
+fn v16_restart_normalizes_only_inert_terminal_history() {
     let (mut header, mut markets) = market_fixture(2, 100);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -2257,6 +2257,18 @@ fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
     header.insurance = V16PodU128::new(0);
     header.insurance_domain_budget_remaining_total = V16PodU128::new(0);
     markets[1].engine.insurance_domain_spent_long = V16PodU128::new(10);
+    let mut historical_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    historical_asset.k_long = -601 * ADL_ONE as i128;
+    historical_asset.f_short_num = 17;
+    historical_asset.k_epoch_start_long = -3;
+    historical_asset.f_epoch_start_short_num = 5;
+    historical_asset.social_loss_dust_long_num = 7;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&historical_asset);
+    markets[1].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: 11,
+            ..SourceCreditStateV16::EMPTY
+        });
     let old_market_id = markets[1].engine.asset.market_id.get();
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
@@ -2265,14 +2277,13 @@ fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     assert_eq!(market.validate_shape(), Ok(()));
-    assert_eq!(
-        market.restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3),
-        Err(V16Error::LockActive)
-    );
-
     market
-        .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(1)
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3)
         .unwrap();
+    let asset = market.markets[1].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(asset.market_id, old_market_id);
+    assert_eq!(asset.effective_price, 222);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
@@ -2288,19 +2299,19 @@ fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
         market.markets[1].engine.insurance_domain_spent_long.get(),
         0
     );
-
-    market
-        .restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3)
-        .unwrap();
-    let asset = market.markets[1].engine.asset.try_to_runtime().unwrap();
-    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
-    assert_ne!(asset.market_id, old_market_id);
-    assert_eq!(asset.effective_price, 222);
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .source_credit_short
+            .try_to_runtime()
+            .unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
     market.validate_shape().unwrap();
 }
 
 #[test]
-fn v16_terminal_spent_domain_budget_cleanup_rejects_remaining_budget() {
+fn v16_restart_rejects_remaining_insurance_budget_without_mutation() {
     let (mut header, mut markets) = market_fixture(2, 100);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -2319,7 +2330,7 @@ fn v16_terminal_spent_domain_budget_cleanup_rejects_remaining_budget() {
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(
-        market.clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(1),
+        market.restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3),
         Err(V16Error::LockActive)
     );
     assert_eq!(market.header.vault, vault_before);
@@ -2339,12 +2350,12 @@ fn v16_terminal_spent_domain_budget_cleanup_rejects_remaining_budget() {
 }
 
 #[test]
-fn v16_terminal_spent_domain_budget_cleanup_rejects_active_asset() {
+fn v16_restart_rejects_active_asset() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(
-        market.clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(1),
+        market.restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3),
         Err(V16Error::LockActive)
     );
 }

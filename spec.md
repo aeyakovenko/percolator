@@ -933,6 +933,12 @@ After every source claim, provider receivable, backing amount, lien, and insuran
 reservation is zero, cumulative `spent_backing_num` is likewise audit-only and is
 cleared atomically with retirement. A nonzero provider receivable or consumed backing
 remains a hard retirement blocker.
+After every position, effective-OI atom, pending obligation, and social-loss weight is
+also zero, historical K/F indices and their prior-epoch baselines have no remaining
+claimant and are audit-only. Retirement clears them atomically. Restart performs the
+same terminal normalization, including spent-only domain budgets and source/social
+audit, before assigning the fresh market generation; any live obligation or nonzero
+remaining insurance budget rejects the complete restart transition.
 
 ```text
 abs(K_side) + A_side * MAX_ORACLE_PRICE <= i128::MAX
