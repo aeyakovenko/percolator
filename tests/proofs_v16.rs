@@ -360,9 +360,14 @@ fn proof_v16_public_finalize_side_reset_success_is_value_neutral() {
     let c_tot: u128 = kani::any();
     let insurance: u128 = kani::any();
     let surplus: u128 = kani::any();
+    let epoch_start_k: i128 = kani::any();
+    let epoch_start_f: i128 = kani::any();
+    let epoch_start_b: u128 = kani::any();
     kani::assume(c_tot <= MAX_VAULT_TVL);
     kani::assume(insurance <= MAX_VAULT_TVL - c_tot);
     kani::assume(surplus <= MAX_VAULT_TVL - c_tot - insurance);
+    kani::assume(epoch_start_k != i128::MIN);
+    kani::assume(epoch_start_f != i128::MIN);
     let (mut header, mut markets) = one_market_persisted_slot_fixture();
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
@@ -374,8 +379,14 @@ fn proof_v16_public_finalize_side_reset_success_is_value_neutral() {
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     if finalize_long {
         asset.mode_long = SideModeV16::ResetPending;
+        asset.k_epoch_start_long = epoch_start_k;
+        asset.f_epoch_start_long_num = epoch_start_f;
+        asset.b_epoch_start_long_num = epoch_start_b;
     } else {
         asset.mode_short = SideModeV16::ResetPending;
+        asset.k_epoch_start_short = epoch_start_k;
+        asset.f_epoch_start_short_num = epoch_start_f;
+        asset.b_epoch_start_short_num = epoch_start_b;
     }
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
@@ -404,8 +415,14 @@ fn proof_v16_public_finalize_side_reset_success_is_value_neutral() {
     assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
     if finalize_long {
         assert_eq!(after.mode_long, SideModeV16::Normal);
+        assert_eq!(after.k_epoch_start_long, 0);
+        assert_eq!(after.f_epoch_start_long_num, 0);
+        assert_eq!(after.b_epoch_start_long_num, 0);
     } else {
         assert_eq!(after.mode_short, SideModeV16::Normal);
+        assert_eq!(after.k_epoch_start_short, 0);
+        assert_eq!(after.f_epoch_start_short_num, 0);
+        assert_eq!(after.b_epoch_start_short_num, 0);
     }
     // Junior-pool isolation: this transition must not move the junior
     // residual pool.
@@ -17541,8 +17558,8 @@ fn proof_v16_frame_insurance_account_credit_touches_only_declared_state() {
     assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
 }
 
-// side-reset frame: exactly {header.risk_epoch, asset.mode_long} — the
-// finalization flips one side mode and bumps one epoch, nothing else.
+// Side-reset frame: finalization flips one side mode, clears only that side's
+// prior-epoch settlement baselines, and bumps one risk epoch.
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
@@ -17551,6 +17568,9 @@ fn proof_v16_frame_side_reset_touches_only_declared_state() {
     {
         let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
         asset.mode_long = SideModeV16::ResetPending;
+        asset.k_epoch_start_long = -7;
+        asset.f_epoch_start_long_num = 11;
+        asset.b_epoch_start_long_num = 13;
         markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     }
     let h0 = header;
@@ -17568,6 +17588,9 @@ fn proof_v16_frame_side_reset_touches_only_declared_state() {
     let mut es = s0;
     let mut asset = s0.asset.try_to_runtime().unwrap();
     asset.mode_long = SideModeV16::Normal;
+    asset.k_epoch_start_long = 0;
+    asset.f_epoch_start_long_num = 0;
+    asset.b_epoch_start_long_num = 0;
     es.asset = AssetStateV16Account::from_runtime(&asset);
     assert!(kani_eq_engine_asset_slot_v16_account(
         &es,

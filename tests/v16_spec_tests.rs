@@ -977,6 +977,12 @@ fn v16_finalize_side_reset_is_public_value_neutral_and_epoch_bumping() {
     let risk_epoch_before = header.risk_epoch.get();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.mode_long = SideModeV16::ResetPending;
+    asset.k_epoch_start_long = -17;
+    asset.f_epoch_start_long_num = 23;
+    asset.b_epoch_start_long_num = 29;
+    asset.k_epoch_start_short = 31;
+    asset.f_epoch_start_short_num = -37;
+    asset.b_epoch_start_short_num = 41;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -986,6 +992,12 @@ fn v16_finalize_side_reset_is_public_value_neutral_and_epoch_bumping() {
 
     let finalized = market.markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(finalized.mode_long, SideModeV16::Normal);
+    assert_eq!(finalized.k_epoch_start_long, 0);
+    assert_eq!(finalized.f_epoch_start_long_num, 0);
+    assert_eq!(finalized.b_epoch_start_long_num, 0);
+    assert_eq!(finalized.k_epoch_start_short, 31);
+    assert_eq!(finalized.f_epoch_start_short_num, -37);
+    assert_eq!(finalized.b_epoch_start_short_num, 41);
     assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);

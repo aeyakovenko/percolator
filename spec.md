@@ -721,6 +721,10 @@ Activation requires:
 - certificates fail closed unless their schema explicitly excludes the new asset.
 
 DrainOnly blocks risk increase and new attaches. Retired requires zero OI, zero stored positions, no pending barriers, no obligations, no liens, all close ledgers finalized/canceled, and all prior-epoch stale accounts settled/migrated/recovered. A `ResetPending` side cannot reset again until all prior-epoch stale accounts are settled, migrated, or recovered.
+Successful side-reset finalization clears that side's prior-epoch K/F/B settlement baselines after
+proving there are no remaining stored or stale legs, pending obligations, or domain barriers that
+can reference them. These inert historical baselines cannot block an otherwise empty asset from
+entering DrainOnly or Retired.
 
 -------------------------------------------------------------------------------
 4. State
