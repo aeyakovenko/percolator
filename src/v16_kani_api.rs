@@ -268,6 +268,68 @@ pub fn kani_source_claim_domain_first_burn_partition(
     V16Core::source_claim_domain_first_burn_partition(source_claim_num, burn_num)
 }
 
+pub fn kani_mul_div_floor_u128_or_wide(a: u128, b: u128, denominator: u128) -> V16Result<u128> {
+    V16Core::mul_div_floor_u128_or_wide(a, b, denominator)
+}
+
+pub fn kani_mul_div_ceil_u128_or_wide(a: u128, b: u128, denominator: u128) -> V16Result<u128> {
+    V16Core::mul_div_ceil_u128_or_wide(a, b, denominator)
+}
+
+pub fn kani_mul_div_floor_u128_wide_reference(
+    a: u128,
+    b: u128,
+    denominator: u128,
+) -> V16Result<u128> {
+    if denominator == 0 {
+        return Err(V16Error::InvalidConfig);
+    }
+    U256::from_u128(a)
+        .checked_mul(U256::from_u128(b))
+        .and_then(|value| value.checked_div(U256::from_u128(denominator)))
+        .and_then(|value| value.try_into_u128())
+        .ok_or(V16Error::ArithmeticOverflow)
+}
+
+pub fn kani_mul_div_ceil_u128_wide_reference(
+    a: u128,
+    b: u128,
+    denominator: u128,
+) -> V16Result<u128> {
+    if denominator == 0 {
+        return Err(V16Error::InvalidConfig);
+    }
+    checked_mul_div_ceil_u256(
+        U256::from_u128(a),
+        U256::from_u128(b),
+        U256::from_u128(denominator),
+    )
+    .and_then(|value| value.try_into_u128())
+    .ok_or(V16Error::ArithmeticOverflow)
+}
+
+pub fn kani_prepare_source_positive_claim_burn_delta(
+    source: SourceCreditStateV16,
+    face_burn_num: u128,
+) -> V16Result<SourceCreditStateV16> {
+    V16Core::prepare_source_positive_claim_burn_delta(source, face_burn_num)
+}
+
+pub fn kani_prepare_source_credit_domain_recompute_for_epoch(
+    source: SourceCreditStateV16,
+    risk_epoch: u64,
+) -> V16Result<(SourceCreditStateV16, u64)> {
+    V16Core::prepare_source_credit_domain_recompute_for_epoch(source, risk_epoch)
+}
+
+pub fn kani_prepare_source_credit_domain_recompute_for_epoch_steps(
+    source: SourceCreditStateV16,
+    risk_epoch: u64,
+    epoch_steps: u64,
+) -> V16Result<(SourceCreditStateV16, u64)> {
+    V16Core::prepare_source_credit_domain_recompute_for_epoch_steps(source, risk_epoch, epoch_steps)
+}
+
 pub fn kani_loss_stale_trade_scope_allowed(
     market_loss_stale_active: bool,
     trade_asset_loss_stale: bool,

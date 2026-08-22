@@ -493,6 +493,31 @@ fn contract_check_prepare_source_positive_claim_bound_delta() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::prepare_source_positive_claim_burn_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_prepare_source_positive_claim_burn_delta() {
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let face_burn_num: u128 = kani::any();
+    kani::assume(source.exact_positive_claim_num <= source.positive_claim_bound_num);
+    kani::assume(face_burn_num <= source.positive_claim_bound_num);
+    let _ = V16Core::prepare_source_positive_claim_burn_delta(source, face_burn_num);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(MarketGroupV16ViewMut::apply_total_delta)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]

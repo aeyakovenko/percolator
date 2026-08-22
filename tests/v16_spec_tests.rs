@@ -4024,8 +4024,7 @@ fn v16_resolved_foreign_expiry_impairs_account_lien_before_release() {
     target.validate_with_market(&market.as_view()).unwrap();
 }
 
-#[test]
-fn v16_live_mark_reversal_unwinds_source_lien_before_claim_burn() {
+fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed: bool) {
     const OPEN_Q: u128 = 1_000 * POS_SCALE;
     const INCREASE_Q: u128 = 50 * POS_SCALE;
     let (mut header, mut markets) = market_fixture(1, 100);
@@ -4040,9 +4039,23 @@ fn v16_live_mark_reversal_unwinds_source_lien_before_claim_burn() {
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
-    market
-        .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 100)
-        .unwrap();
+    if insurance_backed {
+        #[cfg(feature = "fuzz")]
+        {
+            market
+                .deposit_domain_insurance_not_atomic(1, 100_000)
+                .unwrap();
+            market
+                .reserve_insurance_credit_not_atomic(1, 100_000 * BOUND_SCALE)
+                .unwrap();
+        }
+        #[cfg(not(feature = "fuzz"))]
+        unreachable!("the insurance-backed variant requires the fuzz test API");
+    } else {
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 100)
+            .unwrap();
+    }
     market.deposit_not_atomic(&mut long, 52_501).unwrap();
     market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
     market
@@ -4066,6 +4079,19 @@ fn v16_live_mark_reversal_unwinds_source_lien_before_claim_burn() {
         .unwrap();
     market.full_account_refresh_not_atomic(&mut short).unwrap();
     market.full_account_refresh_not_atomic(&mut long).unwrap();
+    if insurance_backed {
+        let fresh_backing_atoms = market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .fresh_unliened_backing_num
+            / BOUND_SCALE;
+        assert!(fresh_backing_atoms > 0);
+        market
+            .withdraw_fresh_counterparty_backing_not_atomic(1, fresh_backing_atoms)
+            .expect("reserved insurance must fully replace withdrawn counterparty backing");
+    }
     assert_eq!(long.header.pnl.get(), 5_000);
     market
         .execute_trade_with_fee_loss_stale_scoped_not_atomic(
@@ -4082,7 +4108,16 @@ fn v16_live_mark_reversal_unwinds_source_lien_before_claim_burn() {
     let lien_before = long.header.source_domains[0];
     assert_eq!(long.header.pnl.get(), 5_000);
     assert!(lien_before.source_claim_liened_num.get() > 0);
-    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+    if insurance_backed {
+        assert!(
+            lien_before.source_lien_insurance_backing_num.get() > 0,
+            "expected insurance-backed lien: {lien_before:?}"
+        );
+        assert_eq!(lien_before.source_lien_counterparty_backing_num.get(), 0);
+    } else {
+        assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+        assert_eq!(lien_before.source_lien_insurance_backing_num.get(), 0);
+    }
     let capital_before_reversal = long.header.capital.get();
     let lien_effective = lien_before.source_lien_effective_reserved.get();
     let backing_before_reversal = market.markets[0]
@@ -4090,6 +4125,12 @@ fn v16_live_mark_reversal_unwinds_source_lien_before_claim_burn() {
         .backing_short
         .try_to_runtime()
         .unwrap();
+    let reservation_before_reversal = market.markets[0]
+        .engine
+        .insurance_reservation_short
+        .try_to_runtime()
+        .unwrap();
+    let insurance_before_reversal = market.header.insurance.get();
 
     market
         .set_asset_raw_oracle_target_not_atomic(0, 100)
@@ -4115,23 +4156,51 @@ fn v16_live_mark_reversal_unwinds_source_lien_before_claim_burn() {
         capital_before_reversal - principal_loss
     );
     assert_eq!(long.header.source_domains[0], Default::default());
-    assert_eq!(
-        backing_after_reversal.fresh_unliened_backing_num,
-        backing_before_reversal
-            .fresh_unliened_backing_num
-            .checked_sub(unliened_support_consumed * BOUND_SCALE)
-            .unwrap()
-            .checked_add(lien_before.source_lien_counterparty_backing_num.get())
-            .unwrap(),
-        "the still-liened backing is unpledged rather than consumed"
-    );
-    assert_eq!(backing_after_reversal.valid_liened_backing_num, 0);
-    assert_eq!(
-        backing_after_reversal.consumed_liened_backing_num,
-        backing_before_reversal.consumed_liened_backing_num
-            + unliened_support_consumed * BOUND_SCALE,
-        "only realizable unliened support offsets the reversal loss"
-    );
+    if insurance_backed {
+        let reservation_after_reversal = market.markets[0]
+            .engine
+            .insurance_reservation_short
+            .try_to_runtime()
+            .unwrap();
+        let source_after_reversal = market.markets[0]
+            .engine
+            .source_credit_short
+            .try_to_runtime()
+            .unwrap();
+        assert_eq!(reservation_after_reversal.valid_liened_insurance_num, 0);
+        assert_eq!(source_after_reversal.valid_liened_insurance_num, 0);
+        assert_eq!(
+            reservation_after_reversal.consumed_insurance_num,
+            reservation_before_reversal.consumed_insurance_num
+                + unliened_support_consumed * BOUND_SCALE,
+            "only realizable unliened support consumes insurance"
+        );
+        assert_eq!(
+            market.header.insurance.get() + unliened_support_consumed,
+            insurance_before_reversal,
+            "the fused burn spends each insurance-backed support atom exactly once"
+        );
+        assert_eq!(backing_after_reversal, backing_before_reversal);
+    } else {
+        assert_eq!(
+            backing_after_reversal.fresh_unliened_backing_num,
+            backing_before_reversal
+                .fresh_unliened_backing_num
+                .checked_sub(unliened_support_consumed * BOUND_SCALE)
+                .unwrap()
+                .checked_add(lien_before.source_lien_counterparty_backing_num.get())
+                .unwrap(),
+            "the still-liened backing is unpledged rather than consumed"
+        );
+        assert_eq!(backing_after_reversal.valid_liened_backing_num, 0);
+        assert_eq!(
+            backing_after_reversal.consumed_liened_backing_num,
+            backing_before_reversal.consumed_liened_backing_num
+                + unliened_support_consumed * BOUND_SCALE,
+            "only realizable unliened support offsets the reversal loss"
+        );
+        assert_eq!(market.header.insurance.get(), insurance_before_reversal);
+    }
     assert!(cert.valid);
     assert!(
         cert.certified_equity >= 0 && (cert.certified_equity as u128) < cert.certified_initial_req,
@@ -4153,6 +4222,17 @@ fn v16_live_mark_reversal_unwinds_source_lien_before_claim_burn() {
             },
         )
         .expect("risk-reducing trade remains available after source-lien unwind");
+}
+
+#[test]
+fn v16_live_mark_reversal_unwinds_counterparty_lien_before_claim_burn() {
+    run_live_mark_reversal_unwinds_source_lien_before_claim_burn(false);
+}
+
+#[cfg(feature = "fuzz")]
+#[test]
+fn v16_live_mark_reversal_unwinds_insurance_lien_before_claim_burn() {
+    run_live_mark_reversal_unwinds_source_lien_before_claim_burn(true);
 }
 
 #[test]
