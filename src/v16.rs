@@ -13956,36 +13956,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ))
     }
 
-    fn released_obligation_is_current(
-        &self,
-        account: &PortfolioV16View<'_>,
-        asset_index: usize,
-    ) -> V16Result<bool> {
-        let Some(leg_slot) = Self::active_leg_slot_for_asset(account, asset_index)? else {
-            return Ok(false);
-        };
-        let leg = account.header.legs[leg_slot].try_to_runtime()?;
-        if !leg.active
-            || leg.b_stale
-            || leg.stale
-            || leg.basis_pos_q != 0
-            || leg.loss_weight == 0
-            || account
-                .header
-                .close_progress
-                .try_to_runtime()?
-                .has_pending_residual()
-            || self.has_pending_domain_loss_barrier(asset_index, leg.side)?
-            || !self.recovery_pending_obligation_release_allowed(asset_index, leg.side)?
-        {
-            return Ok(false);
-        }
-        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
-        Ok(k_target == leg.k_snap
-            && f_target == leg.f_snap
-            && self.b_target_for_leg(asset_index, leg)? == leg.b_snap)
-    }
-
     /// THE SINGLE PUBLIC PERMISSIONLESS CRANK (engine.md): the only crank the
     /// wrapper should call — order-insensitive and engine-selected, built for a
     /// swarm of opportunistic keepers whose transactions land out of order. The
@@ -14022,20 +13992,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.validate_with_market(&self.as_view())?;
             let released_obligation_asset = self.auto_crank_selected_assets(&account.as_view())?.4;
             if let Some(asset_index) = released_obligation_asset {
-                if self.released_obligation_is_current(&account.as_view(), asset_index)? {
-                    self.validate_unconfigured_market_tail()?;
-                    self.clear_leg(account, asset_index)?;
-                    self.validate_shape_audit_scan()?;
-                    account.validate_with_market(&self.as_view())?;
-                    return Ok(AutoCrankResultV16 {
-                        selected: AutoCrankPlanV16::RefreshAccount {
-                            asset_index: Some(asset_index),
-                        },
-                        outcome: AutoCrankOutcomeV16::Progressed(
-                            PermissionlessProgressOutcomeV16::AccountCurrent,
-                        ),
-                    });
-                }
+                self.validate_unconfigured_market_tail()?;
+                self.forfeit_recovery_leg_not_atomic(
+                    account,
+                    asset_index,
+                    self.header.config.public_b_chunk_atoms.get(),
+                )?;
+                self.validate_shape_audit_scan()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(AutoCrankResultV16 {
+                    selected: AutoCrankPlanV16::RefreshAccount {
+                        asset_index: Some(asset_index),
+                    },
+                    outcome: AutoCrankOutcomeV16::Progressed(
+                        PermissionlessProgressOutcomeV16::AccountCurrent,
+                    ),
+                });
             }
             self.resolve_market_not_atomic(work.now_slot)?;
             account.validate_with_market(&self.as_view())?;
@@ -14069,18 +14041,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             recovery_reason,
         );
 
-        // Once the originating domain barrier is gone, a current zero-basis leg
-        // carries only a released loss obligation. Detach it directly so the
-        // account and market counters cannot remain locked behind a current
-        // health certificate that would otherwise classify as NoAction.
+        // Once the originating domain barrier is gone, a zero-basis leg carries
+        // only a released loss obligation. Route it through the canonical
+        // Recovery-forfeit transition so any K/F/B delta is settled before the
+        // leg and its aggregate counters are detached.
         if matches!(plan, AutoCrankPlanV16::RefreshAccount { .. }) {
             if let Some(asset_index) = released_obligation_asset {
-                if self.released_obligation_is_current(&account.as_view(), asset_index)? {
-                    self.validate_unconfigured_market_tail()?;
-                    self.clear_leg(account, asset_index)?;
+                self.validate_unconfigured_market_tail()?;
+                let advanced =
+                    if self.asset_state(asset_index)?.lifecycle == AssetLifecycleV16::Recovery {
+                        self.forfeit_recovery_leg_not_atomic(
+                            account,
+                            asset_index,
+                            self.header.config.public_b_chunk_atoms.get(),
+                        )?;
+                        true
+                    } else {
+                        match self.clear_leg(account, asset_index) {
+                            Ok(()) => true,
+                            // Active/DrainOnly obligations can still accrue K/F/B.
+                            // The ordinary refresh dispatch below settles them.
+                            Err(V16Error::Stale) => false,
+                            Err(err) => return Err(err),
+                        }
+                    };
+                if advanced {
                     self.validate_shape_audit_scan()?;
+                    account.validate_with_market(&self.as_view())?;
                     return Ok(AutoCrankResultV16 {
-                        selected: plan,
+                        selected: AutoCrankPlanV16::RefreshAccount {
+                            asset_index: Some(asset_index),
+                        },
                         outcome: AutoCrankOutcomeV16::Progressed(
                             PermissionlessProgressOutcomeV16::AccountCurrent,
                         ),
