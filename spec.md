@@ -929,6 +929,10 @@ saturates and never creates payout capacity. Remainder, dust, and explicit-loss
 audit fields remain durable while the asset has any live economic obligation.
 An otherwise empty asset may clear only those inert fields atomically with
 retirement so historical rounding cannot permanently block terminal progress.
+After every source claim, provider receivable, backing amount, lien, and insurance
+reservation is zero, cumulative `spent_backing_num` is likewise audit-only and is
+cleared atomically with retirement. A nonzero provider receivable or consumed backing
+remains a hard retirement blocker.
 
 ```text
 abs(K_side) + A_side * MAX_ORACLE_PRICE <= i128::MAX

@@ -4573,6 +4573,19 @@ impl SourceCreditStateV16 {
             && self.impaired_liened_insurance_num == 0
             && (self.credit_rate_num == 0 || self.credit_rate_num == CREDIT_RATE_SCALE)
     }
+
+    const fn is_terminal_spent_audit_only_shape(self) -> bool {
+        self.positive_claim_bound_num == 0
+            && self.exact_positive_claim_num == 0
+            && self.fresh_reserved_backing_num == 0
+            && self.provider_receivable_num == 0
+            && self.valid_liened_backing_num == 0
+            && self.impaired_liened_backing_num == 0
+            && self.insurance_credit_reserved_num == 0
+            && self.valid_liened_insurance_num == 0
+            && self.impaired_liened_insurance_num == 0
+            && (self.credit_rate_num == 0 || self.credit_rate_num == CREDIT_RATE_SCALE)
+    }
 }
 
 impl Default for SourceCreditStateV16 {
@@ -14281,7 +14294,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn require_empty_asset_lifecycle_state(&self, asset_index: usize) -> V16Result<()> {
-        self.require_empty_asset_lifecycle_state_with_policy(asset_index, false, false)
+        self.require_empty_asset_lifecycle_state_with_policy(asset_index, false, false, false)
     }
 
     fn require_empty_asset_lifecycle_state_with_policy(
@@ -14289,6 +14302,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
         allow_terminal_spent_budget: bool,
         allow_terminal_social_loss_audit: bool,
+        allow_terminal_source_spent_audit: bool,
     ) -> V16Result<()> {
         self.validate_configured_asset_index(asset_index)?;
         let asset = self.asset_state(asset_index)?;
@@ -14348,8 +14362,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     || asset.explicit_unallocated_loss_long != 0
                     || asset.explicit_unallocated_loss_short != 0))
             || spent_blocks_empty
-            || !long_source.is_empty_amount_shape()
-            || !short_source.is_empty_amount_shape()
+            || !(if allow_terminal_source_spent_audit {
+                long_source.is_terminal_spent_audit_only_shape()
+            } else {
+                long_source.is_empty_amount_shape()
+            })
+            || !(if allow_terminal_source_spent_audit {
+                short_source.is_terminal_spent_audit_only_shape()
+            } else {
+                short_source.is_empty_amount_shape()
+            })
             || !long_bucket.is_empty_amount_shape()
             || !short_bucket.is_empty_amount_shape()
             || long_bucket.market_id != asset.market_id
@@ -18060,9 +18082,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             | AssetLifecycleV16::DrainOnly
             | AssetLifecycleV16::Recovery => {
                 self.expire_lapsed_source_backing_for_asset_not_atomic(asset_index, now_slot)?;
-                self.require_empty_asset_lifecycle_state_with_policy(asset_index, false, true)?;
+                self.require_empty_asset_lifecycle_state_with_policy(
+                    asset_index,
+                    false,
+                    true,
+                    true,
+                )?;
                 let (next_asset_set_epoch, next_risk_epoch) =
                     self.checked_asset_set_epoch_bump()?;
+                self.clear_terminal_source_spent_audit(asset_index)?;
                 Self::clear_terminal_social_loss_audit(&mut asset);
                 asset.lifecycle = AssetLifecycleV16::Retired;
                 asset.retired_slot = now_slot;
@@ -18073,7 +18101,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             AssetLifecycleV16::Retired => {
                 self.expire_lapsed_source_backing_for_asset_not_atomic(asset_index, now_slot)?;
-                self.require_empty_asset_lifecycle_state_with_policy(asset_index, false, true)?;
+                self.require_empty_asset_lifecycle_state_with_policy(
+                    asset_index,
+                    false,
+                    true,
+                    true,
+                )?;
+                self.clear_terminal_source_spent_audit(asset_index)?;
                 Self::clear_terminal_social_loss_audit(&mut asset);
                 self.set_asset_state(asset_index, asset)?;
                 self.validate_shape()
@@ -18089,6 +18123,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset.social_loss_dust_short_num = 0;
         asset.explicit_unallocated_loss_long = 0;
         asset.explicit_unallocated_loss_short = 0;
+    }
+
+    fn clear_terminal_source_spent_audit(&mut self, asset_index: usize) -> V16Result<()> {
+        for side in [SideV16::Long, SideV16::Short] {
+            let domain = self.insurance_domain_index(asset_index, side)?;
+            let source = self.source_credit_for_domain_shape(domain)?;
+            if !source.is_terminal_spent_audit_only_shape() {
+                return Err(V16Error::LockActive);
+            }
+            self.set_source_credit_for_domain(domain, SourceCreditStateV16::EMPTY)?;
+        }
+        Ok(())
     }
 
     /// Retirement is the terminal consumer for one asset, so it must normalize
@@ -18191,7 +18237,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         ) {
             return Err(V16Error::LockActive);
         }
-        self.require_empty_asset_lifecycle_state_with_policy(asset_index, true, true)?;
+        self.require_empty_asset_lifecycle_state_with_policy(asset_index, true, true, true)?;
         let slot = self.markets[asset_index].engine_slot_mut();
         let (budget_long, spent_long) = Self::clear_terminal_spent_domain_budget_pair(
             slot.insurance_domain_budget_long,

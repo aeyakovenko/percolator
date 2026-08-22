@@ -8253,6 +8253,8 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let short_dust_raw: u8 = kani::any();
     let long_explicit_raw: u8 = kani::any();
     let short_explicit_raw: u8 = kani::any();
+    let long_spent_raw: u8 = kani::any();
+    let short_spent_raw: u8 = kani::any();
     kani::assume((1..=10).contains(&retire_slot_raw));
     let c_tot = if with_senior_balances { 7 } else { 0 };
     let insurance = if with_senior_balances { 3 } else { 0 };
@@ -8269,6 +8271,18 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     asset_before.explicit_unallocated_loss_long = long_explicit_raw as u128;
     asset_before.explicit_unallocated_loss_short = short_explicit_raw as u128;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset_before);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: long_spent_raw as u128,
+            credit_epoch: 7,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: short_spent_raw as u128,
+            credit_epoch: 11,
+            ..SourceCreditStateV16::EMPTY
+        });
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -8282,8 +8296,12 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
 
     kani::cover!(
-        retire_slot > 1 && with_senior_balances && asset.lifecycle == AssetLifecycleV16::Retired,
-        "empty asset can retire without moving nonzero senior balances"
+        retire_slot > 1
+            && with_senior_balances
+            && long_spent_raw > 0
+            && short_spent_raw > 0
+            && asset.lifecycle == AssetLifecycleV16::Retired,
+        "empty asset can retire and clear spent-only source audit without moving senior balances"
     );
     assert_eq!(asset.lifecycle, AssetLifecycleV16::Retired);
     assert_eq!(asset.retired_slot, retire_slot);
@@ -8293,6 +8311,22 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     assert_eq!(asset.social_loss_dust_short_num, 0);
     assert_eq!(asset.explicit_unallocated_loss_long, 0);
     assert_eq!(asset.explicit_unallocated_loss_short, 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .try_to_runtime()
+            .unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_short
+            .try_to_runtime()
+            .unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
     assert_eq!(market.header.current_slot.get(), retire_slot);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
@@ -8303,6 +8337,44 @@ fn proof_v16_retire_empty_asset_is_value_neutral_and_epoch_scoped() {
     );
     assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
     assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_retire_live_provider_receivable_rejects_without_mutation() {
+    let receivable_raw: u8 = kani::any();
+    let retire_slot_raw: u8 = kani::any();
+    kani::assume(receivable_raw > 0);
+    kani::assume(retire_slot_raw > 0);
+    let receivable_num = receivable_raw as u128;
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: receivable_num,
+            provider_receivable_num: receivable_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        consumed_liened_backing_num: receivable_num,
+        expiry_slot: 1,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    let header_before = header;
+    let slot_before = markets[0].engine;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.retire_empty_asset_not_atomic(0, retire_slot_raw as u64);
+
+    kani::cover!(
+        receivable_raw > 8 && retire_slot_raw > 8,
+        "live provider receivable reaches the retirement blocker"
+    );
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert_eq!(*market.header, header_before);
+    assert_eq!(market.markets[0].engine, slot_before);
 }
 
 #[kani::proof]

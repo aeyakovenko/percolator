@@ -2469,6 +2469,12 @@ fn v16_retire_normalizes_only_inert_social_loss_audit_state() {
     asset.explicit_unallocated_loss_long = 7;
     asset.explicit_unallocated_loss_short = u128::MAX;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: 17 * BOUND_SCALE,
+            credit_epoch: 9,
+            ..SourceCreditStateV16::EMPTY
+        });
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
@@ -2483,6 +2489,14 @@ fn v16_retire_normalizes_only_inert_social_loss_audit_state() {
     assert_eq!(retired.social_loss_dust_short_num, 0);
     assert_eq!(retired.explicit_unallocated_loss_long, 0);
     assert_eq!(retired.explicit_unallocated_loss_short, 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .try_to_runtime()
+            .unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
     assert_eq!(market.header.insurance, insurance_before);
@@ -2507,6 +2521,35 @@ fn v16_retire_normalizes_only_inert_social_loss_audit_state() {
         Err(V16Error::LockActive)
     );
     assert_eq!(live.markets[0].engine, slot_before);
+}
+
+#[test]
+fn v16_retire_rejects_live_provider_receivable_without_mutation() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let receivable_num = 19 * BOUND_SCALE;
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: receivable_num,
+            provider_receivable_num: receivable_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        consumed_liened_backing_num: receivable_num,
+        expiry_slot: 1,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    let header_before = header;
+    let slot_before = markets[0].engine;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.retire_empty_asset_not_atomic(0, 2),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(*market.header, header_before);
+    assert_eq!(market.markets[0].engine, slot_before);
 }
 
 #[test]
