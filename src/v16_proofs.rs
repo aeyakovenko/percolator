@@ -2593,6 +2593,17 @@ fn contract_check_actionable_summary_from_signals() {
     );
 }
 
+// INV-076/074: close-snapshot freshness is scoped to the originating asset.
+// The production guard has no market-wide slot input, so unrelated accrual is
+// observationally irrelevant; only an attached originating leg whose own asset
+// slot advanced beyond the immutable anchor is stale.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_open_close_snapshot_is_stale)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_open_close_snapshot_is_stale() {
+    let _ = V16Core::kernel_open_close_snapshot_is_stale(kani::any(), kani::any(), kani::any());
+}
+
 // ROADMAP workstream B.3 (social-loss shell, no-LoF): the live booking division
 // social_loss_book_split (engine_chunk*SOCIAL_LOSS_DEN / weight_sum) is a wide
 // symbolic u128 division that resists Kani — stub it to an arbitrary (delta_b,

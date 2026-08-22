@@ -2228,6 +2228,22 @@ impl V16Core {
         }
     }
 
+    /// A close snapshot becomes stale only when the originating asset has
+    /// advanced past the immutable close anchor while that asset's leg remains
+    /// attached. Unrelated assets may advance the market-wide slot without
+    /// changing this close's economics and therefore cannot trigger recovery.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &bool| {
+        *result
+            == (originating_leg_active && originating_asset_slot > drift_reference_slot)
+    }))]
+    pub(crate) fn kernel_open_close_snapshot_is_stale(
+        originating_leg_active: bool,
+        originating_asset_slot: u64,
+        drift_reference_slot: u64,
+    ) -> bool {
+        originating_leg_active && originating_asset_slot > drift_reference_slot
+    }
+
     /// PRODUCTION KERNEL (roadmap 3B.6, Pillar S/L S-A1 cap): the social-loss
     /// chunk cap — the bookable chunk is `min(residual_remaining, public chunk
     /// cap)`, so a single step books NO MORE than the outstanding residual and
@@ -15199,8 +15215,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let asset_index = ledger.asset_index as usize;
         if asset_index < self.header.config.max_market_slots.get() as usize
-            && Self::active_leg_slot_for_asset(account, asset_index)?.is_some()
-            && self.header.current_slot.get() > ledger.drift_reference_slot
+            && V16Core::kernel_open_close_snapshot_is_stale(
+                Self::active_leg_slot_for_asset(account, asset_index)?.is_some(),
+                self.asset_state(asset_index)?.slot_last,
+                ledger.drift_reference_slot,
+            )
         {
             if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
                 return Ok(());
