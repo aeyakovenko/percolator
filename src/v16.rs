@@ -13890,8 +13890,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut refresh_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut liquidation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut reset_obligation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
-        let mut released_obligation_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut b_stale_flags = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut released_obligation_asset = None;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -13919,7 +13919,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 liquidation_flags[slot] = liquidatable;
                 reset_obligation_flags[slot] =
                     reset_obligation || Self::leg_has_exhausted_effective_oi(asset, leg);
-                released_obligation_flags[slot] = release_allowed
+                let released_obligation = release_allowed
                     && !leg.stale
                     && !leg.b_stale
                     && leg.basis_pos_q == 0
@@ -13929,6 +13929,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         leg.asset_index as usize,
                         leg.side,
                     )?;
+                if released_obligation_asset.is_none() && released_obligation {
+                    released_obligation_asset = Some(leg.asset_index as usize);
+                }
             }
             slot += 1;
         }
@@ -13945,8 +13948,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let liquidatable_asset = asset_of(V16Core::first_actionable_slot(liquidation_flags))?;
         let reset_obligation_asset =
             asset_of(V16Core::first_actionable_slot(reset_obligation_flags))?;
-        let released_obligation_asset =
-            asset_of(V16Core::first_actionable_slot(released_obligation_flags))?;
         Ok((
             b_stale_asset,
             refresh_asset,
