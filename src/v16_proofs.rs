@@ -2689,6 +2689,34 @@ fn contract_check_kernel_forfeit_residual_step() {
     let _ = V16Core::kernel_forfeit_residual_step(residual_remaining, booking_capacity);
 }
 
+// A Recovery exit that moves basis to zero preserves the exact loss weight and
+// only changes effective OI plus the matching pending-obligation count.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_retain_leg_as_pending_obligation)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_retain_leg_as_pending_obligation() {
+    let leg: PortfolioLegV16 = kani::any();
+    let asset: AssetStateV16 = kani::any();
+    let _ = V16Core::kernel_retain_leg_as_pending_obligation(leg, asset);
+}
+
+// Exhaust all lifecycle/count inputs for the overlap-safe release predicate.
+// Recovery release is possible exactly when every opposite stored leg is
+// already a zero-basis obligation; malformed count summaries fail closed.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_recovery_pending_obligation_release_allowed)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_recovery_pending_obligation_release_allowed() {
+    let lifecycle: AssetLifecycleV16 = kani::any();
+    let opposite_stored_count: u64 = kani::any();
+    let opposite_pending_count: u64 = kani::any();
+    let _ = V16Core::kernel_recovery_pending_obligation_release_allowed(
+        lifecycle,
+        opposite_stored_count,
+        opposite_pending_count,
+    );
+}
+
 // ROADMAP workstream B.2 (cross-layer conservation): book_bankruptcy_residual_
 // chunk_for_account_core calls the inner booking step on ledger.residual_remaining
 // and then advances the close ledger by the outcome's (booked_loss, explicit_loss).

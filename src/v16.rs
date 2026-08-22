@@ -2625,6 +2625,96 @@ impl V16Core {
         Ok(asset)
     }
 
+    /// PRODUCTION KERNEL: retain a position's loss weight after its basis is
+    /// removed. Recovery exits use this while an opposite non-pending position
+    /// can still crystallize a socialized loss. The zero-basis leg remains a
+    /// bounded, account-local obligation until that cohort has settled.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(PortfolioLegV16, AssetStateV16)>| match result {
+        Ok((l, a)) => l.active
+            && l.basis_pos_q == 0
+            && l.loss_weight == leg.loss_weight
+            && l.asset_index == leg.asset_index
+            && l.market_id == leg.market_id
+            && l.side == leg.side
+            && l.a_basis == leg.a_basis
+            && l.k_snap == leg.k_snap
+            && l.f_snap == leg.f_snap
+            && l.epoch_snap == leg.epoch_snap
+            && l.b_snap == leg.b_snap
+            && l.b_rem == leg.b_rem
+            && l.b_epoch_snap == leg.b_epoch_snap
+            && l.b_stale == leg.b_stale
+            && l.stale == leg.stale
+            && (match leg.side {
+                SideV16::Long => a.oi_eff_long_q == asset.oi_eff_long_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
+                    && a.pending_obligation_count_long == asset.pending_obligation_count_long.wrapping_add(1)
+                    && a.oi_eff_short_q == asset.oi_eff_short_q
+                    && a.pending_obligation_count_short == asset.pending_obligation_count_short,
+                SideV16::Short => a.oi_eff_short_q == asset.oi_eff_short_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
+                    && a.pending_obligation_count_short == asset.pending_obligation_count_short.wrapping_add(1)
+                    && a.oi_eff_long_q == asset.oi_eff_long_q
+                    && a.pending_obligation_count_long == asset.pending_obligation_count_long,
+            })
+            && a.loss_weight_sum_long == asset.loss_weight_sum_long
+            && a.loss_weight_sum_short == asset.loss_weight_sum_short
+            && a.stored_pos_count_long == asset.stored_pos_count_long
+            && a.stored_pos_count_short == asset.stored_pos_count_short,
+        Err(_) => true,
+    }))]
+    pub(crate) fn kernel_retain_leg_as_pending_obligation(
+        mut leg: PortfolioLegV16,
+        mut asset: AssetStateV16,
+    ) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
+        if !leg.active || leg.basis_pos_q == 0 || leg.loss_weight == 0 {
+            return Err(V16Error::InvalidLeg);
+        }
+        let basis = leg.basis_pos_q.unsigned_abs();
+        match leg.side {
+            SideV16::Long => {
+                asset.oi_eff_long_q = asset
+                    .oi_eff_long_q
+                    .checked_sub(basis)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                asset.pending_obligation_count_long = asset
+                    .pending_obligation_count_long
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+            }
+            SideV16::Short => {
+                asset.oi_eff_short_q = asset
+                    .oi_eff_short_q
+                    .checked_sub(basis)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                asset.pending_obligation_count_short = asset
+                    .pending_obligation_count_short
+                    .checked_add(1)
+                    .ok_or(V16Error::CounterOverflow)?;
+            }
+        }
+        leg.basis_pos_q = 0;
+        Ok((leg, asset))
+    }
+
+    /// A Recovery obligation may detach only after the opposite side contains
+    /// no real (non-obligation) positions. Checking `stored - pending` avoids
+    /// both early release and a two-sided zero-basis wait cycle.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<bool>| match result {
+        Ok(allowed) => *allowed == (lifecycle != AssetLifecycleV16::Recovery
+            || opposite_stored_count == opposite_pending_count),
+        Err(_) => opposite_pending_count > opposite_stored_count,
+    }))]
+    pub(crate) fn kernel_recovery_pending_obligation_release_allowed(
+        lifecycle: AssetLifecycleV16,
+        opposite_stored_count: u64,
+        opposite_pending_count: u64,
+    ) -> V16Result<bool> {
+        if opposite_pending_count > opposite_stored_count {
+            return Err(V16Error::InvalidConfig);
+        }
+        Ok(lifecycle != AssetLifecycleV16::Recovery
+            || opposite_stored_count == opposite_pending_count)
+    }
+
     /// PRODUCTION KERNEL: the clear-leg asset transform — decrement the
     /// side's stored-position count (and pending-obligation count for a
     /// zero-basis obligation leg), and unless the leg predates a side reset,
@@ -13834,7 +13924,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     && !leg.b_stale
                     && leg.basis_pos_q == 0
                     && leg.loss_weight != 0
-                    && !self.has_pending_domain_loss_barrier(leg.asset_index as usize, leg.side)?;
+                    && !self.has_pending_domain_loss_barrier(leg.asset_index as usize, leg.side)?
+                    && self.recovery_pending_obligation_release_allowed(
+                        leg.asset_index as usize,
+                        leg.side,
+                    )?;
             }
             slot += 1;
         }
@@ -13882,6 +13976,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .try_to_runtime()?
                 .has_pending_residual()
             || self.has_pending_domain_loss_barrier(asset_index, leg.side)?
+            || !self.recovery_pending_obligation_release_allowed(asset_index, leg.side)?
         {
             return Ok(false);
         }
@@ -14992,6 +15087,68 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.clear_leg_inner(account, asset_index, false)
     }
 
+    fn recovery_pending_obligation_release_allowed(
+        &self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<bool> {
+        let asset = self.asset_state(asset_index)?;
+        let (opposite_stored_count, opposite_pending_count) = match opposite_side(side) {
+            SideV16::Long => (
+                asset.stored_pos_count_long,
+                asset.pending_obligation_count_long,
+            ),
+            SideV16::Short => (
+                asset.stored_pos_count_short,
+                asset.pending_obligation_count_short,
+            ),
+        };
+        V16Core::kernel_recovery_pending_obligation_release_allowed(
+            asset.lifecycle,
+            opposite_stored_count,
+            opposite_pending_count,
+        )
+    }
+
+    fn retain_leg_as_pending_obligation(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        let leg = account.header.legs[leg_slot].try_to_runtime()?;
+        let asset = self.asset_state(asset_index)?;
+        if Self::leg_is_prior_reset_obligation(asset, leg) {
+            return Err(V16Error::InvalidLeg);
+        }
+        if leg.b_stale || leg.stale {
+            return Err(V16Error::Stale);
+        }
+        let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
+        if k_target != leg.k_snap
+            || f_target != leg.f_snap
+            || self.b_target_for_leg(asset_index, leg)? != leg.b_snap
+        {
+            return Err(V16Error::Stale);
+        }
+        let (leg, asset) = V16Core::kernel_retain_leg_as_pending_obligation(leg, asset)?;
+        account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
+        account.header.health_cert.valid = 0;
+        self.set_asset_state(asset_index, asset)
+    }
+
+    fn retain_recovery_loss_weight_before_detach(
+        &self,
+        asset_index: usize,
+        leg: PortfolioLegV16,
+    ) -> V16Result<bool> {
+        if Self::leg_is_prior_reset_obligation(self.asset_state(asset_index)?, leg) {
+            return Ok(false);
+        }
+        Ok(self.has_pending_domain_loss_barrier(asset_index, leg.side)?
+            || !self.recovery_pending_obligation_release_allowed(asset_index, leg.side)?)
+    }
+
     fn clear_leg_inner(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -15198,34 +15355,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if route == PositionRouteV16::Clear {
             let leg = current_leg;
             if leg.active && self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-                let old_abs = leg.basis_pos_q.unsigned_abs();
-                let mut asset = self.asset_state(asset_index)?;
-                match leg.side {
-                    SideV16::Long => {
-                        asset.oi_eff_long_q = asset
-                            .oi_eff_long_q
-                            .checked_sub(old_abs)
-                            .ok_or(V16Error::CounterUnderflow)?;
-                        asset.pending_obligation_count_long = asset
-                            .pending_obligation_count_long
-                            .checked_add(1)
-                            .ok_or(V16Error::CounterOverflow)?;
-                    }
-                    SideV16::Short => {
-                        asset.oi_eff_short_q = asset
-                            .oi_eff_short_q
-                            .checked_sub(old_abs)
-                            .ok_or(V16Error::CounterUnderflow)?;
-                        asset.pending_obligation_count_short = asset
-                            .pending_obligation_count_short
-                            .checked_add(1)
-                            .ok_or(V16Error::CounterOverflow)?;
-                    }
-                }
-                let mut zero_basis_leg = leg;
-                zero_basis_leg.basis_pos_q = 0;
-                account.header.legs[leg_slot] =
-                    PortfolioLegV16Account::from_runtime(&zero_basis_leg);
+                let (obligation, asset) = V16Core::kernel_retain_leg_as_pending_obligation(
+                    leg,
+                    self.asset_state(asset_index)?,
+                )?;
+                account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&obligation);
                 account.header.health_cert.valid = 0;
                 self.set_asset_state(asset_index, asset)?;
                 return Ok(());
@@ -18501,9 +18635,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .try_to_runtime()?
                 .has_pending_residual()
         {
-            self.clear_leg(account, asset_index)?;
+            let retain = self.retain_recovery_loss_weight_before_detach(asset_index, leg)?;
+            if retain {
+                self.retain_leg_as_pending_obligation(account, asset_index)?;
+            } else {
+                self.clear_leg(account, asset_index)?;
+            }
             return Ok(DeadLegForfeitOutcomeV16 {
-                detached: true,
+                detached: !retain,
                 positive_pnl_forfeited: 0,
                 loss_settled: 0,
                 support_consumed: 0,
@@ -18637,14 +18776,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
 
-        let detached = account.header.pnl.get() >= 0
+        let mut detached = account.header.pnl.get() >= 0
             && !account
                 .header
                 .close_progress
                 .try_to_runtime()?
                 .has_pending_residual();
         if detached {
-            self.clear_leg(account, asset_index)?;
+            let refreshed = Self::active_leg_for_asset(&account.as_view(), asset_index)?;
+            if self.retain_recovery_loss_weight_before_detach(asset_index, refreshed)? {
+                self.retain_leg_as_pending_obligation(account, asset_index)?;
+                detached = false;
+            } else {
+                self.clear_leg(account, asset_index)?;
+            }
         }
         self.validate_shape()?;
         account.validate_with_market(&self.as_view())?;
