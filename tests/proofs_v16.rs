@@ -8,7 +8,7 @@ use percolator::v16::{
     kani_apply_backing_utilization_fee_charge, kani_apply_resolved_payout_receipt_payment,
     kani_auto_crank_leg_flags, kani_auto_crank_lifecycle_dispatchable,
     kani_auto_crank_refresh_asset, kani_available_backing_num_for_source_credit_state,
-    kani_backing_utilization_fee_quote_atoms_for_lien,
+    kani_b_settlement_pending, kani_backing_utilization_fee_quote_atoms_for_lien,
     kani_backing_utilization_rate_e9_for_source_state, kani_cert_is_current,
     kani_commit_declared_liquidation_recovery, kani_expected_source_credit_rate_num_for_state,
     kani_first_actionable_slot, kani_health_cert_after_capital_debit,
@@ -18219,6 +18219,24 @@ fn proof_v16_auto_crank_refresh_target_includes_recovery_reset_obligation() {
         assert_eq!(selected, Some(reset_index));
     } else {
         assert_eq!(selected, None);
+    }
+}
+
+#[kani::proof]
+fn proof_v16_auto_crank_b_settlement_pending_is_exact_and_fail_closed() {
+    let cached_stale: bool = kani::any();
+    let target_b: u128 = kani::any();
+    let b_snap: u128 = kani::any();
+
+    match kani_b_settlement_pending(cached_stale, target_b, b_snap) {
+        Ok(pending) => {
+            assert!(target_b >= b_snap);
+            assert_eq!(pending, cached_stale || target_b > b_snap);
+        }
+        Err(error) => {
+            assert_eq!(error, V16Error::RecoveryRequired);
+            assert!(target_b < b_snap);
+        }
     }
 }
 

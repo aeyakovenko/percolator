@@ -18,10 +18,8 @@ use percolator::{
     V16_EMPTY_ACTIVE_BITMAP,
 };
 #[cfg(feature = "fuzz")]
-use percolator::{
-    MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16, SOCIAL_LOSS_DEN,
-};
-use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
+use percolator::{MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16};
+use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
 
 const FUNDING_COUNTER_PRICE: u64 = 1_000_000;
 const FUNDING_COUNTER_RATE_E9: i128 = 10_000;
@@ -6360,7 +6358,7 @@ fn v16_auto_crank_clears_released_recovery_obligation_with_finalized_close() {
             .build_actionable_summary_at_slot(&account.as_view(), 44)
             .unwrap();
         assert!(summary.stale);
-        let result = market
+        let mut result = market
             .permissionless_auto_crank_not_atomic(
                 &mut account,
                 AutoCrankWorkV16 {
@@ -6370,6 +6368,27 @@ fn v16_auto_crank_clears_released_recovery_obligation_with_finalized_close() {
                 },
             )
             .expect("a released Recovery obligation must be a successful bounded continuation");
+        if b_short_num != 0 {
+            assert_eq!(
+                result.selected,
+                AutoCrankPlanV16::SettleBChunk { asset_index: 0 }
+            );
+            assert_eq!(account.header.capital.get(), 7);
+            assert_eq!(account.header.pnl.get(), -3);
+            assert!(!active_bitmap_is_empty(
+                account.header.active_bitmap.map(V16PodU64::get)
+            ));
+            result = market
+                .permissionless_auto_crank_not_atomic(
+                    &mut account,
+                    AutoCrankWorkV16 {
+                        now_slot: 44,
+                        observations: &[],
+                        resolved_close_fee_rate_per_slot: 0,
+                    },
+                )
+                .expect("settled Recovery obligation must detach on the next bounded step");
+        }
         assert_eq!(
             result.selected,
             AutoCrankPlanV16::RefreshAccount {
@@ -7279,6 +7298,84 @@ fn v16_auto_crank_settles_b_stale_leg() {
         AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountBChunk(_))
     ));
     market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_auto_crank_settles_latent_b_delta_on_recovery_leg() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 52);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    }
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.slot_last = 10;
+    asset.b_long_num = SOCIAL_LOSS_DEN / POS_SCALE;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    account.validate_with_market(&market.as_view()).unwrap();
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(
+        summary.b_stale,
+        "a current B target above the leg snapshot is actionable even when the cached stale bit is false: {summary:?}"
+    );
+
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("latent Recovery B must have a permissionless bounded continuation");
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::SettleBChunk { asset_index: 0 }
+    );
+    assert!(matches!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountBChunk(_))
+    ));
+    let settled_leg = account.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(settled_leg.b_snap, asset.b_long_num);
+    assert_eq!(account.header.pnl.get(), -1);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 }
 
 // ENGINE.MD order-insensitivity: when the engine-selected step needs an

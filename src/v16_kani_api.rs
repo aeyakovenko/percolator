@@ -13,6 +13,14 @@ pub fn kani_auto_crank_lifecycle_dispatchable(lifecycle: AssetLifecycleV16) -> b
     V16Core::kernel_auto_crank_lifecycle_dispatchable(lifecycle)
 }
 
+pub fn kani_b_settlement_pending(
+    cached_stale: bool,
+    target_b: u128,
+    b_snap: u128,
+) -> V16Result<bool> {
+    V16Core::kernel_b_settlement_pending(cached_stale, target_b, b_snap)
+}
+
 pub fn kani_auto_crank_leg_flags(
     active: bool,
     lifecycle: AssetLifecycleV16,
@@ -21,7 +29,7 @@ pub fn kani_auto_crank_leg_flags(
     side_mode: SideModeV16,
     asset_epoch: u64,
     leg_epoch_snap: u64,
-    leg_b_stale: bool,
+    b_settlement_pending: bool,
 ) -> (bool, bool, bool, bool) {
     V16Core::kernel_auto_crank_leg_flags(
         active,
@@ -31,7 +39,7 @@ pub fn kani_auto_crank_leg_flags(
         side_mode,
         asset_epoch,
         leg_epoch_snap,
-        leg_b_stale,
+        b_settlement_pending,
     )
 }
 
