@@ -1639,6 +1639,40 @@ impl V16Core {
         }
     }
 
+    /// Carries terminal source-credit haircut face between bounded close calls.
+    /// The newly reserved face is no longer eligible for realization by another
+    /// source, while the still-released face remains exactly the unprocessed
+    /// source-attributed portion.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| match result {
+        Ok(next_reserved) => {
+            reserved_pnl <= positive_pnl
+                && source_attributed_face <= positive_pnl - reserved_pnl
+                && converted <= source_attributed_face
+                && *next_reserved <= positive_pnl - converted
+                && (positive_pnl - converted) - *next_reserved
+                    == (positive_pnl - reserved_pnl) - source_attributed_face
+        }
+        Err(_) => reserved_pnl > positive_pnl
+            || source_attributed_face > positive_pnl.saturating_sub(reserved_pnl)
+            || converted > source_attributed_face,
+    }))]
+    pub(crate) fn kernel_retain_terminal_source_haircut(
+        positive_pnl: u128,
+        reserved_pnl: u128,
+        source_attributed_face: u128,
+        converted: u128,
+    ) -> V16Result<u128> {
+        if reserved_pnl > positive_pnl
+            || source_attributed_face > positive_pnl - reserved_pnl
+            || converted > source_attributed_face
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+        reserved_pnl
+            .checked_add(source_attributed_face - converted)
+            .ok_or(V16Error::CounterOverflow)
+    }
+
     /// Recompute the resolved payout rate from the ledger's current residual
     /// and outstanding claim bound. This deliberately contains no wide
     /// division: receipts apply the resulting fraction when they are paid.
@@ -4710,7 +4744,16 @@ impl<'a> PortfolioV16View<'a> {
         self.validate_source_credit_shape_with_market(market)?;
         let source_claim_sum_num = self.source_claim_bound_sum_num()?;
         if source_claim_sum_num != 0 {
-            V16Core::validate_positive_pnl_source_attribution(pnl, source_claim_sum_num)?;
+            let source_attributed_pnl =
+                if decode_market_mode(market.header.mode)? == MarketModeV16::Resolved {
+                    pnl.max(0) as u128 - self.header.reserved_pnl.get()
+                } else {
+                    pnl.max(0) as u128
+                };
+            V16Core::validate_positive_pnl_source_attribution(
+                source_attributed_pnl as i128,
+                source_claim_sum_num,
+            )?;
         }
         Self::validate_resolved_payout_receipt_static(
             self.header.resolved_payout_receipt.try_to_runtime()?,
@@ -17180,20 +17223,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // The face is already frozen into the receipt pool.
             return Ok(false);
         }
-        if !Self::account_has_source_claims(&account.as_view())? {
-            return Ok(false);
-        }
-        let pos = account.header.pnl.get().max(0) as u128;
-
         account.compact_source_domains();
-        let source = account.header.source_domains[0];
-        if !source.is_occupied() || source.source_claim_bound_num.get() == 0 {
-            return Err(V16Error::InvalidLeg);
+        let mut claim_source = None;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() && source.source_claim_bound_num.get() != 0 {
+                claim_source = Some(source);
+                break;
+            }
+            slot += 1;
         }
+        let Some(source) = claim_source else {
+            return Ok(false);
+        };
+        let pos = account.header.pnl.get().max(0) as u128;
+        let released = pos.saturating_sub(account.header.reserved_pnl.get());
         let source_domain = source.domain.get() as usize;
         let source_claim_num = source.source_claim_bound_num.get();
         let claim_num = Self::source_claim_unliened_num(&account.as_view(), source_domain)?
-            .min(V16Core::bound_num_from_amount(pos)?);
+            .min(V16Core::bound_num_from_amount(released)?);
         let mut converted = 0u128;
         if claim_num != 0 {
             self.validate_source_domain_ledger_current(source_domain)?;
@@ -17215,8 +17267,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if V16Core::bound_num_from_amount(consumption.face_burn)? > claim_num {
                     return Err(V16Error::InvalidConfig);
                 }
-                // Terminal settlement is not constrained by a live PnL reservation.
-                account.header.reserved_pnl = V16PodU128::new(0);
                 self.apply_released_pnl_conversion_with_consumption_core_not_atomic(
                     account,
                     pos,
@@ -17239,6 +17289,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             )?;
             account.header.health_cert.valid = 0;
         }
+
+        // The source claim is removed in full, but only backed value was converted
+        // into senior capital. Preserve the remainder as terminal-only junior PnL so
+        // another source cannot realize the same face on a later bounded call.
+        let source_attributed_face =
+            V16Core::amount_from_bound_num(source_claim_num)?.min(released);
+        let reserved_pnl = V16Core::kernel_retain_terminal_source_haircut(
+            pos,
+            account.header.reserved_pnl.get(),
+            source_attributed_face,
+            converted,
+        )?;
+        account.header.reserved_pnl = V16PodU128::new(reserved_pnl);
 
         // If the payout snapshot was captured before this account realized (another
         // winner closed first), the realized face is still counted in the ledger's

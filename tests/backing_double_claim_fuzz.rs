@@ -199,6 +199,102 @@ fn resolved_market_with_backed_winner(
     (header, markets, account_header)
 }
 
+fn resolved_market_with_two_backed_sources() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+) {
+    const CLAIM_PER_SOURCE: u128 = 200;
+    const BACKING: [u128; 2] = [150, 100];
+    const EXTRA_RESIDUAL: u128 = 150;
+
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id(), cfg, 2, 0).unwrap();
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+    ];
+    for (asset_index, market) in markets.iter_mut().enumerate() {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                asset_index as u32,
+                &mut market.engine,
+                100,
+                asset_index as u64 + 1,
+            )
+            .unwrap();
+        let backing_num = BACKING[asset_index] * BOUND_SCALE;
+        market.engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: market.engine.asset.market_id.get(),
+            fresh_unliened_backing_num: backing_num,
+            expiry_slot: 100,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+        market.engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                positive_claim_bound_num: CLAIM_PER_SOURCE * BOUND_SCALE,
+                exact_positive_claim_num: CLAIM_PER_SOURCE * BOUND_SCALE,
+                fresh_reserved_backing_num: backing_num,
+                credit_rate_num: BACKING[asset_index] * CREDIT_RATE_SCALE / CLAIM_PER_SOURCE,
+                ..SourceCreditStateV16::EMPTY
+            });
+    }
+
+    let total_claim = 2 * CLAIM_PER_SOURCE;
+    header.mode = 1;
+    header.resolved_slot = V16PodU64::new(2);
+    header.current_slot = V16PodU64::new(2);
+    header.vault = V16PodU128::new(BACKING.iter().sum::<u128>() + EXTRA_RESIDUAL);
+    header.pnl_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_matured_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_claim * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(total_claim * BOUND_SCALE);
+    header.source_fresh_backing_total_num =
+        V16PodU128::new(BACKING.iter().sum::<u128>() * BOUND_SCALE);
+
+    let mut account = winner_account(0, total_claim);
+    for (slot, domain) in [0u32, 2].into_iter().enumerate() {
+        let asset_index = domain as usize / 2;
+        account.source_domains[slot].domain = V16PodU32::new(domain);
+        account.source_domains[slot].source_claim_market_id =
+            V16PodU64::new(markets[asset_index].engine.asset.market_id.get());
+        account.source_domains[slot].source_claim_bound_num =
+            V16PodU128::new(CLAIM_PER_SOURCE * BOUND_SCALE);
+    }
+    (header, markets, account)
+}
+
+#[test]
+fn bounded_terminal_source_realization_preserves_intermediate_attribution() {
+    let (mut header, mut markets, mut account_header) = resolved_market_with_two_backed_sources();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut account, 0),
+        Ok(ResolvedCloseOutcomeV16::ProgressOnly)
+    );
+    assert_eq!(account.header.capital.get(), 150);
+    assert_eq!(account.header.pnl.get(), 250);
+    assert_eq!(account.header.reserved_pnl.get(), 50);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    assert_eq!(market.validate_shape(), Ok(()));
+
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut account, 0),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 400 })
+    );
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
