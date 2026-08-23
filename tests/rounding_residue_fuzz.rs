@@ -161,7 +161,17 @@ fn adl_effective_quantity_roundtrip_boundary_partition() {
         MAX_POSITION_ABS_Q - 1,
         MAX_POSITION_ABS_Q,
     ];
-    let a_values = [
+    let a_basis_values = [
+        MIN_A_SIDE,
+        MIN_A_SIDE + 1,
+        ADL_ONE / 3,
+        ADL_ONE / 2,
+        ADL_ONE - 1,
+        ADL_ONE,
+    ];
+    let current_a_values = [
+        1,
+        MIN_A_SIDE - 1,
         MIN_A_SIDE,
         MIN_A_SIDE + 1,
         ADL_ONE / 3,
@@ -170,8 +180,8 @@ fn adl_effective_quantity_roundtrip_boundary_partition() {
         ADL_ONE,
     ];
     for raw_abs_q in raw_values {
-        for a_basis in a_values {
-            for current_a in a_values.into_iter().filter(|a| *a <= a_basis) {
+        for a_basis in a_basis_values {
+            for current_a in current_a_values.into_iter().filter(|a| *a <= a_basis) {
                 let effective =
                     kani_adl_effective_quantity_ceil(raw_abs_q, a_basis, current_a).unwrap();
                 let targets = [0, effective / 2, effective.saturating_sub(1)];
@@ -206,7 +216,7 @@ proptest! {
         current_selector in any::<u128>(),
         target_selector in any::<u128>(),
     ) {
-        let current_a = MIN_A_SIDE + current_selector % (a_basis - MIN_A_SIDE + 1);
+        let current_a = 1 + current_selector % a_basis;
         let current_effective =
             kani_adl_effective_quantity_ceil(raw_abs_q, a_basis, current_a).unwrap();
         let target_effective = if current_effective == 0 {

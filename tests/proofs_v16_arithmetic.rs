@@ -18,10 +18,15 @@ fn proof_v16_adl_effective_quantity_inverse_preserves_reachable_target() {
     let raw_abs_q = u128::from(kani::any::<u8>() % 41);
     let a_basis_units = kani::any::<u8>();
     let current_a_units = kani::any::<u8>();
+    let sub_min_adl = kani::any::<bool>();
     kani::assume((1..=10).contains(&a_basis_units));
-    kani::assume((1..=a_basis_units).contains(&current_a_units));
     let a_basis = u128::from(a_basis_units) * MIN_A_SIDE;
-    let current_a = u128::from(current_a_units) * MIN_A_SIDE;
+    let current_a = if sub_min_adl {
+        u128::from(current_a_units).checked_add(1).unwrap()
+    } else {
+        kani::assume((1..=a_basis_units).contains(&current_a_units));
+        u128::from(current_a_units) * MIN_A_SIDE
+    };
     let current_effective =
         kani_adl_effective_quantity_ceil(raw_abs_q, a_basis, current_a).unwrap();
     let target_effective = u128::from(kani::any::<u8>() % 41);
@@ -36,6 +41,10 @@ fn proof_v16_adl_effective_quantity_inverse_preserves_reachable_target() {
     kani::cover!(
         current_a < a_basis && target_effective > 0,
         "non-unit ADL partial reduction"
+    );
+    kani::cover!(
+        current_a < MIN_A_SIDE && target_effective > 0,
+        "drain-only sub-minimum A reduction"
     );
     kani::cover!(
         target_effective == 0 && current_effective > 0,

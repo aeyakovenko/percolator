@@ -302,6 +302,73 @@ fn v16_post_quantity_adl_bankrupt_effective_full_close_stays_live() {
     short.validate_with_market(&market.as_view()).unwrap();
 }
 
+#[test]
+fn v16_sub_minimum_drain_only_adl_leg_refreshes_and_exits() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 231);
+    let mut short_header = account_fixture(1, 232);
+    let open_q = 100 * POS_SCALE;
+    let surviving_q = POS_SCALE;
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 100_000_000).unwrap();
+        market.deposit_not_atomic(&mut short, 100_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(open_q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: open_q - surviving_q,
+                },
+            )
+            .unwrap();
+    }
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_short_q, surviving_q);
+    assert!(asset.a_short < percolator::MIN_A_SIDE);
+    assert_eq!(asset.mode_short, SideModeV16::DrainOnly);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market
+        .full_account_refresh_not_atomic(&mut short)
+        .expect("a surviving sub-minimum-A DrainOnly leg must remain refreshable");
+    market
+        .rebalance_reduce_position_not_atomic(
+            &mut short,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: surviving_q,
+            },
+        )
+        .expect("the owner must be able to close the final effective DrainOnly exposure");
+
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.oi_eff_short_q, 0);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
 fn market_fixture(
     market_slots: u32,
     init_price: u64,
