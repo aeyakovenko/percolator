@@ -22,7 +22,11 @@ fn proof_v16_adl_effective_quantity_inverse_preserves_reachable_target() {
     kani::assume((1..=10).contains(&a_basis_units));
     let a_basis = u128::from(a_basis_units) * MIN_A_SIDE;
     let current_a = if sub_min_adl {
-        u128::from(current_a_units).checked_add(1).unwrap()
+        match current_a_units % 3 {
+            0 => 1,
+            1 => MIN_A_SIDE / 2,
+            _ => MIN_A_SIDE - 1,
+        }
     } else {
         kani::assume((1..=a_basis_units).contains(&current_a_units));
         u128::from(current_a_units) * MIN_A_SIDE
