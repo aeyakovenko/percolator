@@ -22,6 +22,7 @@ use percolator::v16::{
     kani_prepare_asset_recovery_transition, kani_refresh_detached_selected_leg,
     kani_select_auto_crank_plan, kani_settle_kf_stale_cohort,
     kani_should_clear_prior_reset_obligation, kani_source_claim_domain_first_burn_partition,
+    kani_source_credit_state_realizable_support_for_claim_num,
     kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
     kani_terminal_claim_free_overlap_recredit, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_validate_positive_pnl_source_attribution, AccrualStepV16,
@@ -9071,6 +9072,25 @@ fn proof_v16_unliened_source_support_is_capped_by_realizable_backing() {
     if backing == claim {
         assert_eq!(support, claim);
     }
+}
+
+#[kani::proof]
+fn proof_v16_source_support_rounds_per_domain_before_aggregation() {
+    let state = SourceCreditStateV16 {
+        positive_claim_bound_num: BOUND_SCALE,
+        exact_positive_claim_num: BOUND_SCALE,
+        fresh_reserved_backing_num: BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE / 2,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let first =
+        kani_source_credit_state_realizable_support_for_claim_num(state, BOUND_SCALE).unwrap();
+    let second =
+        kani_source_credit_state_realizable_support_for_claim_num(state, BOUND_SCALE).unwrap();
+
+    assert_eq!(first, 0);
+    assert_eq!(second, 0);
+    assert_eq!(first.checked_add(second), Some(0));
 }
 
 // Cross-account solvency: two independent winners holding positive-PnL claims

@@ -517,6 +517,67 @@ fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Ac
     account
 }
 
+#[cfg(feature = "fuzz")]
+#[test]
+fn v16_cross_domain_fractional_source_loss_settles_without_locking() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 250);
+    let half_atom_num = BOUND_SCALE / 2;
+    let asset_market_id = markets[0].engine.asset.market_id.get();
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: BOUND_SCALE,
+        exact_positive_claim_num: BOUND_SCALE,
+        fresh_reserved_backing_num: half_atom_num,
+        credit_rate_num: CREDIT_RATE_SCALE / 2,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let backing = BackingBucketV16 {
+        market_id: asset_market_id,
+        fresh_unliened_backing_num: half_atom_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(&source);
+    markets[0].engine.source_credit_short = SourceCreditStateV16Account::from_runtime(&source);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&backing);
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&backing);
+
+    account_header.pnl = V16PodI128::new(2);
+    for (slot, domain) in [0u32, 1u32].into_iter().enumerate() {
+        account_header.source_domains[slot].domain = V16PodU32::new(domain);
+        account_header.source_domains[slot].source_claim_market_id =
+            V16PodU64::new(asset_market_id);
+        account_header.source_domains[slot].source_claim_bound_num = V16PodU128::new(BOUND_SCALE);
+    }
+    header.vault = V16PodU128::new(1);
+    header.pnl_pos_tot = V16PodU128::new(2);
+    header.pnl_pos_bound_tot = V16PodU128::new(2);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(2 * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(2 * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new(BOUND_SCALE);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .validate_shape()
+        .expect("fractional source fixture must be a valid market state");
+    account
+        .validate_with_market(&market.as_view())
+        .expect("fractional source fixture must be a valid portfolio state");
+    let outcome = market
+        .kani_apply_signed_kf_delta_to_pnl(&mut account, -1, None)
+        .expect("an unbacked fractional-domain loss must remain settleable");
+
+    assert_eq!(outcome, (0, 2));
+    assert_eq!(account.header.pnl.get(), -1);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
+    assert_eq!(market.header.vault.get(), 1);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
 fn signed_q(q: u128) -> i128 {
     i128::try_from(q).unwrap()
 }

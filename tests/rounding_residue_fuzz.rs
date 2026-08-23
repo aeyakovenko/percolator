@@ -25,6 +25,27 @@ fn margin_requirement_partition_regression() {
     assert_eq!(partitioned, aggregate);
 }
 
+#[test]
+fn source_support_rounds_each_domain_before_aggregation() {
+    let state = SourceCreditStateV16 {
+        positive_claim_bound_num: BOUND_SCALE,
+        exact_positive_claim_num: BOUND_SCALE,
+        fresh_reserved_backing_num: BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE / 2,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let per_domain =
+        kani_source_credit_state_realizable_support_for_claim_num(state, BOUND_SCALE).unwrap();
+
+    assert_eq!(per_domain, 0);
+    assert_eq!(per_domain.checked_add(per_domain), Some(0));
+    assert_eq!(
+        (BOUND_SCALE / 2).checked_add(BOUND_SCALE / 2).unwrap() / BOUND_SCALE,
+        1,
+        "aggregating fractional domain credit first would invent one unusable atom"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(2000))]
 

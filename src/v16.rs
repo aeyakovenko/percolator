@@ -3932,20 +3932,29 @@ impl V16Core {
         Ok((reservation, source))
     }
 
+    // Source domains settle whole quote atoms independently. Round before a
+    // caller aggregates domains so fractional backing cannot become phantom support.
+    fn source_credit_state_realizable_support_for_claim_num(
+        state: SourceCreditStateV16,
+        claim_num: u128,
+    ) -> V16Result<u128> {
+        if claim_num == 0 || state.positive_claim_bound_num == 0 {
+            return Ok(0);
+        }
+        let credited_num =
+            Self::mul_div_floor_u128_or_wide(claim_num, state.credit_rate_num, CREDIT_RATE_SCALE)?;
+        Ok((credited_num / BOUND_SCALE)
+            .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
+    }
+
     fn source_credit_state_realizable_support_for_face(
         state: SourceCreditStateV16,
         face_claim: u128,
     ) -> V16Result<u128> {
-        if face_claim == 0 || state.positive_claim_bound_num == 0 {
-            return Ok(0);
-        }
-        let credited_num = Self::mul_div_floor_u128_or_wide(
+        Self::source_credit_state_realizable_support_for_claim_num(
+            state,
             Self::bound_num_from_amount(face_claim)?,
-            state.credit_rate_num,
-            CREDIT_RATE_SCALE,
-        )?;
-        Ok((credited_num / BOUND_SCALE)
-            .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
+        )
     }
 
     fn target_effective_lag_loss_penalty(
@@ -10479,7 +10488,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         let mut remaining_num = V16Core::bound_num_from_amount(face_claim)?;
-        let mut support_num = 0u128;
+        let mut support = 0u128;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining_num != 0 {
             let source = account.source_domains()[slot];
@@ -10499,17 +10508,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if locked > source.source_claim_bound_num.get() {
                 return Err(V16Error::InvalidLeg);
             }
-            let valid_lien_effective_num = source
+            let valid_lien_effective = source
                 .source_lien_effective_reserved
                 .get()
-                .checked_mul(BOUND_SCALE)
-                .ok_or(V16Error::ArithmeticOverflow)?
-                .min(remaining_num);
-            if valid_lien_effective_num != 0 {
-                support_num = support_num
-                    .checked_add(valid_lien_effective_num)
+                .min(remaining_num / BOUND_SCALE);
+            if valid_lien_effective != 0 {
+                support = support
+                    .checked_add(valid_lien_effective)
                     .ok_or(V16Error::ArithmeticOverflow)?;
-                remaining_num -= valid_lien_effective_num;
+                remaining_num = remaining_num
+                    .checked_sub(
+                        valid_lien_effective
+                            .checked_mul(BOUND_SCALE)
+                            .ok_or(V16Error::ArithmeticOverflow)?,
+                    )
+                    .ok_or(V16Error::CounterUnderflow)?;
             }
             let claim_num = source
                 .source_claim_bound_num
@@ -10519,22 +10532,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .min(remaining_num);
             if claim_num != 0 {
                 self.validate_source_domain_ledger_current(d)?;
-                let rate = self.source_credit_for_domain(d)?.credit_rate_num;
-                if rate > CREDIT_RATE_SCALE {
-                    return Err(V16Error::InvalidConfig);
-                }
-                let credited_num =
-                    V16Core::mul_div_floor_u128_or_wide(claim_num, rate, CREDIT_RATE_SCALE)?;
-                support_num = support_num
-                    .checked_add(credited_num)
+                let source_credit = self.source_credit_for_domain(d)?;
+                let credited = V16Core::source_credit_state_realizable_support_for_claim_num(
+                    source_credit,
+                    claim_num,
+                )?;
+                support = support
+                    .checked_add(credited)
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 remaining_num -= claim_num;
             }
             slot += 1;
         }
-        Ok(support_num / BOUND_SCALE)
+        Ok(support)
     }
 
+    #[cfg(any(kani, feature = "fuzz"))]
     fn account_unliened_source_realizable_support(
         &self,
         account: &PortfolioV16View<'_>,
@@ -10544,7 +10557,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         let mut remaining_num = V16Core::bound_num_from_amount(face_claim)?;
-        let mut support_num = 0u128;
+        let mut support = 0u128;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP && remaining_num != 0 {
             let source = account.source_domains()[slot];
@@ -10555,24 +10568,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 slot += 1;
                 continue;
             }
-            let d = source.domain.get() as usize;
-            let claim_num = Self::source_claim_unliened_num(account, d)?.min(remaining_num);
+            let domain = source.domain.get() as usize;
+            let claim_num = Self::source_claim_unliened_num(account, domain)?.min(remaining_num);
             if claim_num != 0 {
-                self.validate_source_domain_ledger_current(d)?;
-                let rate = self.source_credit_for_domain(d)?.credit_rate_num;
-                if rate > CREDIT_RATE_SCALE {
-                    return Err(V16Error::InvalidConfig);
-                }
-                let credited_num =
-                    V16Core::mul_div_floor_u128_or_wide(claim_num, rate, CREDIT_RATE_SCALE)?;
-                support_num = support_num
-                    .checked_add(credited_num)
+                self.validate_source_domain_ledger_current(domain)?;
+                let credited = V16Core::source_credit_state_realizable_support_for_claim_num(
+                    self.source_credit_for_domain(domain)?,
+                    claim_num,
+                )?;
+                support = support
+                    .checked_add(credited)
                     .ok_or(V16Error::ArithmeticOverflow)?;
                 remaining_num -= claim_num;
             }
             slot += 1;
         }
-        Ok(support_num / BOUND_SCALE)
+        Ok(support)
     }
 
     fn source_credit_available_backing_num(&self, domain: usize) -> V16Result<u128> {
@@ -11456,12 +11467,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(recredited_total)
     }
 
-    fn create_and_consume_validated_account_source_credit_for_effective_not_atomic(
+    // Loss settlement may consume whatever whole-atom support exists; routes
+    // promising an exact conversion set require_full and retain fail-closed behavior.
+    fn consume_validated_account_source_credit_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         effective_credit: u128,
         burn_account_claims: bool,
-    ) -> V16Result<(SourceCreditConsumptionV16, u128)> {
+        require_full: bool,
+    ) -> V16Result<(SourceCreditConsumptionV16, u128, u128)> {
         if effective_credit == 0 {
             return Ok((
                 SourceCreditConsumptionV16 {
@@ -11469,6 +11483,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     counterparty_credit_consumed: 0,
                     insurance_credit_consumed: 0,
                 },
+                0,
                 0,
             ));
         }
@@ -11515,13 +11530,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_sub(locked)
                 .ok_or(V16Error::CounterUnderflow)?;
             if rate != 0 && unliened != 0 {
-                let soft_num =
-                    V16Core::mul_div_floor_u128_or_wide(unliened, rate, CREDIT_RATE_SCALE)?;
-                let by_claim = soft_num / BOUND_SCALE;
-                let by_backing =
-                    V16Core::available_backing_num_for_source_credit_state(source_credit)?
-                        / BOUND_SCALE;
-                let take = remaining.min(by_claim).min(by_backing);
+                let consumable = V16Core::source_credit_state_realizable_support_for_claim_num(
+                    source_credit,
+                    unliened,
+                )?;
+                let take = remaining.min(consumable);
                 if take != 0 {
                     let (face_num, backing_num) =
                         V16Core::source_credit_lien_amounts_for_effective(take, rate)?;
@@ -11580,7 +11593,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             slot += 1;
         }
-        if remaining != 0 {
+        let consumed = counterparty_credit_consumed
+            .checked_add(insurance_credit_consumed)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if consumed
+            != effective_credit
+                .checked_sub(remaining)
+                .ok_or(V16Error::CounterUnderflow)?
+        {
+            return Err(V16Error::InvalidConfig);
+        }
+        if require_full && consumed != effective_credit {
             return Err(V16Error::LockActive);
         }
         if burn_account_claims {
@@ -11597,6 +11620,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             } else {
                 0
             },
+            consumed,
         ))
     }
 
@@ -12291,42 +12315,47 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             });
         }
         let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
-        let effective_available = if has_source_claims {
-            self.account_unliened_source_realizable_support(&account.as_view(), old_positive_face)?
-        } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
-            0
-        } else {
-            self.haircut_effective_support(
-                old_positive_face,
-                self.residual(),
-                self.junior_claim_bound(),
-            )?
-        };
-        let support_consumed = effective_available.min(loss_abs);
+        let (support_consumed, mut junior_face_burned, preburned_source_claim_num) =
+            if has_source_claims {
+                let source_support_limit = loss_abs.min(old_positive_face);
+                let (consumption, preburned_source_claim_num, support_consumed) = self
+                    .consume_validated_account_source_credit_not_atomic(
+                        account,
+                        source_support_limit,
+                        true,
+                        false,
+                    )?;
+                (
+                    support_consumed,
+                    consumption.face_burn.min(old_positive_face),
+                    preburned_source_claim_num,
+                )
+            } else {
+                let effective_available =
+                    if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
+                        0
+                    } else {
+                        self.haircut_effective_support(
+                            old_positive_face,
+                            self.residual(),
+                            self.junior_claim_bound(),
+                        )?
+                    };
+                let support_consumed = effective_available.min(loss_abs);
+                let junior_face_burned = if support_consumed == 0 {
+                    0
+                } else {
+                    self.face_claim_to_burn_for_support(
+                        support_consumed,
+                        self.residual(),
+                        self.junior_claim_bound(),
+                    )?
+                };
+                (support_consumed, junior_face_burned, 0)
+            };
         let remaining_loss = loss_abs
             .checked_sub(support_consumed)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let (mut junior_face_burned, preburned_source_claim_num) = if has_source_claims {
-            let (consumption, preburned_source_claim_num) = self
-                .create_and_consume_validated_account_source_credit_for_effective_not_atomic(
-                    account,
-                    support_consumed,
-                    true,
-                )?;
-            (
-                consumption.face_burn.min(old_positive_face),
-                preburned_source_claim_num,
-            )
-        } else if support_consumed == 0 {
-            (0, 0)
-        } else {
-            let residual = self.residual();
-            let junior_bound = self.junior_claim_bound();
-            (
-                self.face_claim_to_burn_for_support(support_consumed, residual, junior_bound)?,
-                0,
-            )
-        };
         if remaining_loss != 0 {
             junior_face_burned = old_positive_face;
         }
@@ -17614,8 +17643,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         disposition: ReleasedPnlConversionDispositionV16,
     ) -> V16Result<u128> {
         let consumption = if has_source_claims {
-            self.create_and_consume_validated_account_source_credit_for_effective_not_atomic(
-                account, converted, false,
+            self.consume_validated_account_source_credit_not_atomic(
+                account, converted, false, true,
             )?
             .0
         } else {

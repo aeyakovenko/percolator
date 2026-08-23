@@ -371,6 +371,13 @@ pub fn kani_source_credit_state_realizable_support_for_face(
     V16Core::source_credit_state_realizable_support_for_face(state, face_claim)
 }
 
+pub fn kani_source_credit_state_realizable_support_for_claim_num(
+    state: SourceCreditStateV16,
+    claim_num: u128,
+) -> V16Result<u128> {
+    V16Core::source_credit_state_realizable_support_for_claim_num(state, claim_num)
+}
+
 pub fn kani_terminal_claim_free_overlap_recredit(
     provider_receivable_atoms: u128,
     paired_domain_insurance_spent: u128,
