@@ -3497,8 +3497,8 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
     const PRICE: u64 = POS_SCALE as u64;
     const POSITION_Q: u128 = 10_000;
     const ACCOUNT_CAPITAL: u128 = 980;
-    const EXPECTED_CLOSE_Q: u128 = 981;
-    const EXPECTED_FEE: u128 = 79;
+    const EXPECTED_CLOSE_Q: u128 = 1_000;
+    const EXPECTED_FEE: u128 = 80;
 
     let (mut header, mut markets) = market_fixture(1, PRICE);
     header.config.maintenance_margin_bps = V16PodU64::new(1_000);
@@ -3569,8 +3569,8 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
     );
     let cert = account.header.health_cert.try_to_runtime().unwrap();
     assert_eq!(cert.certified_liq_deficit, 0);
-    assert_eq!(cert.certified_equity, 901);
-    assert_eq!(cert.certified_maintenance_req, 901);
+    assert_eq!(cert.certified_equity, 900);
+    assert_eq!(cert.certified_maintenance_req, 900);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
 }

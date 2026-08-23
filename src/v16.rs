@@ -351,8 +351,11 @@ fn liquidation_leg_maintenance_requirement(
     let adverse_delta =
         V16Core::target_effective_lag_adverse_delta(side, effective_price, raw_target_price);
     let target_lag_penalty = liquidation_risk_notional_ceil(abs_q, adverse_delta)?;
-    let base = ((risk_notional * config.maintenance_margin_bps as u128) / MAX_MARGIN_BPS as u128)
-        .max(config.min_nonzero_mm_req);
+    let base = margin_requirement(
+        risk_notional,
+        config.maintenance_margin_bps,
+        config.min_nonzero_mm_req,
+    )?;
     base.checked_add(target_lag_penalty)
         .ok_or(V16Error::ArithmeticOverflow)
 }
@@ -4278,15 +4281,8 @@ impl V16Config {
     }
 
     fn maintenance_requirement_for_notional(&self, n: u128) -> V16Result<u128> {
-        let mm_prop = if let Some(product) = n.checked_mul(self.maintenance_margin_bps as u128) {
-            product / 10_000
-        } else {
-            U256::from_u128(n)
-                .checked_mul(U256::from_u128(self.maintenance_margin_bps as u128))
-                .and_then(|v| v.checked_div(U256::from_u128(10_000)))
-                .and_then(|v| v.try_into_u128())
-                .ok_or(V16Error::InvalidConfig)?
-        };
+        let mm_prop =
+            Self::checked_mul_div_ceil_to_u128(n, self.maintenance_margin_bps as u128, 10_000)?;
         Ok(core::cmp::max(mm_prop, self.min_nonzero_mm_req))
     }
 
@@ -4494,16 +4490,11 @@ impl V16Config {
             return Err(V16Error::InvalidConfig);
         }
 
-        let floor_region_max = U256::from_u128(
-            self.min_nonzero_mm_req
-                .checked_add(1)
-                .ok_or(V16Error::InvalidConfig)?,
-        )
-        .checked_mul(ten_thousand)
-        .and_then(|v| v.checked_sub(U256::ONE))
-        .and_then(|v| v.checked_div(U256::from_u128(self.maintenance_margin_bps as u128)))
-        .and_then(|v| v.try_into_u128())
-        .ok_or(V16Error::InvalidConfig)?;
+        let floor_region_max = U256::from_u128(self.min_nonzero_mm_req)
+            .checked_mul(ten_thousand)
+            .and_then(|v| v.checked_div(U256::from_u128(self.maintenance_margin_bps as u128)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::InvalidConfig)?;
         let floor_region_end = core::cmp::min(floor_region_max, domain_max);
         if floor_region_end != 0
             && !self.solvency_envelope_holds_for_notional(
@@ -19664,10 +19655,7 @@ fn margin_requirement(notional: u128, bps: u64, floor: u128) -> V16Result<u128> 
     if notional == 0 {
         return Ok(0);
     }
-    if let Some(product) = notional.checked_mul(bps as u128) {
-        return Ok((product / MAX_MARGIN_BPS as u128).max(floor));
-    }
-    let raw = wide_mul_div_floor_u128(notional, bps as u128, MAX_MARGIN_BPS as u128);
+    let raw = V16Core::mul_div_ceil_u128_or_wide(notional, bps as u128, MAX_MARGIN_BPS as u128)?;
     Ok(raw.max(floor))
 }
 

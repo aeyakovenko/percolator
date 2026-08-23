@@ -57,6 +57,58 @@ fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
 }
 
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_margin_requirement_cannot_decrease_when_partitioned_under_division_axiom() {
+    let first_notional_nonzero: bool = kani::any();
+    let second_notional_nonzero: bool = kani::any();
+    let first_quotient: u16 = kani::any();
+    let second_quotient: u16 = kani::any();
+    let first_remainder: u16 = kani::any();
+    let second_remainder: u16 = kani::any();
+    let minimum: u16 = kani::any();
+    kani::assume(first_remainder < MAX_MARGIN_BPS as u16);
+    kani::assume(second_remainder < MAX_MARGIN_BPS as u16);
+    kani::assume(first_notional_nonzero || (first_quotient == 0 && first_remainder == 0));
+    kani::assume(second_notional_nonzero || (second_quotient == 0 && second_remainder == 0));
+
+    let remainder_sum = u32::from(first_remainder) + u32::from(second_remainder);
+    let margin_denominator = MAX_MARGIN_BPS as u32;
+    let aggregate_carry = u32::from(remainder_sum >= margin_denominator);
+    let aggregate_remainder = if aggregate_carry == 0 {
+        remainder_sum
+    } else {
+        remainder_sum - margin_denominator
+    };
+    let first_raw = u32::from(first_quotient) + u32::from(first_remainder != 0);
+    let second_raw = u32::from(second_quotient) + u32::from(second_remainder != 0);
+    let aggregate_raw = u32::from(first_quotient)
+        + u32::from(second_quotient)
+        + aggregate_carry
+        + u32::from(aggregate_remainder != 0);
+    let first = if first_notional_nonzero {
+        first_raw.max(u32::from(minimum))
+    } else {
+        0
+    };
+    let second = if second_notional_nonzero {
+        second_raw.max(u32::from(minimum))
+    } else {
+        0
+    };
+    let aggregate = if first_notional_nonzero || second_notional_nonzero {
+        aggregate_raw.max(u32::from(minimum))
+    } else {
+        0
+    };
+    let partitioned = first + second;
+
+    kani::cover!(first_remainder != 0 && second_remainder != 0 && aggregate_carry == 0);
+    kani::cover!(aggregate_carry == 1);
+    kani::cover!(partitioned > aggregate);
+    assert!(partitioned >= aggregate);
+}
+
 // Shared liquidation/rebalance theorem for partially ADL-reduced positions.
 // Live assets have equal effective OI on both sides, while an account's stored
 // basis can be larger. The production capacity prevents OI underflow and makes

@@ -11,6 +11,18 @@ use percolator::SourceCreditStateV16;
 use percolator::{BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
 use proptest::prelude::*;
 
+#[test]
+fn margin_requirement_partition_regression() {
+    let aggregate = kani_margin_requirement(52_470, 500, 1).unwrap();
+    let partitioned = kani_margin_requirement(26_235, 500, 1)
+        .unwrap()
+        .checked_mul(2)
+        .unwrap();
+
+    assert_eq!(aggregate, 2_624);
+    assert_eq!(partitioned, aggregate);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(2000))]
 
@@ -44,12 +56,10 @@ proptest! {
         prop_assert!(ceil * POS_SCALE + POS_SCALE > exact_num);
     }
 
-    /// Margin requirement is exactly floor(n*bps/10^4).max(min_floor): the
-    /// per-step floor is compensated by the CEILED risk notional upstream
-    /// (kani_risk_notional_ceil, asserted in notional_floor_le_ceil), so the
-    /// composed requirement never understates the true obligation.
+    /// Margin requirement is exactly ceil(n*bps/10^4).max(min_floor), so a
+    /// portfolio never receives fractional-atom collateral credit.
     #[test]
-    fn margin_requirement_is_exact_floored_with_min(
+    fn margin_requirement_is_exact_ceiled_with_min(
         notional in 0u128..=u128::MAX / 20_000,
         bps in 0u64..=10_000u64,
         min_req in 0u128..=1_000_000u128,
@@ -58,8 +68,31 @@ proptest! {
         if notional == 0 {
             prop_assert_eq!(req, 0);
         } else {
-            prop_assert_eq!(req, (notional * bps as u128 / 10_000).max(min_req));
+            let product = notional * bps as u128;
+            let expected = (product / 10_000 + u128::from(product % 10_000 != 0)).max(min_req);
+            prop_assert_eq!(req, expected);
         }
+    }
+
+    /// Splitting one risk notional across two portfolios cannot lower the
+    /// aggregate requirement. This is the arithmetic property needed by the
+    /// public split/merge invariant; the former per-portfolio floor violated it.
+    #[test]
+    fn margin_requirement_is_conservative_under_partition(
+        first in 0u128..=u128::MAX / 40_000,
+        second in 0u128..=u128::MAX / 40_000,
+        bps in 0u64..=10_000u64,
+        min_req in 0u128..=1_000_000u128,
+    ) {
+        let aggregate = kani_margin_requirement(first + second, bps, min_req).unwrap();
+        let partitioned = kani_margin_requirement(first, bps, min_req)
+            .unwrap()
+            .checked_add(kani_margin_requirement(second, bps, min_req).unwrap())
+            .unwrap();
+        prop_assert!(
+            partitioned >= aggregate,
+            "partitioned requirement {partitioned} fell below aggregate {aggregate}"
+        );
     }
 
     /// ADL scaling: the scaled delta never exceeds the unscaled basis delta
