@@ -365,20 +365,20 @@ fn liquidation_projected_healthy_after_close(
     cert: HealthCertV16,
     capital: u128,
     pnl: i128,
-    leg: PortfolioLegV16,
+    side: SideV16,
+    old_abs_q: u128,
     effective_price: u64,
     raw_target_price: u64,
     fee_bps: u64,
     close_q: u128,
 ) -> V16Result<bool> {
-    let old_abs_q = leg.basis_pos_q.unsigned_abs();
     if close_q == 0 || close_q > old_abs_q {
         return Ok(false);
     }
     let old_maintenance = liquidation_leg_maintenance_requirement(
         config,
         old_abs_q,
-        leg.side,
+        side,
         effective_price,
         raw_target_price,
     )?;
@@ -386,7 +386,7 @@ fn liquidation_projected_healthy_after_close(
     let new_maintenance = liquidation_leg_maintenance_requirement(
         config,
         new_abs_q,
-        leg.side,
+        side,
         effective_price,
         raw_target_price,
     )?;
@@ -413,7 +413,8 @@ fn liquidation_partial_close_is_healthy(
     cert: HealthCertV16,
     capital: u128,
     pnl: i128,
-    leg: PortfolioLegV16,
+    side: SideV16,
+    old_abs_q: u128,
     effective_price: u64,
     raw_target_price: u64,
     fee_bps: u64,
@@ -424,7 +425,8 @@ fn liquidation_partial_close_is_healthy(
         cert,
         capital,
         pnl,
-        leg,
+        side,
+        old_abs_q,
         effective_price,
         raw_target_price,
         fee_bps,
@@ -506,12 +508,12 @@ fn liquidation_engine_close_request_q(
     cert: HealthCertV16,
     capital: u128,
     pnl: i128,
-    leg: PortfolioLegV16,
+    side: SideV16,
+    old_abs_q: u128,
     effective_price: u64,
     raw_target_price: u64,
     fee_bps: u64,
 ) -> V16Result<u128> {
-    let old_abs_q = leg.basis_pos_q.unsigned_abs();
     if old_abs_q == 0 {
         return Err(V16Error::InvalidLeg);
     }
@@ -523,7 +525,8 @@ fn liquidation_engine_close_request_q(
         cert,
         capital,
         pnl,
-        leg,
+        side,
+        old_abs_q,
         effective_price,
         raw_target_price,
         fee_bps,
@@ -544,7 +547,8 @@ fn liquidation_engine_close_request_q(
             cert,
             capital,
             pnl,
-            leg,
+            side,
+            old_abs_q,
             effective_price,
             raw_target_price,
             fee_bps,
@@ -563,7 +567,8 @@ fn liquidation_engine_close_request_q(
             cert,
             capital,
             pnl,
-            leg,
+            side,
+            old_abs_q,
             effective_price,
             raw_target_price,
             fee_bps,
@@ -580,7 +585,8 @@ fn liquidation_engine_close_request_q(
         cert,
         capital,
         pnl,
-        leg,
+        side,
+        old_abs_q,
         effective_price,
         raw_target_price,
         fee_bps,
@@ -1392,8 +1398,6 @@ impl V16Core {
     #[cfg_attr(all(kani, feature = "contracts"), kani::requires(new_signed != 0))]
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(PortfolioLegV16, AssetStateV16)>| match result {
         Ok((l, a)) => {
-            let old_abs = leg.basis_pos_q.unsigned_abs();
-            let new_abs = new_signed.unsigned_abs();
             l.basis_pos_q == new_signed
                 && l.loss_weight == (if preserve_pending_obligation_weight { leg.loss_weight } else { new_weight })
                 && l.active == leg.active
@@ -1412,7 +1416,7 @@ impl V16Core {
                 && l.stale == leg.stale
                 && (match leg.side {
                     SideV16::Long => a.oi_eff_long_q
-                            == asset.oi_eff_long_q.wrapping_sub(old_abs).wrapping_add(new_abs)
+                            == asset.oi_eff_long_q.wrapping_sub(old_effective_abs).wrapping_add(new_effective_abs)
                         && a.oi_eff_short_q == asset.oi_eff_short_q
                         && a.loss_weight_sum_short == asset.loss_weight_sum_short
                         && a.loss_weight_sum_long == (if preserve_pending_obligation_weight {
@@ -1421,7 +1425,7 @@ impl V16Core {
                             asset.loss_weight_sum_long.wrapping_sub(leg.loss_weight).wrapping_add(new_weight)
                         }),
                     SideV16::Short => a.oi_eff_short_q
-                            == asset.oi_eff_short_q.wrapping_sub(old_abs).wrapping_add(new_abs)
+                            == asset.oi_eff_short_q.wrapping_sub(old_effective_abs).wrapping_add(new_effective_abs)
                         && a.oi_eff_long_q == asset.oi_eff_long_q
                         && a.loss_weight_sum_long == asset.loss_weight_sum_long
                         && a.loss_weight_sum_short == (if preserve_pending_obligation_weight {
@@ -1473,24 +1477,28 @@ impl V16Core {
         Err(_) => true,
     }))]
     pub(crate) fn kernel_resize_leg_same_side(
-        mut leg: PortfolioLegV16,
-        mut asset: AssetStateV16,
+        leg: PortfolioLegV16,
+        asset: AssetStateV16,
         new_signed: i128,
         new_weight: u128,
         preserve_pending_obligation_weight: bool,
+        old_effective_abs: u128,
+        new_effective_abs: u128,
     ) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
-        let old_abs = leg.basis_pos_q.unsigned_abs();
-        let new_abs = new_signed.unsigned_abs();
+        let mut leg = leg;
+        let mut asset = asset;
         match leg.side {
             SideV16::Long => {
-                asset.oi_eff_long_q = adjust_u128(asset.oi_eff_long_q, old_abs, new_abs)?;
+                asset.oi_eff_long_q =
+                    adjust_u128(asset.oi_eff_long_q, old_effective_abs, new_effective_abs)?;
                 if !preserve_pending_obligation_weight {
                     asset.loss_weight_sum_long =
                         adjust_u128(asset.loss_weight_sum_long, leg.loss_weight, new_weight)?;
                 }
             }
             SideV16::Short => {
-                asset.oi_eff_short_q = adjust_u128(asset.oi_eff_short_q, old_abs, new_abs)?;
+                asset.oi_eff_short_q =
+                    adjust_u128(asset.oi_eff_short_q, old_effective_abs, new_effective_abs)?;
                 if !preserve_pending_obligation_weight {
                     asset.loss_weight_sum_short =
                         adjust_u128(asset.loss_weight_sum_short, leg.loss_weight, new_weight)?;
@@ -1934,6 +1942,74 @@ impl V16Core {
         }
     }
 
+    /// Convert a leg's retained raw basis into the conservative effective
+    /// quantity represented by the current side A index. Quantity ADL lowers
+    /// `current_a` without rewriting every portfolio, so public position work
+    /// must use this quantity rather than treating stale raw basis as live OI.
+    pub(crate) fn kernel_adl_effective_quantity_ceil(
+        raw_abs_q: u128,
+        a_basis: u128,
+        current_a: u128,
+    ) -> V16Result<u128> {
+        if raw_abs_q > MAX_POSITION_ABS_Q
+            || !(MIN_A_SIDE..=ADL_ONE).contains(&a_basis)
+            || !(MIN_A_SIDE..=a_basis).contains(&current_a)
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+        V16Core::mul_div_ceil_u128_or_wide(raw_abs_q, current_a, a_basis)
+    }
+
+    /// Return the economically live quantity represented by a retained leg.
+    /// Current-epoch legs scale with the side A index. A prior-reset obligation
+    /// owns no effective OI even though its raw basis can remain attached until
+    /// the bounded cleanup continuation removes it.
+    pub(crate) fn effective_abs_quantity_for_leg(
+        asset: AssetStateV16,
+        leg: PortfolioLegV16,
+    ) -> V16Result<u128> {
+        if !leg.active {
+            return Err(V16Error::InvalidLeg);
+        }
+        let (current_a, asset_epoch, side_mode) = match leg.side {
+            SideV16::Long => (asset.a_long, asset.epoch_long, asset.mode_long),
+            SideV16::Short => (asset.a_short, asset.epoch_short, asset.mode_short),
+        };
+        if leg.epoch_snap == asset_epoch {
+            return Self::kernel_adl_effective_quantity_ceil(
+                leg.basis_pos_q.unsigned_abs(),
+                leg.a_basis,
+                current_a,
+            );
+        }
+        if Self::kernel_is_prior_reset_obligation(side_mode, asset_epoch, leg.epoch_snap) {
+            return Ok(0);
+        }
+        Err(V16Error::InvalidLeg)
+    }
+
+    /// Choose the largest retained raw basis whose conservative effective
+    /// quantity is `effective_abs_q`. This is the inverse used after a partial
+    /// reduction: `ceil(raw * current_a / a_basis) == effective` while the
+    /// account remains on the same side.
+    pub(crate) fn kernel_raw_basis_for_adl_effective_quantity(
+        effective_abs_q: u128,
+        a_basis: u128,
+        current_a: u128,
+    ) -> V16Result<u128> {
+        if effective_abs_q > MAX_POSITION_ABS_Q
+            || !(MIN_A_SIDE..=ADL_ONE).contains(&a_basis)
+            || !(MIN_A_SIDE..=a_basis).contains(&current_a)
+        {
+            return Err(V16Error::InvalidLeg);
+        }
+        let raw_abs_q = V16Core::mul_div_floor_u128_or_wide(effective_abs_q, a_basis, current_a)?;
+        if raw_abs_q > MAX_POSITION_ABS_Q {
+            return Err(V16Error::InvalidLeg);
+        }
+        Ok(raw_abs_q)
+    }
+
     /// A trade may reduce only OI that existed before that trade. This makes
     /// aggregate accounting independent of which counterparty mutates first.
     pub(crate) fn kernel_trade_preexisting_oi_reduction_gate(
@@ -1973,15 +2049,16 @@ impl V16Core {
         Ok((long_reduction_q, short_reduction_q))
     }
 
-    /// PRODUCTION KERNEL: cap unilateral close work by the account's stored
-    /// basis and by matched effective OI. Liquidation and owner rebalance share
-    /// this bound so neither can subtract more OI than either side contains.
+    /// PRODUCTION KERNEL: cap unilateral close work by the account's effective
+    /// quantity and by matched effective OI. Liquidation and owner rebalance
+    /// share this bound so neither can subtract more OI than any participant
+    /// or side contains.
     fn kernel_unilateral_close_capacity(
-        stored_abs: u128,
+        account_effective_abs: u128,
         oi_eff_long_q: u128,
         oi_eff_short_q: u128,
     ) -> u128 {
-        stored_abs.min(oi_eff_long_q).min(oi_eff_short_q)
+        account_effective_abs.min(oi_eff_long_q).min(oi_eff_short_q)
     }
 
     /// PRODUCTION KERNEL (roadmap 3A.2 risk-reduction / S-L3, A5.dec rank): the
@@ -2760,11 +2837,11 @@ impl V16Core {
             && l.b_stale == leg.b_stale
             && l.stale == leg.stale
             && (match leg.side {
-                SideV16::Long => a.oi_eff_long_q == asset.oi_eff_long_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
+                SideV16::Long => a.oi_eff_long_q == asset.oi_eff_long_q.wrapping_sub(retained_effective_oi_q)
                     && a.pending_obligation_count_long == asset.pending_obligation_count_long.wrapping_add(1)
                     && a.oi_eff_short_q == asset.oi_eff_short_q
                     && a.pending_obligation_count_short == asset.pending_obligation_count_short,
-                SideV16::Short => a.oi_eff_short_q == asset.oi_eff_short_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
+                SideV16::Short => a.oi_eff_short_q == asset.oi_eff_short_q.wrapping_sub(retained_effective_oi_q)
                     && a.pending_obligation_count_short == asset.pending_obligation_count_short.wrapping_add(1)
                     && a.oi_eff_long_q == asset.oi_eff_long_q
                     && a.pending_obligation_count_long == asset.pending_obligation_count_long,
@@ -2778,16 +2855,21 @@ impl V16Core {
     pub(crate) fn kernel_retain_leg_as_pending_obligation(
         mut leg: PortfolioLegV16,
         mut asset: AssetStateV16,
+        retained_effective_oi_q: u128,
     ) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
-        if !leg.active || leg.basis_pos_q == 0 || leg.loss_weight == 0 {
+        if !leg.active
+            || leg.basis_pos_q == 0
+            || leg.loss_weight == 0
+            || retained_effective_oi_q == 0
+            || retained_effective_oi_q > leg.basis_pos_q.unsigned_abs()
+        {
             return Err(V16Error::InvalidLeg);
         }
-        let basis = leg.basis_pos_q.unsigned_abs();
         match leg.side {
             SideV16::Long => {
                 asset.oi_eff_long_q = asset
                     .oi_eff_long_q
-                    .checked_sub(basis)
+                    .checked_sub(retained_effective_oi_q)
                     .ok_or(V16Error::CounterUnderflow)?;
                 asset.pending_obligation_count_long = asset
                     .pending_obligation_count_long
@@ -2797,7 +2879,7 @@ impl V16Core {
             SideV16::Short => {
                 asset.oi_eff_short_q = asset
                     .oi_eff_short_q
-                    .checked_sub(basis)
+                    .checked_sub(retained_effective_oi_q)
                     .ok_or(V16Error::CounterUnderflow)?;
                 asset.pending_obligation_count_short = asset
                     .pending_obligation_count_short
@@ -2855,7 +2937,7 @@ impl V16Core {
                             && a.social_loss_dust_long_num == asset.social_loss_dust_long_num
                             && a.explicit_unallocated_loss_long == asset.explicit_unallocated_loss_long
                     } else {
-                        a.oi_eff_long_q == asset.oi_eff_long_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
+                        a.oi_eff_long_q == asset.oi_eff_long_q.wrapping_sub(clear_effective_oi_q)
                             && a.loss_weight_sum_long == asset.loss_weight_sum_long.wrapping_sub(leg.loss_weight)
                             && a.social_loss_dust_long_num == if leg.b_rem == 0 {
                                 asset.social_loss_dust_long_num
@@ -2882,7 +2964,7 @@ impl V16Core {
                             && a.social_loss_dust_short_num == asset.social_loss_dust_short_num
                             && a.explicit_unallocated_loss_short == asset.explicit_unallocated_loss_short
                     } else {
-                        a.oi_eff_short_q == asset.oi_eff_short_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())
+                        a.oi_eff_short_q == asset.oi_eff_short_q.wrapping_sub(clear_effective_oi_q)
                             && a.loss_weight_sum_short == asset.loss_weight_sum_short.wrapping_sub(leg.loss_weight)
                             && a.social_loss_dust_short_num == if leg.b_rem == 0 {
                                 asset.social_loss_dust_short_num
@@ -2938,6 +3020,7 @@ impl V16Core {
     pub(crate) fn kernel_clear_leg(
         leg: PortfolioLegV16,
         mut asset: AssetStateV16,
+        clear_effective_oi_q: u128,
     ) -> V16Result<AssetStateV16> {
         let prior_reset_epoch = match leg.side {
             SideV16::Long => {
@@ -2949,6 +3032,15 @@ impl V16Core {
                     && leg.epoch_snap.checked_add(1) == Some(asset.epoch_short)
             }
         };
+        let raw_abs_q = leg.basis_pos_q.unsigned_abs();
+        let valid_effective_clear = if prior_reset_epoch || raw_abs_q == 0 {
+            clear_effective_oi_q == 0
+        } else {
+            (1..=raw_abs_q).contains(&clear_effective_oi_q)
+        };
+        if !leg.active || !valid_effective_clear {
+            return Err(V16Error::InvalidLeg);
+        }
         let normalized_carry = if !prior_reset_epoch && leg.b_rem != 0 {
             let (dust, explicit_loss) = match leg.side {
                 SideV16::Long => (
@@ -2987,7 +3079,7 @@ impl V16Core {
                     }
                     asset.oi_eff_long_q = asset
                         .oi_eff_long_q
-                        .checked_sub(leg.basis_pos_q.unsigned_abs())
+                        .checked_sub(clear_effective_oi_q)
                         .ok_or(V16Error::CounterUnderflow)?;
                     asset.loss_weight_sum_long = asset
                         .loss_weight_sum_long
@@ -3013,7 +3105,7 @@ impl V16Core {
                     }
                     asset.oi_eff_short_q = asset
                         .oi_eff_short_q
-                        .checked_sub(leg.basis_pos_q.unsigned_abs())
+                        .checked_sub(clear_effective_oi_q)
                         .ok_or(V16Error::CounterUnderflow)?;
                     asset.loss_weight_sum_short = asset
                         .loss_weight_sum_short
@@ -6077,14 +6169,20 @@ impl TradeRequestGuardSummaryV16 {
 struct PositionDeltaLookupV16 {
     existing_slot: Option<usize>,
     empty_slot: Option<usize>,
+    /// Retained per-leg basis before and after the transition.
     current_q: i128,
     next_q: i128,
+    /// Economically live quantity before and after the transition. These are
+    /// identical to raw basis at unit ADL and differ after quantity ADL.
+    current_effective_q: i128,
+    next_effective_q: i128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PositionSlotMapV16 {
     assets: [u32; V16_MAX_PORTFOLIO_ASSETS_N],
     positions: [i128; V16_MAX_PORTFOLIO_ASSETS_N],
+    a_basis: [u128; V16_MAX_PORTFOLIO_ASSETS_N],
 }
 
 impl PositionSlotMapV16 {
@@ -6092,6 +6190,7 @@ impl PositionSlotMapV16 {
         let mut out = Self {
             assets: [u32::MAX; V16_MAX_PORTFOLIO_ASSETS_N],
             positions: [0; V16_MAX_PORTFOLIO_ASSETS_N],
+            a_basis: [0; V16_MAX_PORTFOLIO_ASSETS_N],
         };
         let bitmap = account.header.active_bitmap.map(V16PodU64::get);
         let mut slot = 0usize;
@@ -6104,6 +6203,7 @@ impl PositionSlotMapV16 {
                 }
                 out.assets[slot] = leg.asset_index;
                 out.positions[slot] = signed_position(leg);
+                out.a_basis[slot] = leg.a_basis;
             } else if leg.active || !leg.is_empty() {
                 return Err(V16Error::HiddenLeg);
             }
@@ -6116,16 +6216,68 @@ impl PositionSlotMapV16 {
         &mut self,
         asset_index: usize,
         delta_q: i128,
+        asset: AssetStateV16,
     ) -> V16Result<PositionDeltaLookupV16> {
         let asset_index = u32::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?;
         let existing_slot = self.assets.iter().position(|asset| *asset == asset_index);
         let current_q = existing_slot.map_or(0, |slot| self.positions[slot]);
-        let next_q = current_q
+        let current_effective_q = if let Some(slot) = existing_slot {
+            let current_a = match current_q.signum() {
+                1 => asset.a_long,
+                -1 => asset.a_short,
+                _ => return Err(V16Error::HiddenLeg),
+            };
+            let effective_abs = V16Core::kernel_adl_effective_quantity_ceil(
+                current_q.unsigned_abs(),
+                self.a_basis[slot],
+                current_a,
+            )?;
+            if current_q > 0 {
+                i128::try_from(effective_abs).map_err(|_| V16Error::ArithmeticOverflow)?
+            } else {
+                i128::try_from(effective_abs)
+                    .map_err(|_| V16Error::ArithmeticOverflow)?
+                    .checked_neg()
+                    .ok_or(V16Error::ArithmeticOverflow)?
+            }
+        } else {
+            0
+        };
+        let next_effective_q = current_effective_q
             .checked_add(delta_q)
             .ok_or(V16Error::ArithmeticOverflow)?;
+        validate_basis_or_zero(next_effective_q)?;
+        let next_q =
+            match V16Core::kernel_classify_position_delta(current_effective_q, next_effective_q) {
+                PositionRouteV16::Attach | PositionRouteV16::Flip => next_effective_q,
+                PositionRouteV16::Clear => 0,
+                PositionRouteV16::Resize => {
+                    let slot = existing_slot.ok_or(V16Error::InvalidLeg)?;
+                    let current_a = if next_effective_q > 0 {
+                        asset.a_long
+                    } else {
+                        asset.a_short
+                    };
+                    let mut next_abs = V16Core::kernel_raw_basis_for_adl_effective_quantity(
+                        next_effective_q.unsigned_abs(),
+                        self.a_basis[slot],
+                        current_a,
+                    )?;
+                    if next_effective_q.unsigned_abs() <= current_effective_q.unsigned_abs() {
+                        next_abs = next_abs.min(current_q.unsigned_abs());
+                    }
+                    let next_abs =
+                        i128::try_from(next_abs).map_err(|_| V16Error::ArithmeticOverflow)?;
+                    if next_effective_q > 0 {
+                        next_abs
+                    } else {
+                        next_abs.checked_neg().ok_or(V16Error::ArithmeticOverflow)?
+                    }
+                }
+            };
         validate_basis_or_zero(next_q)?;
         let mut empty_slot = None;
-        match V16Core::kernel_classify_position_delta(current_q, next_q) {
+        match V16Core::kernel_classify_position_delta(current_effective_q, next_effective_q) {
             PositionRouteV16::Attach => {
                 let slot = self
                     .assets
@@ -6135,16 +6287,23 @@ impl PositionSlotMapV16 {
                 empty_slot = Some(slot);
                 self.assets[slot] = asset_index;
                 self.positions[slot] = next_q;
+                self.a_basis[slot] = if next_q > 0 {
+                    asset.a_long
+                } else {
+                    asset.a_short
+                };
             }
             PositionRouteV16::Clear => {
                 let slot = existing_slot.ok_or(V16Error::InvalidLeg)?;
                 self.assets[slot] = u32::MAX;
                 self.positions[slot] = 0;
+                self.a_basis[slot] = 0;
             }
             PositionRouteV16::Flip => {
                 let slot = existing_slot.ok_or(V16Error::InvalidLeg)?;
                 self.assets[slot] = u32::MAX;
                 self.positions[slot] = 0;
+                self.a_basis[slot] = 0;
                 let slot = self
                     .assets
                     .iter()
@@ -6153,6 +6312,11 @@ impl PositionSlotMapV16 {
                 empty_slot = Some(slot);
                 self.assets[slot] = asset_index;
                 self.positions[slot] = next_q;
+                self.a_basis[slot] = if next_q > 0 {
+                    asset.a_long
+                } else {
+                    asset.a_short
+                };
             }
             PositionRouteV16::Resize => {
                 let slot = existing_slot.ok_or(V16Error::InvalidLeg)?;
@@ -6164,6 +6328,8 @@ impl PositionSlotMapV16 {
             empty_slot,
             current_q,
             next_q,
+            current_effective_q,
+            next_effective_q,
         })
     }
 }
@@ -12637,25 +12803,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if require_b_current && self.b_target_for_leg(asset_index, leg)? > leg.b_snap {
                 return Err(V16Error::BStale);
             }
+            let asset = self.asset_state(asset_index)?;
+            let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
             let price = if let Some((override_asset, override_price)) = price_override {
                 if override_asset == asset_index {
                     override_price
                 } else {
-                    self.markets[asset_index].engine.asset.effective_price.get()
+                    asset.effective_price
                 }
             } else {
-                self.markets[asset_index].engine.asset.effective_price.get()
+                asset.effective_price
             };
-            let risk_notional = risk_notional_ceil(leg.basis_pos_q.unsigned_abs(), price)?;
+            let risk_notional = risk_notional_ceil(effective_abs_q, price)?;
             let target_lag_penalty = V16Core::target_effective_lag_loss_penalty(
-                leg.basis_pos_q.unsigned_abs(),
+                effective_abs_q,
                 leg.side,
                 price,
-                self.markets[asset_index]
-                    .engine
-                    .asset
-                    .raw_oracle_target_price
-                    .get(),
+                asset.raw_oracle_target_price,
             )?;
             let (leg_initial, leg_maintenance, leg_worst_case_loss) =
                 V16Core::health_requirements_from_notional_and_target_lag(
@@ -12870,9 +13034,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             } else {
                 self.markets[asset_index].engine.asset.effective_price.get()
             };
-            let risk_notional = risk_notional_ceil(refreshed.basis_pos_q.unsigned_abs(), price)?;
+            let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, refreshed)?;
+            let risk_notional = risk_notional_ceil(effective_abs_q, price)?;
             let target_lag_penalty = V16Core::target_effective_lag_loss_penalty(
-                refreshed.basis_pos_q.unsigned_abs(),
+                effective_abs_q,
                 refreshed.side,
                 price,
                 asset.raw_oracle_target_price,
@@ -15239,11 +15404,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_lookup: PositionDeltaLookupV16,
         short_lookup: PositionDeltaLookupV16,
     ) -> V16Result<TradePositionPreflightV16> {
-        let (_, long_delta, short_delta) = Self::trade_signed_size_deltas(request.size_q)?;
-        let long_risk_increasing =
-            position_delta_increases_risk(long_lookup.current_q, long_delta)?;
-        let short_risk_increasing =
-            position_delta_increases_risk(short_lookup.current_q, short_delta)?;
+        Self::trade_signed_size_deltas(request.size_q)?;
+        let long_risk_increasing = long_lookup.next_effective_q.unsigned_abs()
+            > long_lookup.current_effective_q.unsigned_abs();
+        let short_risk_increasing = short_lookup.next_effective_q.unsigned_abs()
+            > short_lookup.current_effective_q.unsigned_abs();
         let risk_increasing = long_risk_increasing || short_risk_increasing;
         let asset = self
             .markets
@@ -15254,29 +15419,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::kernel_trade_preexisting_oi_reduction_gate(
             asset.oi_eff_long_q.get(),
             asset.oi_eff_short_q.get(),
-            long_lookup.current_q,
-            long_lookup.next_q,
-            short_lookup.current_q,
-            short_lookup.next_q,
+            long_lookup.current_effective_q,
+            long_lookup.next_effective_q,
+            short_lookup.current_effective_q,
+            short_lookup.next_effective_q,
         )?;
         let target_effective_lag = self.asset_has_target_effective_lag(request.asset_index)?;
         let blocked_by_pending_domain_barrier = pending_domain_loss_barrier_blocks_position_change(
             self.position_change_touches_pending_domain_loss_barrier(
                 request.asset_index,
-                long_lookup.current_q,
-                long_lookup.next_q,
+                long_lookup.current_effective_q,
+                long_lookup.next_effective_q,
             )?,
-            long_lookup.current_q,
-            long_lookup.next_q,
+            long_lookup.current_effective_q,
+            long_lookup.next_effective_q,
         )
             || pending_domain_loss_barrier_blocks_position_change(
                 self.position_change_touches_pending_domain_loss_barrier(
                     request.asset_index,
-                    short_lookup.current_q,
-                    short_lookup.next_q,
+                    short_lookup.current_effective_q,
+                    short_lookup.next_effective_q,
                 )?,
-                short_lookup.current_q,
-                short_lookup.next_q,
+                short_lookup.current_effective_q,
+                short_lookup.next_effective_q,
             );
         trade_preflight_risk_gate(
             risk_increasing,
@@ -15287,30 +15452,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(TradePositionPreflightV16 {
             risk_increasing,
             long_requires_initial_margin: trade_account_requires_initial_margin(
-                long_lookup.current_q,
-                long_lookup.next_q,
+                long_lookup.current_effective_q,
+                long_lookup.next_effective_q,
             ),
             short_requires_initial_margin: trade_account_requires_initial_margin(
-                short_lookup.current_q,
-                short_lookup.next_q,
+                short_lookup.current_effective_q,
+                short_lookup.next_effective_q,
             ),
             long_lookup,
             short_lookup,
-            long_old_abs_q: long_lookup.current_q.unsigned_abs(),
-            short_old_abs_q: short_lookup.current_q.unsigned_abs(),
-            long_new_abs_q: long_lookup.next_q.unsigned_abs(),
-            short_new_abs_q: short_lookup.next_q.unsigned_abs(),
+            long_old_abs_q: long_lookup.current_effective_q.unsigned_abs(),
+            short_old_abs_q: short_lookup.current_effective_q.unsigned_abs(),
+            long_new_abs_q: long_lookup.next_effective_q.unsigned_abs(),
+            short_new_abs_q: short_lookup.next_effective_q.unsigned_abs(),
             long_has_source_claims: Self::account_has_source_claims(long_account)?,
             short_has_source_claims: Self::account_has_source_claims(short_account)?,
         })
     }
 
     fn position_delta_lookup_for_asset(
+        &self,
         account: &PortfolioV16View<'_>,
         asset_index: usize,
         delta_q: i128,
     ) -> V16Result<PositionDeltaLookupV16> {
-        PositionSlotMapV16::from_account(account)?.plan_delta(asset_index, delta_q)
+        PositionSlotMapV16::from_account(account)?.plan_delta(
+            asset_index,
+            delta_q,
+            self.asset_state(asset_index)?,
+        )
     }
 
     fn attach_leg_at_slot(
@@ -15404,7 +15574,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::Stale);
         }
-        let (leg, asset) = V16Core::kernel_retain_leg_as_pending_obligation(leg, asset)?;
+        let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+        let (leg, asset) =
+            V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)
@@ -15434,6 +15606,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             asset_index,
             leg_slot,
             allow_attributed_terminal_trade,
+            None,
         )
     }
 
@@ -15443,6 +15616,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset_index: usize,
         leg_slot: usize,
         allow_attributed_terminal_trade: bool,
+        clear_effective_oi_q: Option<u128>,
     ) -> V16Result<()> {
         if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
             return Err(V16Error::InvalidLeg);
@@ -15479,54 +15653,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
             return Err(V16Error::Stale);
         }
-        let asset = V16Core::kernel_clear_leg(leg, asset)?;
-        account.header.legs[leg_slot] =
-            PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
-        let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
-        active_bitmap_clear(&mut bitmap, leg_slot)?;
-        account.header.active_bitmap = bitmap.map(V16PodU64::new);
-        account.header.health_cert.valid = 0;
-        self.set_asset_state(asset_index, asset)?;
-        Ok(())
-    }
-
-    fn clear_resolved_close_leg(
-        &mut self,
-        account: &mut PortfolioV16ViewMut<'_>,
-        asset_index: usize,
-    ) -> V16Result<()> {
-        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
-            return Err(V16Error::LockActive);
-        }
-        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
-        let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
-        if !leg.active || leg.b_stale || leg.stale {
-            return Err(V16Error::InvalidLeg);
-        }
-        if account
-            .header
-            .close_progress
-            .try_to_runtime()?
-            .has_pending_residual()
-        {
-            return Err(V16Error::LockActive);
-        }
-        if self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-            return Err(V16Error::LockActive);
-        }
-        let asset = self.asset_state(asset_index)?;
-        let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg)?;
-        if !Self::leg_kf_epoch_is_current(asset, leg)
-            || k_target != leg.k_snap
-            || f_target != leg.f_snap
-        {
-            return Err(V16Error::Stale);
-        }
-        if self.b_target_for_leg(asset_index, leg)? != leg.b_snap {
-            return Err(V16Error::Stale);
-        }
-        leg.b_rem = 0;
-        let asset = V16Core::kernel_clear_leg(leg, asset)?;
+        let clear_effective_oi_q = match clear_effective_oi_q {
+            Some(value) => value,
+            None => V16Core::effective_abs_quantity_for_leg(asset, leg)?,
+        };
+        let asset = V16Core::kernel_clear_leg(leg, asset, clear_effective_oi_q)?;
         account.header.legs[leg_slot] =
             PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
         let mut bitmap = account.header.active_bitmap.map(V16PodU64::get);
@@ -15547,8 +15678,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(());
         }
         let lookup =
-            Self::position_delta_lookup_for_asset(&account.as_view(), asset_index, delta_q)?;
-        self.apply_position_delta_with_lookup(account, asset_index, delta_q, lookup)
+            self.position_delta_lookup_for_asset(&account.as_view(), asset_index, delta_q)?;
+        let raw_delta_q = lookup
+            .next_q
+            .checked_sub(lookup.current_q)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        self.apply_position_delta_with_lookup(account, asset_index, raw_delta_q, lookup)
     }
 
     fn apply_position_delta_with_lookup(
@@ -15610,17 +15745,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::HiddenLeg);
         }
         let new = lookup.next_q;
+        let current_effective = lookup.current_effective_q;
+        let new_effective = lookup.next_effective_q;
         if pending_domain_loss_barrier_blocks_position_change(
-            self.position_change_touches_pending_domain_loss_barrier(asset_index, current, new)?,
-            current,
-            new,
+            self.position_change_touches_pending_domain_loss_barrier(
+                asset_index,
+                current_effective,
+                new_effective,
+            )?,
+            current_effective,
+            new_effective,
         ) {
             return Err(V16Error::LockActive);
         }
         // PRODUCTION KERNEL: classify the route (Attach/Clear/Flip/Resize) — the
         // exact decision this body dispatches on, factored out and contracted.
-        let route = V16Core::kernel_classify_position_delta(current, new);
-        self.require_position_route_adl_safe(asset_index, route, current, new)?;
+        let route = V16Core::kernel_classify_position_delta(current_effective, new_effective);
+        self.require_position_route_adl_safe(asset_index, route, current_effective, new_effective)?;
         if route == PositionRouteV16::Attach {
             let side = if new > 0 {
                 SideV16::Long
@@ -15634,19 +15775,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if route == PositionRouteV16::Clear {
             let leg = current_leg;
             if leg.active && self.has_pending_domain_loss_barrier(asset_index, leg.side)? {
-                let (obligation, asset) = V16Core::kernel_retain_leg_as_pending_obligation(
-                    leg,
-                    self.asset_state(asset_index)?,
-                )?;
+                let asset = self.asset_state(asset_index)?;
+                let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+                let (obligation, asset) =
+                    V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
                 account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&obligation);
                 account.header.health_cert.valid = 0;
                 self.set_asset_state(asset_index, asset)?;
                 return Ok(());
             }
-            return self.clear_leg_at_slot_inner(account, asset_index, leg_slot, !settle_existing);
+            return self.clear_leg_at_slot_inner(
+                account,
+                asset_index,
+                leg_slot,
+                !settle_existing,
+                Some(lookup.current_effective_q.unsigned_abs()),
+            );
         }
         if route == PositionRouteV16::Flip {
-            self.clear_leg_at_slot_inner(account, asset_index, leg_slot, false)?;
+            self.clear_leg_at_slot_inner(account, asset_index, leg_slot, false, None)?;
             let side = if new > 0 {
                 SideV16::Long
             } else {
@@ -15656,7 +15803,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return self.attach_leg_at_slot(account, asset_index, side, new, empty_slot);
         }
         let preserve_pending_obligation_weight =
-            same_side_risk_reduction_or_flat_obligation(current, new)
+            same_side_risk_reduction_or_flat_obligation(current_effective, new_effective)
                 && self.has_pending_domain_loss_barrier(asset_index, current_leg.side)?;
         self.resize_leg_same_side_at_slot(
             account,
@@ -15664,6 +15811,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             leg_slot,
             new,
             preserve_pending_obligation_weight,
+            current_effective.unsigned_abs(),
+            new_effective.unsigned_abs(),
         )
     }
 
@@ -15675,6 +15824,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         leg_slot: usize,
         new: i128,
         preserve_pending_obligation_weight: bool,
+        old_effective_abs: u128,
+        new_effective_abs: u128,
     ) -> V16Result<()> {
         let old_leg = account.header.legs[leg_slot].try_to_runtime()?;
         let new_weight = loss_weight_for_basis(new.unsigned_abs(), old_leg.a_basis)?;
@@ -15685,6 +15836,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             new,
             new_weight,
             preserve_pending_obligation_weight,
+            old_effective_abs,
+            new_effective_abs,
         )?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&new_leg);
         account.header.health_cert.valid = 0;
@@ -16138,13 +16291,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn begin_zero_oi_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
         let asset = self.asset_state(asset_index)?;
         let reset_long = asset.oi_eff_long_q == 0
-            && asset.stored_pos_count_long != 0
             && asset.pending_obligation_count_long == 0
-            && asset.mode_long != SideModeV16::ResetPending;
+            && asset.mode_long != SideModeV16::ResetPending
+            && (asset.stored_pos_count_long != 0 || asset.a_long != ADL_ONE);
         let reset_short = asset.oi_eff_short_q == 0
-            && asset.stored_pos_count_short != 0
             && asset.pending_obligation_count_short == 0
-            && asset.mode_short != SideModeV16::ResetPending;
+            && asset.mode_short != SideModeV16::ResetPending
+            && (asset.stored_pos_count_short != 0 || asset.a_short != ADL_ONE);
         if reset_long {
             self.begin_full_drain_reset_inner(asset_index, SideV16::Long)?;
         }
@@ -16154,10 +16307,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn unilateral_close_capacity(&self, asset_index: usize, stored_abs: u128) -> V16Result<u128> {
+    fn unilateral_close_capacity(
+        &self,
+        asset_index: usize,
+        leg: PortfolioLegV16,
+    ) -> V16Result<u128> {
         let asset = self.asset_state(asset_index)?;
+        let account_effective_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
         Ok(V16Core::kernel_unilateral_close_capacity(
-            stored_abs,
+            account_effective_q,
             asset.oi_eff_long_q,
             asset.oi_eff_short_q,
         ))
@@ -16306,12 +16464,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidLeg);
         }
         let asset = self.asset_state(request.asset_index)?;
+        let account_effective_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
         let close_request_q = liquidation_engine_close_request_q(
             config,
             cert,
             account.header.capital.get(),
             account.header.pnl.get(),
-            leg,
+            leg.side,
+            account_effective_q,
             asset.effective_price,
             asset.raw_oracle_target_price,
             fee_bps,
@@ -16321,9 +16481,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // contract now governs the real liquidation route (3C). Liquidation size
         // is engine-selected: close just enough to restore maintenance health
         // when possible, otherwise close the selected leg fully.
-        let close_budget = close_request_q.min(
-            self.unilateral_close_capacity(request.asset_index, leg.basis_pos_q.unsigned_abs())?,
-        );
+        let close_budget =
+            close_request_q.min(self.unilateral_close_capacity(request.asset_index, leg)?);
         if close_budget == 0 {
             return Err(V16Error::NonProgress);
         }
@@ -16342,7 +16501,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.header.active_bitmap.map(V16PodU64::get),
             leg_slot,
             close_q,
-            leg.basis_pos_q.unsigned_abs(),
+            account_effective_q,
         )? {
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
@@ -16360,7 +16519,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             fee_bps,
             config.min_liquidation_abs,
             config.liquidation_fee_cap,
-            close_q == leg.basis_pos_q.unsigned_abs(),
+            close_q == account_effective_q,
         )?;
         let charged_fee = self.charge_account_fee_not_atomic(account, fee)?;
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
@@ -16453,9 +16612,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         // PRODUCTION KERNEL: clamp + toward-zero reduction delta (rank decrease,
         // never over-closes, full close clears).
-        let reduce_budget = request.reduce_q.min(
-            self.unilateral_close_capacity(request.asset_index, leg.basis_pos_q.unsigned_abs())?,
-        );
+        let reduce_budget = request
+            .reduce_q
+            .min(self.unilateral_close_capacity(request.asset_index, leg)?);
         let (reduce_q, reduce_delta) =
             V16Core::kernel_reduce_position_delta(leg.basis_pos_q, leg.side, reduce_budget)?;
         if reduce_q == 0 {
@@ -16718,7 +16877,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         long_attributable_asset_before_refresh: Option<usize>,
         short_attributable_asset_before_refresh: Option<usize>,
     ) -> V16Result<TradeApplyOutcomeV16> {
-        let (abs_size_q, long_delta, short_delta) = Self::trade_signed_size_deltas(request.size_q)?;
+        let (abs_size_q, _, _) = Self::trade_signed_size_deltas(request.size_q)?;
         let trade_preflight = self.validate_trade_position_preflight(
             &long_account.as_view(),
             &short_account.as_view(),
@@ -16750,13 +16909,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.apply_current_position_delta_with_lookup(
             long_account,
             request.asset_index,
-            long_delta,
+            trade_preflight
+                .long_lookup
+                .next_q
+                .checked_sub(trade_preflight.long_lookup.current_q)
+                .ok_or(V16Error::ArithmeticOverflow)?,
             trade_preflight.long_lookup,
         )?;
         self.apply_current_position_delta_with_lookup(
             short_account,
             request.asset_index,
-            short_delta,
+            trade_preflight
+                .short_lookup
+                .next_q
+                .checked_sub(trade_preflight.short_lookup.current_q)
+                .ok_or(V16Error::ArithmeticOverflow)?,
             trade_preflight.short_lookup,
         )?;
         self.transfer_trade_residual_reward_credit(
@@ -16967,9 +17134,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut i = 0usize;
         while i < requests.len() {
             let (_, long_delta, short_delta) = Self::trade_signed_size_deltas(requests[i].size_q)?;
+            let position_asset = self.asset_state(requests[i].asset_index)?;
             let request_position_lookups = (
-                long_position_map.plan_delta(requests[i].asset_index, long_delta)?,
-                short_position_map.plan_delta(requests[i].asset_index, short_delta)?,
+                long_position_map.plan_delta(
+                    requests[i].asset_index,
+                    long_delta,
+                    position_asset,
+                )?,
+                short_position_map.plan_delta(
+                    requests[i].asset_index,
+                    short_delta,
+                    position_asset,
+                )?,
             );
             let applied = self.apply_trade_after_refresh_not_atomic(
                 long_account,
@@ -18467,18 +18643,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     SideV16::Long => asset.oi_eff_long_q,
                     SideV16::Short => asset.oi_eff_short_q,
                 };
-                let stored_abs_q = leg.basis_pos_q.unsigned_abs();
-                if side_effective_oi_q != 0 && side_effective_oi_q < stored_abs_q {
-                    let (_, delta_q) = V16Core::kernel_reduce_position_delta(
-                        leg.basis_pos_q,
-                        leg.side,
-                        side_effective_oi_q,
-                    )?;
-                    self.apply_position_delta(account, asset_index, delta_q)?;
-                    self.begin_side_reset_if_effective_oi_exhausted(asset_index, leg.side)?;
+                let account_effective_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+                let close_q = side_effective_oi_q.min(account_effective_q);
+                if close_q == 0 {
+                    // Zero-effective legs are either prior-reset residue or a
+                    // released pending-loss obligation. They own no live OI,
+                    // but still have to detach so resolved close can finish.
+                    self.clear_leg_at_slot_inner(account, asset_index, slot, false, Some(0))?;
+                    self.begin_zero_oi_residue_resets(asset_index)?;
                     return Ok(());
                 }
-                self.clear_resolved_close_leg(account, asset_index)?;
+                let close_q = i128::try_from(close_q).map_err(|_| V16Error::ArithmeticOverflow)?;
+                let delta_q = match leg.side {
+                    SideV16::Long => close_q.checked_neg().ok_or(V16Error::ArithmeticOverflow)?,
+                    SideV16::Short => close_q,
+                };
+                self.apply_position_delta(account, asset_index, delta_q)?;
+                self.begin_zero_oi_residue_resets(asset_index)?;
                 return Ok(());
             }
             slot += 1;
@@ -19611,6 +19792,7 @@ fn account_equity_from_parts(capital: u128, pnl: i128, fee_credits: i128) -> V16
         .ok_or(V16Error::ArithmeticOverflow)
 }
 
+#[cfg(any(kani, feature = "fuzz"))]
 fn position_delta_increases_risk(current: i128, delta_q: i128) -> V16Result<bool> {
     let next = current
         .checked_add(delta_q)

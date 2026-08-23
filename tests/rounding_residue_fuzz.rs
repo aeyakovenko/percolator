@@ -8,7 +8,9 @@
 
 use percolator::v16::*;
 use percolator::SourceCreditStateV16;
-use percolator::{BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
+use percolator::{
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_POSITION_ABS_Q, MIN_A_SIDE, POS_SCALE,
+};
 use proptest::prelude::*;
 
 #[test]
@@ -145,6 +147,85 @@ proptest! {
                 prop_assert!(l <= r, "support exceeded exact rate-scaled face");
             }
         }
+    }
+}
+
+#[test]
+fn adl_effective_quantity_roundtrip_boundary_partition() {
+    let raw_values = [
+        0,
+        1,
+        POS_SCALE - 1,
+        POS_SCALE,
+        POS_SCALE + 1,
+        MAX_POSITION_ABS_Q - 1,
+        MAX_POSITION_ABS_Q,
+    ];
+    let a_values = [
+        MIN_A_SIDE,
+        MIN_A_SIDE + 1,
+        ADL_ONE / 3,
+        ADL_ONE / 2,
+        ADL_ONE - 1,
+        ADL_ONE,
+    ];
+    for raw_abs_q in raw_values {
+        for a_basis in a_values {
+            for current_a in a_values.into_iter().filter(|a| *a <= a_basis) {
+                let effective =
+                    kani_adl_effective_quantity_ceil(raw_abs_q, a_basis, current_a).unwrap();
+                let targets = [0, effective / 2, effective.saturating_sub(1)];
+                for target_effective in targets {
+                    if effective == 0 || target_effective >= effective {
+                        continue;
+                    }
+                    let target_raw = kani_raw_basis_for_adl_effective_quantity(
+                        target_effective,
+                        a_basis,
+                        current_a,
+                    )
+                    .unwrap();
+                    assert!(target_raw <= raw_abs_q);
+                    assert_eq!(
+                        kani_adl_effective_quantity_ceil(target_raw, a_basis, current_a),
+                        Ok(target_effective),
+                    );
+                }
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20000))]
+
+    #[test]
+    fn adl_effective_quantity_roundtrip_preserves_any_reachable_reduction(
+        raw_abs_q in 0u128..=MAX_POSITION_ABS_Q,
+        a_basis in MIN_A_SIDE..=ADL_ONE,
+        current_selector in any::<u128>(),
+        target_selector in any::<u128>(),
+    ) {
+        let current_a = MIN_A_SIDE + current_selector % (a_basis - MIN_A_SIDE + 1);
+        let current_effective =
+            kani_adl_effective_quantity_ceil(raw_abs_q, a_basis, current_a).unwrap();
+        let target_effective = if current_effective == 0 {
+            0
+        } else {
+            target_selector % current_effective
+        };
+        let target_raw = kani_raw_basis_for_adl_effective_quantity(
+            target_effective,
+            a_basis,
+            current_a,
+        )
+        .unwrap();
+
+        prop_assert!(target_raw <= raw_abs_q);
+        prop_assert_eq!(
+            kani_adl_effective_quantity_ceil(target_raw, a_basis, current_a),
+            Ok(target_effective),
+        );
     }
 }
 

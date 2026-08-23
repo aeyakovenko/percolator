@@ -98,6 +98,18 @@ RiskNotional(asset, account) =
     0 if effective_pos_q == 0
     else ceil(abs(effective_pos_q) * conservative_effective_price / POS_SCALE)
 
+effective_pos_q =
+    0 for a prior-reset obligation
+    else sign(raw_basis_pos_q)
+       * ceil(abs(raw_basis_pos_q) * current_A_side / leg_a_basis)
+
+For a same-side public resize, `size_q` is an effective-quantity delta. A
+post-ADL risk reduction selects the largest raw basis no greater than the prior
+raw basis whose conservative effective quantity equals the requested post-trade
+quantity. Aggregate effective OI, health, liquidation sizing, full-close
+detection, and pending-obligation conversion all use `effective_pos_q`; raw
+basis remains only for K/F settlement and social-loss weight accounting.
+
 trade_notional =
     floor(abs(size_q) * exec_price / POS_SCALE)
 ```

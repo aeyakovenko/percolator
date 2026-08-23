@@ -1490,6 +1490,8 @@ fn contract_check_kernel_resize_leg_same_side() {
     let new_signed: i128 = kani::any();
     let new_weight: u128 = kani::any();
     let preserve: bool = kani::any();
+    let old_effective_abs: u128 = kani::any();
+    let new_effective_abs: u128 = kani::any();
     kani::assume(new_signed != 0);
     kani::assume(new_signed > i128::MIN);
     let _ = V16Core::kernel_resize_leg_same_side(
@@ -1498,6 +1500,8 @@ fn contract_check_kernel_resize_leg_same_side() {
         new_signed,
         new_weight,
         preserve,
+        old_effective_abs,
+        new_effective_abs,
     );
 }
 
@@ -1669,7 +1673,8 @@ fn contract_check_kernel_clear_leg() {
         },
     };
     kani::assume(leg.basis_pos_q > i128::MIN);
-    let _ = V16Core::kernel_clear_leg(leg, asset);
+    let clear_effective_oi_q: u128 = kani::any();
+    let _ = V16Core::kernel_clear_leg(leg, asset, clear_effective_oi_q);
 }
 
 #[cfg(all(kani, feature = "contracts"))]
@@ -2707,7 +2712,8 @@ fn contract_check_kernel_forfeit_residual_step() {
 fn contract_check_kernel_retain_leg_as_pending_obligation() {
     let leg: PortfolioLegV16 = kani::any();
     let asset: AssetStateV16 = kani::any();
-    let _ = V16Core::kernel_retain_leg_as_pending_obligation(leg, asset);
+    let retained_effective_oi_q: u128 = kani::any();
+    let _ = V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, retained_effective_oi_q);
 }
 
 // Exhaust all lifecycle/count inputs for the overlap-safe release predicate.

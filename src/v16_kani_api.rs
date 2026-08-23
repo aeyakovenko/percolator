@@ -192,7 +192,8 @@ pub fn kani_liquidation_projected_healthy_after_close(
     cert: HealthCertV16,
     capital: u128,
     pnl: i128,
-    leg: PortfolioLegV16,
+    side: SideV16,
+    old_abs_q: u128,
     effective_price: u64,
     raw_target_price: u64,
     fee_bps: u64,
@@ -203,7 +204,8 @@ pub fn kani_liquidation_projected_healthy_after_close(
         cert,
         capital,
         pnl,
-        leg,
+        side,
+        old_abs_q,
         effective_price,
         raw_target_price,
         fee_bps,
@@ -216,7 +218,8 @@ pub fn kani_liquidation_engine_close_request_q(
     cert: HealthCertV16,
     capital: u128,
     pnl: i128,
-    leg: PortfolioLegV16,
+    side: SideV16,
+    old_abs_q: u128,
     effective_price: u64,
     raw_target_price: u64,
     fee_bps: u64,
@@ -226,7 +229,8 @@ pub fn kani_liquidation_engine_close_request_q(
         cert,
         capital,
         pnl,
-        leg,
+        side,
+        old_abs_q,
         effective_price,
         raw_target_price,
         fee_bps,
@@ -453,6 +457,22 @@ pub fn kani_position_delta_increases_risk(current: i128, delta_q: i128) -> V16Re
 pub fn kani_position_change_requires_unit_adl(current: i128, new: i128) -> bool {
     let route = V16Core::kernel_classify_position_delta(current, new);
     V16Core::kernel_position_route_requires_unit_adl(route, current, new)
+}
+
+pub fn kani_adl_effective_quantity_ceil(
+    raw_abs_q: u128,
+    a_basis: u128,
+    current_a: u128,
+) -> V16Result<u128> {
+    V16Core::kernel_adl_effective_quantity_ceil(raw_abs_q, a_basis, current_a)
+}
+
+pub fn kani_raw_basis_for_adl_effective_quantity(
+    effective_abs_q: u128,
+    a_basis: u128,
+    current_a: u128,
+) -> V16Result<u128> {
+    V16Core::kernel_raw_basis_for_adl_effective_quantity(effective_abs_q, a_basis, current_a)
 }
 
 pub fn kani_adl_scaled_accrual_index_deltas(
@@ -682,11 +702,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     pub fn kani_kernel_unilateral_close_capacity(
-        stored_abs: u128,
+        account_effective_abs: u128,
         oi_eff_long_q: u128,
         oi_eff_short_q: u128,
     ) -> u128 {
-        V16Core::kernel_unilateral_close_capacity(stored_abs, oi_eff_long_q, oi_eff_short_q)
+        V16Core::kernel_unilateral_close_capacity(
+            account_effective_abs,
+            oi_eff_long_q,
+            oi_eff_short_q,
+        )
     }
 
     pub fn kani_kernel_reduce_position_delta(
@@ -723,8 +747,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn kani_kernel_clear_leg(
         leg: PortfolioLegV16,
         asset: AssetStateV16,
+        clear_effective_oi_q: u128,
     ) -> V16Result<AssetStateV16> {
-        V16Core::kernel_clear_leg(leg, asset)
+        V16Core::kernel_clear_leg(leg, asset, clear_effective_oi_q)
     }
 
     pub fn kani_clear_leg(
@@ -1399,12 +1424,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             Self::terminal_trade_residual_asset_before_refresh(&short_account.as_view())?;
         let (_, long_delta, short_delta) = Self::trade_signed_size_deltas(request.size_q)?;
         let position_lookups = (
-            Self::position_delta_lookup_for_asset(
+            self.position_delta_lookup_for_asset(
                 &long_account.as_view(),
                 request.asset_index,
                 long_delta,
             )?,
-            Self::position_delta_lookup_for_asset(
+            self.position_delta_lookup_for_asset(
                 &short_account.as_view(),
                 request.asset_index,
                 short_delta,

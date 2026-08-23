@@ -110,82 +110,77 @@ fn proof_v16_margin_requirement_cannot_decrease_when_partitioned_under_division_
 }
 
 // Shared liquidation/rebalance theorem for partially ADL-reduced positions.
-// Live assets have equal effective OI on both sides, while an account's stored
-// basis can be larger. The production capacity prevents OI underflow and makes
-// any resulting zero-OI residue permissionlessly actionable.
+// The selected work is bounded by account-local effective quantity and both
+// aggregate sides. The reduction kernel receives retained raw basis, but its
+// effective delta clears exactly when the account's live quantity is exhausted.
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn proof_v16_unilateral_close_capacity_is_safe_progress_and_residue_complete() {
+fn proof_v16_unilateral_close_capacity_is_safe_effective_progress() {
     let side = if kani::any::<bool>() {
         SideV16::Long
     } else {
         SideV16::Short
     };
-    let stored_abs: u128 = kani::any();
+    let raw_abs: u128 = kani::any();
+    let account_effective_abs: u128 = kani::any();
     let matched_oi: u128 = kani::any();
     let request: u128 = kani::any();
-    kani::assume((1..=MAX_POSITION_ABS_Q).contains(&stored_abs));
+    kani::assume((1..=MAX_POSITION_ABS_Q).contains(&raw_abs));
+    kani::assume((1..=raw_abs).contains(&account_effective_abs));
     kani::assume((1..=MAX_OI_SIDE_Q).contains(&matched_oi));
+    kani::assume(account_effective_abs <= matched_oi);
     kani::assume(request > 0);
 
     let capacity = MarketGroupV16ViewMut::<u64>::kani_kernel_unilateral_close_capacity(
-        stored_abs, matched_oi, matched_oi,
+        account_effective_abs,
+        matched_oi,
+        matched_oi,
     );
     let work = request.min(capacity);
-    let pre_basis_signed = match side {
-        SideV16::Long => stored_abs as i128,
-        SideV16::Short => -(stored_abs as i128),
+    let pre_raw_signed = match side {
+        SideV16::Long => raw_abs as i128,
+        SideV16::Short => -(raw_abs as i128),
     };
-    let (reduced_q, delta) = MarketGroupV16ViewMut::<u64>::kani_kernel_reduce_position_delta(
-        pre_basis_signed,
-        side,
-        work,
-    )
-    .unwrap();
-    let expected = request.min(stored_abs).min(matched_oi);
-    let post_basis_signed = pre_basis_signed.checked_add(delta).unwrap();
+    let (reduced_q, delta) =
+        MarketGroupV16ViewMut::<u64>::kani_kernel_reduce_position_delta(pre_raw_signed, side, work)
+            .unwrap();
+    let expected = request.min(account_effective_abs);
+    let pre_effective_signed = match side {
+        SideV16::Long => account_effective_abs as i128,
+        SideV16::Short => -(account_effective_abs as i128),
+    };
+    let post_effective_signed = pre_effective_signed.checked_add(delta).unwrap();
     let long_oi_after = matched_oi.checked_sub(reduced_q).unwrap();
     let short_oi_after = matched_oi.checked_sub(reduced_q).unwrap();
 
-    assert_eq!(capacity, stored_abs.min(matched_oi));
+    assert_eq!(capacity, account_effective_abs);
     assert_eq!(reduced_q, expected);
     assert!(reduced_q > 0);
-    assert!(reduced_q <= stored_abs);
+    assert!(reduced_q <= account_effective_abs);
+    assert!(account_effective_abs <= raw_abs);
     assert!(reduced_q <= matched_oi);
-    assert_eq!(post_basis_signed.unsigned_abs(), stored_abs - reduced_q);
-    assert!(post_basis_signed == 0 || post_basis_signed.signum() == pre_basis_signed.signum());
-
-    if request >= capacity && stored_abs > matched_oi {
-        assert_eq!(long_oi_after, 0);
-        assert_eq!(short_oi_after, 0);
-        assert_ne!(post_basis_signed, 0);
-        let mut asset = AssetStateV16::default();
-        asset.oi_eff_long_q = long_oi_after;
-        asset.oi_eff_short_q = short_oi_after;
-        match side {
-            SideV16::Long => asset.stored_pos_count_long = 1,
-            SideV16::Short => asset.stored_pos_count_short = 1,
-        }
-        let leg = PortfolioLegV16 {
-            active: true,
-            side,
-            basis_pos_q: post_basis_signed,
-            ..PortfolioLegV16::EMPTY
-        };
-        assert!(MarketGroupV16ViewMut::<u64>::kani_leg_has_exhausted_effective_oi(asset, leg));
-    }
+    assert_eq!(
+        post_effective_signed.unsigned_abs(),
+        account_effective_abs - reduced_q
+    );
+    assert!(
+        post_effective_signed == 0
+            || post_effective_signed.signum() == pre_effective_signed.signum()
+    );
+    assert_eq!(long_oi_after, matched_oi - reduced_q);
+    assert_eq!(short_oi_after, matched_oi - reduced_q);
 
     kani::cover!(side == SideV16::Long, "capacity covers long reductions");
     kani::cover!(side == SideV16::Short, "capacity covers short reductions");
     kani::cover!(request < capacity, "capacity covers partial requested work");
     kani::cover!(
-        request >= capacity && stored_abs > matched_oi,
-        "capacity covers an ADL terminal residue"
+        request >= capacity && raw_abs > account_effective_abs,
+        "capacity clears a quantity-ADL account without reissuing raw basis"
     );
     kani::cover!(
-        request >= capacity && stored_abs <= matched_oi,
-        "capacity covers a full account close"
+        request >= capacity && raw_abs == account_effective_abs,
+        "capacity covers a unit-ADL full account close"
     );
 }
 
@@ -5564,12 +5559,6 @@ fn proof_v16_liquidation_selector_is_healthy_locally_minimal_or_full_close() {
         valid: true,
         ..HealthCertV16::default()
     };
-    let leg = PortfolioLegV16 {
-        active: true,
-        side: SideV16::Long,
-        basis_pos_q: position_q as i128,
-        ..PortfolioLegV16::EMPTY
-    };
     let price = POS_SCALE as u64;
 
     let selected = kani_liquidation_engine_close_request_q(
@@ -5577,7 +5566,8 @@ fn proof_v16_liquidation_selector_is_healthy_locally_minimal_or_full_close() {
         cert,
         equity,
         0,
-        leg,
+        SideV16::Long,
+        position_q,
         price,
         price,
         config.liquidation_fee_bps,
@@ -5601,7 +5591,8 @@ fn proof_v16_liquidation_selector_is_healthy_locally_minimal_or_full_close() {
             cert,
             equity,
             0,
-            leg,
+            SideV16::Long,
+            position_q,
             price,
             price,
             config.liquidation_fee_bps,
@@ -5614,7 +5605,8 @@ fn proof_v16_liquidation_selector_is_healthy_locally_minimal_or_full_close() {
                 cert,
                 equity,
                 0,
-                leg,
+                SideV16::Long,
+                position_q,
                 price,
                 price,
                 config.liquidation_fee_bps,
@@ -5630,7 +5622,8 @@ fn proof_v16_liquidation_selector_is_healthy_locally_minimal_or_full_close() {
                     cert,
                     equity,
                     0,
-                    leg,
+                    SideV16::Long,
+                    position_q,
                     price,
                     price,
                     config.liquidation_fee_bps,
@@ -19021,7 +19014,7 @@ fn proof_v16_full_drain_reset_then_prior_epoch_clear_is_total_and_exact() {
         b_rem: remainder,
         ..PortfolioLegV16::EMPTY
     };
-    let cleared = MarketGroupV16ViewMut::<u64>::kani_kernel_clear_leg(leg, reset).unwrap();
+    let cleared = MarketGroupV16ViewMut::<u64>::kani_kernel_clear_leg(leg, reset, 0).unwrap();
     let mut expected_clear = expected_reset;
     match side {
         SideV16::Long => expected_clear.stored_pos_count_long = stored_count - 1,
