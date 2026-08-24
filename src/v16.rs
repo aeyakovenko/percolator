@@ -26,6 +26,7 @@ pub const V16_ACTIVE_BITMAP_WORDS: usize = (V16_MAX_PORTFOLIO_ASSETS_N + 63) / 6
 pub type V16ActiveBitmap = [u64; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_EMPTY_ACTIVE_BITMAP: V16ActiveBitmap = [0; V16_ACTIVE_BITMAP_WORDS];
 pub const V16_BACKING_BUCKETS_PER_DOMAIN: usize = 1;
+pub const V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS: usize = 1;
 // Bump whenever the on-chain account/header Pod layout changes (see the
 // PortfolioAccountV16Account size assertion). 18: added per-side K/F settlement
 // epochs and a per-leg epoch snapshot.
@@ -17880,7 +17881,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
 
+        // Release a fixed number of domains per call. Each domain touches both
+        // account-local and market-wide attribution; releasing the full sparse
+        // table in one SBF instruction can exceed the transaction CU meter.
         let mut released_effective = 0u128;
+        let mut released_domains = 0usize;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source_snapshot = account.header.source_domains[slot];
@@ -17888,6 +17893,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 break;
             }
             if !source_snapshot.is_occupied() {
+                slot += 1;
+                continue;
+            }
+            if source_snapshot.source_claim_liened_num.get() == 0 {
                 slot += 1;
                 continue;
             }
@@ -17920,7 +17929,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             source.source_lien_insurance_backing_num = V16PodU128::new(0);
             source.source_lien_fee_last_slot = V16PodU64::new(0);
             account.reset_source_domain_slot_if_empty(slot);
+            released_domains += 1;
             slot += 1;
+            if released_domains == V16_SOURCE_LIEN_RELEASE_CHUNK_DOMAINS {
+                break;
+            }
+        }
+        if released_domains == 0 {
+            return Err(V16Error::NonProgress);
         }
         account.compact_source_domains();
         account.header.health_cert.valid = 0;

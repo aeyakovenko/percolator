@@ -4985,41 +4985,53 @@ fn v16_residual_reward_credit_uses_real_principal_not_notional() {
     market.validate_shape().unwrap();
 }
 
-fn flat_source_credit_lien_fixture() -> (
+fn flat_source_credit_lien_fixture(
+    source_count: usize,
+) -> (
     MarketGroupV16HeaderAccount,
     Vec<Market<u64>>,
     PortfolioAccountV16Account,
 ) {
+    assert!((1..=2).contains(&source_count));
     let (mut header, mut markets) = market_fixture(1, 1);
     let mut winner_header = account_fixture(1, 10);
     let mut counterparty_header = account_fixture(1, 11);
     let claim = 100;
     let claim_num = claim * BOUND_SCALE;
-    winner_header.pnl = V16PodI128::new(claim as i128);
-    winner_header.source_domains[0].domain = V16PodU32::new(0);
-    winner_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
-    winner_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
-    header.pnl_pos_tot = V16PodU128::new(claim);
-    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
-    header.pnl_pos_bound_tot = V16PodU128::new(claim);
-    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
-    header.vault = V16PodU128::new(claim);
-    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
-    markets[0].engine.source_credit_long =
-        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
-            positive_claim_bound_num: claim_num,
-            exact_positive_claim_num: claim_num,
-            fresh_reserved_backing_num: claim_num,
-            credit_rate_num: CREDIT_RATE_SCALE,
-            ..SourceCreditStateV16::EMPTY
-        });
-    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+    let total_claim = claim * source_count as u128;
+    let total_claim_num = claim_num * source_count as u128;
+    winner_header.pnl = V16PodI128::new(total_claim as i128);
+    for domain in 0..source_count {
+        winner_header.source_domains[domain].domain = V16PodU32::new(domain as u32);
+        winner_header.source_domains[domain].source_claim_market_id = V16PodU64::new(1);
+        winner_header.source_domains[domain].source_claim_bound_num = V16PodU128::new(claim_num);
+    }
+    header.pnl_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_claim);
+    header.source_claim_bound_total_num = V16PodU128::new(total_claim_num);
+    header.vault = V16PodU128::new(total_claim);
+    header.source_fresh_backing_total_num = V16PodU128::new(total_claim_num);
+    let source_credit = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: claim_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let backing = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id: 1,
         fresh_unliened_backing_num: claim_num,
         expiry_slot: 100,
         status: BackingBucketStatusV16::Fresh,
         ..BackingBucketV16::EMPTY
     });
+    markets[0].engine.source_credit_long = source_credit;
+    markets[0].engine.backing_long = backing;
+    if source_count == 2 {
+        markets[0].engine.source_credit_short = source_credit;
+        markets[0].engine.backing_short = backing;
+    }
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
@@ -5029,9 +5041,10 @@ fn flat_source_credit_lien_fixture() -> (
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
     let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+    let open_units = if source_count == 1 { 10 } else { 200 };
     let open = TradeRequestV16 {
         asset_index: 0,
-        size_q: signed_q(10 * POS_SCALE),
+        size_q: signed_q(open_units * POS_SCALE),
         exec_price: 1,
         fee_bps: 0,
     };
@@ -5057,7 +5070,7 @@ fn flat_source_credit_lien_fixture() -> (
 #[test]
 fn v16_auto_crank_releases_flat_source_credit_lien_for_conversion() {
     const CLAIM: u128 = 100;
-    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture();
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture(1);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
 
@@ -5094,6 +5107,46 @@ fn v16_auto_crank_releases_flat_source_credit_lien_for_conversion() {
             .convert_released_pnl_to_capital_not_atomic(&mut winner)
             .expect("released source-backed PnL must become convertible"),
         CLAIM
+    );
+    winner.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_auto_crank_releases_source_liens_in_strict_chunks() {
+    const TOTAL_CLAIM: u128 = 200;
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture(2);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+
+    let lien_count = |account: &PortfolioV16ViewMut<'_>| {
+        account
+            .header
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_liened_num.get() != 0)
+            .count()
+    };
+    assert_eq!(lien_count(&winner), 2);
+    for remaining in [1usize, 0] {
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut winner,
+                AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("each source-lien chunk must make progress");
+        assert_eq!(result.selected, AutoCrankPlanV16::ReleaseSourceLiens);
+        assert_eq!(lien_count(&winner), remaining);
+    }
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("all chunks release the complete claim"),
+        TOTAL_CLAIM
     );
     winner.validate_with_market(&market.as_view()).unwrap();
     market.validate_shape().unwrap();
@@ -8461,7 +8514,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
     // committed source ledgers, so no oracle observation may gate the exit.
     assert_observation_independent(
         "flat_source_lien",
-        flat_source_credit_lien_fixture,
+        || flat_source_credit_lien_fixture(1),
         0,
         0,
         AutoCrankPlanV16::ReleaseSourceLiens,
