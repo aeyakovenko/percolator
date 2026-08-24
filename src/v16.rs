@@ -192,6 +192,7 @@ pub fn auto_crank_plan_requires_caller_observation(plan: &AutoCrankPlanV16) -> b
         AutoCrankPlanV16::AdvanceClose
         | AutoCrankPlanV16::SettleBChunk { .. }
         | AutoCrankPlanV16::Liquidate { .. }
+        | AutoCrankPlanV16::ReleaseSourceLiens
         | AutoCrankPlanV16::DeclareRecovery { .. }
         | AutoCrankPlanV16::FinalizeRecovery
         | AutoCrankPlanV16::CloseResolved
@@ -2262,7 +2263,8 @@ impl V16Core {
     /// bounded plan, carrying the engine-chosen asset (the caller chooses neither
     /// the action nor the asset). PROVES: TOTALITY (an actionable account yields a
     /// non-NoAction plan), PRIORITY DETERMINISM (the documented order: recovery >
-    /// resolved-close > pending-close > b-stale settle > liquidate > refresh), and
+    /// resolved-close > pending-close > b-stale settle > liquidate > source-lien
+    /// release > refresh), and
     /// SELECTED-ASSET fidelity (SettleBChunk/Liquidate carry exactly the provided
     /// engine-selected slot). Pure.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|r: &AutoCrankPlanV16| {
@@ -2281,9 +2283,14 @@ impl V16Core {
                 !recovery && !summary.resolved_winner && !summary.pending_close
                     && !summary.b_stale && summary.liquidatable
                     && *asset_index == liq_slot,
+            AutoCrankPlanV16::ReleaseSourceLiens =>
+                !recovery && !summary.resolved_winner && !summary.pending_close
+                    && !summary.b_stale && !summary.liquidatable
+                    && summary.source_liens_releasable,
             AutoCrankPlanV16::RefreshAccount { asset_index } =>
                 !recovery && !summary.resolved_winner && !summary.pending_close
-                    && !summary.b_stale && !summary.liquidatable && summary.stale
+                    && !summary.b_stale && !summary.liquidatable
+                    && !summary.source_liens_releasable && summary.stale
                     && *asset_index == refresh_asset,
         }
     }))]
@@ -2310,6 +2317,8 @@ impl V16Core {
             AutoCrankPlanV16::Liquidate {
                 asset_index: liq_slot,
             }
+        } else if summary.source_liens_releasable {
+            AutoCrankPlanV16::ReleaseSourceLiens
         } else if summary.stale {
             AutoCrankPlanV16::RefreshAccount {
                 asset_index: refresh_asset,
@@ -2381,7 +2390,7 @@ impl V16Core {
     }
 
     /// PRODUCTION FIDELITY BUILDER (roadmap 3C step 4, actionable-state
-    /// classifier): assemble the ActionableState summary from the seven evaluated
+    /// classifier): assemble the ActionableState summary from the eight evaluated
     /// per-class eligibility signals. build_actionable_summary computes each
     /// signal from real account/market state (cert currentness, b-stale leg,
     /// close-ledger active/expired, certified liquidation deficit, resolved-
@@ -2394,6 +2403,7 @@ impl V16Core {
             && r.pending_close == pending_close
             && r.expired_close == expired_close
             && r.liquidatable == liquidatable
+            && r.source_liens_releasable == source_liens_releasable
             && r.recovery_eligible == recovery_eligible
             && r.resolved_winner == resolved_winner
     }))]
@@ -2403,6 +2413,7 @@ impl V16Core {
         pending_close: bool,
         expired_close: bool,
         liquidatable: bool,
+        source_liens_releasable: bool,
         recovery_eligible: bool,
         resolved_winner: bool,
     ) -> ActionableSummaryV16 {
@@ -2412,6 +2423,7 @@ impl V16Core {
             pending_close,
             expired_close,
             liquidatable,
+            source_liens_releasable,
             recovery_eligible,
             resolved_winner,
         }
@@ -3494,7 +3506,6 @@ impl V16Core {
         live && (!cert_current || reset_obligation || released_obligation || lapsed_source_backing)
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
     // Contract layer: lien release is the un-pledge relabel — valid liened
     // returns to fresh unliened atom-for-atom, fresh_reserved and all stock
     // quantities untouched; zero-amount is the identity.
@@ -6049,7 +6060,7 @@ pub enum PositionRouteV16 {
     Resize,
 }
 
-/// Compact ActionableState summary (roadmap Phase 4 / 3A.4): which of the seven
+/// Compact ActionableState summary (roadmap Phase 4 / 3A.4): which of the eight
 /// ActionableState classes are live for an account/market. The liveness
 /// selector reads only this — never per-class witnesses that another active
 /// class could invalidate.
@@ -6059,13 +6070,14 @@ pub enum PositionRouteV16 {
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActionableSummaryV16 {
-    pub stale: bool,             // A1
-    pub b_stale: bool,           // A2
-    pub pending_close: bool,     // A3
-    pub expired_close: bool,     // A4
-    pub liquidatable: bool,      // A5
-    pub recovery_eligible: bool, // A6
-    pub resolved_winner: bool,   // A7
+    pub stale: bool,                   // A1
+    pub b_stale: bool,                 // A2
+    pub pending_close: bool,           // A3
+    pub expired_close: bool,           // A4
+    pub liquidatable: bool,            // A5
+    pub source_liens_releasable: bool, // A6
+    pub recovery_eligible: bool,       // A7
+    pub resolved_winner: bool,         // A8
 }
 
 impl ActionableSummaryV16 {
@@ -6075,6 +6087,7 @@ impl ActionableSummaryV16 {
             || self.pending_close
             || self.expired_close
             || self.liquidatable
+            || self.source_liens_releasable
             || self.recovery_eligible
             || self.resolved_winner
     }
@@ -6118,6 +6131,7 @@ pub enum AutoCrankPlanV16 {
     Liquidate {
         asset_index: usize,
     },
+    ReleaseSourceLiens,
     AdvanceClose,
     DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16,
@@ -9322,6 +9336,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         domain: usize,
         amount: u128,
     ) -> V16Result<()> {
+        self.release_source_credit_lien_from_counterparty_core_not_atomic(domain, amount)?;
+        self.validate_shape()
+    }
+
+    fn release_source_credit_lien_from_counterparty_core_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
         if amount == 0 {
             return Ok(());
@@ -9346,7 +9369,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
-        self.validate_shape()
+        Ok(())
     }
 
     // Expiry-agnostic counterparty lien release for terminal (Resolved) wind-down; see
@@ -9979,6 +10002,50 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot += 1;
         }
         false
+    }
+
+    fn account_source_credit_liens_are_fresh_and_releasable(
+        &self,
+        account: &PortfolioV16View<'_>,
+        now_slot: u64,
+    ) -> V16Result<bool> {
+        let mut found = false;
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.source_domains()[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() && source.source_claim_liened_num.get() != 0 {
+                found = true;
+                let domain = source.domain.get() as usize;
+                self.domain_asset_side(domain)?;
+                let counterparty_backing = source.source_lien_counterparty_backing_num.get();
+                let insurance_backing = source.source_lien_insurance_backing_num.get();
+                let source_credit = self.source_credit_for_domain(domain)?;
+                if counterparty_backing != 0 {
+                    let bucket = self.backing_bucket_for_domain(domain)?;
+                    if bucket.status != BackingBucketStatusV16::Fresh
+                        || bucket.expiry_slot <= now_slot
+                        || bucket.valid_liened_backing_num < counterparty_backing
+                        || source_credit.valid_liened_backing_num < counterparty_backing
+                    {
+                        return Ok(false);
+                    }
+                }
+                if insurance_backing != 0 {
+                    let reservation = self.insurance_reservation_for_domain(domain)?;
+                    if insurance_backing % BOUND_SCALE != 0
+                        || reservation.valid_liened_insurance_num < insurance_backing
+                        || source_credit.valid_liened_insurance_num < insurance_backing
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+            slot += 1;
+        }
+        Ok(found)
     }
 
     fn source_claim_unliened_num(account: &PortfolioV16View<'_>, domain: usize) -> V16Result<u128> {
@@ -14127,6 +14194,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
+    ///   source_liens_releasable — Live, flat, independently initial-margin safe,
+    ///                      current account whose obsolete source liens can be
+    ///                      returned without an oracle observation
     ///   recovery_eligible— reserved for selector-level proactive Recovery
     ///   resolved_winner  — Resolved, nonterminal account with a close step that
     ///                      can mutate now (or a positive payout that is ready)
@@ -14225,6 +14295,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && cert.certified_liq_deficit != 0
             && has_open_risk
             && reset_obligation_asset.is_none();
+        let no_positive_equity = Self::account_no_positive_credit_equity(account)?;
+        let source_liens_releasable = live
+            && cert_current
+            && active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
+            && no_positive_equity >= 0
+            && (no_positive_equity as u128) >= cert.certified_initial_req
+            && self.account_source_credit_liens_are_fresh_and_releasable(account, now_slot)?;
         // A completed account-local bankruptcy must not let that account force a
         // market-wide Recovery. In particular, a permissionless asset can be
         // attacker-controlled while unrelated assets remain healthy. Outstanding
@@ -14264,6 +14341,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 pending_close,
                 expired_close,
                 liquidatable,
+                source_liens_releasable,
                 recovery_eligible,
                 resolved_winner,
             ),
@@ -14417,8 +14495,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///    matches the observation that step needs, derives the liquidation fee from
     ///    CONFIG (never the caller), and dispatches one bounded primitive.
     /// 5. On `Ok(result)`, mirror any wrapper-owned token/custody movement keyed off
-    ///    `result.selected` (the `AutoCrankPlanV16`): refresh / settle-B move no
-    ///    custody; liquidate / close-resolved may. `NoAction` => nothing was needed.
+    ///    `result.selected` (the `AutoCrankPlanV16`): refresh / settle-B /
+    ///    source-lien release move no custody; liquidate / close-resolved may.
+    ///    `NoAction` => nothing was needed.
     ///    In Recovery, the next call selects `FinalizeRecovery` and performs the
     ///    value-neutral transition to Resolved so terminal account close remains
     ///    publicly reachable. `Err(NonProgress)` => the selected step needed an
@@ -14560,6 +14639,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         let outcome = match plan {
             AutoCrankPlanV16::NoAction => AutoCrankOutcomeV16::NoAction,
+            AutoCrankPlanV16::ReleaseSourceLiens => {
+                self.release_account_source_credit_liens_if_unneeded_core_not_atomic(account)?;
+                AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+            }
             AutoCrankPlanV16::RefreshAccount { asset_index } => {
                 // Accrue the engine-selected active asset from either a fresh
                 // observation or committed state; if no active asset exists, use
@@ -17773,13 +17856,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(converted)
     }
 
-    #[cfg(any(kani, feature = "fuzz"))]
-    pub fn release_account_source_credit_liens_if_unneeded_not_atomic(
+    fn release_account_source_credit_liens_if_unneeded_core_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
             return Err(V16Error::LockActive);
+        }
+        if !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
+            || !Self::account_has_source_liens(&account.as_view())
+            || self.account_has_active_source_claim_exposure(&account.as_view())?
+        {
+            return Err(V16Error::NonProgress);
         }
         self.settle_account_side_effects_not_atomic(
             account,
@@ -17809,35 +17897,45 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let counterparty_backing = source_snapshot.source_lien_counterparty_backing_num.get();
             let insurance_backing = source_snapshot.source_lien_insurance_backing_num.get();
             if counterparty_backing != 0 {
-                self.release_source_credit_lien_from_counterparty_not_atomic(
+                self.release_source_credit_lien_from_counterparty_core_not_atomic(
                     d,
                     counterparty_backing,
                 )?;
             }
             if insurance_backing != 0 {
-                self.release_source_credit_lien_from_insurance_not_atomic(d, insurance_backing)?;
+                self.release_source_credit_lien_from_insurance_core_not_atomic(
+                    d,
+                    insurance_backing,
+                )?;
             }
-            if effective != 0 {
-                released_effective = released_effective
-                    .checked_add(effective)
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                let source = &mut account.header.source_domains[slot];
-                source.source_claim_liened_num = V16PodU128::new(0);
-                source.source_claim_counterparty_liened_num = V16PodU128::new(0);
-                source.source_claim_insurance_liened_num = V16PodU128::new(0);
-                source.source_lien_effective_reserved = V16PodU128::new(0);
-                source.source_lien_counterparty_backing_num = V16PodU128::new(0);
-                source.source_lien_insurance_backing_num = V16PodU128::new(0);
-                source.source_lien_fee_last_slot = V16PodU64::new(0);
-                account.reset_source_domain_slot_if_empty(slot);
-            }
+            released_effective = released_effective
+                .checked_add(effective)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            let source = &mut account.header.source_domains[slot];
+            source.source_claim_liened_num = V16PodU128::new(0);
+            source.source_claim_counterparty_liened_num = V16PodU128::new(0);
+            source.source_claim_insurance_liened_num = V16PodU128::new(0);
+            source.source_lien_effective_reserved = V16PodU128::new(0);
+            source.source_lien_counterparty_backing_num = V16PodU128::new(0);
+            source.source_lien_insurance_backing_num = V16PodU128::new(0);
+            source.source_lien_fee_last_slot = V16PodU64::new(0);
+            account.reset_source_domain_slot_if_empty(slot);
             slot += 1;
         }
         account.compact_source_domains();
         account.header.health_cert.valid = 0;
+        self.recertify_account_after_source_lien_change(account)?;
         account.validate_with_market(&self.as_view())?;
         self.validate_shape()?;
         Ok(released_effective)
+    }
+
+    #[cfg(any(kani, feature = "fuzz"))]
+    pub fn release_account_source_credit_liens_if_unneeded_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.release_account_source_credit_liens_if_unneeded_core_not_atomic(account)
     }
 
     #[cfg(any(kani, feature = "fuzz"))]

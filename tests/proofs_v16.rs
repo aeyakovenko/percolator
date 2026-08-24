@@ -18224,6 +18224,7 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
         asset_index: i
     }));
     assert!(!needs_obs(&AutoCrankPlanV16::Liquidate { asset_index: i }));
+    assert!(!needs_obs(&AutoCrankPlanV16::ReleaseSourceLiens));
     assert!(!needs_obs(&AutoCrankPlanV16::AdvanceClose));
     assert!(!needs_obs(&AutoCrankPlanV16::NoAction));
     assert!(!needs_obs(&AutoCrankPlanV16::FinalizeRecovery));
@@ -18233,6 +18234,49 @@ fn proof_v16_auto_crank_refresh_is_unique_observation_requiring_plan() {
     assert!(!needs_obs(&AutoCrankPlanV16::DeclareRecovery {
         reason: PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
     }));
+}
+
+// A flat account whose independently funded source-credit lien is no longer
+// needed has a committed-state continuation. The selector must choose that
+// release ahead of an ordinary refresh, but never ahead of liquidation or the
+// higher-priority close/B/recovery classes.
+#[kani::proof]
+fn proof_v16_auto_crank_source_lien_release_is_total_and_prioritized() {
+    let release = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: true,
+            b_stale: false,
+            pending_close: false,
+            expired_close: false,
+            liquidatable: false,
+            source_liens_releasable: true,
+            recovery_eligible: false,
+            resolved_winner: false,
+        },
+        0,
+        0,
+        None,
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    );
+    assert_eq!(release, AutoCrankPlanV16::ReleaseSourceLiens);
+
+    let liquidation = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale: true,
+            b_stale: false,
+            pending_close: false,
+            expired_close: false,
+            liquidatable: true,
+            source_liens_releasable: true,
+            recovery_eligible: false,
+            resolved_winner: false,
+        },
+        0,
+        7,
+        None,
+        PermissionlessRecoveryReasonV16::ExplicitLossOrDustAuditOverflow,
+    );
+    assert_eq!(liquidation, AutoCrankPlanV16::Liquidate { asset_index: 7 });
 }
 
 // Pending close is a production-dispatchable class, not merely a proof-summary
@@ -18247,6 +18291,7 @@ fn proof_v16_auto_crank_pending_close_priority_is_total() {
             pending_close: true,
             expired_close: false,
             liquidatable: true,
+            source_liens_releasable: true,
             recovery_eligible: false,
             resolved_winner: false,
         },
@@ -18264,6 +18309,7 @@ fn proof_v16_auto_crank_pending_close_priority_is_total() {
             pending_close: true,
             expired_close: true,
             liquidatable: true,
+            source_liens_releasable: true,
             recovery_eligible: false,
             resolved_winner: true,
         },
@@ -18290,6 +18336,7 @@ fn proof_v16_auto_crank_pending_close_priority_is_total() {
             pending_close: false,
             expired_close: false,
             liquidatable: false,
+            source_liens_releasable: false,
             recovery_eligible: true,
             resolved_winner: false,
         },
@@ -18562,6 +18609,7 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
             pending_close: false,
             expired_close: false,
             liquidatable: false,
+            source_liens_releasable: false,
             recovery_eligible: false,
             resolved_winner: false,
         },
@@ -18603,6 +18651,7 @@ fn proof_v16_recovery_legs_cannot_starve_dispatchable_auto_crank_work() {
                 pending_close: false,
                 expired_close: false,
                 liquidatable: true,
+                source_liens_releasable: false,
                 recovery_eligible: false,
                 resolved_winner: false,
             },
@@ -18755,6 +18804,7 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
                     pending_close: false,
                     expired_close: false,
                     liquidatable: false,
+                    source_liens_releasable: false,
                     recovery_eligible: false,
                     resolved_winner: false,
                 },
@@ -18808,6 +18858,7 @@ fn proof_v16_prior_reset_cleanup_cannot_starve_live_liquidation() {
             pending_close: false,
             expired_close: false,
             liquidatable: true,
+            source_liens_releasable: false,
             recovery_eligible: false,
             resolved_winner: false,
         },

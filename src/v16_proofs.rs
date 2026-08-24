@@ -2616,6 +2616,7 @@ fn contract_check_actionable_summary_from_signals() {
         kani::any(),
         kani::any(),
         kani::any(),
+        kani::any(),
     );
 }
 

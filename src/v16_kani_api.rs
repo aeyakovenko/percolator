@@ -2197,12 +2197,13 @@ pub enum ResolvedCloseStepV16 {
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgressContinuationV16 {
-    DeclareRecovery, // A4 expired close / A6 recovery-eligible: terminal recovery
-    CloseResolved,   // A7 resolved winner: terminal realization
-    AdvanceClose,    // A3 pending close residual: close-ledger rank step
-    SettleBChunk,    // A2 b-stale leg: B-advance rank step
-    Liquidate,       // A5 liquidatable: risk-reduction
-    RefreshAccount,  // A1 stale account: protective accrual segment
+    DeclareRecovery,    // A4 expired close / A7 recovery-eligible: terminal recovery
+    CloseResolved,      // A8 resolved winner: terminal realization
+    AdvanceClose,       // A3 pending close residual: close-ledger rank step
+    SettleBChunk,       // A2 b-stale leg: B-advance rank step
+    Liquidate,          // A5 liquidatable: risk-reduction
+    ReleaseSourceLiens, // A6 flat source claim: release obsolete encumbrance
+    RefreshAccount,     // A1 stale account: protective accrual segment
 }
 
 impl V16Core {
@@ -2211,7 +2212,8 @@ impl V16Core {
     /// cally select a public continuation that makes progress, by a fixed
     /// priority that resolves OVERLAPPING active classes (terminal/safety first):
     /// expired-close/recovery -> resolved -> pending-close -> b-stale ->
-    /// liquidate -> refresh. Proves the no-DoS existential robustly: an actionable
+    /// liquidate -> source-lien release -> refresh. Proves the no-DoS existential
+    /// robustly: an actionable
     /// state ALWAYS selects Some continuation (totality), the selected
     /// continuation's class is ACTUALLY active (non-blocked — never picks a
     /// continuation for an inactive class, so one active class cannot invalidate
@@ -2236,9 +2238,14 @@ impl V16Core {
                     ProgressContinuationV16::Liquidate =>
                         !recovery && !summary.resolved_winner && !summary.pending_close
                             && !summary.b_stale && summary.liquidatable,
+                    ProgressContinuationV16::ReleaseSourceLiens =>
+                        !recovery && !summary.resolved_winner && !summary.pending_close
+                            && !summary.b_stale && !summary.liquidatable
+                            && summary.source_liens_releasable,
                     ProgressContinuationV16::RefreshAccount =>
                         !recovery && !summary.resolved_winner && !summary.pending_close
-                            && !summary.b_stale && !summary.liquidatable && summary.stale,
+                            && !summary.b_stale && !summary.liquidatable
+                            && !summary.source_liens_releasable && summary.stale,
                 }
             }
         }
@@ -2256,6 +2263,8 @@ impl V16Core {
             Some(ProgressContinuationV16::SettleBChunk)
         } else if summary.liquidatable {
             Some(ProgressContinuationV16::Liquidate)
+        } else if summary.source_liens_releasable {
+            Some(ProgressContinuationV16::ReleaseSourceLiens)
         } else if summary.stale {
             Some(ProgressContinuationV16::RefreshAccount)
         } else {
