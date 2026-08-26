@@ -314,6 +314,15 @@ fn uncovered_loss_remains_with_open_risk(
     uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap)
 }
 
+#[inline]
+fn unattributed_loss_lock_after_pnl(
+    was_locked: bool,
+    active_bitmap: V16ActiveBitmap,
+    new_pnl: i128,
+) -> bool {
+    new_pnl < 0 && (was_locked || active_bitmap_count_ones(active_bitmap) > 1)
+}
+
 fn liquidation_risk_notional_ceil(abs_pos_q: u128, price: u64) -> V16Result<u128> {
     if abs_pos_q == 0 {
         return Ok(0);
@@ -12137,9 +12146,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         new_pnl: i128,
     ) -> V16Result<()> {
         let was_locked = decode_bool(account.header.liquidation_lock)?;
-        let multi_asset =
-            active_bitmap_count_ones(account.header.active_bitmap.map(V16PodU64::get)) > 1;
-        account.header.liquidation_lock = encode_bool(new_pnl < 0 && (was_locked || multi_asset));
+        account.header.liquidation_lock = encode_bool(unattributed_loss_lock_after_pnl(
+            was_locked,
+            account.header.active_bitmap.map(V16PodU64::get),
+            new_pnl,
+        ));
         Ok(())
     }
 

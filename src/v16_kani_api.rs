@@ -174,6 +174,14 @@ pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
     ))
 }
 
+pub fn kani_unattributed_loss_lock_after_pnl(
+    was_locked: bool,
+    active_bitmap: V16ActiveBitmap,
+    new_pnl: i128,
+) -> bool {
+    unattributed_loss_lock_after_pnl(was_locked, active_bitmap, new_pnl)
+}
+
 pub fn kani_liquidation_projected_health_deficit_from_parts(
     certified_equity: i128,
     certified_maintenance_req: u128,
