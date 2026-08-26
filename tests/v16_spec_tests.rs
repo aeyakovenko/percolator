@@ -7608,6 +7608,10 @@ fn v16_trade_does_not_charge_prior_multi_asset_deficit_or_force_market_recovery(
         .expect("the first risk-reducing close must remain available");
     assert_eq!(short.header.pnl.get(), -250);
     assert_eq!(
+        short.header.liquidation_lock, 1,
+        "detaching one leg from an uncovered multi-asset deficit must retain its unattributed-loss marker"
+    );
+    assert_eq!(
         short
             .header
             .close_progress
@@ -7632,6 +7636,7 @@ fn v16_trade_does_not_charge_prior_multi_asset_deficit_or_force_market_recovery(
     assert!(active_bitmap_is_empty(
         short.header.active_bitmap.map(V16PodU64::get)
     ));
+    assert_eq!(short.header.liquidation_lock, 1);
     let ledger = short.header.close_progress.try_to_runtime().unwrap();
     assert_eq!(ledger.residual_remaining, 0);
     assert!(
@@ -7654,6 +7659,7 @@ fn v16_trade_does_not_charge_prior_multi_asset_deficit_or_force_market_recovery(
         percolator::ResolvedCloseOutcomeV16::Closed { payout: 0 }
     ));
     assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(short.header.liquidation_lock, 0);
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();

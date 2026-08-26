@@ -161,14 +161,17 @@ pub fn kani_liquidation_close_would_leave_uncovered_loss_with_open_risk(
     close_q: u128,
     leg_abs_q: u128,
 ) -> V16Result<bool> {
-    liquidation_close_would_leave_uncovered_loss_with_open_risk(
-        pnl,
-        capital,
+    let remaining_active_bitmap = liquidation_remaining_active_bitmap_after_close(
         active_bitmap,
         leg_slot_index,
         close_q,
         leg_abs_q,
-    )
+    )?;
+    Ok(uncovered_loss_remains_with_open_risk(
+        pnl,
+        capital,
+        remaining_active_bitmap,
+    ))
 }
 
 pub fn kani_liquidation_projected_health_deficit_from_parts(

@@ -305,22 +305,13 @@ fn liquidation_uncovered_loss_after_principal(pnl: i128, capital: u128) -> u128 
 }
 
 #[inline]
-fn liquidation_close_would_leave_uncovered_loss_with_open_risk(
+fn uncovered_loss_remains_with_open_risk(
     pnl: i128,
     capital: u128,
-    active_bitmap: V16ActiveBitmap,
-    leg_slot_index: usize,
-    close_q: u128,
-    leg_abs_q: u128,
-) -> V16Result<bool> {
+    remaining_active_bitmap: V16ActiveBitmap,
+) -> bool {
     let uncovered_loss_after_principal = liquidation_uncovered_loss_after_principal(pnl, capital);
-    let remaining_active_bitmap = liquidation_remaining_active_bitmap_after_close(
-        active_bitmap,
-        leg_slot_index,
-        close_q,
-        leg_abs_q,
-    )?;
-    Ok(uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap))
+    uncovered_loss_after_principal != 0 && !active_bitmap_is_empty(remaining_active_bitmap)
 }
 
 fn liquidation_risk_notional_ceil(abs_pos_q: u128, price: u64) -> V16Result<u128> {
@@ -5266,6 +5257,10 @@ impl<'a> PortfolioV16View<'a> {
         let pnl = self.header.pnl.get();
         validate_non_min_i128(pnl)?;
         validate_fee_credits(self.header.fee_credits.get())?;
+        let liquidation_lock = decode_bool(self.header.liquidation_lock)?;
+        if liquidation_lock && pnl >= 0 {
+            return Err(V16Error::InvalidLeg);
+        }
         if self.header.reserved_pnl.get() > pnl.max(0) as u128 {
             return Err(V16Error::InvalidLeg);
         }
@@ -8686,6 +8681,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let pnl = account.header.pnl.get();
         validate_non_min_i128(pnl)?;
         validate_fee_credits(account.header.fee_credits.get())?;
+        let liquidation_lock = decode_bool(account.header.liquidation_lock)?;
+        if liquidation_lock && pnl >= 0 {
+            return Err(V16Error::InvalidLeg);
+        }
         if account.header.reserved_pnl.get() > pnl.max(0) as u128 {
             return Err(V16Error::InvalidLeg);
         }
@@ -12133,6 +12132,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_account_pnl_inner(account, new_pnl, None, 0)
     }
 
+    fn sync_unattributed_loss_lock(
+        account: &mut PortfolioV16ViewMut<'_>,
+        new_pnl: i128,
+    ) -> V16Result<()> {
+        let was_locked = decode_bool(account.header.liquidation_lock)?;
+        let multi_asset =
+            active_bitmap_count_ones(account.header.active_bitmap.map(V16PodU64::get)) > 1;
+        account.header.liquidation_lock = encode_bool(new_pnl < 0 && (was_locked || multi_asset));
+        Ok(())
+    }
+
     fn set_account_pnl_with_source(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -12327,6 +12337,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             _ => {}
         }
+        Self::sync_unattributed_loss_lock(account, new_pnl)?;
         account.header.pnl = V16PodI128::new(new_pnl);
         account.header.health_cert.valid = 0;
         Ok(())
@@ -15369,7 +15380,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let account_scoped = account.is_some();
         let bankruptcy_hlock_active = decode_bool(self.header.bankruptcy_hlock_active)?;
         if let Some(account) = account {
-            if decode_bool(account.header.stale_state)?
+            if decode_bool(account.header.liquidation_lock)?
+                || decode_bool(account.header.stale_state)?
                 || decode_bool(account.header.b_stale_state)?
                 || self.account_has_loss_stale_live_leg(account)?
             {
@@ -15742,6 +15754,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || leg.stale
         {
             return Err(V16Error::InvalidLeg);
+        }
+        let remaining_active_bitmap =
+            active_bitmap_with_cleared(account.header.active_bitmap.map(V16PodU64::get), leg_slot)?;
+        // Account PnL is cross-margin and does not retain negative-loss provenance.
+        // Preserve that fact across the detach so later liquidation can reduce
+        // risk without charging the selected surviving asset domain.
+        if uncovered_loss_remains_with_open_risk(
+            account.header.pnl.get(),
+            account.header.capital.get(),
+            remaining_active_bitmap,
+        ) {
+            account.header.liquidation_lock = encode_bool(true);
+            account.header.health_cert.valid = 0;
         }
         let close_progress = account.header.close_progress.try_to_runtime()?;
         if close_progress.has_pending_residual() {
@@ -16608,14 +16633,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )? {
             return Err(V16Error::LockActive);
         }
-        if liquidation_close_would_leave_uncovered_loss_with_open_risk(
-            account.header.pnl.get(),
-            account.header.capital.get(),
+        // A multi-asset deficit has no safe per-domain attribution in the
+        // account-global PnL scalar. Permissionless liquidation can still remove
+        // bounded risk, but it must not consume insurance or book B against the
+        // selected surviving asset.
+        if decode_bool(account.header.liquidation_lock)? {
+            self.reduce_position(account, request.asset_index, close_q)?;
+            self.certify_account_after_local_settlement_with_price_override(account, None)?;
+            self.begin_zero_oi_residue_resets(request.asset_index)?;
+            self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
+            self.validate_shape_audit_scan()?;
+            self.validate_account_audit_scan(&account.as_view())?;
+            return Ok(LiquidationOutcomeV16 {
+                closed_q: close_q,
+                insurance_used: 0,
+                residual_booked: 0,
+                explicit_loss: 0,
+                fee_charged: 0,
+            });
+        }
+        let remaining_active_bitmap = liquidation_remaining_active_bitmap_after_close(
             account.header.active_bitmap.map(V16PodU64::get),
             leg_slot,
             close_q,
             account_effective_q,
-        )? {
+        )?;
+        if uncovered_loss_remains_with_open_risk(
+            account.header.pnl.get(),
+            account.header.capital.get(),
+            remaining_active_bitmap,
+        ) {
             self.declare_permissionless_recovery(
                 PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
             )?;
@@ -17325,6 +17372,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .ok_or(V16Error::CounterUnderflow)?,
             );
         }
+        Self::sync_unattributed_loss_lock(account, new_pnl)?;
         account.header.pnl = V16PodI128::new(new_pnl);
         Ok(())
     }
@@ -19800,6 +19848,8 @@ pub struct PortfolioAccountV16Account {
     pub stale_state: u8,
     pub b_stale_state: u8,
     pub rebalance_lock: u8,
+    // Set while negative PnL has crossed more than one active asset and therefore
+    // cannot be safely charged to any one asset's insurance/B domain.
     pub liquidation_lock: u8,
     pub close_progress: CloseProgressLedgerV16Account,
     pub resolved_payout_receipt: ResolvedPayoutReceiptV16Account,
