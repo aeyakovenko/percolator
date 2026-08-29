@@ -1902,6 +1902,89 @@ fn proof_v16_account_validator_binds_active_leg_side_epoch() {
     );
 }
 
+// Asset lifecycle fail-closure at the persisted-account boundary. Every other
+// leg field is valid and current, so lifecycle is the sole discriminator:
+// active risk may remain attached only while the selected asset is Active,
+// DrainOnly, or Recovery, never while disabled, activating, or retired.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_account_validator_accepts_active_leg_only_in_live_lifecycles() {
+    let lifecycle_raw: u8 = kani::any();
+    let units_raw: u8 = kani::any();
+    let is_short: bool = kani::any();
+    kani::assume(lifecycle_raw <= 5);
+    kani::assume((1..=4).contains(&units_raw));
+
+    let (header, mut markets, mut account_header) = one_market_view_fixture();
+    markets[0].engine.asset.lifecycle = lifecycle_raw;
+    let basis_abs = (units_raw as i128) * POS_SCALE as i128;
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: markets[0].engine.asset.market_id.get(),
+        side: if is_short {
+            SideV16::Short
+        } else {
+            SideV16::Long
+        },
+        basis_pos_q: if is_short { -basis_abs } else { basis_abs },
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: basis_abs as u128,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+
+    let market = MarketGroupV16View::new(&header, &markets);
+    let account = PortfolioV16View::new(&account_header);
+    let result = account.validate_with_market(&market);
+    let lifecycle = markets[0].engine.asset.try_to_runtime().unwrap().lifecycle;
+    let allowed = matches!(
+        lifecycle,
+        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly | AssetLifecycleV16::Recovery
+    );
+
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::Disabled && !is_short && units_raw > 2,
+        "disabled asset rejects a nontrivial long leg"
+    );
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::PendingActivation && is_short && units_raw > 2,
+        "pending asset rejects a nontrivial short leg"
+    );
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::Active && !is_short && units_raw > 2,
+        "active asset accepts a nontrivial long leg"
+    );
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::DrainOnly && is_short && units_raw > 2,
+        "draining asset accepts a nontrivial short leg"
+    );
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::Retired && !is_short && units_raw > 2,
+        "retired asset rejects a nontrivial long leg"
+    );
+    kani::cover!(
+        lifecycle == AssetLifecycleV16::Recovery && is_short && units_raw > 2,
+        "recovery asset accepts a nontrivial short leg"
+    );
+
+    if allowed {
+        assert_eq!(result, Ok(()));
+    } else {
+        assert_eq!(result, Err(V16Error::HiddenLeg));
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
