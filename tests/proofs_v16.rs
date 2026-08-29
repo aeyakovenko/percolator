@@ -9919,41 +9919,61 @@ fn proof_v16_available_source_support_excludes_liened_and_encumbered_amounts() {
 
 // The end-to-end K/F theorem below proves account, junior, and domain claims
 // move together. These four compositional theorems prove the production domain
-// setter used by that path cannot redirect the claim aggregate to a sibling
-// side or another slab asset. Keeping the rate recomputation in the end-to-end
-// theorem only avoids duplicating its expensive symbolic U256 division here.
+// setter used by that path cannot redirect claim bounds, fresh backing, or
+// insurance reservations to a sibling side or another slab asset. Keeping the
+// rate recomputation in the end-to-end theorem only avoids duplicating its
+// expensive symbolic U256 division here.
 fn assert_v16_source_credit_setter_is_exact_and_asset_isolated<
     const ASSET_INDEX: usize,
     const TARGET_LONG: bool,
 >() {
     let old_raw: u8 = kani::any();
     let delta_raw: u8 = kani::any();
+    let old_fresh_raw: u8 = kani::any();
+    let new_fresh_raw: u8 = kani::any();
+    let old_insurance_raw: u8 = kani::any();
+    let new_insurance_raw: u8 = kani::any();
     let epoch_raw: u8 = kani::any();
     kani::assume(old_raw <= 3);
     kani::assume((1..=4).contains(&delta_raw));
+    kani::assume(old_fresh_raw <= 4);
+    kani::assume(new_fresh_raw <= 4);
+    kani::assume(old_insurance_raw <= 4);
+    kani::assume(new_insurance_raw <= 4);
     kani::assume(epoch_raw <= 3);
     let old_num = old_raw as u128 * BOUND_SCALE;
     let delta_num = delta_raw as u128 * BOUND_SCALE;
+    let old_fresh_num = old_fresh_raw as u128 * BOUND_SCALE;
+    let new_fresh_num = new_fresh_raw as u128 * BOUND_SCALE;
+    let old_insurance_num = old_insurance_raw as u128 * BOUND_SCALE;
+    let new_insurance_num = new_insurance_raw as u128 * BOUND_SCALE;
     let sibling_num = 5 * BOUND_SCALE;
     let independent_long_num = 7 * BOUND_SCALE;
     let independent_short_num = 11 * BOUND_SCALE;
+    let sibling_fresh_num = 13 * BOUND_SCALE;
+    let independent_long_fresh_num = 17 * BOUND_SCALE;
+    let independent_short_fresh_num = 19 * BOUND_SCALE;
+    let sibling_insurance_atoms = 2u128;
+    let independent_long_insurance_atoms = 3u128;
+    let independent_short_insurance_atoms = 5u128;
     let target_domain = ASSET_INDEX * 2 + usize::from(!TARGET_LONG);
     let unrelated = 1 - ASSET_INDEX;
-    let old_epoch = if old_raw == 0 { 0 } else { epoch_raw as u64 };
-    let old_source = if old_raw == 0 {
-        SourceCreditStateV16::EMPTY
-    } else {
-        SourceCreditStateV16 {
-            positive_claim_bound_num: old_num,
-            exact_positive_claim_num: old_num,
-            credit_rate_num: 0,
-            credit_epoch: old_epoch,
-            ..SourceCreditStateV16::EMPTY
-        }
+    let old_is_empty = old_raw == 0 && old_fresh_raw == 0 && old_insurance_raw == 0;
+    let old_epoch = if old_is_empty { 0 } else { epoch_raw as u64 };
+    let old_source = SourceCreditStateV16 {
+        positive_claim_bound_num: old_num,
+        exact_positive_claim_num: old_num,
+        fresh_reserved_backing_num: old_fresh_num,
+        insurance_credit_reserved_num: old_insurance_num,
+        credit_rate_num: 0,
+        credit_epoch: old_epoch,
+        ..SourceCreditStateV16::EMPTY
     };
     let sibling_source = SourceCreditStateV16 {
         positive_claim_bound_num: sibling_num,
         exact_positive_claim_num: sibling_num,
+        fresh_reserved_backing_num: sibling_fresh_num,
+        insurance_credit_reserved_num: sibling_insurance_atoms * BOUND_SCALE,
         credit_rate_num: 0,
         credit_epoch: 13,
         ..SourceCreditStateV16::EMPTY
@@ -9961,6 +9981,8 @@ fn assert_v16_source_credit_setter_is_exact_and_asset_isolated<
     let independent_long_source = SourceCreditStateV16 {
         positive_claim_bound_num: independent_long_num,
         exact_positive_claim_num: independent_long_num,
+        fresh_reserved_backing_num: independent_long_fresh_num,
+        insurance_credit_reserved_num: independent_long_insurance_atoms * BOUND_SCALE,
         credit_rate_num: 0,
         credit_epoch: 17,
         ..SourceCreditStateV16::EMPTY
@@ -9968,6 +9990,8 @@ fn assert_v16_source_credit_setter_is_exact_and_asset_isolated<
     let independent_short_source = SourceCreditStateV16 {
         positive_claim_bound_num: independent_short_num,
         exact_positive_claim_num: independent_short_num,
+        fresh_reserved_backing_num: independent_short_fresh_num,
+        insurance_credit_reserved_num: independent_short_insurance_atoms * BOUND_SCALE,
         credit_rate_num: 0,
         credit_epoch: 19,
         ..SourceCreditStateV16::EMPTY
@@ -9975,6 +9999,8 @@ fn assert_v16_source_credit_setter_is_exact_and_asset_isolated<
     let next_source = SourceCreditStateV16 {
         positive_claim_bound_num: old_num + delta_num,
         exact_positive_claim_num: old_num + delta_num,
+        fresh_reserved_backing_num: new_fresh_num,
+        insurance_credit_reserved_num: new_insurance_num,
         credit_rate_num: 0,
         credit_epoch: old_epoch + 1,
         ..SourceCreditStateV16::EMPTY
@@ -9997,6 +10023,18 @@ fn assert_v16_source_credit_setter_is_exact_and_asset_isolated<
         SourceCreditStateV16Account::from_runtime(&independent_short_source);
     header.source_claim_bound_total_num =
         V16PodU128::new(old_num + sibling_num + independent_long_num + independent_short_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(
+        old_fresh_num
+            + sibling_fresh_num
+            + independent_long_fresh_num
+            + independent_short_fresh_num,
+    );
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(
+        old_insurance_raw as u128
+            + sibling_insurance_atoms
+            + independent_long_insurance_atoms
+            + independent_short_insurance_atoms,
+    );
     header.vault = V16PodU128::new(31);
     header.c_tot = V16PodU128::new(13);
     header.insurance = V16PodU128::new(7);
@@ -10010,17 +10048,43 @@ fn assert_v16_source_credit_setter_is_exact_and_asset_isolated<
         .kani_set_source_credit_for_domain(target_domain, next_source)
         .unwrap();
 
-    kani::cover!(old_raw == 0, "source setter covers an empty target domain");
+    kani::cover!(old_is_empty, "source setter covers an empty target domain");
     kani::cover!(
-        old_raw > 0,
-        "source setter covers an existing target-domain claim"
+        !old_is_empty && old_raw > 0,
+        "source setter covers an existing target-domain claim and support state"
     );
     kani::cover!(delta_raw == 1, "source setter covers a one-atom delta");
     kani::cover!(delta_raw > 1, "source setter covers a multi-atom delta");
+    kani::cover!(
+        new_fresh_raw > old_fresh_raw,
+        "source setter covers fresh backing growth"
+    );
+    kani::cover!(
+        new_fresh_raw < old_fresh_raw,
+        "source setter covers fresh backing reduction"
+    );
+    kani::cover!(
+        new_insurance_raw > old_insurance_raw,
+        "source setter covers insurance reservation growth"
+    );
+    kani::cover!(
+        new_insurance_raw < old_insurance_raw,
+        "source setter covers insurance reservation reduction"
+    );
 
     let mut expected_header = header_before;
     expected_header.source_claim_bound_total_num =
         V16PodU128::new(header_before.source_claim_bound_total_num.get() + delta_num);
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(
+        header_before.source_fresh_backing_total_num.get() - old_fresh_num + new_fresh_num,
+    );
+    expected_header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(
+        header_before
+            .source_insurance_credit_reserved_total_atoms
+            .get()
+            - old_insurance_raw as u128
+            + new_insurance_raw as u128,
+    );
     assert!(kani_eq_market_group_v16_header_account(
         &expected_header,
         market.header
