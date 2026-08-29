@@ -4292,30 +4292,31 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
     assert!(blocked);
 }
 
-// Public-path favorable-action freshness: conversion preflight accepts exactly
-// the current/unlocked branch and rejects stale certificates or h-lock lanes
-// before value mutation. This links the cert-currentness/h-lock kernels to the
-// production entrypoint preflight instead of proving only the private leaf
-// predicates.
-#[kani::proof]
-#[kani::unwind(48)]
-#[kani::solver(cadical)]
-fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
-    let blocker: u8 = kani::any();
-    kani::assume(blocker <= 5);
-
-    let claim = 3u128;
-    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-
+// Blocker encoding shared by the two production-conversion freshness theorems:
+// 0 invalid cert; 1..=4 oracle/funding/risk/asset-set epoch mismatch;
+// 5 active-bitmap mismatch; 6 account H-lock; 7 market H-lock; 8 fully current.
+fn conversion_freshness_fixture(
+    blocker: u8,
+    claim: u128,
+    epoch: u64,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+) {
+    let (mut header, markets, mut account_header) = one_market_view_fixture();
     header.vault = V16PodU128::new(claim);
     header.c_tot = V16PodU128::new(claim);
-    if blocker == 4 {
+    header.oracle_epoch = V16PodU64::new(epoch);
+    header.funding_epoch = V16PodU64::new(epoch);
+    header.risk_epoch = V16PodU64::new(epoch);
+    header.asset_set_epoch = V16PodU64::new(epoch);
+    if blocker == 7 {
         header.threshold_stress_active = 1;
     }
-
     account_header.capital = V16PodU128::new(claim);
     account_header.pnl = V16PodI128::new(claim as i128);
-    if blocker == 3 {
+    if blocker == 6 {
         account_header.stale_state = 1;
     }
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
@@ -4324,52 +4325,124 @@ fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
         certified_maintenance_req: 0,
         certified_liq_deficit: 0,
         certified_worst_case_loss: 0,
-        cert_oracle_epoch: header.oracle_epoch.get() + if blocker == 1 { 1 } else { 0 },
-        cert_funding_epoch: header.funding_epoch.get(),
-        cert_risk_epoch: header.risk_epoch.get(),
-        cert_asset_set_epoch: header.asset_set_epoch.get(),
-        active_bitmap_at_cert: if blocker == 2 {
+        cert_oracle_epoch: epoch + u64::from(blocker == 1),
+        cert_funding_epoch: epoch + u64::from(blocker == 2),
+        cert_risk_epoch: epoch + u64::from(blocker == 3),
+        cert_asset_set_epoch: epoch + u64::from(blocker == 4),
+        active_bitmap_at_cert: if blocker == 5 {
             [1u64; V16_ACTIVE_BITMAP_WORDS]
         } else {
             V16_EMPTY_ACTIVE_BITMAP
         },
         valid: blocker != 0,
     });
+    (header, markets, account_header)
+}
 
-    let vault_before = header.vault;
-    let c_tot_before = header.c_tot;
-    let account_capital_before = account_header.capital;
-    let account_pnl_before = account_header.pnl;
+// Favorable-action freshness is conjunctive across certificate validity, all
+// four market epochs, and the active bitmap. Exercise every independent stale
+// component plus both H-lock lanes through the exact production preflight.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
+    let blocker: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    let epoch_raw: u8 = kani::any();
+    kani::assume(blocker <= 8);
+    kani::assume((1..=16).contains(&claim_raw));
+    kani::assume(epoch_raw <= 16);
+
+    let claim = claim_raw as u128;
+    let epoch = epoch_raw as u64;
+    let (mut header, mut markets, account_header) =
+        conversion_freshness_fixture(blocker, claim, epoch);
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let account = PortfolioV16View::new(&account_header);
+    let preflight = market
+        .kani_preflight_convert_released_pnl_to_capital(&PortfolioV16View::new(&account_header));
 
-    let result = market.kani_preflight_convert_released_pnl_to_capital(&account);
-
+    kani::cover!(blocker == 0 && claim > 2, "invalid certificate is rejected");
     kani::cover!(
-        blocker <= 2 && claim > 1 && result == Err(V16Error::Stale),
-        "stale health certificate blocks favorable conversion before mutation"
+        blocker == 1 && epoch_raw > 1 && claim > 2,
+        "oracle-epoch mismatch is rejected"
     );
     kani::cover!(
-        (blocker == 3 || blocker == 4) && claim > 1 && result == Err(V16Error::LockActive),
-        "h-lock lane blocks favorable conversion before mutation"
+        blocker == 2 && epoch_raw > 1 && claim > 2,
+        "funding-epoch mismatch is rejected"
     );
     kani::cover!(
-        blocker == 5 && claim > 1 && result == Ok(()),
-        "current unlocked account passes favorable conversion preflight"
+        blocker == 3 && epoch_raw > 1 && claim > 2,
+        "risk-epoch mismatch is rejected"
+    );
+    kani::cover!(
+        blocker == 4 && epoch_raw > 1 && claim > 2,
+        "asset-set-epoch mismatch is rejected"
+    );
+    kani::cover!(
+        blocker == 5 && claim > 2,
+        "active-bitmap mismatch is rejected"
+    );
+    kani::cover!(blocker == 6 && claim > 2, "account H-lock is rejected");
+    kani::cover!(blocker == 7 && claim > 2, "market H-lock is rejected");
+    kani::cover!(
+        blocker == 8 && claim > 2 && epoch_raw > 1,
+        "fully current unlocked certificate passes conversion preflight"
     );
 
-    let expected = if blocker <= 2 {
+    let expected = if blocker <= 5 {
         Err(V16Error::Stale)
-    } else if blocker <= 4 {
+    } else if blocker <= 7 {
         Err(V16Error::LockActive)
     } else {
         Ok(())
     };
-    assert_eq!(result, expected);
+    assert_eq!(preflight, expected);
+}
+
+// Compose the complete preflight theorem above with the public mutating
+// conversion entrypoint. A compile-time invalid certificate keeps Kani from
+// expanding the unreachable source-credit conversion core; symbolic claim and
+// epoch state still prove the public API returns Stale before changing the
+// global or account stocks that fund conversion.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_convert_rejects_invalid_certificate_before_value_mutation() {
+    let claim_raw: u8 = kani::any();
+    let epoch_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&claim_raw));
+    kani::assume(epoch_raw <= 16);
+
+    let claim = claim_raw as u128;
+    let (mut header, mut markets, mut account_header) =
+        conversion_freshness_fixture(0, claim, epoch_raw as u64);
+    let vault_before = header.vault;
+    let insurance_before = header.insurance;
+    let c_tot_before = header.c_tot;
+    let pnl_pos_before = header.pnl_pos_tot;
+    let pnl_bound_before = header.pnl_pos_bound_tot_num;
+    let pnl_matured_before = header.pnl_matured_pos_tot;
+    let capital_before = account_header.capital;
+    let pnl_before = account_header.pnl;
+    let reserved_before = account_header.reserved_pnl;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let conversion = market.convert_released_pnl_to_capital_not_atomic(&mut account);
+
+    kani::cover!(
+        claim > 2 && epoch_raw > 1,
+        "public conversion rejects an invalid cert over nontrivial value and epoch state"
+    );
+    assert_eq!(conversion, Err(V16Error::Stale));
     assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.insurance, insurance_before);
     assert_eq!(market.header.c_tot, c_tot_before);
-    assert_eq!(account.header.capital, account_capital_before);
-    assert_eq!(account.header.pnl, account_pnl_before);
+    assert_eq!(market.header.pnl_pos_tot, pnl_pos_before);
+    assert_eq!(market.header.pnl_pos_bound_tot_num, pnl_bound_before);
+    assert_eq!(market.header.pnl_matured_pos_tot, pnl_matured_before);
+    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(account.header.pnl, pnl_before);
+    assert_eq!(account.header.reserved_pnl, reserved_before);
 }
 
 // Production conversion-stock theorem. Source allocation, domain consume, and
