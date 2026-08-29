@@ -42,7 +42,7 @@ use percolator::v16::{
     kani_eq_portfolio_account_v16_account,
 };
 use percolator::{
-    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS, MAX_OI_SIDE_Q,
     MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE,
     SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
@@ -19039,6 +19039,75 @@ fn proof_v16_validator_sound_senior_stack_within_vault() {
         })
         .expect("senior stack sum cannot overflow a validated state");
     assert!(senior <= market.header.vault.get());
+}
+
+// Live-asset market soundness: for the later slot in a multi-asset slab, a
+// successful production validation implies balanced effective OI and bounded,
+// nonempty social-loss progress witnesses on every nonempty side. OI,
+// loss-weight, and stored-position counters are full-width symbolic values;
+// the first slot remains canonical so this exercises a nonzero scan index.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_live_market_validator_balances_oi_and_preserves_progress_witnesses() {
+    let oi_long: u128 = kani::any();
+    let oi_short: u128 = kani::any();
+    let weight_long: u128 = kani::any();
+    let weight_short: u128 = kani::any();
+    let count_long: u64 = kani::any();
+    let count_short: u64 = kani::any();
+    let selected = 1usize;
+
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    let mut asset = markets[selected].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = oi_long;
+    asset.oi_eff_short_q = oi_short;
+    asset.loss_weight_sum_long = weight_long;
+    asset.loss_weight_sum_short = weight_short;
+    asset.stored_pos_count_long = count_long;
+    asset.stored_pos_count_short = count_short;
+    markets[selected].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let blocker_total = count_long.checked_add(count_short);
+    kani::assume(blocker_total.is_some());
+    header.resolved_payout_blocker_count = V16PodU64::new(blocker_total.unwrap());
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    kani::assume(market.validate_shape() == Ok(()));
+    kani::cover!(
+        oi_long > POS_SCALE && weight_long > 0 && weight_short > 0 && weight_long != weight_short,
+        "later slab slot accepts independent nonzero side weights"
+    );
+    kani::cover!(
+        oi_long > POS_SCALE && count_long > 0 && count_short > 0,
+        "later slab slot accepts nonzero side progress counts"
+    );
+    kani::cover!(
+        oi_long == 0 && weight_long > 0 && count_long > 0,
+        "zero current OI retains a social-loss progress witness"
+    );
+
+    let accepted = market.markets[selected]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(accepted.oi_eff_long_q, accepted.oi_eff_short_q);
+    assert!(accepted.oi_eff_long_q <= MAX_OI_SIDE_Q);
+    assert!(accepted.oi_eff_short_q <= MAX_OI_SIDE_Q);
+    assert!(accepted.loss_weight_sum_long <= SOCIAL_LOSS_DEN);
+    assert!(accepted.loss_weight_sum_short <= SOCIAL_LOSS_DEN);
+    if accepted.oi_eff_long_q != 0 {
+        assert!(accepted.loss_weight_sum_long != 0);
+    }
+    if accepted.oi_eff_short_q != 0 {
+        assert!(accepted.loss_weight_sum_short != 0);
+    }
+    if accepted.loss_weight_sum_long != 0 {
+        assert!(accepted.stored_pos_count_long != 0);
+    }
+    if accepted.loss_weight_sum_short != 0 {
+        assert!(accepted.stored_pos_count_short != 0);
+    }
 }
 
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
