@@ -4197,6 +4197,45 @@ fn proof_v16_open_source_claim_exposure_blocks_convert() {
     assert!(blocked);
 }
 
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_flat_source_claim_lien_blocks_convert() {
+    let claim_raw: u8 = kani::any();
+    kani::assume(claim_raw > 0);
+    let claim = claim_raw as u128;
+    let face_num = claim * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_claim_bound_num: V16PodU128::new(face_num),
+        source_claim_liened_num: V16PodU128::new(face_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(face_num),
+        source_lien_effective_reserved: V16PodU128::new(claim),
+        source_lien_counterparty_backing_num: V16PodU128::new(face_num),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    let blocked = market
+        .kani_convert_source_claim_exposure_guard(&account.as_view())
+        .unwrap();
+
+    kani::cover!(
+        blocked && claim > 10,
+        "flat source claim with a live lien reaches convert guard"
+    );
+    assert!(blocked);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+}
+
 // Public-path favorable-action freshness: conversion preflight accepts exactly
 // the current/unlocked branch and rejects stale certificates or h-lock lanes
 // before value mutation. This links the cert-currentness/h-lock kernels to the
