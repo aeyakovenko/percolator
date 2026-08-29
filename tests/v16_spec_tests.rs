@@ -5153,6 +5153,92 @@ fn v16_auto_crank_releases_source_liens_in_strict_chunks() {
 }
 
 #[test]
+fn v16_released_pnl_conversion_consumes_the_backed_source_claim_exactly_once() {
+    const CLAIM: u128 = 100;
+    const BACKING: u128 = 2 * CLAIM;
+    let claim_num = CLAIM * BOUND_SCALE;
+    let backing_num = BACKING * BOUND_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut winner_header = account_fixture(1, 12);
+
+    winner_header.pnl = V16PodI128::new((2 * CLAIM) as i128);
+    for domain in 0..2 {
+        winner_header.source_domains[domain].domain = V16PodU32::new(domain as u32);
+        winner_header.source_domains[domain].source_claim_market_id = V16PodU64::new(1);
+        winner_header.source_domains[domain].source_claim_bound_num = V16PodU128::new(claim_num);
+    }
+    header.pnl_pos_tot = V16PodU128::new(2 * CLAIM);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(2 * claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(2 * CLAIM);
+    header.source_claim_bound_total_num = V16PodU128::new(2 * claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.vault = V16PodU128::new(BACKING);
+
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            credit_rate_num: 0,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    market
+        .validate_shape()
+        .expect("cross-domain fixture must be a valid market state");
+    winner
+        .validate_with_market(&market.as_view())
+        .expect("cross-domain fixture must be a valid portfolio state");
+    market.full_account_refresh_not_atomic(&mut winner).unwrap();
+
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("the funded source claim must convert"),
+        CLAIM
+    );
+    assert_eq!(winner.header.capital.get(), CLAIM);
+    assert_eq!(winner.header.pnl.get(), CLAIM as i128);
+    assert_eq!(winner.header.source_domains[0].domain.get(), 0);
+    assert_eq!(
+        winner.header.source_domains[0].source_claim_bound_num.get(),
+        claim_num,
+        "the unfunded source claim must not be burned for another domain's backing"
+    );
+    assert_eq!(winner.header.source_domains[1], Default::default());
+
+    market.full_account_refresh_not_atomic(&mut winner).unwrap();
+    assert_eq!(
+        market.convert_released_pnl_to_capital_not_atomic(&mut winner),
+        Err(V16Error::LockActive),
+        "the same funded source backing must not convert a second source claim"
+    );
+    assert_eq!(winner.header.capital.get(), CLAIM);
+    winner.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_residual_reward_credit_is_capped_by_available_crystallized_loss() {
     let (mut header, mut markets) = market_fixture(1, 1_000);
     header.config.initial_margin_bps = V16PodU64::new(500);

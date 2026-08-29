@@ -17755,7 +17755,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
-        if has_source_claims && self.account_has_active_source_claim_exposure(&account.as_view())? {
+        if has_source_claims
+            && (Self::account_has_source_liens(&account.as_view())
+                || self.account_has_active_source_claim_exposure(&account.as_view())?)
+        {
             return Err(V16Error::LockActive);
         }
         let converted = if has_source_claims {
@@ -17785,29 +17788,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         has_source_claims: bool,
         disposition: ReleasedPnlConversionDispositionV16,
     ) -> V16Result<u128> {
-        let consumption = if has_source_claims {
-            self.consume_validated_account_source_credit_not_atomic(
-                account, converted, false, true,
-            )?
-            .0
+        let (consumption, preburned_source_claim_num) = if has_source_claims {
+            let (consumption, preburned_source_claim_num, _) = self
+                .consume_validated_account_source_credit_not_atomic(
+                    account, converted, true, true,
+                )?;
+            (consumption, preburned_source_claim_num)
         } else {
             let residual = self.residual();
             let junior_bound = self.junior_claim_bound();
-            SourceCreditConsumptionV16 {
-                face_burn: self.face_claim_to_burn_for_support(
-                    converted,
-                    residual,
-                    junior_bound,
-                )?,
-                counterparty_credit_consumed: 0,
-                insurance_credit_consumed: 0,
-            }
+            (
+                SourceCreditConsumptionV16 {
+                    face_burn: self.face_claim_to_burn_for_support(
+                        converted,
+                        residual,
+                        junior_bound,
+                    )?,
+                    counterparty_credit_consumed: 0,
+                    insurance_credit_consumed: 0,
+                },
+                0,
+            )
         };
         self.apply_released_pnl_conversion_with_consumption_core_not_atomic(
             account,
             pos,
             converted,
             consumption,
+            preburned_source_claim_num,
             disposition,
         )
     }
@@ -17818,6 +17826,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         pos: u128,
         converted: u128,
         consumption: SourceCreditConsumptionV16,
+        preburned_source_claim_num: u128,
         disposition: ReleasedPnlConversionDispositionV16,
     ) -> V16Result<u128> {
         if converted == 0 || converted > pos.saturating_sub(account.header.reserved_pnl.get()) {
@@ -17844,12 +17853,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         match disposition {
             ReleasedPnlConversionDispositionV16::ConsumeHaircutFace => {
-                self.set_account_pnl(account, new_pnl)?;
+                self.set_account_pnl_after_source_claim_burn(
+                    account,
+                    new_pnl,
+                    preburned_source_claim_num,
+                )?;
             }
             ReleasedPnlConversionDispositionV16::RetainHaircutFaceForTerminalDomain {
                 source_domain,
                 source_claim_num,
             } => {
+                if preburned_source_claim_num != 0 {
+                    return Err(V16Error::InvalidConfig);
+                }
                 self.burn_account_source_claim_bound_num_domain_first(
                     account,
                     source_domain,
@@ -18427,6 +18443,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     pos,
                     converted,
                     consumption,
+                    0,
                     ReleasedPnlConversionDispositionV16::RetainHaircutFaceForTerminalDomain {
                         source_domain,
                         source_claim_num,
