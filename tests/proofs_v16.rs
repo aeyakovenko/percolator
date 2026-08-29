@@ -19500,6 +19500,135 @@ fn proof_v16_live_market_validator_balances_oi_and_preserves_progress_witnesses(
     }
 }
 
+// Every production asset-state mutation funnels through set_asset_state. This
+// transition theorem proves its O(1) resolved-payout blocker aggregate remains
+// exactly equal to the two-slot slab sum while all unrelated state is framed.
+// Stored positions and stale accounts vary independently; domain barriers stay
+// live in the selected slot and therefore must be retained in both totals.
+fn prove_v16_asset_state_setter_reconciles_blockers_and_isolates_slot<const SELECTED: usize>() {
+    let old_stored_long: u8 = kani::any();
+    let old_stored_short: u8 = kani::any();
+    let old_stale_long: u8 = kani::any();
+    let old_stale_short: u8 = kani::any();
+    let new_stored_long: u8 = kani::any();
+    let new_stored_short: u8 = kani::any();
+    let new_stale_long: u8 = kani::any();
+    let new_stale_short: u8 = kani::any();
+    let barrier_long: bool = kani::any();
+    let barrier_short: bool = kani::any();
+    kani::assume(old_stored_long <= 4);
+    kani::assume(old_stored_short <= 4);
+    kani::assume(old_stale_long <= 4);
+    kani::assume(old_stale_short <= 4);
+    kani::assume(new_stored_long <= 4);
+    kani::assume(new_stored_short <= 4);
+    kani::assume(new_stale_long <= 4);
+    kani::assume(new_stale_short <= 4);
+
+    let unrelated = 1 - SELECTED;
+    let selected_barriers = u64::from(barrier_long) + u64::from(barrier_short);
+    let old_selected_blockers = u64::from(old_stored_long)
+        + u64::from(old_stored_short)
+        + u64::from(old_stale_long)
+        + u64::from(old_stale_short)
+        + selected_barriers;
+    let new_selected_blockers = u64::from(new_stored_long)
+        + u64::from(new_stored_short)
+        + u64::from(new_stale_long)
+        + u64::from(new_stale_short)
+        + selected_barriers;
+    const UNRELATED_BLOCKERS: u64 = 3;
+
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    let mut selected_before = markets[SELECTED].engine.asset.try_to_runtime().unwrap();
+    selected_before.stored_pos_count_long = u64::from(old_stored_long);
+    selected_before.stored_pos_count_short = u64::from(old_stored_short);
+    selected_before.stale_account_count_long = u64::from(old_stale_long);
+    selected_before.stale_account_count_short = u64::from(old_stale_short);
+    markets[SELECTED].engine.asset = AssetStateV16Account::from_runtime(&selected_before);
+    markets[SELECTED].engine.pending_domain_loss_barrier_long =
+        V16PodU64::new(u64::from(barrier_long));
+    markets[SELECTED].engine.pending_domain_loss_barrier_short =
+        V16PodU64::new(u64::from(barrier_short));
+
+    let mut unrelated_asset = markets[unrelated].engine.asset.try_to_runtime().unwrap();
+    unrelated_asset.stored_pos_count_long = UNRELATED_BLOCKERS;
+    markets[unrelated].engine.asset = AssetStateV16Account::from_runtime(&unrelated_asset);
+    header.resolved_payout_blocker_count =
+        V16PodU64::new(old_selected_blockers + UNRELATED_BLOCKERS);
+
+    let mut selected_after = selected_before;
+    selected_after.stored_pos_count_long = u64::from(new_stored_long);
+    selected_after.stored_pos_count_short = u64::from(new_stored_short);
+    selected_after.stale_account_count_long = u64::from(new_stale_long);
+    selected_after.stale_account_count_short = u64::from(new_stale_short);
+
+    let header_before = header;
+    let selected_slot_before = markets[SELECTED].engine;
+    let unrelated_before = markets[unrelated];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    let result = market.kani_set_asset_state(SELECTED, selected_after);
+
+    kani::cover!(
+        new_selected_blockers > old_selected_blockers && new_stored_long > 0 && new_stale_short > 0,
+        "setter covers aggregate growth across stored and stale categories"
+    );
+    kani::cover!(
+        new_selected_blockers < old_selected_blockers,
+        "setter covers aggregate reduction"
+    );
+    kani::cover!(
+        new_selected_blockers == old_selected_blockers
+            && new_stored_long != old_stored_long
+            && new_stale_long != old_stale_long,
+        "setter covers category redistribution with a flat aggregate"
+    );
+    kani::cover!(
+        barrier_long && barrier_short,
+        "setter retains both selected domain barriers"
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(
+        market.header.resolved_payout_blocker_count.get(),
+        new_selected_blockers + UNRELATED_BLOCKERS
+    );
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_blocker_count =
+        V16PodU64::new(new_selected_blockers + UNRELATED_BLOCKERS);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    let mut expected_selected_slot = selected_slot_before;
+    expected_selected_slot.asset = AssetStateV16Account::from_runtime(&selected_after);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected_slot,
+        &market.markets[SELECTED].engine
+    ));
+    assert_eq!(market.markets[unrelated].wrapper, unrelated_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[unrelated].engine,
+        &unrelated_before.engine
+    ));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_state_setter_reconciles_blockers_and_isolates_asset_one() {
+    prove_v16_asset_state_setter_reconciles_blockers_and_isolates_slot::<0>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_state_setter_reconciles_blockers_and_isolates_asset_zero() {
+    prove_v16_asset_state_setter_reconciles_blockers_and_isolates_slot::<1>();
+}
+
 // Per-domain insurance isolation at the persisted-state boundary. For a domain
 // in the later asset slot, full-market validation accepts a symbolic canonical
 // reservation and rejects each independently corrupted budget, mirror ledger,

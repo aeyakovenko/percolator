@@ -2218,11 +2218,17 @@ impl V16Core {
     }
 }
 
-// Test/proof-only accessor for the INTERNAL direct-crank dispatch primitive
-// (permissionless_crank_not_atomic is pub(crate) — production wrappers call the
-// single public route permissionless_auto_crank_not_atomic). Lets the kani/fuzz
-// suites exercise one caller-chosen primitive action directly.
+// Test/proof-only accessors for internal production mutation seams. These let
+// Kani isolate central transitions without exposing a second production API.
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_set_asset_state(
+        &mut self,
+        asset_index: usize,
+        asset: AssetStateV16,
+    ) -> V16Result<()> {
+        self.set_asset_state(asset_index, asset)
+    }
+
     pub fn kani_reduce_matching_open_interest_for_unilateral_close(
         &mut self,
         asset_index: usize,
