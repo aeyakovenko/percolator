@@ -19501,93 +19501,128 @@ fn proof_v16_live_market_validator_balances_oi_and_preserves_progress_witnesses(
 }
 
 // Per-domain insurance isolation at the persisted-state boundary. For a domain
-// in the later asset slot, successful full-market validation implies that spent
-// insurance plus every live reservation fits inside that domain's own budget,
-// the source and reservation ledgers agree exactly, and both O(1) header totals
-// reconcile without borrowing capacity from pooled insurance.
+// in the later asset slot, full-market validation accepts a symbolic canonical
+// reservation and rejects each independently corrupted budget, mirror ledger,
+// encumbrance, aggregate, and pooled-insurance cap. This proves classification,
+// rather than merely assuming acceptance and deriving its consequences.
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn proof_v16_market_validator_isolates_domain_insurance_reservations() {
-    let budget_raw: u8 = kani::any();
     let spent_raw: u8 = kani::any();
-    let source_reserved_raw: u8 = kani::any();
-    let reservation_reserved_raw: u8 = kani::any();
-    let source_valid_raw: u8 = kani::any();
-    let reservation_valid_raw: u8 = kani::any();
-    let source_impaired_raw: u8 = kani::any();
-    let reservation_impaired_raw: u8 = kani::any();
-    let header_reserved_raw: u8 = kani::any();
-    let header_remaining_raw: u8 = kani::any();
-    let insurance_raw: u8 = kani::any();
-    kani::assume(budget_raw <= 16);
-    kani::assume(spent_raw <= 16);
-    kani::assume(source_reserved_raw <= 16);
-    kani::assume(reservation_reserved_raw <= 16);
-    kani::assume(source_valid_raw <= 16);
-    kani::assume(reservation_valid_raw <= 16);
-    kani::assume(source_impaired_raw <= 16);
-    kani::assume(reservation_impaired_raw <= 16);
-    kani::assume(header_reserved_raw <= 16);
-    kani::assume(header_remaining_raw <= 16);
-    kani::assume(insurance_raw <= 32);
+    let remaining_raw: u8 = kani::any();
+    let reserved_raw: u8 = kani::any();
+    let valid_raw: u8 = kani::any();
+    let impaired_raw: u8 = kani::any();
+    let insurance_slack_raw: u8 = kani::any();
+    let fault: u8 = kani::any();
+    kani::assume(spent_raw <= 8);
+    kani::assume((2..=8).contains(&remaining_raw));
+    kani::assume((2..=remaining_raw).contains(&reserved_raw));
+    kani::assume(valid_raw <= reserved_raw);
+    kani::assume(impaired_raw <= reserved_raw - valid_raw);
+    kani::assume((2..=8).contains(&insurance_slack_raw));
+    kani::assume(fault <= 10);
 
-    let budget = budget_raw as u128;
     let spent = spent_raw as u128;
-    let source_reserved_num = source_reserved_raw as u128 * BOUND_SCALE;
-    let reservation_reserved_num = reservation_reserved_raw as u128 * BOUND_SCALE;
-    let source_valid_num = source_valid_raw as u128 * BOUND_SCALE;
-    let reservation_valid_num = reservation_valid_raw as u128 * BOUND_SCALE;
-    let source_impaired_num = source_impaired_raw as u128 * BOUND_SCALE;
-    let reservation_impaired_num = reservation_impaired_raw as u128 * BOUND_SCALE;
-    let insurance = insurance_raw as u128;
+    let remaining = remaining_raw as u128;
+    let budget = spent + remaining;
+    let reserved_num = reserved_raw as u128 * BOUND_SCALE;
+    let valid_num = valid_raw as u128 * BOUND_SCALE;
+    let impaired_num = impaired_raw as u128 * BOUND_SCALE;
+    let insurance = budget + insurance_slack_raw as u128;
 
     let (mut header, mut markets, _) = two_market_direct_view_fixture();
     header.vault = V16PodU128::new(insurance);
     header.insurance = V16PodU128::new(insurance);
-    header.source_insurance_credit_reserved_total_atoms =
-        V16PodU128::new(header_reserved_raw as u128);
-    header.insurance_domain_budget_remaining_total = V16PodU128::new(header_remaining_raw as u128);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(reserved_raw as u128);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(remaining);
 
     let slot = &mut markets[1].engine;
     slot.insurance_domain_budget_long = V16PodU128::new(budget);
     slot.insurance_domain_spent_long = V16PodU128::new(spent);
-    slot.source_credit_long = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
-        insurance_credit_reserved_num: source_reserved_num,
-        valid_liened_insurance_num: source_valid_num,
-        impaired_liened_insurance_num: source_impaired_num,
+    let mut source = SourceCreditStateV16 {
+        insurance_credit_reserved_num: reserved_num,
+        valid_liened_insurance_num: valid_num,
+        impaired_liened_insurance_num: impaired_num,
         credit_rate_num: CREDIT_RATE_SCALE,
         ..SourceCreditStateV16::EMPTY
-    });
+    };
+    let mut reservation = InsuranceCreditReservationV16 {
+        insurance_credit_reserved_num: reserved_num,
+        valid_liened_insurance_num: valid_num,
+        impaired_liened_insurance_num: impaired_num,
+        ..InsuranceCreditReservationV16::EMPTY
+    };
+
+    match fault {
+        0 => {}
+        1 => slot.insurance_domain_spent_long = V16PodU128::new(budget + 1),
+        2 => {
+            let over_budget_num = (remaining + 1) * BOUND_SCALE;
+            source.insurance_credit_reserved_num = over_budget_num;
+            reservation.insurance_credit_reserved_num = over_budget_num;
+            header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(remaining + 1);
+        }
+        3 => reservation.insurance_credit_reserved_num = reserved_num + BOUND_SCALE,
+        4 => {
+            source.valid_liened_insurance_num = 0;
+            source.impaired_liened_insurance_num = 0;
+            reservation.valid_liened_insurance_num = BOUND_SCALE;
+            reservation.impaired_liened_insurance_num = 0;
+        }
+        5 => {
+            source.valid_liened_insurance_num = 0;
+            source.impaired_liened_insurance_num = 0;
+            reservation.valid_liened_insurance_num = 0;
+            reservation.impaired_liened_insurance_num = BOUND_SCALE;
+        }
+        6 => {
+            let over_reserved_num = reserved_num + BOUND_SCALE;
+            source.valid_liened_insurance_num = over_reserved_num;
+            source.impaired_liened_insurance_num = 0;
+            reservation.valid_liened_insurance_num = over_reserved_num;
+            reservation.impaired_liened_insurance_num = 0;
+        }
+        7 => {
+            header.source_insurance_credit_reserved_total_atoms =
+                V16PodU128::new(reserved_raw as u128 + 1)
+        }
+        8 => header.insurance_domain_budget_remaining_total = V16PodU128::new(remaining + 1),
+        9 => header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(insurance + 1),
+        10 => header.insurance_domain_budget_remaining_total = V16PodU128::new(insurance + 1),
+        _ => unreachable!(),
+    }
+    slot.source_credit_long = SourceCreditStateV16Account::from_runtime(&source);
     slot.insurance_reservation_long =
-        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
-            insurance_credit_reserved_num: reservation_reserved_num,
-            valid_liened_insurance_num: reservation_valid_num,
-            impaired_liened_insurance_num: reservation_impaired_num,
-            ..InsuranceCreditReservationV16::EMPTY
-        });
+        InsuranceCreditReservationV16Account::from_runtime(&reservation);
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    kani::assume(market.validate_shape() == Ok(()));
+    let validation = market.validate_shape();
     kani::cover!(
-        spent > 0
-            && source_valid_num > 0
-            && source_impaired_num == 0
-            && spent + u128::from(source_reserved_raw) < budget,
-        "later-slot domain accepts spent insurance plus a live valid lien"
+        fault == 0 && valid_num > 0 && impaired_num > 0,
+        "valid live reservation"
     );
+    kani::cover!(fault == 1, "spent exceeds its domain budget");
     kani::cover!(
-        source_impaired_num > 0 && source_valid_num > 0,
-        "domain isolation includes simultaneous valid and impaired liens"
+        fault == 2,
+        "pooled slack cannot enlarge a domain reservation"
     );
-    kani::cover!(
-        budget > 0 && spent + u128::from(source_reserved_raw) == budget,
-        "domain isolation reaches an exactly saturated budget"
-    );
-    kani::cover!(
-        insurance > budget && source_reserved_raw > 0,
-        "pooled insurance slack cannot enlarge the selected domain budget"
-    );
+    kani::cover!(fault == 3, "reserved mirror mismatch");
+    kani::cover!(fault == 4, "valid-lien mirror mismatch");
+    kani::cover!(fault == 5, "impaired-lien mirror mismatch");
+    kani::cover!(fault == 6, "encumbrance exceeds reservation");
+    kani::cover!(fault == 7, "reserved header aggregate mismatch");
+    kani::cover!(fault == 8, "remaining-budget header aggregate mismatch");
+    kani::cover!(fault == 9, "reserved aggregate exceeds pooled insurance");
+    kani::cover!(fault == 10, "remaining budget exceeds pooled insurance");
+
+    if fault == 0 {
+        assert_eq!(validation, Ok(()));
+    } else {
+        assert_eq!(validation, Err(V16Error::InvalidConfig));
+        return;
+    }
 
     let accepted_slot = &market.markets[1].engine;
     let source = accepted_slot.source_credit_long.try_to_runtime().unwrap();
