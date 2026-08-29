@@ -19816,47 +19816,94 @@ fn proof_v16_validator_sound_bound_and_config() {
     assert!(h.next_market_id.get() != 0); // U10
 }
 
-// ROADMAP Phase 1 (Pillar F soundness, U19): validate_with_market's Ok-exit
-// implies the account-reserve invariants — reserved PnL never exceeds positive
-// PnL, and residual principal spent never exceeds residual crystallized loss.
-// Account-header scalars symbolic so the lemma tests the validator. (These
-// clauses run before the leg loop; an empty account keeps it tractable.)
+// Persisted reserve bounds gate both the full validator and the O(1) scalar
+// preflight used by hot refresh. Symbolically violate either independent bound
+// and require exact, fail-before-mutation rejection from both production paths.
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
 fn proof_v16_validator_sound_account_reserves() {
-    let pnl: i128 = kani::any();
-    let reserved_pnl: u128 = kani::any();
-    let residual_spent: u128 = kani::any();
-    let residual_crystallized: u128 = kani::any();
-    kani::assume(pnl > i128::MIN);
-    let (header, markets, mut account_header) = one_market_view_fixture();
-    account_header.pnl = V16PodI128::new(pnl);
+    let fault: u8 = kani::any();
+    let pnl_raw: u8 = kani::any();
+    let reserved_raw: u8 = kani::any();
+    let residual_crystallized_raw: u8 = kani::any();
+    let residual_spent_raw: u8 = kani::any();
+    let excess_raw: u8 = kani::any();
+    kani::assume(fault <= 2);
+    kani::assume(pnl_raw > 0 && pnl_raw <= 16);
+    kani::assume(reserved_raw <= pnl_raw);
+    kani::assume(residual_crystallized_raw <= 16);
+    kani::assume(residual_spent_raw <= residual_crystallized_raw);
+    kani::assume(excess_raw > 0 && excess_raw <= 16);
+
+    let pnl = pnl_raw as u128;
+    let residual_crystallized = residual_crystallized_raw as u128;
+    let reserved_pnl = if fault == 1 {
+        pnl + excess_raw as u128
+    } else {
+        reserved_raw as u128
+    };
+    let residual_spent = if fault == 2 {
+        residual_crystallized + excess_raw as u128
+    } else {
+        residual_spent_raw as u128
+    };
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    account_header.pnl = V16PodI128::new(pnl as i128);
     account_header.reserved_pnl = V16PodU128::new(reserved_pnl);
     account_header.residual_spent_principal_atoms_total = V16PodU128::new(residual_spent);
     account_header.residual_crystallized_loss_atoms_total = V16PodU128::new(residual_crystallized);
-    let mut header = header;
-    let mut markets = markets;
-    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    let account = PortfolioV16ViewMut::new(&mut account_header);
 
-    kani::assume(account.as_view().validate_with_market(&market.as_view()) == Ok(()));
+    let validation = PortfolioV16View::new(&account_header)
+        .validate_with_market(&MarketGroupV16View::new(&header, &markets));
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let refresh = market.full_account_refresh_not_atomic(&mut account);
+
     kani::cover!(
-        pnl > 0 && reserved_pnl > 0 && residual_crystallized > 0 && residual_spent > 0,
-        "account-reserve soundness lemma reachable with nontrivial reserves"
+        fault == 0
+            && reserved_raw > 0
+            && reserved_raw < pnl_raw
+            && residual_spent_raw > 0
+            && residual_spent_raw < residual_crystallized_raw,
+        "valid persisted account reaches both paths with nontrivial reserve slack"
+    );
+    kani::cover!(
+        fault == 1 && reserved_raw > 0 && excess_raw > 1,
+        "over-reserved positive PnL reaches both production gates"
+    );
+    kani::cover!(
+        fault == 2 && residual_spent_raw > 0 && excess_raw > 1,
+        "over-spent residual principal reaches both production gates"
     );
 
-    let h = &account.header;
-    let pos_pnl = if h.pnl.get() > 0 {
-        h.pnl.get() as u128
+    if fault == 0 {
+        assert_eq!(validation, Ok(()));
+        assert!(refresh.is_ok());
+        assert!(account.header.reserved_pnl.get() <= account.header.pnl.get() as u128);
+        assert!(
+            account.header.residual_spent_principal_atoms_total.get()
+                <= account.header.residual_crystallized_loss_atoms_total.get()
+        );
     } else {
-        0
-    };
-    assert!(h.reserved_pnl.get() <= pos_pnl); // U19a
-    assert!(
-        h.residual_spent_principal_atoms_total.get()
-            <= h.residual_crystallized_loss_atoms_total.get()
-    ); // U19b
+        assert_eq!(validation, Err(V16Error::InvalidLeg));
+        assert_eq!(refresh, Err(V16Error::InvalidLeg));
+        assert!(kani_eq_market_group_v16_header_account(
+            &header_before,
+            market.header
+        ));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &slot_before,
+            &market.markets[0].engine
+        ));
+        assert!(kani_eq_portfolio_account_v16_account(
+            &account_before,
+            account.header
+        ));
+    }
 }
 
 // REALIZABILITY (no-DoS auto-crank dispatch seam): only the no-active-asset
