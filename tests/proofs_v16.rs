@@ -13246,6 +13246,102 @@ fn proof_v16_frame_fee_sync_touches_only_declared_state() {
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    kani_assume_portfolio_shape_valid
+)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
+fn proof_v16_resolved_fee_sync_stops_at_resolution_and_replay_is_value_neutral() {
+    // Universal fee arithmetic is proved separately. Seven independent value
+    // classes exercise 128 resolved-mode production sequences without making
+    // the O(N) shape invariant part of this transition query.
+    let capital = if kani::any::<bool>() { 7u128 } else { 9u128 };
+    let insurance = if kani::any::<bool>() { 2u128 } else { 3u128 };
+    let surplus = if kani::any::<bool>() { 1u128 } else { 4u128 };
+    let fee_rate = if kani::any::<bool>() { 1u128 } else { 3u128 };
+    let resolved_slot = if kani::any::<bool>() { 4u64 } else { 6u64 };
+    let last_fee_slot = if kani::any::<bool>() { 1u64 } else { 2u64 };
+    let relayer_delay = if kani::any::<bool>() { 1u64 } else { 5u64 };
+    let submitted_now = resolved_slot + relayer_delay;
+    let requested_fee = fee_rate * (resolved_slot - last_fee_slot) as u128;
+    let expected_fee = capital.min(requested_fee);
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1;
+    header.resolved_slot = V16PodU64::new(resolved_slot);
+    header.current_slot = V16PodU64::new(resolved_slot);
+    header.slot_last = V16PodU64::new(resolved_slot);
+    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.last_fee_slot = V16PodU64::new(last_fee_slot);
+    let slot_before = markets[0].engine;
+    let wrapper_before = markets[0].wrapper;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let first = market
+        .sync_account_fee_to_slot_not_atomic(&mut account, submitted_now, fee_rate)
+        .unwrap();
+
+    kani::cover!(
+        expected_fee == capital,
+        "resolved fee sync covers capital-capped historical fee"
+    );
+    kani::cover!(
+        expected_fee == requested_fee && expected_fee < capital,
+        "resolved fee sync covers exact uncapped historical fee"
+    );
+    kani::cover!(
+        submitted_now > resolved_slot + 1,
+        "resolved fee sync ignores a substantially later relayer slot"
+    );
+    assert_eq!(first, expected_fee);
+    assert_eq!(market.header.vault.get(), capital + insurance + surplus);
+    assert_eq!(market.header.c_tot.get(), capital - expected_fee);
+    assert_eq!(market.header.insurance.get(), insurance + expected_fee);
+    assert_eq!(account.header.capital.get(), capital - expected_fee);
+    assert_eq!(account.header.last_fee_slot.get(), resolved_slot);
+    assert_eq!(market.kani_residual(), residual_before);
+
+    let header_after_first = *market.header;
+    let slot_after_first = market.markets[0].engine;
+    let wrapper_after_first = market.markets[0].wrapper;
+    let account_after_first = *account.header;
+    let second = market
+        .sync_account_fee_to_slot_not_atomic(&mut account, submitted_now + 7, fee_rate)
+        .unwrap();
+
+    kani::cover!(
+        second == 0 && submitted_now > resolved_slot,
+        "resolved fee sync replay after more clock advance is a no-op"
+    );
+    assert_eq!(second, 0);
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_after_first,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &slot_after_first
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_after_first,
+        &market.markets[0].engine
+    ));
+    assert_eq!(wrapper_before, wrapper_after_first);
+    assert_eq!(wrapper_after_first, market.markets[0].wrapper);
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_after_first,
+        account.header
+    ));
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
 fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
     let capital_raw: u8 = kani::any();
     let hidden_loss_raw: u8 = kani::any();
