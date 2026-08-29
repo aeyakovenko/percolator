@@ -6848,6 +6848,154 @@ fn proof_v16_trade_fee_helper_moves_capital_to_insurance_only() {
 }
 
 #[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
+fn proof_v16_wrapper_trade_fee_routing_preserves_stock_and_domain_isolation() {
+    // `proof_v16_trade_fee_helper_moves_capital_to_insurance_only` proves the
+    // arbitrary-u128 collection step. Starting from that proved post-collection
+    // state, this is the exact budget-routing composition used for asset 1.
+    let fee_a = kani::any::<u8>() as u128;
+    let fee_b = kani::any::<u8>() as u128;
+    let redirect_bps = if kani::any::<bool>() {
+        0u128
+    } else if kani::any::<bool>() {
+        3_333u128
+    } else {
+        10_000u128
+    };
+    let redirect_a = fee_a * redirect_bps / 10_000;
+    let redirect_b = fee_b * redirect_bps / 10_000;
+    let local_a = fee_a - redirect_a;
+    let local_b = fee_b - redirect_b;
+    let base_long_credit = redirect_a / 2 + redirect_b / 2;
+    let base_short_credit = redirect_a - redirect_a / 2 + redirect_b - redirect_b / 2;
+    let total_fee = fee_a + fee_b;
+
+    let base_long_budget = if kani::any::<bool>() { 2u128 } else { 4u128 };
+    let base_short_budget = if kani::any::<bool>() { 1u128 } else { 3u128 };
+    let asset_long_budget = if kani::any::<bool>() { 5u128 } else { 7u128 };
+    let asset_short_budget = if kani::any::<bool>() { 2u128 } else { 6u128 };
+    let unbudgeted = if kani::any::<bool>() { 1u128 } else { 4u128 };
+    let junior_surplus = if kani::any::<bool>() { 2u128 } else { 5u128 };
+    let prior_budget_total =
+        base_long_budget + base_short_budget + asset_long_budget + asset_short_budget;
+    let prior_insurance = prior_budget_total + unbudgeted;
+    let post_fee_c_tot = if kani::any::<bool>() { 9u128 } else { 14u128 };
+    let prior_c_tot = post_fee_c_tot + total_fee;
+    let prior_vault = prior_c_tot + prior_insurance + junior_surplus;
+
+    let (mut header, mut markets, _) = two_market_view_fixture();
+    header.vault = V16PodU128::new(prior_vault);
+    header.c_tot = V16PodU128::new(post_fee_c_tot);
+    header.insurance = V16PodU128::new(prior_insurance + total_fee);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(prior_budget_total);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(base_long_budget);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(base_short_budget);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(asset_long_budget);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(asset_short_budget);
+    let asset_zero_before = markets[0].engine.asset;
+    let asset_one_before = markets[1].engine.asset;
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+
+    // The wrapper credits each redirect separately. Their per-side sums are
+    // used here to avoid duplicating public validation in the solver; exact
+    // partition arithmetic and the final four domain balances are asserted.
+    if local_a != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(2, local_a)
+            .unwrap();
+    }
+    if local_b != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(3, local_b)
+            .unwrap();
+    }
+    if base_long_credit != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(0, base_long_credit)
+            .unwrap();
+    }
+    if base_short_credit != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(1, base_short_credit)
+            .unwrap();
+    }
+
+    kani::cover!(
+        fee_a > 0 && fee_b == 0,
+        "trade fee routing covers a one-sided collected fee"
+    );
+    kani::cover!(
+        fee_a > 0 && fee_b > 0,
+        "trade fee routing covers two collected counterparty fees"
+    );
+    kani::cover!(
+        redirect_bps == 0 && total_fee > 0,
+        "trade fee routing covers no base-asset redirect"
+    );
+    kani::cover!(
+        redirect_bps == 10_000 && total_fee > 0 && local_a == 0 && local_b == 0,
+        "trade fee routing covers full base-asset redirect"
+    );
+    kani::cover!(
+        redirect_bps > 0
+            && redirect_bps < 10_000
+            && redirect_a > 0
+            && redirect_b > 0
+            && base_short_credit > base_long_credit,
+        "trade fee routing covers independent redirect rounding on both sides"
+    );
+
+    assert_eq!(
+        local_a + local_b + base_long_credit + base_short_credit,
+        total_fee
+    );
+    assert_eq!(market.header.vault.get(), prior_vault);
+    assert_eq!(market.header.c_tot.get(), post_fee_c_tot);
+    assert_eq!(market.header.insurance.get(), prior_insurance + total_fee);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        prior_budget_total + total_fee
+    );
+    assert_eq!(
+        market.header.c_tot.get() + market.header.insurance.get(),
+        prior_c_tot + prior_insurance
+    );
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        unbudgeted
+    );
+    assert_eq!(market.kani_residual(), residual_before);
+
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        base_long_budget + base_long_credit
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        base_short_budget + base_short_credit
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        asset_long_budget + local_a
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_short.get(),
+        asset_short_budget + local_b
+    );
+    assert_eq!(market.markets[0].engine.asset, asset_zero_before);
+    assert_eq!(market.markets[1].engine.asset, asset_one_before);
+    assert_eq!(
+        [market.markets[0].wrapper, market.markets[1].wrapper],
+        wrappers_before
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(32)]
 #[kani::solver(cadical)]
 fn proof_v16_trade_fee_helper_does_not_charge_negative_pnl_account() {
