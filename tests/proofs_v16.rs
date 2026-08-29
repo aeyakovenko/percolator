@@ -19249,6 +19249,136 @@ fn proof_v16_market_validator_isolates_domain_insurance_reservations() {
     );
 }
 
+// Persisted counterparty-backing soundness for a positive-claim source domain.
+// A successful full-market validation must reconcile the bucket, source-credit
+// ledger, and O(1) header total exactly; provider receivables must be backed by
+// consumed principal; and the effective credit rate may count only fresh,
+// unliened backing. The later slab slot is selected to exercise the audit scan.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_market_validator_reconciles_counterparty_backing_and_credit_rate() {
+    let source_fresh_raw: u8 = kani::any();
+    let bucket_fresh_raw: u8 = kani::any();
+    let source_valid_raw: u8 = kani::any();
+    let bucket_valid_raw: u8 = kani::any();
+    let source_impaired_raw: u8 = kani::any();
+    let bucket_impaired_raw: u8 = kani::any();
+    let source_receivable_raw: u8 = kani::any();
+    let bucket_consumed_raw: u8 = kani::any();
+    let source_spent_raw: u8 = kani::any();
+    let rate_raw: u8 = kani::any();
+    let header_fresh_raw: u8 = kani::any();
+    let vault_raw: u8 = kani::any();
+    kani::assume(source_fresh_raw <= 16);
+    kani::assume(bucket_fresh_raw <= 16);
+    kani::assume(source_valid_raw <= 16);
+    kani::assume(bucket_valid_raw <= 16);
+    kani::assume(source_impaired_raw <= 16);
+    kani::assume(bucket_impaired_raw <= 16);
+    kani::assume(source_receivable_raw <= 16);
+    kani::assume(bucket_consumed_raw <= 16);
+    kani::assume(source_spent_raw <= 16);
+    kani::assume(rate_raw <= 16);
+    kani::assume(header_fresh_raw <= 16);
+    kani::assume(vault_raw <= 32);
+
+    let claim_atoms = 16u128;
+    let claim_num = claim_atoms * BOUND_SCALE;
+    let source_fresh_num = source_fresh_raw as u128 * BOUND_SCALE;
+    let bucket_fresh_num = bucket_fresh_raw as u128 * BOUND_SCALE;
+    let source_valid_num = source_valid_raw as u128 * BOUND_SCALE;
+    let bucket_valid_num = bucket_valid_raw as u128 * BOUND_SCALE;
+    let source_impaired_num = source_impaired_raw as u128 * BOUND_SCALE;
+    let bucket_impaired_num = bucket_impaired_raw as u128 * BOUND_SCALE;
+    let source_receivable_num = source_receivable_raw as u128 * BOUND_SCALE;
+    let bucket_consumed_num = bucket_consumed_raw as u128 * BOUND_SCALE;
+    let source_spent_num = source_spent_raw as u128 * BOUND_SCALE;
+    let rate_num = rate_raw as u128 * (CREDIT_RATE_SCALE / claim_atoms);
+
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    header.vault = V16PodU128::new(vault_raw as u128);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim_atoms);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(header_fresh_raw as u128 * BOUND_SCALE);
+
+    let market_id = markets[1].engine.asset.market_id.get();
+    markets[1].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: source_fresh_num,
+            spent_backing_num: source_spent_num,
+            provider_receivable_num: source_receivable_num,
+            valid_liened_backing_num: source_valid_num,
+            impaired_liened_backing_num: source_impaired_num,
+            credit_rate_num: rate_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: bucket_fresh_num,
+        valid_liened_backing_num: bucket_valid_num,
+        consumed_liened_backing_num: bucket_consumed_num,
+        impaired_liened_backing_num: bucket_impaired_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    kani::assume(market.validate_shape() == Ok(()));
+    kani::cover!(
+        bucket_fresh_num > 0 && bucket_valid_num > 0 && rate_num < CREDIT_RATE_SCALE,
+        "source domain combines fresh backing, a live lien, and a partial credit rate"
+    );
+    kani::cover!(
+        bucket_consumed_num > 0 && source_spent_num > source_receivable_num,
+        "provider receivable tracks consumed backing inside cumulative spend"
+    );
+    kani::cover!(
+        bucket_impaired_num > 0 && bucket_valid_num > 0,
+        "persisted source domain includes valid and impaired backing history"
+    );
+    kani::cover!(
+        u128::from(vault_raw) > u128::from(header_fresh_raw) && bucket_fresh_raw > 0,
+        "provider principal remains senior with independent vault slack"
+    );
+
+    let accepted_slot = &market.markets[1].engine;
+    let source = accepted_slot.source_credit_long.try_to_runtime().unwrap();
+    let bucket = accepted_slot.backing_long.try_to_runtime().unwrap();
+    assert_eq!(
+        source.fresh_reserved_backing_num,
+        bucket.fresh_unliened_backing_num + bucket.valid_liened_backing_num
+    );
+    assert_eq!(
+        source.valid_liened_backing_num,
+        bucket.valid_liened_backing_num
+    );
+    assert_eq!(
+        source.impaired_liened_backing_num,
+        bucket.impaired_liened_backing_num
+    );
+    assert_eq!(
+        source.provider_receivable_num,
+        bucket.consumed_liened_backing_num
+    );
+    assert!(source.spent_backing_num >= source.provider_receivable_num);
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        source.fresh_reserved_backing_num
+    );
+    assert!(
+        market.header.source_fresh_backing_total_num.get() / BOUND_SCALE
+            <= market.header.vault.get()
+    );
+    let available_num = source.fresh_reserved_backing_num - source.valid_liened_backing_num;
+    let expected_rate_num = (available_num * CREDIT_RATE_SCALE / claim_num).min(CREDIT_RATE_SCALE);
+    assert_eq!(source.credit_rate_num, expected_rate_num);
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
