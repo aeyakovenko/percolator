@@ -13702,6 +13702,155 @@ fn proof_v16_maintenance_fee_reward_and_budget_credit_preserve_domain_insurance(
 }
 
 #[kani::proof]
+#[kani::unwind(56)]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
+fn proof_v16_liquidation_reward_and_fee_redirect_preserve_domain_isolation() {
+    // Liquidation fee creation and the arbitrary-u128 insurance-to-cranker
+    // transfer are proved separately. This starts at that proved post-reward
+    // state and composes every bounded `(reward, retained)` partition with
+    // retained-fee routing to the liquidated asset and asset-0 redirect.
+    let reward = kani::any::<u8>() as u128;
+    let retained = kani::any::<u8>() as u128;
+    let fee = reward + retained;
+    let redirect_bps = if kani::any::<bool>() {
+        0u128
+    } else if kani::any::<bool>() {
+        3_333u128
+    } else {
+        10_000u128
+    };
+    let redirect = retained * redirect_bps / 10_000;
+    let local = retained - redirect;
+    let local_long = local / 2;
+    let local_short = local - local_long;
+    let base_long = redirect / 2;
+    let base_short = redirect - base_long;
+
+    let base_long_budget = 2u128;
+    let base_short_budget = 1u128;
+    let asset_long_budget = 5u128;
+    let asset_short_budget = 2u128;
+    let prior_unbudgeted = 1u128;
+    let junior_surplus = 2u128;
+    let post_fee_c_tot = 10u128;
+    let prior_c_tot = post_fee_c_tot + fee;
+    let prior_budget_total =
+        base_long_budget + base_short_budget + asset_long_budget + asset_short_budget;
+    let prior_insurance = prior_budget_total + prior_unbudgeted;
+    let prior_vault = prior_c_tot + prior_insurance + junior_surplus;
+
+    let (mut header, mut markets, _) = two_market_view_fixture();
+    header.vault = V16PodU128::new(prior_vault);
+    header.c_tot = V16PodU128::new(post_fee_c_tot + reward);
+    header.insurance = V16PodU128::new(prior_insurance + fee - reward);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(prior_budget_total);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(base_long_budget);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(base_short_budget);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(asset_long_budget);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(asset_short_budget);
+    let asset_zero_before = markets[0].engine.asset;
+    let asset_one_before = markets[1].engine.asset;
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    if local_long != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(2, local_long)
+            .unwrap();
+    }
+    if local_short != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(3, local_short)
+            .unwrap();
+    }
+    if base_long != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(0, base_long)
+            .unwrap();
+    }
+    if base_short != 0 {
+        market
+            .credit_domain_insurance_budget_not_atomic(1, base_short)
+            .unwrap();
+    }
+
+    kani::cover!(fee == 0, "liquidation fee routing covers a zero-fee no-op");
+    kani::cover!(
+        fee > 0 && reward == 0,
+        "liquidation fee routing covers no cranker reward"
+    );
+    kani::cover!(
+        fee > 1 && reward > 0 && reward < fee,
+        "liquidation fee routing covers a partial cranker reward"
+    );
+    kani::cover!(
+        fee > 0 && reward == fee && retained == 0,
+        "liquidation fee routing covers full cranker reward"
+    );
+    kani::cover!(
+        retained > 0 && redirect == 0,
+        "liquidation fee routing covers no asset-0 redirect"
+    );
+    kani::cover!(
+        retained > 0 && redirect == retained && local == 0,
+        "liquidation fee routing covers full asset-0 redirect"
+    );
+    kani::cover!(
+        redirect > 0 && local > 0 && (base_short > base_long || local_short > local_long),
+        "liquidation fee routing covers partial redirect with odd rounding"
+    );
+
+    assert_eq!(
+        reward + local_long + local_short + base_long + base_short,
+        fee
+    );
+    assert_eq!(market.header.vault.get(), prior_vault);
+    assert_eq!(market.header.c_tot.get(), post_fee_c_tot + reward);
+    assert_eq!(
+        market.header.insurance.get(),
+        prior_insurance + fee - reward
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        prior_budget_total + retained
+    );
+    assert_eq!(
+        market.header.c_tot.get() + market.header.insurance.get(),
+        prior_c_tot + prior_insurance
+    );
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        prior_unbudgeted
+    );
+    assert_eq!(market.kani_residual(), residual_before);
+
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        base_long_budget + base_long
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        base_short_budget + base_short
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        asset_long_budget + local_long
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_short.get(),
+        asset_short_budget + local_short
+    );
+    assert_eq!(market.markets[0].engine.asset, asset_zero_before);
+    assert_eq!(market.markets[1].engine.asset, asset_one_before);
+    assert_eq!(
+        [market.markets[0].wrapper, market.markets[1].wrapper],
+        wrappers_before
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
