@@ -24,8 +24,8 @@ use percolator::v16::{
     BackingBucketV16Account, BatchTradeOutcomeV16, CloseProgressLedgerV16,
     CloseProgressLedgerV16Account, EngineAssetSlotV16Account, HLockLaneV16, HealthCertV16,
     HealthCertV16Account, InsuranceCreditReservationV16, InsuranceCreditReservationV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16View, MarketGroupV16ViewMut,
+    PermissionlessCrankActionV16, PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
     PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
     PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
@@ -1793,6 +1793,113 @@ fn proof_v16_account_validator_caps_source_lien_credit_by_claim_and_backing() {
     if source.source_lien_counterparty_backing_num.get() == 0 {
         assert_eq!(source.source_lien_fee_last_slot.get(), 0);
     }
+}
+
+// Active-leg side-epoch soundness at the full persisted-account boundary.
+// Side and both epoch snapshots are independent persisted candidates;
+// successful production validation must allow only the current side epoch (or
+// its single ResetPending predecessor). Stale market-ID rejection is covered
+// separately by proof_v16_reused_asset_slot_rejects_stale_market_id_leg.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_account_validator_binds_active_leg_side_epoch() {
+    let epoch_raw: u8 = kani::any();
+    let b_epoch_raw: u8 = kani::any();
+    let is_short: bool = kani::any();
+    let side_mode_raw: u8 = kani::any();
+    kani::assume(epoch_raw <= 3);
+    kani::assume(b_epoch_raw <= 3);
+    kani::assume(side_mode_raw <= 2);
+
+    let (header, mut markets, mut account_header) = one_market_view_fixture();
+    markets[0].engine.asset.epoch_long = V16PodU64::new(2);
+    markets[0].engine.asset.epoch_short = V16PodU64::new(2);
+    markets[0].engine.asset.mode_long = side_mode_raw;
+    markets[0].engine.asset.mode_short = side_mode_raw;
+
+    let basis = if is_short {
+        -(POS_SCALE as i128)
+    } else {
+        POS_SCALE as i128
+    };
+    account_header.legs[0] = PortfolioLegV16Account {
+        active: 1,
+        asset_index: V16PodU32::new(0),
+        market_id: markets[0].engine.asset.market_id,
+        side: if is_short { 1 } else { 0 },
+        basis_pos_q: V16PodI128::new(basis),
+        a_basis: V16PodU128::new(ADL_ONE),
+        k_snap: V16PodI128::new(0),
+        f_snap: V16PodI128::new(0),
+        epoch_snap: V16PodU64 {
+            bytes: [epoch_raw, 0, 0, 0, 0, 0, 0, 0],
+        },
+        loss_weight: V16PodU128::new(POS_SCALE),
+        b_snap: V16PodU128::new(0),
+        b_rem: V16PodU128::new(0),
+        b_epoch_snap: V16PodU64 {
+            bytes: [b_epoch_raw, 0, 0, 0, 0, 0, 0, 0],
+        },
+        b_stale: 0,
+        stale: 0,
+    };
+    let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+
+    let market = MarketGroupV16View::new(&header, &markets);
+    let account = PortfolioV16View::new(&account_header);
+    if account.validate_with_market(&market).is_err() {
+        return;
+    }
+    let leg = account.header.legs[0].try_to_runtime().unwrap();
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    let (side_epoch, mode) = match leg.side {
+        SideV16::Long => (asset.epoch_long, asset.mode_long),
+        SideV16::Short => (asset.epoch_short, asset.mode_short),
+    };
+    kani::cover!(
+        leg.side == SideV16::Long && leg.epoch_snap == side_epoch && mode == SideModeV16::Normal,
+        "current long side epoch validates"
+    );
+    kani::cover!(
+        leg.side == SideV16::Short && leg.epoch_snap == side_epoch && mode == SideModeV16::Normal,
+        "current short side epoch validates"
+    );
+    kani::cover!(
+        leg.epoch_snap == side_epoch && mode == SideModeV16::DrainOnly,
+        "current side epoch validates during side drain"
+    );
+    kani::cover!(
+        leg.epoch_snap == 1 && leg.b_epoch_snap == 1 && mode == SideModeV16::ResetPending,
+        "ResetPending accepts exactly the immediately preceding side epoch"
+    );
+    kani::cover!(
+        leg.epoch_snap == 2 && leg.b_epoch_snap == 2 && mode == SideModeV16::ResetPending,
+        "ResetPending also accepts the current side epoch"
+    );
+
+    assert!(active_bitmap_get(
+        account.header.active_bitmap.map(V16PodU64::get),
+        0
+    ));
+    assert_eq!(
+        active_bitmap_count_ones(account.header.active_bitmap.map(V16PodU64::get)),
+        1
+    );
+    assert_eq!(leg.asset_index, 0);
+    assert_eq!(leg.market_id, asset.market_id);
+    assert!(matches!(
+        asset.lifecycle,
+        AssetLifecycleV16::Active | AssetLifecycleV16::DrainOnly | AssetLifecycleV16::Recovery
+    ));
+    assert_eq!(leg.b_epoch_snap, leg.epoch_snap);
+    assert!(
+        leg.epoch_snap == side_epoch
+            || (mode == SideModeV16::ResetPending
+                && leg.epoch_snap.checked_add(1) == Some(side_epoch))
+    );
 }
 
 #[kani::proof]
