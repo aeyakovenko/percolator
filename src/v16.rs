@@ -5235,9 +5235,16 @@ impl<'a> PortfolioV16ViewMut<'a> {
     fn compact_source_domains(&mut self) {
         let mut write = 0usize;
         let mut read = 0usize;
+        let mut ordered = true;
+        let mut previous_domain = None;
         while read < PORTFOLIO_SOURCE_DOMAIN_CAP {
             let source = self.header.source_domains[read];
             if source.is_occupied() {
+                let domain = source.domain.get();
+                if previous_domain.is_some_and(|previous| previous > domain) {
+                    ordered = false;
+                }
+                previous_domain = Some(domain);
                 if write != read {
                     self.header.source_domains[write] = source;
                     self.header.source_domains[read] = PortfolioSourceDomainV16Account::default();
@@ -5246,9 +5253,25 @@ impl<'a> PortfolioV16ViewMut<'a> {
             }
             read += 1;
         }
+        let occupied = write;
         while write < PORTFOLIO_SOURCE_DOMAIN_CAP {
             self.header.source_domains[write] = PortfolioSourceDomainV16Account::default();
             write += 1;
+        }
+        if !ordered {
+            let mut index = 1usize;
+            while index < occupied {
+                let source = self.header.source_domains[index];
+                let mut insert = index;
+                while insert != 0
+                    && self.header.source_domains[insert - 1].domain.get() > source.domain.get()
+                {
+                    self.header.source_domains[insert] = self.header.source_domains[insert - 1];
+                    insert -= 1;
+                }
+                self.header.source_domains[insert] = source;
+                index += 1;
+            }
         }
     }
 }

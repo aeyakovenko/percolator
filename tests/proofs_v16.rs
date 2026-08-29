@@ -2090,6 +2090,59 @@ fn proof_v16_mutable_view_compacts_persisted_source_domain_tail() {
     assert_eq!(source.source_claim_bound_num.get(), claim_num);
 }
 
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_mutable_view_canonicalizes_source_domain_order() {
+    let domain_a: u8 = kani::any();
+    let domain_b: u8 = kani::any();
+    kani::assume(domain_a < 4);
+    kani::assume(domain_b < 4);
+    kani::assume(domain_a != domain_b);
+    let (_, _, mut account_header) = one_market_view_fixture();
+    account_header.source_domains[0].domain = V16PodU32::new(u32::from(domain_a));
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[0].source_claim_bound_num =
+        V16PodU128::new((u128::from(domain_a) + 1) * BOUND_SCALE);
+    account_header.source_domains[2].domain = V16PodU32::new(u32::from(domain_b));
+    account_header.source_domains[2].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[2].source_claim_bound_num =
+        V16PodU128::new((u128::from(domain_b) + 1) * BOUND_SCALE);
+
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let low = domain_a.min(domain_b);
+    let high = domain_a.max(domain_b);
+
+    kani::cover!(
+        domain_a > domain_b,
+        "descending persisted source domains are reordered"
+    );
+    assert_eq!(
+        account.header.source_domains[0].domain.get(),
+        u32::from(low)
+    );
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+        (u128::from(low) + 1) * BOUND_SCALE
+    );
+    assert_eq!(
+        account.header.source_domains[1].domain.get(),
+        u32::from(high)
+    );
+    assert_eq!(
+        account.header.source_domains[1]
+            .source_claim_bound_num
+            .get(),
+        (u128::from(high) + 1) * BOUND_SCALE
+    );
+    assert_eq!(
+        account.header.source_domains[2],
+        PortfolioSourceDomainV16Account::default()
+    );
+}
+
 // Domain-isolation theorem for every representable two-domain claim rank. The
 // affected domain is exhausted before fallback can touch an unrelated domain,
 // while the aggregate claim rank falls by exactly the requested B loss.

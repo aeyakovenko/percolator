@@ -5447,6 +5447,37 @@ fn v16_mutable_view_compacts_persisted_domain_indexed_source_claim_before_deposi
 }
 
 #[test]
+fn v16_mutable_view_canonicalizes_persisted_source_domain_order() {
+    let mut account_header = account_fixture(2, 120);
+    account_header.source_domains[0].domain = V16PodU32::new(3);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(2);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(3 * BOUND_SCALE);
+    account_header.source_domains[2].domain = V16PodU32::new(1);
+    account_header.source_domains[2].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[2].source_claim_bound_num = V16PodU128::new(BOUND_SCALE);
+
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    assert_eq!(account.header.source_domains[0].domain.get(), 1);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+        BOUND_SCALE
+    );
+    assert_eq!(account.header.source_domains[1].domain.get(), 3);
+    assert_eq!(
+        account.header.source_domains[1]
+            .source_claim_bound_num
+            .get(),
+        3 * BOUND_SCALE
+    );
+    assert!(account.header.source_domains[2..]
+        .iter()
+        .all(|source| *source == PortfolioSourceDomainV16Account::default()));
+}
+
+#[test]
 fn v16_trade_created_parked_source_claim_survives_later_deposit() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut long_header = account_fixture(1, 21);
