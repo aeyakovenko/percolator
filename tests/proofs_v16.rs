@@ -2279,6 +2279,119 @@ fn proof_v16_public_market_activation_starts_domains_unfunded_and_value_neutral(
 }
 
 #[kani::proof]
+#[kani::unwind(56)]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
+fn proof_v16_permissionless_asset_init_fee_funds_only_asset_zero_insurance() {
+    let fee = kani::any::<u8>() as u128;
+    kani::assume(fee > 0);
+    let base_long_credit = fee / 2;
+    let base_short_credit = fee - base_long_credit;
+    let base_long_budget = 3u128;
+    let base_short_budget = 5u128;
+    let prior_budget_total = base_long_budget + base_short_budget;
+    let prior_unbudgeted = 2u128;
+    let prior_insurance = prior_budget_total + prior_unbudgeted;
+    let c_tot = 7u128;
+    let junior_surplus = 4u128;
+    let prior_vault = c_tot + prior_insurance + junior_surplus;
+
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+    ];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    header.vault = V16PodU128::new(prior_vault);
+    header.c_tot = V16PodU128::new(c_tot);
+    header.insurance = V16PodU128::new(prior_insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(prior_budget_total);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(base_long_budget);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(base_short_budget);
+    let asset_zero_before = markets[0].engine.asset;
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    market.activate_empty_market_not_atomic(1, 120, 2).unwrap();
+    if base_long_credit != 0 {
+        market
+            .deposit_domain_insurance_not_atomic(0, base_long_credit)
+            .unwrap();
+    }
+    market
+        .deposit_domain_insurance_not_atomic(1, base_short_credit)
+        .unwrap();
+
+    kani::cover!(
+        fee == 1 && base_long_credit == 0 && base_short_credit == 1,
+        "permissionless init fee covers minimum odd fee"
+    );
+    kani::cover!(
+        fee > 1 && fee % 2 == 0 && base_long_credit == base_short_credit,
+        "permissionless init fee covers even split"
+    );
+    kani::cover!(
+        fee > 1 && fee % 2 == 1 && base_short_credit == base_long_credit + 1,
+        "permissionless init fee covers odd split rounding"
+    );
+
+    assert_eq!(base_long_credit + base_short_credit, fee);
+    assert_eq!(market.header.vault.get(), prior_vault + fee);
+    assert_eq!(market.header.c_tot.get(), c_tot);
+    assert_eq!(market.header.insurance.get(), prior_insurance + fee);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        prior_budget_total + fee
+    );
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        prior_unbudgeted
+    );
+    assert_eq!(market.kani_residual(), residual_before);
+
+    assert_eq!(market.markets[0].engine.asset, asset_zero_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        base_long_budget + base_long_credit
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        base_short_budget + base_short_credit
+    );
+    let new_asset = market.markets[1].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(new_asset.lifecycle, AssetLifecycleV16::Active);
+    assert_eq!(new_asset.market_id, 2);
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_short.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_spent_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_spent_short.get(),
+        0
+    );
+    assert_eq!(market.domain_insurance_withdraw_capacity(2), Ok(0));
+    assert_eq!(market.domain_insurance_withdraw_capacity(3), Ok(0));
+    assert_eq!(
+        [market.markets[0].wrapper, market.markets[1].wrapper],
+        wrappers_before
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_market_capacity_growth_is_monotone_and_value_neutral() {
