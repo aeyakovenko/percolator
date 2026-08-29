@@ -2229,6 +2229,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_asset_state(asset_index, asset)
     }
 
+    pub fn kani_set_pending_domain_loss_barrier_count(
+        &mut self,
+        asset_index: usize,
+        side: SideV16,
+        value: u64,
+    ) -> V16Result<()> {
+        self.set_pending_domain_loss_barrier_count(asset_index, side, value)
+    }
+
     pub fn kani_reduce_matching_open_interest_for_unilateral_close(
         &mut self,
         asset_index: usize,

@@ -19629,6 +19629,114 @@ fn proof_v16_asset_one_state_setter_reconciles_blockers_and_isolates_asset_zero(
     prove_v16_asset_state_setter_reconciles_blockers_and_isolates_slot::<1>();
 }
 
+// Close/recovery barriers are the only payout blockers updated outside
+// set_asset_state. Prove their production setter maintains the same O(1) slab
+// sum and writes only the requested side of the selected asset.
+fn prove_v16_barrier_setter_reconciles_blockers_and_isolates_slot<const SELECTED: usize>() {
+    let update_short: bool = kani::any();
+    let old_long: bool = kani::any();
+    let old_short: bool = kani::any();
+    let new_value: bool = kani::any();
+    let unrelated = 1 - SELECTED;
+    let side = if update_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    const SELECTED_ASSET_BLOCKERS: u64 = 2;
+    const UNRELATED_ASSET_BLOCKERS: u64 = 3;
+    let old_selected_blockers =
+        SELECTED_ASSET_BLOCKERS + u64::from(old_long) + u64::from(old_short);
+    let expected_long = if update_short { old_long } else { new_value };
+    let expected_short = if update_short { new_value } else { old_short };
+    let new_selected_blockers =
+        SELECTED_ASSET_BLOCKERS + u64::from(expected_long) + u64::from(expected_short);
+
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    let mut selected_asset = markets[SELECTED].engine.asset.try_to_runtime().unwrap();
+    selected_asset.stored_pos_count_long = SELECTED_ASSET_BLOCKERS;
+    markets[SELECTED].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+    markets[SELECTED].engine.pending_domain_loss_barrier_long = V16PodU64::new(u64::from(old_long));
+    markets[SELECTED].engine.pending_domain_loss_barrier_short =
+        V16PodU64::new(u64::from(old_short));
+
+    let mut unrelated_asset = markets[unrelated].engine.asset.try_to_runtime().unwrap();
+    unrelated_asset.stored_pos_count_short = UNRELATED_ASSET_BLOCKERS;
+    markets[unrelated].engine.asset = AssetStateV16Account::from_runtime(&unrelated_asset);
+    header.resolved_payout_blocker_count =
+        V16PodU64::new(old_selected_blockers + UNRELATED_ASSET_BLOCKERS);
+
+    let header_before = header;
+    let selected_before = markets[SELECTED].engine;
+    let unrelated_before = markets[unrelated];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(market.validate_shape(), Ok(()));
+    let result =
+        market.kani_set_pending_domain_loss_barrier_count(SELECTED, side, u64::from(new_value));
+
+    kani::cover!(
+        !update_short && !old_long && new_value,
+        "long-domain barrier opens"
+    );
+    kani::cover!(
+        !update_short && old_long && !new_value,
+        "long-domain barrier clears"
+    );
+    kani::cover!(
+        update_short && !old_short && new_value,
+        "short-domain barrier opens"
+    );
+    kani::cover!(
+        update_short && old_short && !new_value,
+        "short-domain barrier clears"
+    );
+    kani::cover!(
+        (if update_short { old_short } else { old_long }) == new_value,
+        "barrier setter is idempotent at the aggregate boundary"
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(
+        market.header.resolved_payout_blocker_count.get(),
+        new_selected_blockers + UNRELATED_ASSET_BLOCKERS
+    );
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_blocker_count =
+        V16PodU64::new(new_selected_blockers + UNRELATED_ASSET_BLOCKERS);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    let mut expected_selected = selected_before;
+    expected_selected.pending_domain_loss_barrier_long = V16PodU64::new(u64::from(expected_long));
+    expected_selected.pending_domain_loss_barrier_short = V16PodU64::new(u64::from(expected_short));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[SELECTED].engine
+    ));
+    assert_eq!(market.markets[unrelated].wrapper, unrelated_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[unrelated].engine,
+        &unrelated_before.engine
+    ));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_barrier_setter_reconciles_blockers_and_isolates_asset_one() {
+    prove_v16_barrier_setter_reconciles_blockers_and_isolates_slot::<0>();
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_barrier_setter_reconciles_blockers_and_isolates_asset_zero() {
+    prove_v16_barrier_setter_reconciles_blockers_and_isolates_slot::<1>();
+}
+
 // Per-domain insurance isolation at the persisted-state boundary. For a domain
 // in the later asset slot, full-market validation accepts a symbolic canonical
 // reservation and rejects each independently corrupted budget, mirror ledger,
