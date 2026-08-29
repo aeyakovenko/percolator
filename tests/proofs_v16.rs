@@ -19110,6 +19110,145 @@ fn proof_v16_live_market_validator_balances_oi_and_preserves_progress_witnesses(
     }
 }
 
+// Per-domain insurance isolation at the persisted-state boundary. For a domain
+// in the later asset slot, successful full-market validation implies that spent
+// insurance plus every live reservation fits inside that domain's own budget,
+// the source and reservation ledgers agree exactly, and both O(1) header totals
+// reconcile without borrowing capacity from pooled insurance.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_market_validator_isolates_domain_insurance_reservations() {
+    let budget_raw: u8 = kani::any();
+    let spent_raw: u8 = kani::any();
+    let source_reserved_raw: u8 = kani::any();
+    let reservation_reserved_raw: u8 = kani::any();
+    let source_valid_raw: u8 = kani::any();
+    let reservation_valid_raw: u8 = kani::any();
+    let source_impaired_raw: u8 = kani::any();
+    let reservation_impaired_raw: u8 = kani::any();
+    let header_reserved_raw: u8 = kani::any();
+    let header_remaining_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    kani::assume(budget_raw <= 16);
+    kani::assume(spent_raw <= 16);
+    kani::assume(source_reserved_raw <= 16);
+    kani::assume(reservation_reserved_raw <= 16);
+    kani::assume(source_valid_raw <= 16);
+    kani::assume(reservation_valid_raw <= 16);
+    kani::assume(source_impaired_raw <= 16);
+    kani::assume(reservation_impaired_raw <= 16);
+    kani::assume(header_reserved_raw <= 16);
+    kani::assume(header_remaining_raw <= 16);
+    kani::assume(insurance_raw <= 32);
+
+    let budget = budget_raw as u128;
+    let spent = spent_raw as u128;
+    let source_reserved_num = source_reserved_raw as u128 * BOUND_SCALE;
+    let reservation_reserved_num = reservation_reserved_raw as u128 * BOUND_SCALE;
+    let source_valid_num = source_valid_raw as u128 * BOUND_SCALE;
+    let reservation_valid_num = reservation_valid_raw as u128 * BOUND_SCALE;
+    let source_impaired_num = source_impaired_raw as u128 * BOUND_SCALE;
+    let reservation_impaired_num = reservation_impaired_raw as u128 * BOUND_SCALE;
+    let insurance = insurance_raw as u128;
+
+    let (mut header, mut markets, _) = two_market_direct_view_fixture();
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
+    header.source_insurance_credit_reserved_total_atoms =
+        V16PodU128::new(header_reserved_raw as u128);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(header_remaining_raw as u128);
+
+    let slot = &mut markets[1].engine;
+    slot.insurance_domain_budget_long = V16PodU128::new(budget);
+    slot.insurance_domain_spent_long = V16PodU128::new(spent);
+    slot.source_credit_long = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        insurance_credit_reserved_num: source_reserved_num,
+        valid_liened_insurance_num: source_valid_num,
+        impaired_liened_insurance_num: source_impaired_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    slot.insurance_reservation_long =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: reservation_reserved_num,
+            valid_liened_insurance_num: reservation_valid_num,
+            impaired_liened_insurance_num: reservation_impaired_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    kani::assume(market.validate_shape() == Ok(()));
+    kani::cover!(
+        spent > 0
+            && source_valid_num > 0
+            && source_impaired_num == 0
+            && spent + u128::from(source_reserved_raw) < budget,
+        "later-slot domain accepts spent insurance plus a live valid lien"
+    );
+    kani::cover!(
+        source_impaired_num > 0 && source_valid_num > 0,
+        "domain isolation includes simultaneous valid and impaired liens"
+    );
+    kani::cover!(
+        budget > 0 && spent + u128::from(source_reserved_raw) == budget,
+        "domain isolation reaches an exactly saturated budget"
+    );
+    kani::cover!(
+        insurance > budget && source_reserved_raw > 0,
+        "pooled insurance slack cannot enlarge the selected domain budget"
+    );
+
+    let accepted_slot = &market.markets[1].engine;
+    let source = accepted_slot.source_credit_long.try_to_runtime().unwrap();
+    let reservation = accepted_slot
+        .insurance_reservation_long
+        .try_to_runtime()
+        .unwrap();
+    let reserved_atoms = source.insurance_credit_reserved_num / BOUND_SCALE;
+    assert!(
+        accepted_slot.insurance_domain_spent_long.get()
+            <= accepted_slot.insurance_domain_budget_long.get()
+    );
+    assert!(
+        accepted_slot.insurance_domain_spent_long.get() + reserved_atoms
+            <= accepted_slot.insurance_domain_budget_long.get()
+    );
+    assert_eq!(
+        source.insurance_credit_reserved_num,
+        reservation.insurance_credit_reserved_num
+    );
+    assert_eq!(
+        source.valid_liened_insurance_num,
+        reservation.valid_liened_insurance_num
+    );
+    assert_eq!(
+        source.impaired_liened_insurance_num,
+        reservation.impaired_liened_insurance_num
+    );
+    assert!(
+        reservation.valid_liened_insurance_num + reservation.impaired_liened_insurance_num
+            <= reservation.insurance_credit_reserved_num
+    );
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        reserved_atoms
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        accepted_slot.insurance_domain_budget_long.get()
+            - accepted_slot.insurance_domain_spent_long.get()
+    );
+    assert!(reserved_atoms <= market.header.insurance.get());
+    assert!(
+        market.header.insurance_domain_budget_remaining_total.get()
+            <= market.header.insurance.get()
+    );
+}
+
 // ROADMAP Phase 1 (Pillar F soundness lemmas, batched): validate_shape's Ok-exit
 // implies the header-scalar invariants that DON'T depend on account aggregates —
 // junior layers within vault (U2) and a monotone clock (U9). The PnL-aggregate
