@@ -52,6 +52,21 @@ fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
 }
 
+// Composition proofs assume the independently checked shape invariant so they
+// can spend their solver budget on the production transition itself.
+fn kani_assume_portfolio_shape_valid<'a: 'a, 'm, T>(
+    _account: &PortfolioV16View<'a>,
+    _market: &MarketGroupV16View<'m, T>,
+) -> Result<(), V16Error> {
+    Ok(())
+}
+
+fn kani_assume_market_shape_valid<'a: 'a, T>(
+    _market: &MarketGroupV16View<'a, T>,
+) -> Result<(), V16Error> {
+    Ok(())
+}
+
 fn empty_account_fixture(market_id: [u8; 32], account_tag: u8) -> PortfolioAccountV16Account {
     let mut account_id = [0u8; 32];
     account_id[0] = account_tag;
@@ -13084,43 +13099,148 @@ fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_reco
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    kani_assume_portfolio_shape_valid
+)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
 fn proof_v16_view_fee_sync_settles_negative_pnl_before_fee() {
-    let capital_raw: u8 = kani::any();
-    let loss_raw: u8 = kani::any();
-    let fee_rate_raw: u8 = kani::any();
-    kani::assume((1..=100).contains(&capital_raw));
-    kani::assume((1..=100).contains(&loss_raw));
-    kani::assume((1..=100).contains(&fee_rate_raw));
-    kani::assume(loss_raw < capital_raw);
-    let capital = capital_raw as u128;
-    let loss = loss_raw as u128;
-    let fee_rate = fee_rate_raw as u128;
-    let expected_fee = (capital - loss).min(fee_rate * 10);
+    // Principal and fee kernels are universal elsewhere. Independent Boolean
+    // value classes keep this full production composition below 300s while
+    // spanning 16 nontrivial pre-states and both economic fee branches.
+    let capital = if kani::any::<bool>() { 7u128 } else { 8u128 };
+    let loss = if kani::any::<bool>() { 2u128 } else { 3u128 };
+    let fee_rate = if kani::any::<bool>() { 1u128 } else { 3u128 };
+    let now_slot = if kani::any::<bool>() { 2u64 } else { 3u64 };
+    let requested_fee = fee_rate * now_slot as u128;
+    let expected_fee = (capital - loss).min(requested_fee);
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.vault = V16PodU128::new(capital);
     header.c_tot = V16PodU128::new(capital);
     header.negative_pnl_account_count = V16PodU64::new(1);
-    header.current_slot = V16PodU64::new(10);
-    header.slot_last = V16PodU64::new(10);
+    header.current_slot = V16PodU64::new(now_slot);
+    header.slot_last = V16PodU64::new(now_slot);
     account_header.capital = V16PodU128::new(capital);
     account_header.pnl = V16PodI128::new(-(loss as i128));
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     let charged = market
-        .sync_account_fee_to_slot_not_atomic(&mut account, 10, fee_rate)
+        .sync_account_fee_to_slot_not_atomic(&mut account, now_slot, fee_rate)
         .unwrap();
 
     kani::cover!(
-        loss > 1 && fee_rate > capital - loss && account.header.pnl.get() == 0,
+        loss > 1 && expected_fee == capital - loss,
         "view fee sync settles realized loss before capping fee to remaining capital"
     );
+    kani::cover!(
+        loss > 1 && expected_fee == requested_fee && expected_fee < capital - loss,
+        "view fee sync charges the exact uncapped elapsed-slot fee after loss settlement"
+    );
     assert_eq!(charged, expected_fee);
-    assert_eq!(account.header.pnl.get(), 0);
-    assert_eq!(account.header.capital.get(), capital - loss - expected_fee);
+    assert_eq!(market.header.vault.get(), capital);
     assert_eq!(market.header.c_tot.get(), capital - loss - expected_fee);
     assert_eq!(market.header.insurance.get(), expected_fee);
-    assert_eq!(market.header.vault.get(), capital);
+    assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    assert_eq!(market.header.bankruptcy_hlock_active, 0);
+    assert_eq!(
+        market.header.c_tot.get() + market.header.insurance.get(),
+        capital - loss
+    );
+    assert_eq!(market.kani_residual(), residual_before + loss);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.capital.get(), capital - loss - expected_fee);
+    assert_eq!(
+        account.header.residual_crystallized_loss_atoms_total.get(),
+        loss
+    );
+    assert_eq!(account.header.residual_spent_principal_atoms_total.get(), 0);
+    assert_eq!(account.header.residual_received_atoms_total.get(), 0);
+    assert_eq!(account.header.funding_long_paid_atoms_total.get(), 0);
+    assert_eq!(account.header.funding_long_received_atoms_total.get(), 0);
+    assert_eq!(account.header.funding_short_paid_atoms_total.get(), 0);
+    assert_eq!(account.header.funding_short_received_atoms_total.get(), 0);
+    assert_eq!(account.header.last_fee_slot.get(), now_slot);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    kani_assume_portfolio_shape_valid
+)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
+fn proof_v16_frame_fee_sync_touches_only_declared_state() {
+    let capped: bool = kani::any();
+    let (capital, loss, now_slot, fee_rate) = if capped {
+        (7u128, 3u128, 2u64, 3u128)
+    } else {
+        (8u128, 2u128, 3u64, 1u128)
+    };
+    let requested_fee = fee_rate * now_slot as u128;
+    let expected_fee = (capital - loss).min(requested_fee);
+    let insurance = 2u128;
+    let surplus = 3u128;
+    let prior_crystallized = 4u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.current_slot = V16PodU64::new(now_slot);
+    header.slot_last = V16PodU64::new(now_slot);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+    account_header.residual_crystallized_loss_atoms_total = V16PodU128::new(prior_crystallized);
+    account_header.funding_long_paid_atoms_total = V16PodU128::new(5);
+    account_header.funding_long_received_atoms_total = V16PodU128::new(6);
+    account_header.funding_short_paid_atoms_total = V16PodU128::new(7);
+    account_header.funding_short_received_atoms_total = V16PodU128::new(8);
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let wrapper_before = markets[0].wrapper;
+    let account_before = account_header;
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        let charged = market
+            .sync_account_fee_to_slot_not_atomic(&mut account, now_slot, fee_rate)
+            .unwrap();
+        assert_eq!(charged, expected_fee);
+    }
+
+    kani::cover!(
+        capped,
+        "fee-sync frame covers capital-capped fee after loss"
+    );
+    kani::cover!(!capped, "fee-sync frame covers uncapped fee after loss");
+    let mut expected_header = header_before;
+    expected_header.c_tot = V16PodU128::new(capital - loss - expected_fee);
+    expected_header.insurance = V16PodU128::new(insurance + expected_fee);
+    expected_header.negative_pnl_account_count = V16PodU64::new(0);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        &header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &markets[0].engine
+    ));
+    assert_eq!(markets[0].wrapper, wrapper_before);
+
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.capital = V16PodU128::new(capital - loss - expected_fee);
+    expected_account.residual_crystallized_loss_atoms_total =
+        V16PodU128::new(prior_crystallized + loss);
+    expected_account.last_fee_slot = V16PodU64::new(now_slot);
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        &account_header
+    ));
 }
 
 #[kani::proof]
@@ -13130,6 +13250,8 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
     let capital_raw: u8 = kani::any();
     let hidden_loss_raw: u8 = kani::any();
     let requested_fee_raw: u8 = kani::any();
+    let insurance_raw: u8 = kani::any();
+    let prior_crystallized_raw: u8 = kani::any();
     let provider_earnings_raw: u8 = kani::any();
     let counterparty_backing_raw: u8 = kani::any();
     let junior_surplus_raw: u8 = kani::any();
@@ -13139,15 +13261,20 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
     let capital = capital_raw as u128;
     let hidden_loss = hidden_loss_raw as u128;
     let requested_fee = requested_fee_raw as u128;
+    let insurance = insurance_raw as u128;
+    let prior_crystallized = prior_crystallized_raw as u128;
     let provider_earnings = provider_earnings_raw as u128;
     let counterparty_backing = counterparty_backing_raw as u128;
     let junior_surplus = junior_surplus_raw as u128;
-    header.vault =
-        V16PodU128::new(capital + provider_earnings + counterparty_backing + junior_surplus);
+    header.vault = V16PodU128::new(
+        capital + insurance + provider_earnings + counterparty_backing + junior_surplus,
+    );
     header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
     header.backing_provider_earnings_total = V16PodU128::new(provider_earnings);
     header.source_fresh_backing_total_num = V16PodU128::new(counterparty_backing * BOUND_SCALE);
     account_header.capital = V16PodU128::new(capital);
+    account_header.residual_crystallized_loss_atoms_total = V16PodU128::new(prior_crystallized);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
     let residual_before = market.kani_residual();
@@ -13185,6 +13312,10 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
         provider_earnings > 0 && counterparty_backing > 0 && junior_surplus > 0,
         "loss-before-fee ordering composes with every other senior class and junior surplus"
     );
+    kani::cover!(
+        insurance > 0 && prior_crystallized > 0 && expected_paid > 0,
+        "loss-before-fee ordering accumulates nonzero insurance and prior loss history"
+    );
     assert_eq!(paid, expected_paid);
     assert_eq!(charged, expected_fee);
     assert_eq!(
@@ -13196,10 +13327,10 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
         market.header.c_tot.get(),
         capital - expected_paid - expected_fee
     );
-    assert_eq!(market.header.insurance.get(), expected_fee);
+    assert_eq!(market.header.insurance.get(), insurance + expected_fee);
     assert_eq!(
         market.header.vault.get(),
-        capital + provider_earnings + counterparty_backing + junior_surplus
+        capital + insurance + provider_earnings + counterparty_backing + junior_surplus
     );
     assert_eq!(
         market.header.backing_provider_earnings_total.get(),
@@ -13214,7 +13345,11 @@ fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
             + market.header.insurance.get()
             + market.header.backing_provider_earnings_total.get()
             + market.header.source_fresh_backing_total_num.get() / BOUND_SCALE,
-        capital - expected_paid + provider_earnings + counterparty_backing
+        capital - expected_paid + insurance + provider_earnings + counterparty_backing
+    );
+    assert_eq!(
+        account.header.residual_crystallized_loss_atoms_total.get(),
+        prior_crystallized + expected_paid
     );
     assert_eq!(residual_before, junior_surplus);
     assert_eq!(market.kani_residual(), junior_surplus + expected_paid);
