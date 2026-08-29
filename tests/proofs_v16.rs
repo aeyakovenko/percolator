@@ -11331,8 +11331,10 @@ fn proof_v16_resolved_receipt_claimable_is_rate_monotone_and_overpaid_fails_clos
 fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
     let claimable_raw: u8 = kani::any();
     let vault_raw: u8 = kani::any();
-    kani::assume((1..=64).contains(&claimable_raw));
-    kani::assume(vault_raw <= 64);
+    // Universal receipt-payment arithmetic is proved above; this bounded
+    // composition keeps the complete fixed-capacity account frame below 300s.
+    kani::assume((1..=8).contains(&claimable_raw));
+    kani::assume(vault_raw <= 8);
     let claimable = claimable_raw as u128;
     let vault = vault_raw as u128;
     let paid_before = 2u128;
@@ -11362,11 +11364,10 @@ fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
             paid_effective: paid_before,
             finalized: false,
         });
-    let ledger_before = header.resolved_payout_ledger;
-    let c_tot_before = header.c_tot;
-    let insurance_before = header.insurance;
-    let account_capital_before = account_header.capital;
-    let account_pnl_before = account_header.pnl;
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let wrapper_before = markets[0].wrapper;
+    let account_before = account_header;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -11390,12 +11391,31 @@ fn proof_v16_public_resolved_payout_topup_pays_min_claimable_and_vault() {
         "resolved payout topup can fully pay claimable amount"
     );
     assert_eq!(paid, payout);
-    assert_eq!(market.header.vault.get(), vault - payout);
-    assert_eq!(market.header.c_tot, c_tot_before);
-    assert_eq!(market.header.insurance, insurance_before);
-    assert_eq!(market.header.resolved_payout_ledger, ledger_before);
-    assert_eq!(account.header.capital, account_capital_before);
-    assert_eq!(account.header.pnl, account_pnl_before);
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(vault - payout);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &market.markets[0].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, wrapper_before);
+
+    let mut expected_account = account_before;
+    let mut expected_receipt = expected_account
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+    expected_receipt.paid_effective = paid_before + payout;
+    expected_receipt.finalized = payout == claimable;
+    expected_account.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&expected_receipt);
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
     assert_eq!(receipt.paid_effective, paid_before + payout);
     assert_eq!(receipt.terminal_positive_claim_face, terminal);
     assert_eq!(receipt.prior_bound_contribution_num, terminal * BOUND_SCALE);
