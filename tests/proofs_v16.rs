@@ -9866,23 +9866,24 @@ fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
     assert!(support_b <= b);
 }
 
-// Global junior-bound aggregation invariant: the group-level junior claim bound
-// (`pnl_pos_bound_tot_num`) is the denominator for the non-source haircut
-// (`haircut_effective_support`) and the resolved-payout snapshot, so it must
-// never UNDERSTATE the aggregate per-domain source claims it haircuts against —
-// otherwise the denominator is too small and support is over-computed. The
-// mutation paths (credit/burn) keep `global >= sum(per-domain)` in lockstep, but
-// `validate_shape` never checks it: a state with a fully-backed domain claim but
-// a zero global bound is internally inconsistent yet currently accepted. This
-// proof pins that invariant — it FAILS until validate_shape enforces the sum.
+// Global junior-bound aggregation soundness: any market state accepted by the
+// production validator has a global haircut denominator at least as large as
+// the aggregate source-domain claims it haircuts against. Otherwise a smaller
+// denominator over-credits non-source support and resolved payouts. The proof
+// keeps equal and strict-overbound accepted states reachable while retaining
+// underbound candidates for mutation testing.
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
 fn proof_v16_validate_shape_rejects_global_junior_bound_below_domain_claims() {
     let claim_raw: u8 = kani::any();
+    let global_bound_raw: u8 = kani::any();
     kani::assume((1..=5).contains(&claim_raw));
+    kani::assume(global_bound_raw <= 8);
     let claim = claim_raw as u128;
     let claim_num = claim * BOUND_SCALE;
+    let global_bound = global_bound_raw as u128;
+    let global_bound_num = global_bound * BOUND_SCALE;
 
     // Inline market (no account fixture -> no 16-leg loop), so unwind(8) suffices.
     let (market_id, _, _) = ids();
@@ -9915,19 +9916,23 @@ fn proof_v16_validate_shape_rejects_global_junior_bound_below_domain_claims() {
     header.source_claim_bound_total_num = V16PodU128::new(claim_num);
     header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
     header.vault = V16PodU128::new(claim);
-    // Group-level junior bound left at 0 -> global UNDERSTATES the domain's claims.
-    // Every other facet of the state is valid (the backing is vault-funded and
-    // aggregated); the only inconsistency is the missing aggregation relation.
+    header.pnl_pos_bound_tot = V16PodU128::new(global_bound);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(global_bound_num);
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-
+    kani::assume(market.validate_shape() == Ok(()));
     kani::cover!(
-        claim > 0,
-        "global-vs-domain aggregation covers nontrivial claim"
+        global_bound == claim,
+        "validator accepts an exact global/source claim bound"
     );
-    // The group bound (0) understates the per-domain source claims (claim_num > 0).
-    // A sound validator must reject this; today it does not.
-    assert_eq!(market.validate_shape(), Err(V16Error::InvalidConfig));
+    kani::cover!(
+        global_bound > claim,
+        "validator accepts a strict global overbound of source claims"
+    );
+    assert!(
+        market.header.pnl_pos_bound_tot_num.get()
+            >= market.header.source_claim_bound_total_num.get()
+    );
 }
 
 // Loser-side backing reservation is value-neutral: when a counterparty's realized
