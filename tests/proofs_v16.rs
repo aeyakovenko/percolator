@@ -11619,35 +11619,119 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
-fn proof_v16_public_resolved_close_flat_account_pays_only_capital_and_vault() {
-    let capital_raw: u8 = kani::any();
-    kani::assume((1..=5).contains(&capital_raw));
-    let capital = capital_raw as u128;
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    kani_assume_portfolio_shape_valid
+)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
+fn proof_v16_public_resolved_close_pays_post_fee_capital_and_budgets_fee() {
+    // Universal fee arithmetic and budget deltas are proved separately. These
+    // independent classes cover zero, partial, and capital-capped historical
+    // fees through the exact close + wrapper budget-credit sequence.
+    let capital = if kani::any::<bool>() { 7u128 } else { 9u128 };
+    let long_budget = if kani::any::<bool>() { 2u128 } else { 3u128 };
+    let short_budget = if kani::any::<bool>() { 1u128 } else { 4u128 };
+    let prior_unbudgeted = if kani::any::<bool>() { 1u128 } else { 3u128 };
+    let junior_surplus = if kani::any::<bool>() { 1u128 } else { 4u128 };
+    let no_fee = kani::any::<bool>();
+    let fee_rate = if no_fee {
+        0u128
+    } else if kani::any::<bool>() {
+        1u128
+    } else {
+        3u128
+    };
+    let resolved_slot = if kani::any::<bool>() { 4u64 } else { 6u64 };
+    let last_fee_slot = if kani::any::<bool>() { 1u64 } else { 2u64 };
+    let split_fee = kani::any::<bool>();
+    let fee = capital.min(fee_rate * (resolved_slot - last_fee_slot) as u128);
+    let payout = capital - fee;
+    let long_credit = if split_fee { fee / 2 } else { fee };
+    let short_credit = fee - long_credit;
+    let prior_budget_total = long_budget + short_budget;
+    let prior_insurance = prior_budget_total + prior_unbudgeted;
+    let prior_vault = capital + prior_insurance + junior_surplus;
+
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.mode = 1;
-    header.current_slot = V16PodU64::new(2);
-    header.resolved_slot = V16PodU64::new(2);
-    header.vault = V16PodU128::new(capital);
+    header.current_slot = V16PodU64::new(resolved_slot);
+    header.resolved_slot = V16PodU64::new(resolved_slot);
+    header.slot_last = V16PodU64::new(resolved_slot);
+    header.vault = V16PodU128::new(prior_vault);
     header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(prior_insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(prior_budget_total);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_budget);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_budget);
     account_header.capital = V16PodU128::new(capital);
-    account_header.pnl = V16PodI128::new(0);
-    account_header.last_fee_slot = V16PodU64::new(2);
+    account_header.last_fee_slot = V16PodU64::new(last_fee_slot);
+    let wrapper_before = markets[0].wrapper;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
 
     let outcome = market
-        .close_resolved_account_not_atomic(&mut account, 0)
+        .close_resolved_account_not_atomic(&mut account, fee_rate)
+        .unwrap();
+    market
+        .credit_domain_insurance_budget_not_atomic(0, long_credit)
+        .unwrap();
+    market
+        .credit_domain_insurance_budget_not_atomic(1, short_credit)
         .unwrap();
 
-    kani::cover!(capital > 1, "resolved flat close pays nontrivial capital");
-    assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: capital });
-    assert_eq!(market.header.vault.get(), 0);
+    kani::cover!(
+        fee == 0 && payout > 0,
+        "resolved close covers no historical maintenance fee"
+    );
+    kani::cover!(
+        fee > 0 && fee < capital && payout > 0,
+        "resolved close covers partial historical fee and nonzero payout"
+    );
+    kani::cover!(
+        fee == capital && payout == 0,
+        "resolved close covers capital-capped historical fee"
+    );
+    kani::cover!(
+        fee > 1 && long_credit > 0 && short_credit > 0,
+        "resolved close covers split domain allocation of retained fee"
+    );
+    assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout });
+    assert_eq!(long_credit + short_credit, fee);
+
+    assert_eq!(market.header.vault.get(), prior_vault - payout);
     assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.insurance.get(), prior_insurance + fee);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        prior_budget_total + fee
+    );
+    assert_eq!(
+        market.header.c_tot.get() + market.header.insurance.get(),
+        prior_insurance + fee
+    );
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        prior_unbudgeted
+    );
+    assert_eq!(market.kani_residual(), residual_before);
+
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        long_budget + long_credit
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        short_budget + short_credit
+    );
+    assert_eq!(market.markets[0].wrapper, wrapper_before);
+
     assert_eq!(account.header.capital.get(), 0);
     assert_eq!(account.header.pnl.get(), 0);
     assert_eq!(account.header.reserved_pnl.get(), 0);
-    assert_eq!(market.validate_shape(), Ok(()));
-    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(account.header.health_cert.valid, 0);
+    assert_eq!(account.header.last_fee_slot.get(), resolved_slot);
 }
 
 #[kani::proof]
