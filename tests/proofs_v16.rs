@@ -35,7 +35,8 @@ use percolator::v16::{
     TokenValueFlowProofV16, V16Config, V16ConfigAccount, V16Error,
     V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
     BACKING_FEE_RATE_DEN_E9, MAX_BACKING_FEE_RATE_E9_PER_SLOT, MAX_BACKING_FEE_UTIL_BPS,
-    PORTFOLIO_SOURCE_DOMAIN_CAP, V16_EMPTY_ACTIVE_BITMAP, V16_MAX_PORTFOLIO_ASSETS_N,
+    PORTFOLIO_SOURCE_DOMAIN_CAP, V16_ACCOUNT_VERSION, V16_EMPTY_ACTIVE_BITMAP,
+    V16_LAYOUT_DISCRIMINATOR, V16_MAX_PORTFOLIO_ASSETS_N,
 };
 use percolator::v16::{
     kani_eq_engine_asset_slot_v16_account, kani_eq_market_group_v16_header_account,
@@ -685,6 +686,86 @@ fn proof_v16_in_place_account_init_clears_hidden_risk_state_and_validates() {
     assert_eq!(account.rebalance_lock, 0);
     assert_eq!(account.liquidation_lock, 0);
     assert_eq!(account_view.validate_with_market(&market.as_view()), Ok(()));
+}
+
+// Persisted provenance is a common fund-safety gate for the full validator and
+// the O(1) scalar preflight used by hot refresh. Symbolically corrupt each
+// independent identity/schema component and require both production paths to
+// reject before mutating any market, asset, or portfolio byte.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_persisted_provenance_gates_validator_and_hot_refresh_before_mutation() {
+    let fault: u8 = kani::any();
+    let byte_index_raw: u8 = kani::any();
+    let byte_delta: u8 = kani::any();
+    let wrong_version: u16 = kani::any();
+    let wrong_layout: u16 = kani::any();
+    kani::assume(fault <= 4);
+    kani::assume(byte_index_raw < 32);
+    kani::assume(byte_delta != 0);
+    kani::assume(wrong_version != V16_ACCOUNT_VERSION);
+    kani::assume(wrong_layout != V16_LAYOUT_DISCRIMINATOR);
+
+    let byte_index = byte_index_raw as usize;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let mut provenance = account_header.provenance_header.try_to_runtime().unwrap();
+    match fault {
+        0 => {}
+        1 => provenance.market_group_id[byte_index] ^= byte_delta,
+        2 => account_header.owner[byte_index] ^= byte_delta,
+        3 => provenance.version = wrong_version,
+        4 => provenance.layout_discriminator = wrong_layout,
+        _ => unreachable!(),
+    }
+    account_header.provenance_header = ProvenanceHeaderV16Account::from_runtime(&provenance);
+
+    let validation = PortfolioV16View::new(&account_header)
+        .validate_with_market(&MarketGroupV16View::new(&header, &markets));
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let refresh = market.full_account_refresh_not_atomic(&mut account);
+
+    kani::cover!(fault == 0, "valid persisted provenance reaches both paths");
+    kani::cover!(
+        fault == 1 && byte_index_raw > 15 && byte_delta > 1,
+        "cross-market provenance corruption reaches a nontrivial identity byte"
+    );
+    kani::cover!(
+        fault == 2 && byte_index_raw > 15 && byte_delta > 1,
+        "owner provenance corruption reaches a nontrivial identity byte"
+    );
+    kani::cover!(
+        fault == 3 && wrong_version > V16_ACCOUNT_VERSION,
+        "nontrivial persisted version mismatch is reachable"
+    );
+    kani::cover!(
+        fault == 4 && wrong_layout > V16_LAYOUT_DISCRIMINATOR,
+        "nontrivial persisted layout mismatch is reachable"
+    );
+
+    if fault == 0 {
+        assert_eq!(validation, Ok(()));
+        assert!(refresh.is_ok());
+    } else {
+        assert_eq!(validation, Err(V16Error::ProvenanceMismatch));
+        assert_eq!(refresh, Err(V16Error::ProvenanceMismatch));
+        assert!(kani_eq_market_group_v16_header_account(
+            &header_before,
+            market.header
+        ));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &slot_before,
+            &market.markets[0].engine
+        ));
+        assert!(kani_eq_portfolio_account_v16_account(
+            &account_before,
+            account.header
+        ));
+    }
 }
 
 #[kani::proof]
