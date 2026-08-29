@@ -1584,12 +1584,12 @@ fn proof_v16_sparse_source_domain_validation_accepts_domain_indexed_claim() {
     );
 }
 
-// Full account-validator soundness for a persisted source claim. A successful
-// validation binds the claim to the current asset episode and domain aggregate,
-// and any nonzero source attribution covers the account's entire positive PnL
-// in scaled units. The quotient/remainder claim shape keeps the subtle
-// fractionally-underbound case representable: ceil(claim/BOUND_SCALE) can equal
-// PnL while the exact numerator is still too small.
+// Full account-validator soundness for a persisted source claim. Episode
+// identity and attribution are independent persisted candidates, and the
+// result is exact: stale episode -> HiddenLeg, current but under-attributed ->
+// InvalidLeg, current and fully attributed -> Ok. The quotient/remainder claim
+// shape keeps the subtle fractionally-underbound case representable:
+// ceil(claim/BOUND_SCALE) can equal PnL while the exact numerator is too small.
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
@@ -1597,6 +1597,8 @@ fn proof_v16_account_validator_binds_and_fully_attributes_persisted_source_claim
     let pnl_raw: u8 = kani::any();
     let claim_whole_raw: u8 = kani::any();
     let claim_remainder_raw: u8 = kani::any();
+    let stale_market_id_raw: u8 = kani::any();
+    let market_id_is_current: bool = kani::any();
     kani::assume((1..=8).contains(&pnl_raw));
     kani::assume(claim_whole_raw <= 8);
     kani::assume(claim_remainder_raw <= 8);
@@ -1608,7 +1610,8 @@ fn proof_v16_account_validator_binds_and_fully_attributes_persisted_source_claim
     let backing_num = 9 * BOUND_SCALE;
 
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    let market_id = markets[0].engine.asset.market_id.get();
+    let current_market_id = markets[0].engine.asset.market_id.get();
+    kani::assume(stale_market_id_raw as u64 != current_market_id);
     header.vault = V16PodU128::new(9);
     header.pnl_pos_tot = V16PodU128::new(pnl);
     header.pnl_pos_bound_tot = V16PodU128::new(9);
@@ -1623,7 +1626,7 @@ fn proof_v16_account_validator_binds_and_fully_attributes_persisted_source_claim
             ..SourceCreditStateV16::EMPTY
         });
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
-        market_id,
+        market_id: current_market_id,
         fresh_unliened_backing_num: backing_num,
         expiry_slot: 100,
         status: BackingBucketStatusV16::Fresh,
@@ -1631,34 +1634,55 @@ fn proof_v16_account_validator_binds_and_fully_attributes_persisted_source_claim
     });
     account_header.pnl = V16PodI128::new(pnl as i128);
     account_header.source_domains[0].domain = V16PodU32::new(0);
-    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[0].source_claim_market_id =
+        V16PodU64::new(if market_id_is_current {
+            current_market_id
+        } else {
+            stale_market_id_raw as u64
+        });
     account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
 
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16ViewMut::new(&mut account_header);
-    // Market validator soundness and aggregate reconciliation are separate
-    // theorems; this fixture is their canonical fully-backed one-domain shape.
-    kani::assume(account.validate_with_market(&market.as_view()) == Ok(()));
+    let result = account.validate_with_market(&market.as_view());
     kani::cover!(
-        claim_whole == pnl && claim_remainder == 0,
+        market_id_is_current && claim_whole == pnl && claim_remainder == 0,
         "account validator accepts an exact nonzero persisted source claim"
     );
     kani::cover!(
-        claim_whole == pnl && claim_remainder > 0,
+        market_id_is_current && claim_whole == pnl && claim_remainder > 0,
         "account validator accepts a fractional over-attributed persisted claim"
     );
+    kani::cover!(
+        market_id_is_current && claim_num < pnl * BOUND_SCALE && claim_whole > 0,
+        "current-episode source claim still rejects nontrivial under-attribution"
+    );
+    kani::cover!(
+        !market_id_is_current
+            && stale_market_id_raw > 2
+            && claim_whole == pnl
+            && claim_remainder > 0,
+        "fully attributed source claim from a stale episode is rejected"
+    );
 
-    let source = account.header.source_domains[0];
-    let domain_credit = market.markets[0]
-        .engine
-        .source_credit_long
-        .try_to_runtime()
-        .unwrap();
-    assert!(source.is_occupied());
-    assert_eq!(source.domain.get(), 0);
-    assert_eq!(source.source_claim_market_id.get(), market_id);
-    assert!(source.source_claim_bound_num.get() <= domain_credit.positive_claim_bound_num);
-    assert!(source.source_claim_bound_num.get() >= pnl * BOUND_SCALE);
+    if !market_id_is_current {
+        assert_eq!(result, Err(V16Error::HiddenLeg));
+    } else if claim_num < pnl * BOUND_SCALE {
+        assert_eq!(result, Err(V16Error::InvalidLeg));
+    } else {
+        assert_eq!(result, Ok(()));
+        let source = account.header.source_domains[0];
+        let domain_credit = market.markets[0]
+            .engine
+            .source_credit_long
+            .try_to_runtime()
+            .unwrap();
+        assert!(source.is_occupied());
+        assert_eq!(source.domain.get(), 0);
+        assert_eq!(source.source_claim_market_id.get(), current_market_id);
+        assert!(source.source_claim_bound_num.get() <= domain_credit.positive_claim_bound_num);
+        assert!(source.source_claim_bound_num.get() >= pnl * BOUND_SCALE);
+    }
 }
 
 // Full account-validator lien soundness: an accepted persisted source lien can
