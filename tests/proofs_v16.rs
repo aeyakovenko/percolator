@@ -11547,6 +11547,10 @@ fn proof_v16_expired_close_progress_declares_recovery_without_value_mutation() {
     assert_eq!(market.header.insurance, insurance_before);
 }
 
+// Active close identity and residual arithmetic are jointly fail-closed at the
+// persisted-account boundary. The ledger episode is independent of its exact
+// residual partition: even an arithmetically valid close cannot survive asset
+// slot reuse, while current-episode over/understated residuals still reject.
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -11557,6 +11561,8 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     let insurance_raw: u8 = kani::any();
     let b_loss_raw: u8 = kani::any();
     let explicit_raw: u8 = kani::any();
+    let stale_market_id_raw: u8 = kani::any();
+    let market_id_is_current: bool = kani::any();
 
     let gross = gross_raw as u128;
     let drift = drift_raw as u128;
@@ -11570,13 +11576,19 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     kani::assume(progress <= total_loss);
     let residual = total_loss - progress;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let current_market_id = markets[0].engine.asset.market_id.get();
+    kani::assume(stale_market_id_raw as u64 != current_market_id);
     let base = CloseProgressLedgerV16 {
         active: true,
         finalized: residual == 0,
         canceled: false,
         close_id: 1,
         asset_index: 0,
-        market_id: 1,
+        market_id: if market_id_is_current {
+            current_market_id
+        } else {
+            stale_market_id_raw as u64
+        },
         domain_side: SideV16::Long,
         gross_loss_at_close_start: gross,
         drift_reference_slot: 0,
@@ -11594,10 +11606,11 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     account_header.close_progress = CloseProgressLedgerV16Account::from_runtime(&base);
     let account = PortfolioV16ViewMut::new(&mut account_header);
 
-    let ok = account.validate_with_market(&market.as_view());
+    let base_result = account.validate_with_market(&market.as_view());
 
     let mut bad_header = account_header;
     let bad = CloseProgressLedgerV16 {
+        market_id: current_market_id,
         residual_remaining: residual + 1,
         ..base
     };
@@ -11608,6 +11621,7 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     let understated_rejected = if residual > 0 {
         let mut understated_header = account_header;
         let understated = CloseProgressLedgerV16 {
+            market_id: current_market_id,
             residual_remaining: residual - 1,
             ..base
         };
@@ -11620,22 +11634,30 @@ fn proof_v16_close_progress_ledger_residual_equation_is_enforced() {
     };
 
     kani::cover!(
-        residual == 0,
+        market_id_is_current && residual == 0,
         "close progress proof covers finalized residual"
     );
     kani::cover!(
-        residual != 0,
+        market_id_is_current && residual != 0,
         "close progress proof covers pending residual"
     );
     kani::cover!(
-        progress != 0,
+        market_id_is_current && progress != 0,
         "close progress proof covers nonzero close cure progress"
     );
     kani::cover!(
-        residual > 1,
+        market_id_is_current && residual > 1,
         "close progress proof covers understated residual rejection"
     );
-    assert_eq!(ok, Ok(()));
+    kani::cover!(
+        !market_id_is_current && stale_market_id_raw > 2 && residual > 1 && progress > 0,
+        "arithmetically valid nontrivial close from a stale episode is reachable"
+    );
+    if market_id_is_current {
+        assert_eq!(base_result, Ok(()));
+    } else {
+        assert_eq!(base_result, Err(V16Error::InvalidLeg));
+    }
     assert_eq!(rejected, Err(V16Error::InvalidLeg));
     assert_eq!(understated_rejected, Err(V16Error::InvalidLeg));
 }
