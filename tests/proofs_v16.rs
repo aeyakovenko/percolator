@@ -13340,6 +13340,136 @@ fn proof_v16_resolved_fee_sync_stops_at_resolution_and_replay_is_value_neutral()
 }
 
 #[kani::proof]
+#[kani::unwind(56)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    kani_assume_portfolio_shape_valid
+)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
+fn proof_v16_maintenance_fee_reward_and_budget_credit_preserve_domain_insurance() {
+    // The three component APIs have separate complete frame theorems. This
+    // query composes their value/domain deltas without re-expanding two 9KB
+    // account frames into the same solver formula.
+    let payer_capital = if kani::any::<bool>() { 7u128 } else { 9u128 };
+    let cranker_capital = if kani::any::<bool>() { 2u128 } else { 4u128 };
+    let long_budget = if kani::any::<bool>() { 2u128 } else { 3u128 };
+    let short_budget = if kani::any::<bool>() { 1u128 } else { 4u128 };
+    let prior_unbudgeted = if kani::any::<bool>() { 1u128 } else { 3u128 };
+    let junior_surplus = if kani::any::<bool>() { 1u128 } else { 4u128 };
+    let fee_rate = if kani::any::<bool>() { 1u128 } else { 4u128 };
+    let now_slot = if kani::any::<bool>() { 2u64 } else { 3u64 };
+    let zero_reward = kani::any::<bool>();
+    let full_reward = kani::any::<bool>();
+    let credit_long_first = kani::any::<bool>();
+
+    let fee = payer_capital.min(fee_rate * now_slot as u128);
+    let reward = if zero_reward {
+        0
+    } else if full_reward {
+        fee
+    } else {
+        fee / 2
+    };
+    let retained = fee - reward;
+    let long_credit = if credit_long_first {
+        retained
+    } else {
+        retained / 2
+    };
+    let short_credit = retained - long_credit;
+    let prior_budget_total = long_budget + short_budget;
+    let prior_insurance = prior_budget_total + prior_unbudgeted;
+    let prior_c_tot = payer_capital + cranker_capital;
+    let prior_vault = prior_c_tot + prior_insurance + junior_surplus;
+
+    let (market_id, _, _) = ids();
+    let (mut header, mut markets, mut payer_header) = one_market_view_fixture();
+    let mut cranker_header = empty_account_fixture(market_id, 3);
+    header.vault = V16PodU128::new(prior_vault);
+    header.c_tot = V16PodU128::new(prior_c_tot);
+    header.insurance = V16PodU128::new(prior_insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(prior_budget_total);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(long_budget);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(short_budget);
+    header.current_slot = V16PodU64::new(now_slot);
+    header.slot_last = V16PodU64::new(now_slot);
+    payer_header.capital = V16PodU128::new(payer_capital);
+    cranker_header.capital = V16PodU128::new(cranker_capital);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.kani_residual();
+    let mut payer = PortfolioV16ViewMut::new(&mut payer_header);
+    let mut cranker = PortfolioV16ViewMut::new(&mut cranker_header);
+    let charged = market
+        .sync_account_fee_to_slot_not_atomic(&mut payer, now_slot, fee_rate)
+        .unwrap();
+    if reward != 0 {
+        market
+            .credit_account_from_insurance_not_atomic(&mut cranker, reward)
+            .unwrap();
+    }
+    market
+        .credit_domain_insurance_budget_not_atomic(0, long_credit)
+        .unwrap();
+    market
+        .credit_domain_insurance_budget_not_atomic(1, short_credit)
+        .unwrap();
+
+    kani::cover!(
+        fee == payer_capital,
+        "maintenance sequence covers capital-capped fee"
+    );
+    kani::cover!(
+        reward == 0 && retained > 0,
+        "maintenance sequence covers no-reward full budget allocation"
+    );
+    kani::cover!(
+        reward == fee && reward > 0,
+        "maintenance sequence covers full cranker reward"
+    );
+    kani::cover!(
+        reward > 0 && reward < fee && long_credit > 0 && short_credit > 0,
+        "maintenance sequence covers partial reward and split domain allocation"
+    );
+    assert_eq!(charged, fee);
+    assert_eq!(reward + long_credit + short_credit, fee);
+
+    assert_eq!(market.header.vault.get(), prior_vault);
+    assert_eq!(market.header.c_tot.get(), prior_c_tot - fee + reward);
+    assert_eq!(
+        market.header.insurance.get(),
+        prior_insurance + fee - reward
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        prior_budget_total + retained
+    );
+    assert_eq!(
+        market.header.insurance.get() - market.header.insurance_domain_budget_remaining_total.get(),
+        prior_unbudgeted
+    );
+    assert_eq!(
+        market.header.c_tot.get() + market.header.insurance.get(),
+        prior_c_tot + prior_insurance
+    );
+    assert_eq!(market.kani_residual(), residual_before);
+
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        long_budget + long_credit
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_short.get(),
+        short_budget + short_credit
+    );
+    assert_eq!(payer.header.capital.get(), payer_capital - fee);
+    assert_eq!(payer.header.last_fee_slot.get(), now_slot);
+    assert_eq!(payer.header.pnl.get(), 0);
+    assert_eq!(cranker.header.capital.get(), cranker_capital + reward);
+    assert_eq!(cranker.header.pnl.get(), 0);
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_loss_senior_fee_ordering_consumes_kf_loss_before_fee() {
