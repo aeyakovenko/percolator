@@ -784,10 +784,10 @@ fn proof_v16_public_materialized_portfolio_register_is_value_neutral() {
     header.insurance = V16PodU128::new(insurance_raw as u128);
     header.vault = V16PodU128::new(c_tot_raw as u128 + insurance_raw as u128 + surplus_raw as u128);
 
-    let vault_before = header.vault.get();
-    let c_tot_before = header.c_tot.get();
-    let insurance_before = header.insurance.get();
-    let risk_epoch_before = header.risk_epoch.get();
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let wrapper_before = markets[0].wrapper;
+    let account_before = account_header;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16View::new(&account_header);
@@ -798,14 +798,21 @@ fn proof_v16_public_materialized_portfolio_register_is_value_neutral() {
         "materialized portfolio register covers nontrivial senior value state"
     );
     assert_eq!(result, Ok(()));
-    assert_eq!(
-        market.header.materialized_portfolio_count.get(),
-        count_raw as u64 + 1
-    );
-    assert_eq!(market.header.vault.get(), vault_before);
-    assert_eq!(market.header.c_tot.get(), c_tot_before);
-    assert_eq!(market.header.insurance.get(), insurance_before);
-    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+    let mut expected_header = header_before;
+    expected_header.materialized_portfolio_count = V16PodU64::new(count_raw as u64 + 1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &market.markets[0].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, wrapper_before);
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
     assert_eq!(
         account.validate_with_market(&market.as_view()),
         Ok(()),
@@ -829,10 +836,10 @@ fn proof_v16_public_materialized_portfolio_deregister_is_value_neutral() {
     header.insurance = V16PodU128::new(insurance_raw as u128);
     header.vault = V16PodU128::new(c_tot_raw as u128 + insurance_raw as u128 + surplus_raw as u128);
 
-    let vault_before = header.vault.get();
-    let c_tot_before = header.c_tot.get();
-    let insurance_before = header.insurance.get();
-    let risk_epoch_before = header.risk_epoch.get();
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let wrapper_before = markets[0].wrapper;
+    let account_before = account_header;
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let account = PortfolioV16View::new(&account_header);
@@ -843,14 +850,21 @@ fn proof_v16_public_materialized_portfolio_deregister_is_value_neutral() {
         "materialized portfolio deregister covers nontrivial senior value state"
     );
     assert_eq!(result, Ok(()));
-    assert_eq!(
-        market.header.materialized_portfolio_count.get(),
-        count_raw as u64 - 1
-    );
-    assert_eq!(market.header.vault.get(), vault_before);
-    assert_eq!(market.header.c_tot.get(), c_tot_before);
-    assert_eq!(market.header.insurance.get(), insurance_before);
-    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before);
+    let mut expected_header = header_before;
+    expected_header.materialized_portfolio_count = V16PodU64::new(count_raw as u64 - 1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &market.markets[0].engine
+    ));
+    assert_eq!(market.markets[0].wrapper, wrapper_before);
+    assert!(kani_eq_portfolio_account_v16_account(
+        &account_before,
+        account.header
+    ));
     assert_eq!(
         account.validate_with_market(&market.as_view()),
         Ok(()),
