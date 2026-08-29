@@ -1661,6 +1661,140 @@ fn proof_v16_account_validator_binds_and_fully_attributes_persisted_source_claim
     assert!(source.source_claim_bound_num.get() >= pnl * BOUND_SCALE);
 }
 
+// Full account-validator lien soundness: an accepted persisted source lien can
+// reserve no more active margin credit than its locked claim face or attributed
+// source claim, and every effective credit atom has exactly one scaled backing
+// atom. All account-side lien components remain independently symbolic so the
+// implication exercises the production aggregate validator rather than
+// constructing these equalities into the fixture.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_account_validator_caps_source_lien_credit_by_claim_and_backing() {
+    let claim_raw: u8 = kani::any();
+    let face_raw: u8 = kani::any();
+    let counterparty_face_raw: u8 = kani::any();
+    let insurance_face_raw: u8 = kani::any();
+    let effective_raw: u8 = kani::any();
+    let counterparty_backing_raw: u8 = kani::any();
+    let insurance_backing_raw: u8 = kani::any();
+    let impaired_face_raw: u8 = kani::any();
+    let impaired_effective_raw: u8 = kani::any();
+    let fee_slot_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    kani::assume(face_raw <= 8);
+    kani::assume(counterparty_face_raw <= 8);
+    kani::assume(insurance_face_raw <= 8);
+    kani::assume(effective_raw <= 8);
+    kani::assume(counterparty_backing_raw <= 8);
+    kani::assume(insurance_backing_raw <= 8);
+    kani::assume(impaired_face_raw <= 8);
+    kani::assume(impaired_effective_raw <= 8);
+    kani::assume(fee_slot_raw <= 2);
+
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let face_num = face_raw as u128 * BOUND_SCALE;
+    let counterparty_face_num = counterparty_face_raw as u128 * BOUND_SCALE;
+    let insurance_face_num = insurance_face_raw as u128 * BOUND_SCALE;
+    let effective = effective_raw as u128;
+    let counterparty_backing_num = counterparty_backing_raw as u128 * BOUND_SCALE;
+    let insurance_backing_num = insurance_backing_raw as u128 * BOUND_SCALE;
+    let impaired_face_num = impaired_face_raw as u128 * BOUND_SCALE;
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(claim_raw as u128);
+    header.pnl_pos_tot = V16PodU128::new(claim_raw as u128);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim_raw as u128);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    account_header.pnl = V16PodI128::new(claim_raw as i128);
+    account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        source_claim_liened_num: V16PodU128::new(face_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(counterparty_face_num),
+        source_claim_insurance_liened_num: V16PodU128::new(insurance_face_num),
+        source_lien_effective_reserved: V16PodU128::new(effective),
+        source_lien_counterparty_backing_num: V16PodU128::new(counterparty_backing_num),
+        source_lien_insurance_backing_num: V16PodU128::new(insurance_backing_num),
+        source_lien_fee_last_slot: V16PodU64::new(fee_slot_raw as u64),
+        source_claim_impaired_num: V16PodU128::new(impaired_face_num),
+        source_lien_impaired_effective_reserved: V16PodU128::new(impaired_effective_raw as u128),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    kani::assume(account.validate_with_market(&market.as_view()) == Ok(()));
+    kani::cover!(
+        effective > 0
+            && counterparty_backing_num > 0
+            && insurance_backing_num == 0
+            && fee_slot_raw > 0,
+        "validator accepts a nontrivial counterparty-backed active lien"
+    );
+    kani::cover!(
+        effective > 0
+            && insurance_backing_num > 0
+            && counterparty_backing_num == 0
+            && fee_slot_raw == 0,
+        "validator accepts a nontrivial insurance-backed active lien"
+    );
+    kani::cover!(
+        effective > 0 && impaired_face_num > 0 && impaired_effective_raw > 0,
+        "validator accepts simultaneous live and impaired lien history"
+    );
+    kani::cover!(
+        face_num + impaired_face_num < claim_num,
+        "validator accepts a strict unused source-claim remainder"
+    );
+
+    let source = account.header.source_domains[0];
+    let locked_face_num = source.source_claim_liened_num.get();
+    let total_backing_num = source
+        .source_lien_counterparty_backing_num
+        .get()
+        .checked_add(source.source_lien_insurance_backing_num.get())
+        .unwrap();
+    assert_eq!(
+        source.source_claim_counterparty_liened_num.get()
+            + source.source_claim_insurance_liened_num.get(),
+        locked_face_num
+    );
+    assert!(
+        locked_face_num + source.source_claim_impaired_num.get()
+            <= source.source_claim_bound_num.get()
+    );
+    assert_eq!(
+        total_backing_num,
+        source.source_lien_effective_reserved.get() * BOUND_SCALE
+    );
+    assert!(total_backing_num <= locked_face_num);
+    assert!(total_backing_num <= source.source_claim_bound_num.get());
+    assert!(source.source_lien_fee_last_slot.get() <= market.header.current_slot.get());
+    if source.source_lien_counterparty_backing_num.get() == 0 {
+        assert_eq!(source.source_lien_fee_last_slot.get(), 0);
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
