@@ -5153,6 +5153,118 @@ fn v16_auto_crank_releases_source_liens_in_strict_chunks() {
 }
 
 #[test]
+fn v16_auto_crank_normalizes_impaired_flat_lien_before_releasing_fresh_sibling() {
+    const CLAIM: u128 = 100;
+    const EXPIRY_SLOT: u64 = 5;
+    let claim_num = CLAIM * BOUND_SCALE;
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture(2);
+    markets[0].engine.backing_long.expiry_slot = V16PodU64::new(EXPIRY_SLOT);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    let observations = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: market.markets[0].engine.asset.effective_price.get(),
+        funding_rate_e9: 0,
+    }];
+    let work = AutoCrankWorkV16 {
+        now_slot: EXPIRY_SLOT,
+        observations: &observations,
+        resolved_close_fee_rate_per_slot: 0,
+    };
+
+    assert_eq!(
+        winner.header.source_domains[0]
+            .source_claim_counterparty_liened_num
+            .get(),
+        claim_num,
+        "global expiry cannot mutate an account that was not part of that transition"
+    );
+
+    let mut release_steps = 0usize;
+    let mut saw_expiry = false;
+    for _ in 0..6 {
+        let summary = market
+            .build_actionable_summary_at_slot(&winner.as_view(), EXPIRY_SLOT)
+            .unwrap();
+        if !summary.is_actionable() {
+            break;
+        }
+        let result = market
+            .permissionless_auto_crank_not_atomic(&mut winner, work)
+            .expect("each selected flat-lien continuation must succeed");
+        release_steps += usize::from(result.selected == AutoCrankPlanV16::ReleaseSourceLiens);
+        saw_expiry |= result.outcome
+            == AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain: 0 },
+            );
+    }
+    assert!(
+        saw_expiry,
+        "authenticated expiry must be selected in finite cranks"
+    );
+    assert_eq!(release_steps, 2, "one bounded step per source domain");
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired
+    );
+    let impaired_claim_num = winner
+        .header
+        .source_domains
+        .iter()
+        .map(|source| source.source_claim_impaired_num.get())
+        .sum::<u128>();
+    assert_eq!(
+        impaired_claim_num, claim_num,
+        "impaired claim attribution was not retained: {:?}",
+        winner.header.source_domains
+    );
+    assert_eq!(
+        winner.header.source_domains[0]
+            .source_claim_liened_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        winner.header.source_domains[1]
+            .source_claim_liened_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .impaired_liened_backing_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .valid_liened_backing_num
+            .get(),
+        0
+    );
+
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("the independently fresh source claim must remain convertible"),
+        CLAIM
+    );
+    assert_eq!(winner.header.pnl.get(), CLAIM as i128);
+    winner.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_released_pnl_conversion_consumes_the_backed_source_claim_exactly_once() {
     const CLAIM: u128 = 100;
     const BACKING: u128 = 2 * CLAIM;

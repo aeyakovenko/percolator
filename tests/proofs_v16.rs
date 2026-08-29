@@ -7917,6 +7917,145 @@ fn proof_v16_lapsed_source_backing_forces_live_refresh_even_with_current_cert() 
 }
 
 #[kani::proof]
+fn proof_v16_lapsed_source_backing_preempts_flat_lien_normalization() {
+    let live: bool = kani::any();
+    let cert_current: bool = kani::any();
+    let lapsed_source_backing: bool = kani::any();
+    let flat: bool = kani::any();
+    let margin_safe: bool = kani::any();
+    let normalizable_lien: bool = kani::any();
+    let selected = MarketGroupV16ViewMut::<u64>::kani_live_flat_source_lien_normalization_required(
+        live,
+        cert_current,
+        lapsed_source_backing,
+        flat,
+        margin_safe,
+        normalizable_lien,
+    );
+    assert_eq!(
+        selected,
+        live && cert_current && !lapsed_source_backing && flat && margin_safe && normalizable_lien
+    );
+    if lapsed_source_backing {
+        assert!(!selected);
+    }
+
+    kani::cover!(
+        live && cert_current && lapsed_source_backing && flat && margin_safe && normalizable_lien
+    );
+    kani::cover!(selected);
+    kani::cover!(!live && !selected);
+}
+
+#[kani::proof]
+fn proof_v16_flat_source_lien_normalization_is_total_and_fail_closed() {
+    let claim_live: bool = kani::any();
+    let counterparty_units: u8 = kani::any();
+    let insurance_units: u8 = kani::any();
+    let malformed_insurance: bool = kani::any();
+    let status_raw: u8 = kani::any();
+    let expiry_slot: u64 = kani::any();
+    let now_slot: u64 = kani::any();
+    let bucket_valid: u8 = kani::any();
+    let bucket_impaired: u8 = kani::any();
+    let source_valid: u8 = kani::any();
+    let source_impaired: u8 = kani::any();
+    let reservation_insurance: u8 = kani::any();
+    let source_insurance: u8 = kani::any();
+    kani::assume(status_raw < 3);
+
+    let counterparty_backing = u128::from(counterparty_units);
+    let insurance_backing = u128::from(insurance_units) * BOUND_SCALE
+        + u128::from(malformed_insurance && insurance_units != 0);
+    let source_claim_liened = if claim_live { 1 } else { 0 };
+    let status = match status_raw {
+        0 => BackingBucketStatusV16::Fresh,
+        1 => BackingBucketStatusV16::Impaired,
+        _ => BackingBucketStatusV16::Expired,
+    };
+    let bucket_valid = u128::from(bucket_valid);
+    let bucket_impaired = u128::from(bucket_impaired);
+    let source_valid = u128::from(source_valid);
+    let source_impaired = u128::from(source_impaired);
+    let reservation_insurance = u128::from(reservation_insurance) * BOUND_SCALE;
+    let source_insurance = u128::from(source_insurance) * BOUND_SCALE;
+
+    let selected = MarketGroupV16ViewMut::<u64>::kani_flat_source_lien_normalization(
+        source_claim_liened,
+        counterparty_backing,
+        insurance_backing,
+        status,
+        expiry_slot,
+        now_slot,
+        bucket_valid,
+        bucket_impaired,
+        source_valid,
+        source_impaired,
+        reservation_insurance,
+        source_insurance,
+    );
+    let has_backing = counterparty_backing != 0 || insurance_backing != 0;
+    let impair = source_claim_liened != 0
+        && counterparty_backing != 0
+        && status == BackingBucketStatusV16::Impaired
+        && bucket_impaired >= counterparty_backing
+        && source_impaired >= counterparty_backing;
+    let counterparty_releasable = counterparty_backing == 0
+        || (status == BackingBucketStatusV16::Fresh
+            && expiry_slot > now_slot
+            && bucket_valid >= counterparty_backing
+            && source_valid >= counterparty_backing);
+    let insurance_releasable = insurance_backing == 0
+        || (insurance_backing % BOUND_SCALE == 0
+            && reservation_insurance >= insurance_backing
+            && source_insurance >= insurance_backing);
+    let release = source_claim_liened != 0
+        && has_backing
+        && !impair
+        && counterparty_releasable
+        && insurance_releasable;
+    let expected = if impair {
+        1
+    } else if release {
+        2
+    } else {
+        0
+    };
+    assert_eq!(selected, expected);
+    assert!(selected <= 2);
+    if selected == 1 {
+        assert!(impair && !release);
+    }
+    if selected == 2 {
+        assert!(release && !impair);
+    }
+
+    kani::cover!(
+        selected == 1 && insurance_backing != 0,
+        "impaired counterparty is normalized before a sibling insurance component"
+    );
+    kani::cover!(
+        selected == 2 && counterparty_backing != 0 && insurance_backing != 0,
+        "both fresh components release atomically"
+    );
+    kani::cover!(
+        status == BackingBucketStatusV16::Fresh
+            && expiry_slot == now_slot
+            && counterparty_backing != 0
+            && selected == 0,
+        "equal-slot lapsed backing cannot be released"
+    );
+    kani::cover!(
+        malformed_insurance && insurance_backing != 0 && selected == 0,
+        "malformed insurance backing fails closed"
+    );
+    kani::cover!(
+        !claim_live && has_backing && selected == 0,
+        "backing without a live account lien is not actionable"
+    );
+}
+
+#[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state() {

@@ -1090,6 +1090,58 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_live_flat_source_lien_normalization_required(
+        live: bool,
+        cert_current: bool,
+        lapsed_source_backing: bool,
+        flat: bool,
+        margin_safe: bool,
+        normalizable_lien: bool,
+    ) -> bool {
+        V16Core::kernel_live_flat_source_lien_normalization_required(
+            live,
+            cert_current,
+            lapsed_source_backing,
+            flat,
+            margin_safe,
+            normalizable_lien,
+        )
+    }
+
+    pub fn kani_flat_source_lien_normalization(
+        source_claim_liened_num: u128,
+        counterparty_backing_num: u128,
+        insurance_backing_num: u128,
+        bucket_status: BackingBucketStatusV16,
+        bucket_expiry_slot: u64,
+        now_slot: u64,
+        bucket_valid_liened_num: u128,
+        bucket_impaired_liened_num: u128,
+        source_valid_liened_backing_num: u128,
+        source_impaired_liened_backing_num: u128,
+        reservation_valid_liened_insurance_num: u128,
+        source_valid_liened_insurance_num: u128,
+    ) -> u8 {
+        match V16Core::kernel_flat_source_lien_normalization(
+            source_claim_liened_num,
+            counterparty_backing_num,
+            insurance_backing_num,
+            bucket_status,
+            bucket_expiry_slot,
+            now_slot,
+            bucket_valid_liened_num,
+            bucket_impaired_liened_num,
+            source_valid_liened_backing_num,
+            source_impaired_liened_backing_num,
+            reservation_valid_liened_insurance_num,
+            source_valid_liened_insurance_num,
+        ) {
+            FlatSourceLienNormalizationV16::None => 0,
+            FlatSourceLienNormalizationV16::ImpairCounterparty => 1,
+            FlatSourceLienNormalizationV16::Release => 2,
+        }
+    }
+
     pub fn kani_source_credit_lien_amounts_for_effective(
         effective_credit: u128,
         credit_rate_num: u128,
