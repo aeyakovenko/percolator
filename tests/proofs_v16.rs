@@ -12571,9 +12571,10 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
     assert_eq!(market.kani_residual(), residual_before);
 }
 
-// Multi-asset oracle-containment frame over the production accrual transition
-// selected by the public crank. Mark/clock progress for one slab slot cannot
-// write another slot or move any value stock.
+// Multi-asset oracle-containment theorem over the production accrual transition
+// selected by the public crank. It derives the touched slot's K/F and clock
+// state exactly, frames every other selected-slot ledger plus the unrelated
+// slot and wrappers, and proves the transition cannot move value stock.
 fn assert_v16_public_accrual_selected_asset_preserves_unrelated_asset_and_value<
     const SELECTED: usize,
 >() {
@@ -12590,6 +12591,7 @@ fn assert_v16_public_accrual_selected_asset_preserves_unrelated_asset_and_value<
     let header_before = header;
     let selected_before = markets[SELECTED].engine;
     let unrelated_before = markets[unrelated].engine;
+    let wrappers_before = [markets[0].wrapper, markets[1].wrapper];
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let residual_before = market.kani_residual();
@@ -12605,24 +12607,45 @@ fn assert_v16_public_accrual_selected_asset_preserves_unrelated_asset_and_value<
         !advance_slot && !price_up,
         "selected asset accrual covers same-slot downward mark progress"
     );
+    kani::cover!(
+        !advance_slot && price_up,
+        "selected asset accrual covers same-slot upward mark progress"
+    );
+    kani::cover!(
+        advance_slot && !price_up,
+        "selected asset accrual covers next-slot downward mark progress"
+    );
+    assert_eq!(outcome.dt, u64::from(advance_slot));
+    assert!(!outcome.price_move_active);
+    assert!(!outcome.funding_active);
     assert!(!outcome.equity_active);
+    assert!(!outcome.loss_stale_after);
+
+    let mut expected_selected = selected_before;
+    let mut expected_asset = selected_before.asset.try_to_runtime().unwrap();
+    let price_delta = effective_price as i128 - expected_asset.effective_price as i128;
+    let k_delta = price_delta * ADL_ONE as i128;
+    expected_asset.k_long += k_delta;
+    expected_asset.k_short -= k_delta;
+    expected_asset.effective_price = effective_price;
+    expected_asset.fund_px_last = effective_price;
+    expected_asset.slot_last = now_slot;
+    expected_selected.asset = AssetStateV16Account::from_runtime(&expected_asset);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected,
+        &market.markets[SELECTED].engine
+    ));
     assert!(kani_eq_engine_asset_slot_v16_account(
         &unrelated_before,
         &market.markets[unrelated].engine
     ));
-    assert_eq!(
-        market.markets[SELECTED].engine.asset.market_id,
-        selected_before.asset.market_id
-    );
-    assert_eq!(
-        market.markets[SELECTED].engine.asset.lifecycle,
-        selected_before.asset.lifecycle
-    );
+    assert_eq!(market.markets[0].wrapper, wrappers_before[0]);
+    assert_eq!(market.markets[1].wrapper, wrappers_before[1]);
 
     let mut expected_header = header_before;
-    expected_header.current_slot = market.header.current_slot;
-    expected_header.slot_last = market.header.slot_last;
-    expected_header.loss_stale_active = market.header.loss_stale_active;
+    expected_header.current_slot = V16PodU64::new(now_slot);
+    expected_header.slot_last = V16PodU64::new(now_slot);
+    expected_header.loss_stale_active = 0;
     assert!(kani_eq_market_group_v16_header_account(
         &expected_header,
         market.header
