@@ -2268,6 +2268,172 @@ fn composition_attach_value_conservation_under_axiom() {
     assert_eq!(leg_basis, basis);
 }
 
+// Credit-rate arithmetic is already discharged against an independent model
+// in rounding_residue_fuzz. This abstraction preserves the exact extrema used
+// by the source-lien unwind (zero available backing => zero rate; no claim or
+// enough available backing => full rate) and over-approximates only the
+// division-bearing partial-haircut branch, which this composition never uses.
+#[cfg(all(kani, feature = "closure"))]
+fn axiom_source_credit_rate_extrema(state: SourceCreditStateV16) -> V16Result<u128> {
+    V16Core::validate_source_credit_state_shape_static(state)?;
+    let available = V16Core::available_backing_num_for_source_credit_state(state)?;
+    if state.positive_claim_bound_num == 0 || available >= state.positive_claim_bound_num {
+        return Ok(CREDIT_RATE_SCALE);
+    }
+    if available == 0 {
+        return Ok(0);
+    }
+    let rate: u128 = kani::any();
+    kani::assume(rate < CREDIT_RATE_SCALE);
+    Ok(rate)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn complete_counterparty_source_lien_fixture(
+    claim: u128,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+) {
+    let face_num = claim * BOUND_SCALE;
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let mut account = PortfolioAccountV16Account::default();
+    account
+        .init_empty_in_place(ProvenanceHeaderV16Account::from_runtime(
+            &ProvenanceHeaderV16::new([1u8; 32], [2u8; 32], [3u8; 32]),
+        ))
+        .unwrap();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(claim);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(face_num);
+    header.source_claim_bound_total_num = V16PodU128::new(face_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(face_num);
+    account.pnl = V16PodI128::new(claim as i128);
+    account.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_claim_bound_num: V16PodU128::new(face_num),
+        source_claim_liened_num: V16PodU128::new(face_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(face_num),
+        source_lien_effective_reserved: V16PodU128::new(claim),
+        source_lien_counterparty_backing_num: V16PodU128::new(face_num),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        valid_liened_backing_num: face_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: face_num,
+            exact_positive_claim_num: face_num,
+            fresh_reserved_backing_num: face_num,
+            valid_liened_backing_num: face_num,
+            credit_rate_num: 0,
+            ..SourceCreditStateV16::EMPTY
+        });
+    (header, markets, account)
+}
+
+// Nonvacuity companion for the whole-setter composition below. Keeping the
+// fixture in one constructor prevents the validity proof and mutation proof
+// from silently drifting while avoiding three full validation scans in one
+// CBMC query.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    axiom_source_credit_rate_extrema
+)]
+fn composition_complete_counterparty_source_lien_fixture_is_valid_under_rate_axiom() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let (mut header, mut markets, mut account_header) =
+        complete_counterparty_source_lien_fixture(claim_raw as u128);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    kani::cover!(claim_raw > 1, "nontrivial valid complete source lien");
+}
+
+// INV-071/073 whole-setter composition: a valid live positive-PnL claim whose
+// complete face is counterparty-liened cannot survive the canonical PnL setter
+// crossing below zero. Every close-producing route uses this setter before it
+// can install a pending residual, so a source-lien release cannot remain hidden
+// behind the higher-priority close continuation.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    axiom_source_credit_rate_extrema
+)]
+fn composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom() {
+    let claim_raw: u8 = kani::any();
+    let loss_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    kani::assume((1..=8).contains(&loss_raw));
+    let claim = claim_raw as u128;
+    let face_num = claim * BOUND_SCALE;
+    let loss = loss_raw as i128;
+
+    let (mut header, mut markets, mut account_header) =
+        complete_counterparty_source_lien_fixture(claim);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    market.set_account_pnl(&mut account, -loss).unwrap();
+
+    kani::cover!(
+        claim > 1 && loss > 1,
+        "nontrivial source-lien loss crossing"
+    );
+    assert_eq!(account.header.pnl.get(), -loss);
+    assert!(account
+        .header
+        .source_domains
+        .iter()
+        .all(|source| source.source_claim_bound_num.get() == 0
+            && source.source_claim_liened_num.get() == 0
+            && source.source_claim_impaired_num.get() == 0));
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.fresh_unliened_backing_num, face_num);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(source.positive_claim_bound_num, 0);
+    assert_eq!(source.exact_positive_claim_num, 0);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
+}
+
 // VALUE-CONSERVATION composition for the CLEAR body — the inverse of attach,
 // and a second instance of the helper-stub recipe (the review's named next
 // candidate). clear has NO division (it subtracts the leg's STORED weight), so
