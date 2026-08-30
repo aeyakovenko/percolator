@@ -13054,6 +13054,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         normalize_exhausted_sides: bool,
     ) -> V16Result<()> {
+        // The composing refresh/crank paths validate bitmap-to-leg consistency. Flat
+        // accounts have no K/F work, and skipping a second full leg scan preserves
+        // headroom for their bounded source-domain admission checks.
+        if active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)) {
+            return Ok(());
+        }
         let mut plan = [None; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut plan_len = 0usize;
         let mut slot = 0usize;
