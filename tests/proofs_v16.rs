@@ -14797,6 +14797,257 @@ fn proof_v16_view_domain_budget_caps_bankruptcy_insurance_spend() {
     );
 }
 
+// Full two-asset routing theorem for the production bankruptcy-insurance helper.
+// The selected source domain alone funds the loss; every other domain and every
+// unrelated slot field is framed exactly even though all four budgets vary.
+fn prove_v16_bankruptcy_insurance_isolated_for_domain<
+    const TARGET_ASSET: usize,
+    const BANKRUPT_SHORT: bool,
+>() {
+    let budgets_raw: [u8; 4] = kani::any();
+    let spent_raw: [u8; 4] = kani::any();
+    let loss_raw: u8 = kani::any();
+    let insurance_slack_raw: u8 = kani::any();
+    kani::assume((1..=32).contains(&loss_raw));
+    kani::assume(
+        budgets_raw[0] <= 32
+            && budgets_raw[1] <= 32
+            && budgets_raw[2] <= 32
+            && budgets_raw[3] <= 32
+            && spent_raw[0] <= budgets_raw[0]
+            && spent_raw[1] <= budgets_raw[1]
+            && spent_raw[2] <= budgets_raw[2]
+            && spent_raw[3] <= budgets_raw[3],
+    );
+
+    assert!(TARGET_ASSET < 2);
+    let target_asset = TARGET_ASSET;
+    let bankrupt_side = if BANKRUPT_SHORT {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let source_is_short = !BANKRUPT_SHORT;
+    let target_domain = target_asset * 2 + usize::from(source_is_short);
+    let budgets = [
+        u128::from(budgets_raw[0]),
+        u128::from(budgets_raw[1]),
+        u128::from(budgets_raw[2]),
+        u128::from(budgets_raw[3]),
+    ];
+    let spent = [
+        u128::from(spent_raw[0]),
+        u128::from(spent_raw[1]),
+        u128::from(spent_raw[2]),
+        u128::from(spent_raw[3]),
+    ];
+    let remaining = [
+        budgets[0] - spent[0],
+        budgets[1] - spent[1],
+        budgets[2] - spent[2],
+        budgets[3] - spent[3],
+    ];
+    let remaining_total = remaining[0] + remaining[1] + remaining[2] + remaining[3];
+    let insurance_slack = u128::from(insurance_slack_raw);
+    let insurance = remaining_total + insurance_slack;
+    let loss = u128::from(loss_raw);
+    let expected_used = remaining[target_domain].min(loss);
+
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    header.vault = V16PodU128::new(insurance);
+    header.insurance = V16PodU128::new(insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(remaining_total);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    markets[0].wrapper = kani::any();
+    markets[1].wrapper = kani::any();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(budgets[0]);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(spent[0]);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(budgets[1]);
+    markets[0].engine.insurance_domain_spent_short = V16PodU128::new(spent[1]);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(budgets[2]);
+    markets[1].engine.insurance_domain_spent_long = V16PodU128::new(spent[2]);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(budgets[3]);
+    markets[1].engine.insurance_domain_spent_short = V16PodU128::new(spent[3]);
+    account_header.pnl = V16PodI128::new(-(loss as i128));
+
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let mut expected_markets = markets_before;
+    match target_domain {
+        0 => {
+            expected_markets[0].engine.insurance_domain_spent_long =
+                V16PodU128::new(spent[0] + expected_used)
+        }
+        1 => {
+            expected_markets[0].engine.insurance_domain_spent_short =
+                V16PodU128::new(spent[1] + expected_used)
+        }
+        2 => {
+            expected_markets[1].engine.insurance_domain_spent_long =
+                V16PodU128::new(spent[2] + expected_used)
+        }
+        _ => {
+            expected_markets[1].engine.insurance_domain_spent_short =
+                V16PodU128::new(spent[3] + expected_used)
+        }
+    }
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let used = market
+        .kani_consume_domain_insurance_for_negative_pnl(target_asset, bankrupt_side, &mut account)
+        .unwrap();
+
+    kani::cover!(
+        expected_used > 0,
+        "selected source domain can fund bankruptcy"
+    );
+    kani::cover!(
+        remaining[target_domain] < loss && expected_used == remaining[target_domain],
+        "selected domain budget caps the insurance draw"
+    );
+    kani::cover!(
+        loss < remaining[target_domain] && expected_used == loss,
+        "bankruptcy loss caps the insurance draw"
+    );
+    kani::cover!(
+        remaining[target_domain] == 0
+            && remaining_total > 0
+            && insurance >= loss
+            && expected_used == 0,
+        "an empty selected domain cannot consume funded unrelated domains"
+    );
+
+    assert_eq!(used, expected_used);
+    assert_eq!(market.header.vault.get(), header_before.vault.get());
+    assert_eq!(market.header.insurance.get(), insurance - expected_used);
+    assert_eq!(market.header.c_tot.get(), header_before.c_tot.get());
+    assert_eq!(
+        market.header.pnl_pos_tot.get(),
+        header_before.pnl_pos_tot.get()
+    );
+    assert_eq!(
+        market.header.pnl_pos_bound_tot_num.get(),
+        header_before.pnl_pos_bound_tot_num.get()
+    );
+    assert_eq!(
+        market.header.pnl_pos_bound_tot.get(),
+        header_before.pnl_pos_bound_tot.get()
+    );
+    assert_eq!(
+        market.header.pnl_matured_pos_tot.get(),
+        header_before.pnl_matured_pos_tot.get()
+    );
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        header_before.backing_provider_earnings_total.get()
+    );
+    assert_eq!(
+        market.header.source_claim_bound_total_num.get(),
+        header_before.source_claim_bound_total_num.get()
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        header_before.source_fresh_backing_total_num.get()
+    );
+    assert_eq!(
+        market
+            .header
+            .source_insurance_credit_reserved_total_atoms
+            .get(),
+        header_before
+            .source_insurance_credit_reserved_total_atoms
+            .get()
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        remaining_total - expected_used
+    );
+    assert_eq!(
+        market.header.negative_pnl_account_count.get(),
+        u64::from(expected_used != loss)
+    );
+    assert_eq!(market.header.bankruptcy_hlock_active, 1);
+    assert_eq!(
+        market.header.recovery_reason.present,
+        header_before.recovery_reason.present
+    );
+    assert_eq!(
+        market.header.recovery_reason.value,
+        header_before.recovery_reason.value
+    );
+    assert_eq!(market.header.mode, header_before.mode);
+
+    assert_eq!(account.header.capital.get(), account_before.capital.get());
+    assert_eq!(
+        account.header.pnl.get(),
+        -(loss as i128) + expected_used as i128
+    );
+    assert_eq!(
+        account.header.reserved_pnl.get(),
+        account_before.reserved_pnl.get()
+    );
+    assert_eq!(
+        account.header.fee_credits.get(),
+        account_before.fee_credits.get()
+    );
+    assert_eq!(
+        account.header.residual_crystallized_loss_atoms_total.get(),
+        account_before.residual_crystallized_loss_atoms_total.get()
+    );
+    assert_eq!(
+        account.header.active_bitmap[0].get(),
+        account_before.active_bitmap[0].get()
+    );
+    assert_eq!(account.header.health_cert.valid, 0);
+    assert_eq!(
+        account.header.close_progress.active,
+        account_before.close_progress.active
+    );
+    assert_eq!(
+        account.header.close_progress.finalized,
+        account_before.close_progress.finalized
+    );
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0].engine,
+        &market.markets[0].engine,
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1].engine,
+        &market.markets[1].engine,
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_long_bankruptcy_insurance_isolated_across_two_assets() {
+    prove_v16_bankruptcy_insurance_isolated_for_domain::<0, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_short_bankruptcy_insurance_isolated_across_two_assets() {
+    prove_v16_bankruptcy_insurance_isolated_for_domain::<0, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_long_bankruptcy_insurance_isolated_across_two_assets() {
+    prove_v16_bankruptcy_insurance_isolated_for_domain::<1, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_short_bankruptcy_insurance_isolated_across_two_assets() {
+    prove_v16_bankruptcy_insurance_isolated_for_domain::<1, true>();
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
