@@ -19658,6 +19658,162 @@ fn proof_v16_production_close_cure_consumes_escrow_without_minting_value() {
     }
 }
 
+// Successful owner-cure composition at the exact post-refresh production
+// boundary. The refresh/certification route and scalar stock kernel are proved
+// independently; this theorem joins the current cert to the real preflight,
+// escrow consumption, close cancellation, blocker update, validators, and
+// whole-state frame. A second asset carries live barrier state so a wrong-domain
+// write is observable rather than vacuously equal to zero.
+fn prove_v16_close_cure_is_funded_and_domain_isolated<const SOURCE_IS_SHORT: bool>() {
+    let optional_deposit = if kani::any::<bool>() { 0 } else { 3 };
+    let escrow = 3u128;
+    let capital = 20_000u128;
+    let insurance = 17u128;
+    let surplus = 11u128;
+    let source_side = if SOURCE_IS_SHORT {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    header.vault = V16PodU128::new(capital + insurance + escrow + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.materialized_portfolio_count = V16PodU64::new(3);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    match source_side {
+        SideV16::Long => markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1),
+        SideV16::Short => markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1),
+    }
+    markets[1].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
+    markets[1].wrapper = 0x1a2b_3c4d_5e6f_7788;
+
+    account_header.capital = V16PodU128::new(capital);
+    account_header.cancel_deposit_escrow = V16PodU128::new(escrow);
+    account_header.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: true,
+            close_id: 1,
+            asset_index: 0,
+            market_id: markets[0].engine.asset.market_id.get(),
+            domain_side: source_side,
+            gross_loss_at_close_start: 10,
+            drift_reference_slot: header.current_slot.get(),
+            max_close_slot: header.current_slot.get() + 10,
+            residual_remaining: 10,
+            ..CloseProgressLedgerV16::EMPTY
+        });
+    let cert = HealthCertV16 {
+        certified_equity: capital as i128,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+        ..HealthCertV16::default()
+    };
+    account_header.health_cert = HealthCertV16Account::from_runtime(&cert);
+
+    let header_before = header;
+    let selected_before = markets[0];
+    let unrelated_before = markets[1];
+    let account_before = account_header;
+    let ledger_before = account_header.close_progress.try_to_runtime().unwrap();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .kani_cure_and_cancel_close_with_cert_not_atomic(&mut account, optional_deposit, cert)
+        .expect("a funded reversible close must be owner-curable after refresh");
+
+    kani::cover!(
+        optional_deposit == 0,
+        "cure consumes pre-funded escrow without external deposit"
+    );
+    kani::cover!(
+        optional_deposit == 3,
+        "cure combines escrow with a nontrivial external deposit"
+    );
+
+    let capital_credit = escrow + optional_deposit;
+    let mut expected_header = header_before;
+    expected_header.vault = V16PodU128::new(header_before.vault.get() + optional_deposit);
+    expected_header.c_tot = V16PodU128::new(header_before.c_tot.get() + capital_credit);
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(1);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+
+    let mut expected_selected = selected_before;
+    match source_side {
+        SideV16::Long => {
+            expected_selected.engine.pending_domain_loss_barrier_long = V16PodU64::new(0)
+        }
+        SideV16::Short => {
+            expected_selected.engine.pending_domain_loss_barrier_short = V16PodU64::new(0)
+        }
+    }
+    assert_eq!(market.markets[0].wrapper, expected_selected.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[0].engine,
+        &expected_selected.engine,
+    ));
+    assert_eq!(market.markets[1].wrapper, unrelated_before.wrapper);
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &market.markets[1].engine,
+        &unrelated_before.engine,
+    ));
+
+    let mut expected_account = account_before;
+    expected_account.capital = V16PodU128::new(capital + capital_credit);
+    expected_account.cancel_deposit_escrow = V16PodU128::new(0);
+    expected_account.close_progress =
+        CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+            active: false,
+            finalized: false,
+            canceled: true,
+            ..ledger_before
+        });
+    expected_account.health_cert.valid = 0;
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+
+    assert_eq!(
+        market.header.vault.get() - header_before.vault.get(),
+        optional_deposit
+    );
+    assert_eq!(
+        market.header.c_tot.get() - header_before.c_tot.get(),
+        capital_credit
+    );
+    assert_eq!(
+        account.header.capital.get() - account_before.capital.get(),
+        capital_credit
+    );
+    assert_eq!(
+        market.header.vault.get() - market.header.c_tot.get(),
+        insurance + surplus
+    );
+}
+
+#[kani::proof]
+#[kani::unwind(36)]
+#[kani::solver(cadical)]
+fn proof_v16_long_domain_close_cure_is_funded_and_domain_isolated() {
+    prove_v16_close_cure_is_funded_and_domain_isolated::<false>();
+}
+
+#[kani::proof]
+#[kani::unwind(36)]
+#[kani::solver(cadical)]
+fn proof_v16_short_domain_close_cure_is_funded_and_domain_isolated() {
+    prove_v16_close_cure_is_funded_and_domain_isolated::<true>();
+}
+
 // ============ INTRACTABLE-TIER GRIND: realize-body verdict ============
 // CONCLUSIVELY INTRACTABLE (full elimination, 2026-06-10): the terminal-
 // realization full-backing witness exceeds the 900s budget under EVERY
