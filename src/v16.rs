@@ -12966,23 +12966,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn prepare_account_kf_settlement_entry(
-        &self,
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
         leg_slot: usize,
-        asset: AssetStateV16,
-        leg: PortfolioLegV16,
+        normalize_exhausted_sides: bool,
     ) -> V16Result<u64> {
         if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
             return Err(V16Error::InvalidLeg);
         }
+        let leg = account.header.legs[leg_slot].try_to_runtime()?;
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
         let asset_index = leg.asset_index as usize;
+        let mut asset = self.asset_state(asset_index)?;
         if asset_index >= self.header.config.max_market_slots.get() as usize
             || asset_index >= self.markets.len()
             || asset.market_id == 0
         {
             return Err(V16Error::InvalidLeg);
+        }
+        if normalize_exhausted_sides
+            && Self::leg_has_exhausted_effective_oi(asset, leg)
+            && !account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+            && !self.has_pending_domain_loss_barrier(asset_index, leg.side)?
+        {
+            self.begin_full_drain_reset_inner(asset_index, leg.side)?;
+            asset = self.asset_state(asset_index)?;
         }
         let (_k_now, _f_now, _k_delta, _f_delta, net) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
@@ -13059,8 +13073,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // The composing refresh/crank paths validate bitmap-to-leg consistency. Flat
         // accounts have no K/F work, and skipping a second full leg scan preserves
         // headroom for their bounded source-domain admission checks.
-        if active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get)) {
+        let active_bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        let active_leg_count = active_bitmap_count_ones(active_bitmap);
+        if active_leg_count == 0 {
             return Ok(());
+        }
+        if active_leg_count == 1 {
+            let mut slot = 0usize;
+            while slot < V16_MAX_PORTFOLIO_ASSETS_N && !active_bitmap_get(active_bitmap, slot) {
+                slot += 1;
+            }
+            if slot == V16_MAX_PORTFOLIO_ASSETS_N {
+                return Err(V16Error::InvalidLeg);
+            }
+            let entry =
+                self.prepare_account_kf_settlement_entry(account, slot, normalize_exhausted_sides)?;
+            return self.apply_account_kf_settlement_entry(account, entry);
         }
         let mut plan = [None; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut plan_len = 0usize;
@@ -13071,21 +13099,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 slot += 1;
                 continue;
             }
-            let asset_index = leg.asset_index as usize;
-            let mut asset = self.asset_state(asset_index)?;
-            if normalize_exhausted_sides
-                && Self::leg_has_exhausted_effective_oi(asset, leg)
-                && !account
-                    .header
-                    .close_progress
-                    .try_to_runtime()?
-                    .has_pending_residual()
-                && !self.has_pending_domain_loss_barrier(asset_index, leg.side)?
-            {
-                self.begin_full_drain_reset_inner(asset_index, leg.side)?;
-                asset = self.asset_state(asset_index)?;
-            }
-            let entry = self.prepare_account_kf_settlement_entry(slot, asset, leg)?;
+            let entry =
+                self.prepare_account_kf_settlement_entry(account, slot, normalize_exhausted_sides)?;
             plan_len = insert_account_kf_settlement_plan_entry(&mut plan, plan_len, entry)?;
             slot += 1;
         }
