@@ -10739,12 +10739,20 @@ fn proof_v16_source_credit_rate_never_exceeds_available_backing_ratio() {
         "source credit rate proof covers haircut branch"
     );
     kani::cover!(
+        backing_num == 0,
+        "source credit rate proof covers unsupported positive claims"
+    );
+    kani::cover!(
         backing_num >= claim_num,
         "source credit rate proof covers full-credit branch"
     );
     assert!(rate <= CREDIT_RATE_SCALE);
     assert!(support <= backing_atoms);
     assert!(support <= claim_atoms);
+    if backing_num == 0 {
+        assert_eq!(rate, 0);
+        assert_eq!(support, 0);
+    }
     if backing_num >= claim_num {
         assert_eq!(rate, CREDIT_RATE_SCALE);
         assert_eq!(support, claim_atoms);
@@ -11054,6 +11062,314 @@ fn proof_v16_asset_one_long_source_credit_setter_is_exact_and_asset_isolated() {
 #[kani::solver(cadical)]
 fn proof_v16_asset_one_short_source_credit_setter_is_exact_and_asset_isolated() {
     assert_v16_source_credit_setter_is_exact_and_asset_isolated::<1, false>();
+}
+
+// The canonical source-attributed PnL setter is reached by positive K/F
+// settlement and by the public source-grant API. Prove its notional junior-claim
+// mint for every domain in a two-asset slab, including first and additive claims.
+fn prove_v16_positive_pnl_source_setter_is_exact_and_asset_isolated<
+    const ASSET_INDEX: usize,
+    const TARGET_LONG: bool,
+    const EXISTING_CLAIM: bool,
+    const MULTI_ATOM_DELTA: bool,
+>() {
+    let risk_epoch: u64 = kani::any();
+    let old_credit_epoch: u64 = if EXISTING_CLAIM { kani::any() } else { 0 };
+    let wrappers_before: [u64; 2] = kani::any();
+    let capital = kani::any::<u32>() as u128;
+    let insurance = kani::any::<u32>() as u128;
+    let backing_earnings = kani::any::<u32>() as u128;
+    let cancel_escrow = kani::any::<u32>() as u128;
+    let crystallized_loss = kani::any::<u32>() as u128;
+    let fee_credits = kani::any::<i64>() as i128;
+    kani::assume(risk_epoch < u64::MAX);
+    kani::assume(old_credit_epoch < u64::MAX);
+
+    let old = if EXISTING_CLAIM { 3 } else { 0 };
+    let delta = if MULTI_ATOM_DELTA { 4 } else { 1 };
+    let old_num = old * BOUND_SCALE;
+    let delta_num = delta * BOUND_SCALE;
+    let target_domain = ASSET_INDEX * 2 + usize::from(!TARGET_LONG);
+    let target_market_id = (ASSET_INDEX + 1) as u64;
+    let old_source = if old == 0 {
+        SourceCreditStateV16::EMPTY
+    } else {
+        SourceCreditStateV16 {
+            positive_claim_bound_num: old_num,
+            exact_positive_claim_num: old_num,
+            credit_rate_num: 0,
+            credit_epoch: old_credit_epoch,
+            ..SourceCreditStateV16::EMPTY
+        }
+    };
+    let next_source = SourceCreditStateV16 {
+        positive_claim_bound_num: old_num + delta_num,
+        exact_positive_claim_num: old_num + delta_num,
+        credit_rate_num: 0,
+        credit_epoch: old_credit_epoch + 1,
+        ..SourceCreditStateV16::EMPTY
+    };
+
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    markets[0].wrapper = wrappers_before[0];
+    markets[1].wrapper = wrappers_before[1];
+    header.vault = V16PodU128::new(capital + insurance + backing_earnings + cancel_escrow);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    header.backing_provider_earnings_total = V16PodU128::new(backing_earnings);
+    if TARGET_LONG {
+        markets[ASSET_INDEX].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&old_source);
+    } else {
+        markets[ASSET_INDEX].engine.source_credit_short =
+            SourceCreditStateV16Account::from_runtime(&old_source);
+    }
+    header.pnl_pos_tot = V16PodU128::new(old);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(old_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(old);
+    header.source_claim_bound_total_num = V16PodU128::new(old_num);
+    header.risk_epoch = V16PodU64::new(risk_epoch);
+    account_header.capital = V16PodU128::new(capital);
+    account_header.pnl = V16PodI128::new(old as i128);
+    account_header.residual_crystallized_loss_atoms_total = V16PodU128::new(crystallized_loss);
+    account_header.fee_credits = V16PodI128::new(fee_credits);
+    account_header.cancel_deposit_escrow = V16PodU128::new(cancel_escrow);
+    account_header.health_cert.valid = 1;
+    if old != 0 {
+        account_header.source_domains[0] = PortfolioSourceDomainV16Account {
+            domain: V16PodU32::new(target_domain as u32),
+            source_claim_market_id: V16PodU64::new(target_market_id),
+            source_claim_bound_num: V16PodU128::new(old_num),
+            ..PortfolioSourceDomainV16Account::default()
+        };
+    }
+
+    let header_before = header;
+    let slots_before = [markets[0].engine, markets[1].engine];
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    market
+        .kani_set_account_pnl_with_source(&mut account, (old + delta) as i128, target_domain)
+        .unwrap();
+
+    kani::cover!(
+        risk_epoch > 0 && capital > 0 && insurance > 0 && backing_earnings > 0 && cancel_escrow > 0,
+        "source setter covers nonzero conservation-consistent senior stock"
+    );
+    kani::cover!(
+        wrappers_before[0] != wrappers_before[1],
+        "source setter covers distinct opaque wrapper payloads"
+    );
+    if EXISTING_CLAIM {
+        kani::cover!(
+            old_credit_epoch > 0,
+            "source setter covers an existing claim with a nonzero credit epoch"
+        );
+    }
+
+    assert_eq!(market.header.pnl_pos_tot.get(), old + delta);
+    assert_eq!(
+        market.header.pnl_pos_bound_tot_num.get(),
+        old_num + delta_num
+    );
+    assert_eq!(market.header.pnl_pos_bound_tot.get(), old + delta);
+    assert_eq!(
+        market.header.source_claim_bound_total_num.get(),
+        old_num + delta_num
+    );
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch + 1);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+    assert_eq!(
+        market.header.backing_provider_earnings_total,
+        header_before.backing_provider_earnings_total
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num,
+        header_before.source_fresh_backing_total_num
+    );
+    assert_eq!(
+        market.header.source_insurance_credit_reserved_total_atoms,
+        header_before.source_insurance_credit_reserved_total_atoms
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total,
+        header_before.insurance_domain_budget_remaining_total
+    );
+    assert_eq!(
+        market.header.negative_pnl_account_count,
+        header_before.negative_pnl_account_count
+    );
+
+    let expected_selected_source = SourceCreditStateV16Account::from_runtime(&next_source);
+    if TARGET_LONG {
+        assert_eq!(
+            market.markets[ASSET_INDEX].engine.source_credit_long,
+            expected_selected_source
+        );
+        assert_eq!(
+            market.markets[ASSET_INDEX].engine.source_credit_short,
+            slots_before[ASSET_INDEX].source_credit_short
+        );
+    } else {
+        assert_eq!(
+            market.markets[ASSET_INDEX].engine.source_credit_short,
+            expected_selected_source
+        );
+        assert_eq!(
+            market.markets[ASSET_INDEX].engine.source_credit_long,
+            slots_before[ASSET_INDEX].source_credit_long
+        );
+    }
+    let unrelated = 1 - ASSET_INDEX;
+    assert_eq!(
+        market.markets[unrelated].engine.source_credit_long,
+        slots_before[unrelated].source_credit_long
+    );
+    assert_eq!(
+        market.markets[unrelated].engine.source_credit_short,
+        slots_before[unrelated].source_credit_short
+    );
+    assert_eq!(
+        market.markets[ASSET_INDEX]
+            .engine
+            .insurance_domain_budget_long,
+        slots_before[ASSET_INDEX].insurance_domain_budget_long
+    );
+    assert_eq!(
+        market.markets[ASSET_INDEX]
+            .engine
+            .insurance_domain_budget_short,
+        slots_before[ASSET_INDEX].insurance_domain_budget_short
+    );
+    assert_eq!(
+        market.markets[ASSET_INDEX]
+            .engine
+            .insurance_domain_spent_long,
+        slots_before[ASSET_INDEX].insurance_domain_spent_long
+    );
+    assert_eq!(
+        market.markets[ASSET_INDEX]
+            .engine
+            .insurance_domain_spent_short,
+        slots_before[ASSET_INDEX].insurance_domain_spent_short
+    );
+    assert_eq!(
+        market.markets[unrelated]
+            .engine
+            .insurance_domain_budget_long,
+        slots_before[unrelated].insurance_domain_budget_long
+    );
+    assert_eq!(
+        market.markets[unrelated]
+            .engine
+            .insurance_domain_budget_short,
+        slots_before[unrelated].insurance_domain_budget_short
+    );
+    assert_eq!(
+        market.markets[unrelated].engine.insurance_domain_spent_long,
+        slots_before[unrelated].insurance_domain_spent_long
+    );
+    assert_eq!(
+        market.markets[unrelated]
+            .engine
+            .insurance_domain_spent_short,
+        slots_before[unrelated].insurance_domain_spent_short
+    );
+    assert_eq!(
+        [market.markets[0].wrapper, market.markets[1].wrapper],
+        wrappers_before
+    );
+
+    assert_eq!(account.header.pnl.get(), (old + delta) as i128);
+    assert_eq!(
+        account.header.source_domains[0],
+        PortfolioSourceDomainV16Account {
+            domain: V16PodU32::new(target_domain as u32),
+            source_claim_market_id: V16PodU64::new(target_market_id),
+            source_claim_bound_num: V16PodU128::new(old_num + delta_num),
+            ..PortfolioSourceDomainV16Account::default()
+        }
+    );
+    let mut source_slot = 1usize;
+    while source_slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert_eq!(
+            account.header.source_domains[source_slot],
+            account_before.source_domains[source_slot]
+        );
+        source_slot += 1;
+    }
+    assert_eq!(account.header.capital, account_before.capital);
+    assert_eq!(account.header.reserved_pnl, account_before.reserved_pnl);
+    assert_eq!(account.header.fee_credits, account_before.fee_credits);
+    assert_eq!(
+        account.header.cancel_deposit_escrow,
+        account_before.cancel_deposit_escrow
+    );
+    assert_eq!(
+        account.header.residual_crystallized_loss_atoms_total,
+        account_before.residual_crystallized_loss_atoms_total
+    );
+    assert_eq!(account.header.health_cert.valid, 0);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_long_positive_pnl_source_setter_is_exact_and_asset_isolated() {
+    prove_v16_positive_pnl_source_setter_is_exact_and_asset_isolated::<0, true, false, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_short_positive_pnl_source_setter_is_exact_and_asset_isolated() {
+    prove_v16_positive_pnl_source_setter_is_exact_and_asset_isolated::<0, false, false, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_long_positive_pnl_source_setter_is_exact_and_asset_isolated() {
+    prove_v16_positive_pnl_source_setter_is_exact_and_asset_isolated::<1, true, false, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_short_positive_pnl_source_setter_is_exact_and_asset_isolated() {
+    prove_v16_positive_pnl_source_setter_is_exact_and_asset_isolated::<1, false, false, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_long_positive_pnl_source_extension_is_exact_and_asset_isolated() {
+    prove_v16_positive_pnl_source_setter_is_exact_and_asset_isolated::<0, true, true, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_zero_short_positive_pnl_source_extension_is_exact_and_asset_isolated() {
+    prove_v16_positive_pnl_source_setter_is_exact_and_asset_isolated::<0, false, true, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_long_positive_pnl_source_extension_is_exact_and_asset_isolated() {
+    prove_v16_positive_pnl_source_setter_is_exact_and_asset_isolated::<1, true, true, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_asset_one_short_positive_pnl_source_extension_is_exact_and_asset_isolated() {
+    prove_v16_positive_pnl_source_setter_is_exact_and_asset_isolated::<1, false, true, true>();
 }
 
 #[kani::proof]

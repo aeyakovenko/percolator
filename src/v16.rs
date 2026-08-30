@@ -811,6 +811,9 @@ impl V16Core {
             return Ok(CREDIT_RATE_SCALE);
         }
         let available = Self::available_backing_num_for_source_credit_state(state)?;
+        if available == 0 {
+            return Ok(0);
+        }
         let rate = U256::from_u128(available)
             .checked_mul(U256::from_u128(CREDIT_RATE_SCALE))
             .and_then(|v| v.checked_div(U256::from_u128(state.positive_claim_bound_num)))

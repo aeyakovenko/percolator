@@ -856,6 +856,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_account_pnl(account, new_pnl)
     }
 
+    pub fn kani_set_account_pnl_with_source(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        new_pnl: i128,
+        source_domain: usize,
+    ) -> V16Result<()> {
+        self.set_account_pnl_with_source(account, new_pnl, source_domain)
+    }
+
     pub fn kani_apply_signed_kf_delta_to_pnl(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
