@@ -3288,3 +3288,344 @@ fn closure_full_refresh_aggregates_two_assets_without_value_or_domain_drift() {
         market_index += 1;
     }
 }
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_forfeit_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+) {
+    let market_group_id = [11u8; 32];
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::default();
+    header.market_group_id = market_group_id;
+    header.config = V16ConfigAccount::from_runtime(&cfg);
+    header.asset_slot_capacity = V16PodU32::new(2);
+    header.next_market_id = V16PodU64::new(3);
+    header.asset_activation_count = V16PodU64::new(2);
+    header.last_asset_activation_slot = V16PodU64::new(2);
+    header.current_slot = V16PodU64::new(2);
+    header.slot_last = V16PodU64::new(2);
+    header.asset_set_epoch = V16PodU64::new(2);
+    header.risk_epoch = V16PodU64::new(2);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(10);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(10);
+
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(1)),
+        Market::new(0u64, EngineAssetSlotV16Account::empty_for_market(2)),
+    ];
+    let mut asset_index = 0usize;
+    while asset_index < 2 {
+        let mut asset = AssetStateV16::default();
+        asset.market_id = asset_index as u64 + 1;
+        asset.lifecycle = AssetLifecycleV16::Active;
+        asset.raw_oracle_target_price = 100;
+        asset.effective_price = 100;
+        asset.fund_px_last = 100;
+        asset.slot_last = 2;
+        markets[asset_index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        asset_index += 1;
+    }
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(1);
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(2);
+    markets[1].engine.insurance_domain_budget_long = V16PodU128::new(3);
+    markets[1].engine.insurance_domain_budget_short = V16PodU128::new(4);
+
+    let owner = [13u8; 32];
+    let mut account = PortfolioAccountV16Account::default();
+    account.provenance_header = ProvenanceHeaderV16Account::from_runtime(
+        &ProvenanceHeaderV16::new(market_group_id, [12u8; 32], owner),
+    );
+    account.owner = owner;
+    account.legs =
+        [PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY); V16_MAX_PORTFOLIO_ASSETS_N];
+    (header, markets, account)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn install_source_forfeit_counterparty_claim(
+    header: &mut MarketGroupV16HeaderAccount,
+    markets: &mut [Market<u64>; 2],
+    account: &mut PortfolioAccountV16Account,
+) {
+    let claim = 2u128;
+    let claim_num = claim * BOUND_SCALE;
+    header.vault = V16PodU128::new(10 + claim);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: claim_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: header.risk_epoch.get(),
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets[0].engine.asset.market_id.get(),
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    account.pnl = V16PodI128::new(claim as i128);
+    account.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: markets[0].engine.asset.market_id,
+        source_claim_bound_num: V16PodU128::new(claim_num),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+}
+
+// Exact small-value division seam. The general divider and source-credit rate
+// formula are proved independently; this closure asserts every reached value
+// remains in its two-atom fixture domain.
+#[cfg(all(kani, feature = "closure"))]
+fn source_forfeit_div_rem_stub(num: U256, den: U256) -> (U256, U256) {
+    assert_eq!(num.hi(), 0);
+    assert_eq!(den.hi(), 0);
+    assert_ne!(den.lo(), 0);
+    (
+        U256::from_u128(num.lo() / den.lo()),
+        U256::from_u128(num.lo() % den.lo()),
+    )
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_forfeit_rate_stub(state: SourceCreditStateV16) -> V16Result<u128> {
+    let available = V16Core::available_backing_num_for_source_credit_state(state)?;
+    assert!((BOUND_SCALE..=2 * BOUND_SCALE).contains(&state.positive_claim_bound_num));
+    assert_eq!(state.positive_claim_bound_num % BOUND_SCALE, 0);
+    assert_eq!(
+        state.exact_positive_claim_num,
+        state.positive_claim_bound_num
+    );
+    assert!((BOUND_SCALE..=2 * BOUND_SCALE).contains(&available));
+    assert!(available <= state.positive_claim_bound_num);
+    Ok(available * CREDIT_RATE_SCALE / state.positive_claim_bound_num)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_forfeit_negative_one_delta_stub(
+    abs_basis_q: u128,
+    a_basis: u128,
+    then: i128,
+    now: i128,
+) -> Option<i128> {
+    assert_eq!(abs_basis_q, POS_SCALE);
+    assert_eq!(a_basis, ADL_ONE);
+    if then == now {
+        Some(0)
+    } else {
+        assert_eq!(then, 0);
+        assert_eq!(now, -(ADL_ONE as i128));
+        Some(-1)
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_forfeit_account_validation_stub<'a: 'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()> {
+    assert_eq!(
+        account.header.provenance_header.market_group_id,
+        market.header.market_group_id
+    );
+    assert_ne!(account.header.pnl.get(), i128::MIN);
+    assert!(account.header.active_bitmap[0].get() <= 1);
+    let source = account.header.source_domains[0];
+    assert_eq!(source.domain.get(), 0);
+    assert_eq!(source.source_claim_market_id.get(), 1);
+    assert!((BOUND_SCALE..=2 * BOUND_SCALE).contains(&source.source_claim_bound_num.get()));
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn source_forfeit_market_validation_stub<'a: 'a, T>(
+    market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()> {
+    assert_eq!(market.markets.len(), 2);
+    assert!(market.header.vault.get() >= market.header.c_tot.get() + market.header.insurance.get());
+    assert!(
+        (BOUND_SCALE..=2 * BOUND_SCALE).contains(&market.header.source_claim_bound_total_num.get())
+    );
+    assert!((BOUND_SCALE..=2 * BOUND_SCALE)
+        .contains(&market.header.source_fresh_backing_total_num.get()));
+    Ok(())
+}
+
+// Public recovery forfeit composes adverse K/F settlement with a real source
+// claim and fresh counterparty backing. Exactly one backed atom may cure one
+// loss atom: the transient create-and-consume lien, close ledger, consumed
+// backing, provider receivable, residual stock, and remaining source claim must
+// all advance once while the other asset stays framed. The leaf create/consume
+// contracts cover arbitrary amounts; this closure pins their smallest
+// nontrivial composition through the full public route.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(128)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    crate::v16::scaled_adl_delta_fast,
+    source_forfeit_negative_one_delta_stub
+)]
+#[kani::stub(crate::wide_math::div_rem_u256, source_forfeit_div_rem_stub)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    source_forfeit_rate_stub
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    source_forfeit_account_validation_stub
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape,
+    source_forfeit_market_validation_stub
+)]
+fn closure_counterparty_lien_recovery_forfeit_counts_support_once() {
+    let remaining_num = BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = source_forfeit_fixture();
+    install_source_forfeit_counterparty_claim(&mut header, &mut markets, &mut account_header);
+
+    let mut risk_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    risk_asset.lifecycle = AssetLifecycleV16::Recovery;
+    risk_asset.k_long = -(ADL_ONE as i128);
+    risk_asset.k_short = ADL_ONE as i128;
+    risk_asset.oi_eff_long_q = POS_SCALE;
+    risk_asset.oi_eff_short_q = POS_SCALE;
+    risk_asset.stored_pos_count_long = 1;
+    risk_asset.stored_pos_count_short = 1;
+    risk_asset.loss_weight_sum_long = POS_SCALE;
+    risk_asset.loss_weight_sum_short = POS_SCALE;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&risk_asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: risk_asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        epoch_snap: risk_asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_epoch_snap: risk_asset.epoch_long,
+        ..PortfolioLegV16::EMPTY
+    });
+
+    let header_before = header;
+    let markets_before = markets;
+    let account_before = account_header;
+    let mut expected_header = header_before;
+    expected_header.pnl_pos_tot = V16PodU128::new(1);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(1);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(remaining_num);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(remaining_num);
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(remaining_num);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 2);
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(1);
+
+    let mut expected_markets = [markets_before[0].engine, markets_before[1].engine];
+    expected_markets[0].source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: remaining_num,
+            exact_positive_claim_num: remaining_num,
+            fresh_reserved_backing_num: remaining_num,
+            spent_backing_num: BOUND_SCALE,
+            provider_receivable_num: BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: header_before.risk_epoch.get() + 2,
+            ..SourceCreditStateV16::EMPTY
+        });
+    expected_markets[0].backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: markets_before[0].engine.asset.market_id.get(),
+        fresh_unliened_backing_num: remaining_num,
+        consumed_liened_backing_num: BOUND_SCALE,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    let mut selected_after = risk_asset;
+    selected_after.oi_eff_long_q = 0;
+    selected_after.stored_pos_count_long = 0;
+    selected_after.loss_weight_sum_long = 0;
+    expected_markets[1].asset = AssetStateV16Account::from_runtime(&selected_after);
+
+    let final_close = CloseProgressLedgerV16 {
+        active: true,
+        finalized: true,
+        close_id: 1,
+        asset_index: 1,
+        market_id: risk_asset.market_id,
+        domain_side: SideV16::Short,
+        gross_loss_at_close_start: 1,
+        drift_reference_slot: header_before.current_slot.get(),
+        max_close_slot: header_before.current_slot.get()
+            + header_before.config.max_bankrupt_close_lifetime_slots.get(),
+        support_consumed: 1,
+        junior_face_burned: 1,
+        ..CloseProgressLedgerV16::EMPTY
+    };
+    let mut expected_account = account_before;
+    expected_account.pnl = V16PodI128::new(1);
+    expected_account.active_bitmap = V16_EMPTY_ACTIVE_BITMAP.map(V16PodU64::new);
+    expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    expected_account.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: markets_before[0].engine.asset.market_id,
+        source_claim_bound_num: V16PodU128::new(remaining_num),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    expected_account.health_cert.valid = 0;
+    expected_account.close_progress = CloseProgressLedgerV16Account::from_runtime(&final_close);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let residual_before = market.residual();
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let outcome = market.forfeit_recovery_leg_not_atomic(&mut account, 1, 1);
+
+    kani::cover!(
+        matches!(outcome, Ok(value) if value.support_consumed == 1 && value.detached),
+        "source-backed recovery forfeit reaches terminal close progress"
+    );
+    assert!(
+        outcome
+            == Ok(DeadLegForfeitOutcomeV16 {
+                detached: true,
+                positive_pnl_forfeited: 0,
+                loss_settled: 1,
+                support_consumed: 1,
+                junior_face_burned: 1,
+                principal_used: 0,
+                insurance_used: 0,
+                residual_booked: 0,
+                explicit_loss: 0,
+            })
+    );
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header,
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header,
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[0],
+        &market.markets[0].engine,
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_markets[1],
+        &market.markets[1].engine,
+    ));
+    assert_eq!(market.markets[0].wrapper, markets_before[0].wrapper);
+    assert_eq!(market.markets[1].wrapper, markets_before[1].wrapper);
+    assert_eq!(market.residual(), residual_before + 1);
+}
