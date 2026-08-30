@@ -585,6 +585,309 @@ fn signed_q(q: u128) -> i128 {
     i128::try_from(q).unwrap()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct KfSettlementOrderOutcome {
+    vault: u128,
+    c_tot: u128,
+    long_capital: u128,
+    long_pnl: i128,
+    long_equity: i128,
+    long_claims: Vec<(u32, u128)>,
+    long_funding: (u128, u128, u128, u128),
+    short_capital: u128,
+    short_pnl: i128,
+    short_equity: i128,
+    short_claims: Vec<(u32, u128)>,
+    short_funding: (u128, u128, u128, u128),
+    source_stock: Vec<(u128, u128, u128)>,
+}
+
+fn multi_asset_funding_fixture(
+    market_slots: u32,
+    init_price: u64,
+) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (market_id, _, _) = ids();
+    let mut cfg =
+        V16Config::public_user_fund_with_market_slots(market_slots as u16, market_slots, 0, 10);
+    cfg.max_abs_funding_e9_per_slot = FUNDING_COUNTER_RATE_E9 as u64;
+    cfg.max_price_move_bps_per_slot = 9_000;
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, market_slots, 0).unwrap();
+    let mut markets = (0..market_slots)
+        .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
+    for (asset_index, market) in markets.iter_mut().enumerate() {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                asset_index as u32,
+                &mut market.engine,
+                init_price,
+                (asset_index + 1) as u64,
+            )
+            .unwrap();
+    }
+    (header, markets)
+}
+
+fn account_claims(account: &PortfolioAccountV16Account) -> Vec<(u32, u128)> {
+    account
+        .source_domains
+        .iter()
+        .filter(|source| source.is_occupied())
+        .map(|source| (source.domain.get(), source.source_claim_bound_num.get()))
+        .collect()
+}
+
+fn kf_settlement_order_outcome(
+    attach_order: [usize; 3],
+    settle_short_first: bool,
+    funding_only: bool,
+) -> KfSettlementOrderOutcome {
+    let initial_price = if funding_only {
+        FUNDING_COUNTER_PRICE
+    } else {
+        100
+    };
+    let (mut header, mut markets) = if funding_only {
+        multi_asset_funding_fixture(3, initial_price)
+    } else {
+        market_fixture(3, initial_price)
+    };
+    let mut long_header = account_fixture(3, 180);
+    let mut short_header = account_fixture(3, 181);
+    let quantities = [20u128, 10, 15];
+    let marks = if funding_only {
+        [initial_price; 3]
+    } else {
+        [110u64, 95, 98]
+    };
+    let funding_rates = [
+        FUNDING_COUNTER_RATE_E9,
+        -FUNDING_COUNTER_RATE_E9,
+        FUNDING_COUNTER_RATE_E9,
+    ];
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        let deposit = if funding_only { 100_000_000 } else { 10_000 };
+        market.deposit_not_atomic(&mut long, deposit).unwrap();
+        market.deposit_not_atomic(&mut short, deposit).unwrap();
+        for asset_index in attach_order {
+            market
+                .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                    &mut long,
+                    &mut short,
+                    TradeRequestV16 {
+                        asset_index,
+                        size_q: signed_q(quantities[asset_index] * POS_SCALE),
+                        exec_price: initial_price,
+                        fee_bps: 0,
+                    },
+                )
+                .unwrap();
+        }
+        if funding_only {
+            for asset_index in 0..3 {
+                market
+                    .accrue_asset_to_not_atomic(asset_index, 4, initial_price, 0, true)
+                    .unwrap();
+            }
+        }
+        for asset_index in 0..3 {
+            if !funding_only {
+                market
+                    .set_asset_raw_oracle_target_not_atomic(asset_index, marks[asset_index])
+                    .unwrap();
+            }
+            market
+                .accrue_asset_to_not_atomic(
+                    asset_index,
+                    if funding_only { 5 } else { 4 },
+                    marks[asset_index],
+                    if funding_only {
+                        funding_rates[asset_index]
+                    } else {
+                        0
+                    },
+                    true,
+                )
+                .unwrap_or_else(|err| panic!("asset {asset_index} accrual failed: {err:?}"));
+        }
+        if settle_short_first {
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+            market.full_account_refresh_not_atomic(&mut long).unwrap();
+        } else {
+            market.full_account_refresh_not_atomic(&mut long).unwrap();
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+        }
+        let first_cert = if settle_short_first {
+            short.header.health_cert.try_to_runtime().unwrap()
+        } else {
+            long.header.health_cert.try_to_runtime().unwrap()
+        };
+        assert_ne!(
+            first_cert.cert_risk_epoch,
+            market.header.risk_epoch.get(),
+            "later source-backing settlement must invalidate the earlier health certificate",
+        );
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+    }
+
+    let mut source_stock = Vec::new();
+    for market in &markets {
+        for (source, backing) in [
+            (
+                &market.engine.source_credit_long,
+                &market.engine.backing_long,
+            ),
+            (
+                &market.engine.source_credit_short,
+                &market.engine.backing_short,
+            ),
+        ] {
+            let source = source.try_to_runtime().unwrap();
+            let backing = backing.try_to_runtime().unwrap();
+            source_stock.push((
+                source.positive_claim_bound_num,
+                source.fresh_reserved_backing_num,
+                backing.fresh_unliened_backing_num,
+            ));
+        }
+    }
+    KfSettlementOrderOutcome {
+        vault: header.vault.get(),
+        c_tot: header.c_tot.get(),
+        long_capital: long_header.capital.get(),
+        long_pnl: long_header.pnl.get(),
+        long_equity: long_header
+            .health_cert
+            .try_to_runtime()
+            .unwrap()
+            .certified_equity,
+        long_claims: account_claims(&long_header),
+        long_funding: funding_counter_tuple(&long_header),
+        short_capital: short_header.capital.get(),
+        short_pnl: short_header.pnl.get(),
+        short_equity: short_header
+            .health_cert
+            .try_to_runtime()
+            .unwrap()
+            .certified_equity,
+        short_claims: account_claims(&short_header),
+        short_funding: funding_counter_tuple(&short_header),
+        source_stock,
+    }
+}
+
+#[test]
+fn v16_whole_account_kf_settlement_is_leg_and_account_order_independent() {
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let expected = kf_settlement_order_outcome(orders[0], false, false);
+    for order in orders {
+        for settle_short_first in [false, true] {
+            assert_eq!(
+                kf_settlement_order_outcome(order, settle_short_first, false),
+                expected,
+                "K/F settlement changed under attach order {order:?}, short-first={settle_short_first}",
+            );
+        }
+    }
+
+    assert_eq!(expected.vault, 20_000);
+    assert_eq!(expected.c_tot, 19_720);
+    assert_eq!(
+        (
+            expected.long_capital,
+            expected.long_pnl,
+            expected.long_equity,
+        ),
+        (9_920, 200, 10_120),
+    );
+    assert_eq!(
+        (
+            expected.short_capital,
+            expected.short_pnl,
+            expected.short_equity,
+        ),
+        (9_800, 80, 9_880),
+    );
+    assert_eq!(expected.long_claims, vec![(1, 200 * BOUND_SCALE)]);
+    assert_eq!(
+        expected.short_claims,
+        vec![(2, 50 * BOUND_SCALE), (4, 30 * BOUND_SCALE)],
+    );
+    assert_eq!(
+        expected.source_stock,
+        vec![
+            (0, 0, 0),
+            (200 * BOUND_SCALE, 200 * BOUND_SCALE, 200 * BOUND_SCALE),
+            (50 * BOUND_SCALE, 50 * BOUND_SCALE, 50 * BOUND_SCALE),
+            (0, 0, 0),
+            (30 * BOUND_SCALE, 30 * BOUND_SCALE, 30 * BOUND_SCALE),
+            (0, 0, 0),
+        ],
+    );
+
+    let funding_expected = kf_settlement_order_outcome(orders[0], false, true);
+    for order in orders {
+        for settle_short_first in [false, true] {
+            assert_eq!(
+                kf_settlement_order_outcome(order, settle_short_first, true),
+                funding_expected,
+                "funding settlement changed under attach order {order:?}, short-first={settle_short_first}",
+            );
+        }
+    }
+    assert_eq!(funding_expected.c_tot, 199_999_550);
+    assert_eq!(
+        (
+            funding_expected.long_capital,
+            funding_expected.long_pnl,
+            funding_expected.long_equity,
+            funding_expected.long_funding,
+        ),
+        (99_999_650, 100, 99_999_750, (350, 100, 0, 0)),
+    );
+    assert_eq!(
+        (
+            funding_expected.short_capital,
+            funding_expected.short_pnl,
+            funding_expected.short_equity,
+            funding_expected.short_funding,
+        ),
+        (99_999_900, 350, 100_000_250, (0, 0, 100, 350)),
+    );
+    assert_eq!(funding_expected.long_claims, vec![(3, 100 * BOUND_SCALE)],);
+    assert_eq!(
+        funding_expected.short_claims,
+        vec![(0, 200 * BOUND_SCALE), (4, 150 * BOUND_SCALE)],
+    );
+    assert_eq!(
+        funding_expected.source_stock,
+        vec![
+            (200 * BOUND_SCALE, 200 * BOUND_SCALE, 200 * BOUND_SCALE),
+            (0, 0, 0),
+            (0, 0, 0),
+            (100 * BOUND_SCALE, 100 * BOUND_SCALE, 100 * BOUND_SCALE),
+            (150 * BOUND_SCALE, 150 * BOUND_SCALE, 150 * BOUND_SCALE),
+            (0, 0, 0),
+        ],
+    );
+}
+
 fn funding_counter_tuple(account: &PortfolioAccountV16Account) -> (u128, u128, u128, u128) {
     (
         account.funding_long_paid_atoms_total.get(),
