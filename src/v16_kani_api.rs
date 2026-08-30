@@ -2251,6 +2251,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.reduce_matching_open_interest_for_unilateral_close(asset_index, closed_side, close_q)
     }
 
+    pub fn kani_reduce_position_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+        close_q: u128,
+    ) -> V16Result<()> {
+        self.reduce_position(account, asset_index, close_q)
+    }
+
     pub fn kani_liquidation_close_would_leave_uncovered_loss_for_account(
         &self,
         account: &PortfolioV16View<'_>,

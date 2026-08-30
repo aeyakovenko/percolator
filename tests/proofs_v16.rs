@@ -6546,6 +6546,170 @@ fn proof_v16_unilateral_reduction_preserves_long_short_oi_symmetry() {
     );
 }
 
+// Production-core composition theorem for the permissionless defensive
+// rebalance path. The public path's settle/certify/progress gates are covered
+// independently; this executes its exact private reducer and proves a partial
+// reduction cannot move value, break matched OI, or touch another live asset
+// in the same cross-margin portfolio.
+fn prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated<
+    const SELECTED_IS_SHORT: bool,
+>() {
+    let selected_q = 4 * POS_SCALE;
+    let reduce_q = 2 * POS_SCALE;
+    let remaining_q = selected_q - reduce_q;
+    let unrelated_q = 2 * POS_SCALE;
+    let capital = if kani::any::<bool>() { 10_000 } else { 20_000 };
+    let selected_side = if SELECTED_IS_SHORT {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let unrelated_side = if SELECTED_IS_SHORT {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    header.vault = V16PodU128::new(capital);
+    header.c_tot = V16PodU128::new(capital);
+    account_header.capital = V16PodU128::new(capital);
+
+    let install_position = |market: &mut Market<u64>,
+                            account_leg: &mut PortfolioLegV16Account,
+                            asset_index,
+                            side: SideV16,
+                            size: u128| {
+        let mut asset = market.engine.asset.try_to_runtime().unwrap();
+        asset.oi_eff_long_q = size;
+        asset.oi_eff_short_q = size;
+        asset.stored_pos_count_long = 1;
+        asset.stored_pos_count_short = 1;
+        asset.loss_weight_sum_long = size;
+        asset.loss_weight_sum_short = size;
+        market.engine.asset = AssetStateV16Account::from_runtime(&asset);
+        *account_leg = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index,
+            market_id: asset.market_id,
+            side,
+            basis_pos_q: if side == SideV16::Long {
+                size as i128
+            } else {
+                -(size as i128)
+            },
+            a_basis: ADL_ONE,
+            k_snap: 0,
+            f_snap: 0,
+            epoch_snap: 0,
+            loss_weight: size,
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: 0,
+            b_stale: false,
+            stale: false,
+        });
+    };
+    install_position(
+        &mut markets[0],
+        &mut account_header.legs[0],
+        0,
+        selected_side,
+        selected_q,
+    );
+    install_position(
+        &mut markets[1],
+        &mut account_header.legs[1],
+        1,
+        unrelated_side,
+        unrelated_q,
+    );
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: 17,
+        certified_maintenance_req: 11,
+        certified_worst_case_loss: 7,
+        active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let header_before = header;
+    let selected_before = markets[0];
+    let unrelated_before = markets[1];
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .kani_reduce_position_not_atomic(&mut account, 0, reduce_q)
+        .unwrap();
+
+    let selected_after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    let selected_leg_after = account.header.legs[0].try_to_runtime().unwrap();
+    let expected_signed_remaining = if SELECTED_IS_SHORT {
+        -(remaining_q as i128)
+    } else {
+        remaining_q as i128
+    };
+
+    kani::cover!(
+        capital == 20_000,
+        "rebalance reducer reaches a non-default value stock"
+    );
+    assert_eq!(selected_leg_after.side, selected_side);
+    assert_eq!(selected_leg_after.basis_pos_q, expected_signed_remaining);
+    assert_eq!(selected_leg_after.loss_weight, remaining_q);
+    assert_eq!(selected_after.oi_eff_long_q, remaining_q);
+    assert_eq!(selected_after.oi_eff_short_q, remaining_q);
+    assert_eq!(selected_after.stored_pos_count_long, 1);
+    assert_eq!(selected_after.stored_pos_count_short, 1);
+    assert_eq!(market.markets[0].wrapper, selected_before.wrapper);
+
+    let mut expected_selected_slot = selected_before.engine;
+    expected_selected_slot.asset = market.markets[0].engine.asset;
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &expected_selected_slot,
+        &market.markets[0].engine,
+    ));
+
+    assert_eq!(market.markets[1], unrelated_before);
+    let mut expected_account = account_before;
+    expected_account.legs[0] = account.header.legs[0];
+    expected_account.health_cert.valid = 0;
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header,
+    ));
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header,
+    ));
+    assert_eq!(account.header.health_cert.valid, 0);
+    assert_eq!(account.header.capital, account_before.capital);
+    assert_eq!(account.header.pnl, account_before.pnl);
+    assert_eq!(account.header.reserved_pnl, account_before.reserved_pnl);
+    assert_eq!(account.header.fee_credits, account_before.fee_credits);
+    assert_eq!(account.header.source_domains, account_before.source_domains);
+    assert_eq!(market.header.vault, header_before.vault);
+    assert_eq!(market.header.c_tot, header_before.c_tot);
+    assert_eq!(market.header.insurance, header_before.insurance);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_rebalance_long_reducer_is_value_neutral_and_asset_isolated() {
+    prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated::<false>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_rebalance_short_reducer_is_value_neutral_and_asset_isolated() {
+    prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated::<true>();
+}
+
 // Bounded-progress companion for the matching side's A-factor. Every valid
 // partial close keeps the scaled A positive; if it falls below the configured
 // safety floor, the exact same production kernel marks only that side
