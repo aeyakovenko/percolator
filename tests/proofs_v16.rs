@@ -9265,6 +9265,47 @@ fn proof_v16_positive_kf_delta_creates_source_claim_bound() {
 }
 
 #[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_unbacked_loss_burns_positive_face_one_for_one() {
+    let positive: u128 = kani::any();
+    let support_face_burned: u128 = kani::any();
+    let remaining_loss: u128 = kani::any();
+    let result = MarketGroupV16ViewMut::<u64>::kani_kernel_settle_positive_face_after_support(
+        positive,
+        support_face_burned,
+        remaining_loss,
+    );
+    let invalid = positive > i128::MAX as u128
+        || support_face_burned > positive
+        || remaining_loss > i128::MAX as u128;
+    if invalid {
+        assert_eq!(result, Err(V16Error::ArithmeticOverflow));
+        return;
+    }
+
+    let (new_pnl, junior_face_burned) = result.unwrap();
+    let expected_pnl = (positive - support_face_burned) as i128 - remaining_loss as i128;
+    let expected_burn = (support_face_burned + remaining_loss).min(positive);
+    kani::cover!(
+        support_face_burned + remaining_loss < positive,
+        "loss consumes only part of the positive face"
+    );
+    kani::cover!(
+        support_face_burned + remaining_loss == positive,
+        "loss consumes the positive face exactly"
+    );
+    kani::cover!(
+        support_face_burned + remaining_loss > positive,
+        "loss exhausts the face and leaves a deficit"
+    );
+    assert_eq!(junior_face_burned, expected_burn);
+    assert_eq!(new_pnl, expected_pnl);
+    assert!(junior_face_burned >= support_face_burned);
+    assert_eq!(positive - junior_face_burned, new_pnl.max(0) as u128);
+}
+
+#[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
 fn proof_v16_unliened_source_support_is_capped_by_realizable_backing() {

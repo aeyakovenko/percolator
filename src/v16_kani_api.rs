@@ -697,6 +697,18 @@ impl MarketGroupV16HeaderAccount {
 }
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
+    pub fn kani_kernel_settle_positive_face_after_support(
+        old_positive_face: u128,
+        support_face_burned: u128,
+        remaining_loss: u128,
+    ) -> V16Result<(i128, u128)> {
+        V16Core::kernel_settle_positive_face_after_support(
+            old_positive_face,
+            support_face_burned,
+            remaining_loss,
+        )
+    }
+
     pub fn kani_kernel_released_pnl_conversion_partition(
         positive_face: u128,
         converted: u128,

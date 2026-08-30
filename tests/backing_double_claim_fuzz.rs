@@ -833,9 +833,10 @@ fn resolved_close_prepares_lapsed_backing_before_pending_k_loss() {
     assert_eq!(account.header.pnl.get(), 0);
     assert_eq!(
         market.header.vault.get(),
-        BACKING + PNL,
-        "the crystallized mark loss remains in the source-backing ledger",
+        BACKING,
+        "the pending mark loss consumes the matching positive face without charging principal",
     );
+    assert_eq!(vault_before - market.header.vault.get(), capital_before);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }

@@ -519,7 +519,7 @@ fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Ac
 
 #[cfg(feature = "fuzz")]
 #[test]
-fn v16_cross_domain_fractional_source_loss_settles_without_locking() {
+fn v16_cross_domain_unbacked_loss_burns_only_matching_positive_face() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 250);
     let half_atom_num = BOUND_SCALE / 2;
@@ -567,12 +567,15 @@ fn v16_cross_domain_fractional_source_loss_settles_without_locking() {
         .expect("fractional source fixture must be a valid portfolio state");
     let outcome = market
         .kani_apply_signed_kf_delta_to_pnl(&mut account, -1, None)
-        .expect("an unbacked fractional-domain loss must remain settleable");
+        .expect("an unbacked cross-domain loss must remain settleable");
 
-    assert_eq!(outcome, (0, 2));
-    assert_eq!(account.header.pnl.get(), -1);
-    assert_eq!(market.header.pnl_pos_tot.get(), 0);
-    assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
+    assert_eq!(outcome, (0, 1));
+    assert_eq!(account.header.pnl.get(), 1);
+    assert_eq!(market.header.pnl_pos_tot.get(), 1);
+    assert_eq!(
+        market.header.source_claim_bound_total_num.get(),
+        BOUND_SCALE
+    );
     assert_eq!(market.header.vault.get(), 1);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
@@ -4757,11 +4760,12 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         .try_to_runtime()
         .unwrap();
     let unliened_support_consumed = 5_000 - lien_effective;
-    let principal_loss = 5_250 - unliened_support_consumed;
+    let principal_loss = 5_250 - 5_000;
     assert_eq!(long.header.pnl.get(), 0);
     assert_eq!(
         long.header.capital.get(),
-        capital_before_reversal - principal_loss
+        capital_before_reversal - principal_loss,
+        "the prior positive face absorbs the reversal one-for-one before principal"
     );
     assert_eq!(long.header.source_domains[0], Default::default());
     if insurance_backed {

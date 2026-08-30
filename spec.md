@@ -1358,6 +1358,15 @@ KF_pnl_delta = exact signed-floor A/K/F settlement
 net_pnl_delta = KF_pnl_delta - B_loss
 ```
 
+When a negative `net_pnl_delta` is applied to existing positive face `P`, source
+support first consumes `S` effective atoms and burns `F` face. The uncovered
+tail is `R = abs(net_pnl_delta) - S`, and settlement MUST set
+`PNL_new = (P - F) - R` and burn total face `P - max(PNL_new, 0)`. A nonzero
+uncovered tail MUST NOT both burn all retained positive face and then be
+subtracted again. Permissionless settlement order therefore cannot change the
+account's terminal value merely by changing which signed K/F delta reaches the
+account first.
+
 If full B settlement is too large, partial settlement is allowed. While `B_remaining > 0`, no user-favorable action may continue.
 
 -------------------------------------------------------------------------------
