@@ -6548,11 +6548,12 @@ fn proof_v16_unilateral_reduction_preserves_long_short_oi_symmetry() {
 
 // Production-core composition theorem for the permissionless defensive
 // rebalance path. The public path's settle/certify/progress gates are covered
-// independently; this executes its exact private reducer and proves a partial
-// reduction cannot move value, break matched OI, or touch another live asset
-// in the same cross-margin portfolio.
+// independently; this executes its exact lifecycle gate and private reducer.
+// Active and DrainOnly routes must both reduce without moving value, breaking
+// matched OI, or touching another live asset in the cross-margin portfolio.
 fn prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated<
     const SELECTED_IS_SHORT: bool,
+    const STARTS_DRAIN_ONLY: bool,
 >() {
     let selected_q = 4 * POS_SCALE;
     let reduce_q = 2 * POS_SCALE;
@@ -6624,6 +6625,11 @@ fn prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated<
         unrelated_side,
         unrelated_q,
     );
+    if STARTS_DRAIN_ONLY {
+        let mut selected_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        selected_asset.lifecycle = AssetLifecycleV16::DrainOnly;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&selected_asset);
+    }
     account_header.active_bitmap[0] = V16PodU64::new(3);
     account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
         certified_equity: capital as i128,
@@ -6641,6 +6647,7 @@ fn prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated<
     let account_before = account_header;
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(market.kani_require_asset_live_reducible(0), Ok(()));
     market
         .kani_reduce_position_not_atomic(&mut account, 0, reduce_q)
         .unwrap();
@@ -6664,6 +6671,14 @@ fn prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated<
     assert_eq!(selected_after.oi_eff_short_q, remaining_q);
     assert_eq!(selected_after.stored_pos_count_long, 1);
     assert_eq!(selected_after.stored_pos_count_short, 1);
+    assert_eq!(
+        selected_after.lifecycle,
+        if STARTS_DRAIN_ONLY {
+            AssetLifecycleV16::DrainOnly
+        } else {
+            AssetLifecycleV16::Active
+        }
+    );
     assert_eq!(market.markets[0].wrapper, selected_before.wrapper);
 
     let mut expected_selected_slot = selected_before.engine;
@@ -6700,14 +6715,28 @@ fn prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated<
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_rebalance_long_reducer_is_value_neutral_and_asset_isolated() {
-    prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated::<false>();
+    prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated::<false, false>();
 }
 
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_rebalance_short_reducer_is_value_neutral_and_asset_isolated() {
-    prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated::<true>();
+    prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated::<true, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_drain_only_rebalance_long_reducer_preserves_exit_and_asset_isolation() {
+    prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated::<false, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_drain_only_rebalance_short_reducer_preserves_exit_and_asset_isolation() {
+    prove_v16_rebalance_reducer_is_value_neutral_and_asset_isolated::<true, true>();
 }
 
 // Bounded-progress companion for the matching side's A-factor. Every valid

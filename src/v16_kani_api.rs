@@ -2260,6 +2260,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.reduce_position(account, asset_index, close_q)
     }
 
+    pub fn kani_require_asset_live_reducible(&self, asset_index: usize) -> V16Result<()> {
+        self.require_asset_live_reducible(asset_index)
+    }
+
     pub fn kani_liquidation_close_would_leave_uncovered_loss_for_account(
         &self,
         account: &PortfolioV16View<'_>,
