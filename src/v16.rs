@@ -7012,6 +7012,14 @@ const ACCOUNT_KF_SETTLEMENT_DOMAIN_MAX: u64 = u32::MAX as u64 * 2 + 1;
 const ACCOUNT_KF_SETTLEMENT_PHASE_SHIFT: u32 = 37;
 const ACCOUNT_KF_SETTLEMENT_KEY_MAX: u64 = (1u64 << 38) - 1;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AccountKfSettlementPreparedV16 {
+    k_now: i128,
+    f_now: i128,
+    f_delta: i128,
+    net: i128,
+}
+
 fn account_kf_settlement_plan_key(
     phase: u8,
     source_domain: usize,
@@ -12970,7 +12978,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         leg_slot: usize,
         normalize_exhausted_sides: bool,
-    ) -> V16Result<u64> {
+    ) -> V16Result<(u64, AccountKfSettlementPreparedV16)> {
         if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
             return Err(V16Error::InvalidLeg);
         }
@@ -12998,7 +13006,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.begin_full_drain_reset_inner(asset_index, leg.side)?;
             asset = self.asset_state(asset_index)?;
         }
-        let (_k_now, _f_now, _k_delta, _f_delta, net) =
+        let (k_now, f_now, _k_delta, f_delta, net) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
         let source_side = if net > 0 {
             opposite_side(leg.side)
@@ -13006,13 +13014,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             leg.side
         };
         let source_domain = self.insurance_domain_index(asset_index, source_side)?;
-        account_kf_settlement_plan_key(u8::from(net >= 0), source_domain, leg_slot)
+        let entry = account_kf_settlement_plan_key(u8::from(net >= 0), source_domain, leg_slot)?;
+        Ok((
+            entry,
+            AccountKfSettlementPreparedV16 {
+                k_now,
+                f_now,
+                f_delta,
+                net,
+            },
+        ))
     }
 
     fn apply_account_kf_settlement_entry(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         entry: u64,
+        prepared: AccountKfSettlementPreparedV16,
     ) -> V16Result<()> {
         let (phase, source_domain, leg_slot) = decode_account_kf_settlement_plan_key(entry)?;
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
@@ -13021,24 +13039,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let asset_index = leg.asset_index as usize;
         let mut asset = self.asset_state(asset_index)?;
-        let (k_now, f_now, _k_delta, f_delta, net) =
-            Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
-        let actual_source_side = if net > 0 {
+        let actual_source_side = if prepared.net > 0 {
             opposite_side(leg.side)
         } else {
             leg.side
         };
-        if phase != u8::from(net >= 0)
+        if phase != u8::from(prepared.net >= 0)
             || source_domain != self.insurance_domain_index(asset_index, actual_source_side)?
         {
             return Err(V16Error::InvalidLeg);
         }
-        if net != 0 {
-            if net > 0 {
-                self.apply_signed_kf_delta_to_pnl(account, net, Some(source_domain))?;
+        if prepared.net != 0 {
+            if prepared.net > 0 {
+                self.apply_signed_kf_delta_to_pnl(account, prepared.net, Some(source_domain))?;
             } else {
                 let negative_before = account.header.pnl.get().min(0).unsigned_abs();
-                self.apply_signed_kf_delta_to_pnl(account, net, None)?;
+                self.apply_signed_kf_delta_to_pnl(account, prepared.net, None)?;
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
                 self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
                     account,
@@ -13048,12 +13064,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 )?;
             }
         }
-        Self::record_account_funding_flow(account, leg.side, f_delta)?;
+        Self::record_account_funding_flow(account, leg.side, prepared.f_delta)?;
         let (settled_asset, kf_epoch_snap) =
             V16Core::kernel_settle_kf_stale_cohort(asset, leg.side, leg.kf_epoch_snap)?;
         asset = settled_asset;
-        leg.k_snap = k_now;
-        leg.f_snap = f_now;
+        leg.k_snap = prepared.k_now;
+        leg.f_snap = prepared.f_now;
         leg.kf_epoch_snap = kf_epoch_snap;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
@@ -13086,11 +13102,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if slot == V16_MAX_PORTFOLIO_ASSETS_N {
                 return Err(V16Error::InvalidLeg);
             }
-            let entry =
+            let (entry, prepared) =
                 self.prepare_account_kf_settlement_entry(account, slot, normalize_exhausted_sides)?;
-            return self.apply_account_kf_settlement_entry(account, entry);
+            return self.apply_account_kf_settlement_entry(account, entry, prepared);
         }
         let mut plan = [None; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut prepared_by_slot =
+            [AccountKfSettlementPreparedV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
         let mut plan_len = 0usize;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
@@ -13099,8 +13117,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 slot += 1;
                 continue;
             }
-            let entry =
+            let (entry, prepared) =
                 self.prepare_account_kf_settlement_entry(account, slot, normalize_exhausted_sides)?;
+            prepared_by_slot[slot] = prepared;
             plan_len = insert_account_kf_settlement_plan_entry(&mut plan, plan_len, entry)?;
             slot += 1;
         }
@@ -13108,7 +13127,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut index = 0usize;
         while index < plan_len {
             let entry = plan[index].ok_or(V16Error::InvalidLeg)?;
-            self.apply_account_kf_settlement_entry(account, entry)?;
+            let leg_slot = (entry & 0xf) as usize;
+            if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+                return Err(V16Error::InvalidLeg);
+            }
+            self.apply_account_kf_settlement_entry(account, entry, prepared_by_slot[leg_slot])?;
             index += 1;
         }
         Ok(())
