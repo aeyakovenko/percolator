@@ -13039,12 +13039,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let asset_index = leg.asset_index as usize;
         let mut asset = self.asset_state(asset_index)?;
+        let (live_k_now, live_f_now) = Self::kf_target_for_leg_from_asset(asset, leg)?;
         let actual_source_side = if prepared.net > 0 {
             opposite_side(leg.side)
         } else {
             leg.side
         };
-        if phase != u8::from(prepared.net >= 0)
+        if live_k_now != prepared.k_now
+            || live_f_now != prepared.f_now
+            || phase != u8::from(prepared.net >= 0)
             || source_domain != self.insurance_domain_index(asset_index, actual_source_side)?
         {
             return Err(V16Error::InvalidLeg);
