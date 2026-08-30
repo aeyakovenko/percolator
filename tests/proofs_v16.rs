@@ -6186,6 +6186,236 @@ fn proof_v16_released_flat_pending_obligation_detach_is_value_neutral_progress()
     );
 }
 
+// CrankForward and asset-isolation composition over the production selector and
+// exact released-obligation mutation behind the wrapper-facing dispatcher. A
+// current obligation must be selected and detached without oracle work even
+// when another asset carries live risk. The selected step must reduce exactly
+// one payout blocker, preserve the unrelated asset byte-for-byte, and move no
+// value stock. Public dispatcher wiring is exercised by v16_spec_tests.
+fn prove_v16_auto_crank_released_obligation_route_is_asset_isolated<
+    const RELEASED_IS_SHORT: bool,
+    const PROVE_SELECTION: bool,
+>() {
+    let released_weight = 5 * POS_SCALE;
+    let released_side = if RELEASED_IS_SHORT {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+    let unrelated_side = if RELEASED_IS_SHORT {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let unrelated_q = 2 * POS_SCALE;
+    let capital = if kani::any::<bool>() { 10_000 } else { 20_000 };
+    let insurance = 17;
+    let surplus = 11;
+
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    header.vault = V16PodU128::new(capital + insurance + surplus);
+    header.c_tot = V16PodU128::new(capital);
+    header.insurance = V16PodU128::new(insurance);
+    // This account carries one side of asset 1; a second persisted portfolio
+    // supplies the matched counterparty OI represented in the market totals.
+    header.materialized_portfolio_count = V16PodU64::new(2);
+    account_header.capital = V16PodU128::new(capital);
+
+    let mut released_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    match released_side {
+        SideV16::Long => {
+            released_asset.stored_pos_count_long = 1;
+            released_asset.pending_obligation_count_long = 1;
+            released_asset.loss_weight_sum_long = released_weight;
+        }
+        SideV16::Short => {
+            released_asset.stored_pos_count_short = 1;
+            released_asset.pending_obligation_count_short = 1;
+            released_asset.loss_weight_sum_short = released_weight;
+        }
+    }
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&released_asset);
+
+    let mut unrelated_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    unrelated_asset.oi_eff_long_q = unrelated_q;
+    unrelated_asset.oi_eff_short_q = unrelated_q;
+    unrelated_asset.stored_pos_count_long = 1;
+    unrelated_asset.stored_pos_count_short = 1;
+    unrelated_asset.loss_weight_sum_long = unrelated_q;
+    unrelated_asset.loss_weight_sum_short = unrelated_q;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&unrelated_asset);
+    markets[1].wrapper = 0x55aa_33cc_0f0f_f0f0;
+    header.resolved_payout_blocker_count = V16PodU64::new(3);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: released_asset.market_id,
+        side: released_side,
+        basis_pos_q: 0,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: released_weight,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: unrelated_asset.market_id,
+        side: unrelated_side,
+        basis_pos_q: if RELEASED_IS_SHORT {
+            unrelated_q as i128
+        } else {
+            -(unrelated_q as i128)
+        },
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        epoch_snap: 0,
+        loss_weight: unrelated_q,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: capital as i128,
+        certified_initial_req: 13,
+        certified_maintenance_req: 7,
+        certified_worst_case_loss: 5,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let header_before = header;
+    let released_before = markets[0];
+    let unrelated_before = markets[1];
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    kani::cover!(
+        capital == 20_000,
+        "released-obligation route reaches funded non-default state beside unrelated risk"
+    );
+
+    if PROVE_SELECTION {
+        let (summary, plan) = market
+            .kani_auto_crank_summary_and_plan(&account.as_view())
+            .expect("a valid released obligation beside live risk must classify");
+        assert!(summary.stale);
+        assert!(summary.is_actionable());
+        assert!(!summary.b_stale);
+        assert!(!summary.pending_close);
+        assert!(!summary.expired_close);
+        assert!(!summary.liquidatable);
+        assert!(!summary.recovery_eligible);
+        assert!(!summary.resolved_winner);
+        assert_eq!(
+            plan,
+            AutoCrankPlanV16::RefreshAccount {
+                asset_index: Some(0)
+            }
+        );
+        return;
+    }
+
+    market
+        .kani_execute_current_released_obligation_at_slot(&mut account, 0)
+        .expect("a selected current obligation must make observation-free progress");
+
+    let mut expected_header = header_before;
+    expected_header.resolved_payout_blocker_count = V16PodU64::new(2);
+    assert!(kani_eq_market_group_v16_header_account(
+        &expected_header,
+        market.header
+    ));
+    assert_eq!(market.markets[1], unrelated_before);
+
+    let mut expected_released_asset = released_asset;
+    match released_side {
+        SideV16::Long => {
+            expected_released_asset.stored_pos_count_long = 0;
+            expected_released_asset.pending_obligation_count_long = 0;
+            expected_released_asset.loss_weight_sum_long = 0;
+        }
+        SideV16::Short => {
+            expected_released_asset.stored_pos_count_short = 0;
+            expected_released_asset.pending_obligation_count_short = 0;
+            expected_released_asset.loss_weight_sum_short = 0;
+        }
+    }
+    let mut expected_released = released_before;
+    expected_released.engine.asset = AssetStateV16Account::from_runtime(&expected_released_asset);
+    assert_eq!(market.markets[0], expected_released);
+
+    let mut expected_account = account_before;
+    expected_account.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16::EMPTY);
+    expected_account.active_bitmap[0] = V16PodU64::new(2);
+    expected_account.health_cert.valid = 0;
+    assert!(kani_eq_portfolio_account_v16_account(
+        &expected_account,
+        account.header
+    ));
+    assert!(account.header.legs[0].try_to_runtime().unwrap().is_empty());
+    assert_eq!(account.header.legs[1], account_before.legs[1]);
+    assert_eq!(account.header.active_bitmap[0].get(), 2);
+    assert_eq!(account.header.health_cert, expected_account.health_cert);
+    assert_eq!(
+        active_bitmap_count_ones(account.header.active_bitmap.map(V16PodU64::get)),
+        1
+    );
+    assert!(active_bitmap_get(
+        account.header.active_bitmap.map(V16PodU64::get),
+        1
+    ));
+    assert_eq!(account.header.capital, account_before.capital);
+    assert_eq!(account.header.pnl, account_before.pnl);
+    assert_eq!(account.header.reserved_pnl, account_before.reserved_pnl);
+    assert_eq!(account.header.fee_credits, account_before.fee_credits);
+    assert_eq!(account.header.source_domains, account_before.source_domains);
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_selects_released_long_before_healthy_unrelated_risk() {
+    prove_v16_auto_crank_released_obligation_route_is_asset_isolated::<false, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_selects_released_short_before_healthy_unrelated_risk() {
+    prove_v16_auto_crank_released_obligation_route_is_asset_isolated::<true, true>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_released_long_selected_step_preserves_unrelated_risk_and_value() {
+    prove_v16_auto_crank_released_obligation_route_is_asset_isolated::<false, false>();
+}
+
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_released_short_selected_step_preserves_unrelated_risk_and_value() {
+    prove_v16_auto_crank_released_obligation_route_is_asset_isolated::<true, false>();
+}
+
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]

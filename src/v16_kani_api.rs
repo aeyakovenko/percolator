@@ -2289,6 +2289,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok((summary, plan))
     }
 
+    // Exact mutation seam for the released-obligation fast path in
+    // permissionless_auto_crank_not_atomic. The production plan builder is
+    // proved separately so CBMC never expands every unrelated crank arm in the
+    // same SAT instance.
+    pub fn kani_execute_current_released_obligation_at_slot(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        leg_slot: usize,
+    ) -> V16Result<()> {
+        if !self.released_obligation_is_current(&account.as_view(), leg_slot)? {
+            return Err(V16Error::NonProgress);
+        }
+        self.validate_unconfigured_market_tail()?;
+        self.clear_leg_at_slot(account, leg_slot)?;
+        self.validate_shape_audit_scan()
+    }
+
     pub fn kani_permissionless_crank(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
