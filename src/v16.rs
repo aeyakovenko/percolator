@@ -15377,17 +15377,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    pub fn convert_released_pnl_to_capital_not_atomic(
+    fn convert_released_pnl_to_capital_after_preflight_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<u128> {
-        self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
         let converted = self.convert_released_pnl_to_capital_core_not_atomic(account)?;
         if converted != 0 {
             self.validate_shape()?;
             account.validate_with_market(&self.as_view())?;
         }
         Ok(converted)
+    }
+
+    pub fn convert_released_pnl_to_capital_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.preflight_convert_released_pnl_to_capital(&account.as_view())?;
+        self.convert_released_pnl_to_capital_after_preflight_not_atomic(account)
     }
 
     #[cfg(any(kani, feature = "fuzz"))]

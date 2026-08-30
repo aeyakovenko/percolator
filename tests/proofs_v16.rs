@@ -4658,6 +4658,212 @@ fn proof_v16_production_conversion_delta_is_exact_and_fully_funded() {
     }
 }
 
+// Successful source-backed conversion through the post-preflight production
+// suffix. The exhaustive public preflight theorem composes with this route
+// theorem. The selected domain mixes counterparty principal and insurance while
+// the unrelated asset carries live backing, making both funding classes and the
+// cross-asset frame observable in one transition.
+fn prove_v16_mixed_source_conversion_is_funded_and_domain_isolated<const SOURCE_IS_SHORT: bool>() {
+    const COUNTERPARTY_ATOMS: u128 = 5;
+    const INSURANCE_ATOMS: u128 = 5;
+    const CONVERTED: u128 = COUNTERPARTY_ATOMS + INSURANCE_ATOMS;
+    const UNRELATED_BACKING_ATOMS: u128 = 7;
+
+    let counterparty_num = COUNTERPARTY_ATOMS * BOUND_SCALE;
+    let insurance_num = INSURANCE_ATOMS * BOUND_SCALE;
+    let claim_num = CONVERTED * BOUND_SCALE;
+    let unrelated_backing_num = UNRELATED_BACKING_ATOMS * BOUND_SCALE;
+    let selected_domain = usize::from(SOURCE_IS_SHORT);
+    let (mut header, mut markets, mut account_header) = two_market_direct_view_fixture();
+    let selected_market_id = markets[0].engine.asset.market_id.get();
+    let unrelated_market_id = markets[1].engine.asset.market_id.get();
+
+    header.vault = V16PodU128::new(CONVERTED + UNRELATED_BACKING_ATOMS);
+    header.insurance = V16PodU128::new(INSURANCE_ATOMS);
+    header.pnl_pos_tot = V16PodU128::new(CONVERTED);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(CONVERTED);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num =
+        V16PodU128::new(counterparty_num + unrelated_backing_num);
+    header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(INSURANCE_ATOMS);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(INSURANCE_ATOMS);
+
+    let selected_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: counterparty_num,
+        insurance_credit_reserved_num: insurance_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let selected_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: selected_market_id,
+        fresh_unliened_backing_num: counterparty_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    let selected_reservation =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            insurance_credit_reserved_num: insurance_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    if SOURCE_IS_SHORT {
+        markets[0].engine.source_credit_short = selected_source;
+        markets[0].engine.backing_short = selected_bucket;
+        markets[0].engine.insurance_reservation_short = selected_reservation;
+        markets[0].engine.insurance_domain_budget_short = V16PodU128::new(INSURANCE_ATOMS);
+    } else {
+        markets[0].engine.source_credit_long = selected_source;
+        markets[0].engine.backing_long = selected_bucket;
+        markets[0].engine.insurance_reservation_long = selected_reservation;
+        markets[0].engine.insurance_domain_budget_long = V16PodU128::new(INSURANCE_ATOMS);
+    }
+
+    markets[1].wrapper = 0x1a2b_3c4d_5e6f_7788;
+    markets[1].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: unrelated_backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[1].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: unrelated_market_id,
+        fresh_unliened_backing_num: unrelated_backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    account_header.pnl = V16PodI128::new(CONVERTED as i128);
+    account_header.source_domains[0].domain = V16PodU32::new(selected_domain as u32);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(selected_market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: CONVERTED as i128,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    let header_before = header;
+    let selected_before = markets[0];
+    let unrelated_before = markets[1];
+    let account_before = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let converted = market.kani_convert_released_pnl_after_preflight_not_atomic(&mut account);
+
+    kani::cover!(
+        converted == Ok(CONVERTED),
+        "mixed counterparty and insurance support reaches successful production conversion"
+    );
+    kani::cover!(
+        market.markets[1]
+            .engine
+            .source_credit_short
+            .fresh_reserved_backing_num
+            .get()
+            == unrelated_backing_num,
+        "conversion executes beside nonzero unrelated source backing"
+    );
+
+    let mut expected_header = header_before;
+    expected_header.c_tot = V16PodU128::new(CONVERTED);
+    expected_header.insurance = V16PodU128::new(0);
+    expected_header.pnl_pos_tot = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot_num = V16PodU128::new(0);
+    expected_header.pnl_pos_bound_tot = V16PodU128::new(0);
+    expected_header.source_claim_bound_total_num = V16PodU128::new(0);
+    expected_header.source_fresh_backing_total_num = V16PodU128::new(unrelated_backing_num);
+    expected_header.source_insurance_credit_reserved_total_atoms = V16PodU128::new(0);
+    expected_header.insurance_domain_budget_remaining_total = V16PodU128::new(0);
+    expected_header.risk_epoch = V16PodU64::new(header_before.risk_epoch.get() + 3);
+
+    let expected_source = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        spent_backing_num: counterparty_num,
+        provider_receivable_num: counterparty_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 3,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let expected_bucket = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: selected_market_id,
+        consumed_liened_backing_num: counterparty_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    let expected_reservation =
+        InsuranceCreditReservationV16Account::from_runtime(&InsuranceCreditReservationV16 {
+            consumed_insurance_num: insurance_num,
+            ..InsuranceCreditReservationV16::EMPTY
+        });
+    let mut expected_selected = selected_before;
+    if SOURCE_IS_SHORT {
+        expected_selected.engine.source_credit_short = expected_source;
+        expected_selected.engine.backing_short = expected_bucket;
+        expected_selected.engine.insurance_reservation_short = expected_reservation;
+        expected_selected.engine.insurance_domain_spent_short = V16PodU128::new(INSURANCE_ATOMS);
+    } else {
+        expected_selected.engine.source_credit_long = expected_source;
+        expected_selected.engine.backing_long = expected_bucket;
+        expected_selected.engine.insurance_reservation_long = expected_reservation;
+        expected_selected.engine.insurance_domain_spent_long = V16PodU128::new(INSURANCE_ATOMS);
+    }
+
+    let mut expected_account = account_before;
+    expected_account.capital = V16PodU128::new(CONVERTED);
+    expected_account.pnl = V16PodI128::new(0);
+    expected_account.source_domains[0] = PortfolioSourceDomainV16Account::default();
+    expected_account.health_cert.valid = 0;
+    let exact_funded_isolated_transition = converted == Ok(CONVERTED)
+        && kani_eq_market_group_v16_header_account(&expected_header, market.header)
+        && market.markets[0].wrapper == expected_selected.wrapper
+        && kani_eq_engine_asset_slot_v16_account(
+            &market.markets[0].engine,
+            &expected_selected.engine,
+        )
+        && market.markets[1].wrapper == unrelated_before.wrapper
+        && kani_eq_engine_asset_slot_v16_account(
+            &market.markets[1].engine,
+            &unrelated_before.engine,
+        )
+        && kani_eq_portfolio_account_v16_account(&expected_account, account.header)
+        && market.header.vault.get()
+            == market.header.c_tot.get() + unrelated_backing_num / BOUND_SCALE;
+    assert!(exact_funded_isolated_transition);
+}
+
+#[kani::proof]
+#[kani::unwind(36)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    kani_assume_portfolio_shape_valid
+)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
+fn proof_v16_long_source_conversion_is_funded_and_domain_isolated() {
+    prove_v16_mixed_source_conversion_is_funded_and_domain_isolated::<false>();
+}
+
+#[kani::proof]
+#[kani::unwind(36)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    kani_assume_portfolio_shape_valid
+)]
+#[kani::stub(MarketGroupV16View::validate_shape, kani_assume_market_shape_valid)]
+fn proof_v16_short_source_conversion_is_funded_and_domain_isolated() {
+    prove_v16_mixed_source_conversion_is_funded_and_domain_isolated::<true>();
+}
+
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]

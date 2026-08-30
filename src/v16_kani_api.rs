@@ -954,6 +954,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.preflight_convert_released_pnl_to_capital(account)
     }
 
+    pub fn kani_convert_released_pnl_after_preflight_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<u128> {
+        self.convert_released_pnl_to_capital_after_preflight_not_atomic(account)
+    }
+
     pub fn kani_released_pnl_conversion_delta(
         capital: u128,
         c_tot: u128,
