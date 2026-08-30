@@ -11958,13 +11958,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn create_account_source_credit_lien_for_effective_not_atomic(
+    fn create_account_source_credit_lien_for_effective_unchecked(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         domain: usize,
         effective_credit: u128,
     ) -> V16Result<()> {
-        account.validate_with_market(&self.as_view())?;
         self.domain_asset_side(domain)?;
         if effective_credit == 0 {
             return Ok(());
@@ -11989,7 +11988,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.current_slot.get(),
         )?;
         account.header.health_cert.valid = 0;
-        account.validate_with_market(&self.as_view())
+        Ok(())
     }
 
     fn create_account_source_credit_lien_for_effective_any_not_atomic(
@@ -11997,6 +11996,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         effective_credit: u128,
     ) -> V16Result<()> {
+        // Each domain mutation preserves the same local ledger equations. Validate
+        // the account once around the bounded batch instead of rescanning all source
+        // slots before and after every individual domain.
         account.validate_with_market(&self.as_view())?;
         let mut remaining = effective_credit;
         let mut slot = 0usize;
@@ -12023,7 +12025,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let by_backing = self.source_credit_available_backing_num(d)? / BOUND_SCALE;
                 let take = remaining.min(by_claim).min(by_backing);
                 if take != 0 {
-                    self.create_account_source_credit_lien_for_effective_not_atomic(
+                    self.create_account_source_credit_lien_for_effective_unchecked(
                         account, d, take,
                     )?;
                     remaining -= take;
@@ -12034,7 +12036,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if remaining != 0 {
             return Err(V16Error::LockActive);
         }
-        Ok(())
+        account.validate_with_market(&self.as_view())
     }
 
     fn create_initial_margin_source_lien_if_needed(
