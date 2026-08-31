@@ -3813,6 +3813,62 @@ fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
 }
 
 #[test]
+fn v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement() {
+    const ASSETS: usize = TERMINAL_SLAB_SCAN_ASSETS_PER_CALL + 1;
+    const ASSET: usize = ASSETS - 1;
+    const RESIDUAL: u128 = 10;
+    const SPENT: u128 = 3;
+    const RECEIVABLE: u128 = 7;
+
+    let (mut header, mut markets) = market_fixture(ASSETS, 100);
+    let market_id = markets[ASSET].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(RESIDUAL);
+    markets[ASSET].engine.insurance_domain_budget_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.insurance_domain_spent_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: RECEIVABLE * BOUND_SCALE,
+            provider_receivable_num: RECEIVABLE * BOUND_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[ASSET].engine.backing_short =
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            consumed_liened_backing_num: RECEIVABLE * BOUND_SCALE,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(2).unwrap();
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(2, 0, 2),
+        Ok(TerminalSlabOutcomeV16::ScanProgress {
+            next_asset_index: TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
+            authenticated_slot: 2,
+        })
+    );
+    assert_eq!(
+        (market.header.vault.get(), market.header.insurance.get()),
+        (RESIDUAL, 0),
+        "a scan-only step cannot reclassify terminal value"
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(2, TERMINAL_SLAB_SCAN_ASSETS_PER_CALL, 2,),
+        Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+            asset_index: ASSET,
+            amount: SPENT,
+        }),
+        "the persisted continuation cannot skip a candidate in the last chunk"
+    );
+    assert_eq!(
+        (market.header.vault.get(), market.header.insurance.get()),
+        (RESIDUAL, SPENT)
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
 fn v16_public_domain_insurance_spent_setter_preserves_budget_total() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
