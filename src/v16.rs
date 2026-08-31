@@ -7168,6 +7168,16 @@ pub enum ResolvedCloseOutcomeV16 {
     Closed { payout: u128 },
 }
 
+/// One bounded step toward closing an otherwise claim-free resolved market.
+/// A successful call either performs one state transition or returns the exact
+/// terminal amount that the wrapper must remove from external custody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalSlabOutcomeV16 {
+    BackingExpired { domain: usize },
+    InsuranceRecredited { asset_index: usize, amount: u128 },
+    ReadyToClose { retired: u128 },
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
 pub struct V16PodU16 {
@@ -11250,14 +11260,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
-    // Contract layer: terminal retirement removes only insurance that has no
-    // remaining domain or source-credit claimant. The wrapper pairs this
-    // accounting transition with an SPL-token burn.
+    // Contract layer: terminal retirement removes only value that has no
+    // remaining domain or source-credit claimant. Any vault value above
+    // insurance is claim-free protocol surplus at this boundary; the wrapper
+    // pairs the complete accounting transition with an SPL-token burn.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| match result {
-        Ok((retired, next_vault, next_insurance)) => *retired == insurance
+        Ok((retired, next_vault, next_insurance)) => *retired == vault
             && *next_vault == 0
             && *next_insurance == 0
-            && vault == insurance
+            && insurance <= vault
             && budget_remaining == 0
             && source_reserved_atoms == 0,
         Err(_) => true,
@@ -11268,39 +11279,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         budget_remaining: u128,
         source_reserved_atoms: u128,
     ) -> V16Result<(u128, u128, u128)> {
-        if vault != insurance || budget_remaining != 0 || source_reserved_atoms != 0 {
+        if insurance > vault || budget_remaining != 0 || source_reserved_atoms != 0 {
             return Err(V16Error::LockActive);
         }
-        Ok((insurance, 0, 0))
+        Ok((vault, 0, 0))
     }
 
-    /// Retires the final unbudgeted insurance surplus from an otherwise empty
-    /// resolved market. No domain budget, source reservation, portfolio, PnL,
-    /// backing claim, or payout receipt may remain.
-    pub fn retire_terminal_unbudgeted_insurance_not_atomic(&mut self) -> V16Result<u128> {
-        self.validate_shape()?;
-        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved
-            || self.header.c_tot.get() != 0
-            || self.header.pnl_pos_tot.get() != 0
-            || self.header.pnl_pos_bound_tot_num.get() != 0
-            || self.header.pnl_pos_bound_tot.get() != 0
-            || self.header.pnl_matured_pos_tot.get() != 0
-            || self.header.backing_provider_earnings_total.get() != 0
-            || self.header.source_claim_bound_total_num.get() != 0
-            || self.header.source_fresh_backing_total_num.get() != 0
-            || self.header.resolved_payout_blocker_count.get() != 0
-            || self.header.materialized_portfolio_count.get() != 0
-            || self.header.stale_certificate_count.get() != 0
-            || self.header.b_stale_account_count.get() != 0
-            || self.header.negative_pnl_account_count.get() != 0
-        {
-            return Err(V16Error::LockActive);
-        }
+    fn retire_terminal_unbudgeted_insurance_core_not_atomic(&mut self) -> V16Result<u128> {
         let vault_before = self.header.vault.get();
+        let insurance_before = self.header.insurance.get();
         let (retired, next_vault, next_insurance) =
             Self::retire_terminal_unbudgeted_insurance_delta(
                 vault_before,
-                self.header.insurance.get(),
+                insurance_before,
                 self.header.insurance_domain_budget_remaining_total.get(),
                 self.header
                     .source_insurance_credit_reserved_total_atoms
@@ -11308,12 +11299,40 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             )?;
         self.header.vault = V16PodU128::new(next_vault);
         self.header.insurance = V16PodU128::new(next_insurance);
+        let protocol_surplus = vault_before
+            .checked_sub(insurance_before)
+            .ok_or(V16Error::CounterUnderflow)?;
+        TokenValueFlowProofV16::unallocated_protocol_surplus_to_insurance(
+            protocol_surplus,
+            vault_before,
+            vault_before,
+        )?
+        .validate()?;
         TokenValueFlowProofV16::insurance_capital_to_external_out(
             retired,
             vault_before,
             next_vault,
         )?
         .validate()?;
+        Ok(retired)
+    }
+
+    /// Retires the final unbudgeted insurance and claim-free protocol surplus
+    /// from an otherwise empty resolved market. No recoverable insurance
+    /// overlap, domain budget, source reservation, portfolio, PnL, backing
+    /// claim, or payout receipt may remain.
+    pub fn retire_terminal_unbudgeted_insurance_not_atomic(&mut self) -> V16Result<u128> {
+        self.validate_shape()?;
+        self.require_terminal_claim_free_state()?;
+        if self.header.backing_provider_earnings_total.get() != 0
+            || self.header.source_fresh_backing_total_num.get() != 0
+        {
+            return Err(V16Error::LockActive);
+        }
+        if self.first_terminal_claim_free_recredit_asset()?.is_some() {
+            return Err(V16Error::LockActive);
+        }
+        let retired = self.retire_terminal_unbudgeted_insurance_core_not_atomic()?;
         self.validate_shape()?;
         Ok(retired)
     }
@@ -11663,19 +11682,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(recredit)
     }
 
-    /// Restores one asset's claim-free terminal residual that is also backed by
-    /// both an outstanding counterparty-provider receivable and historical
-    /// insurance spend on the paired side. The final materialized-portfolio gate
-    /// makes the residual unowned by traders before any reclassification occurs.
-    ///
-    /// This operation is intentionally asset-local: wrapper callers can make
-    /// bounded progress even when the market account contains thousands of
-    /// configured slots.
-    pub fn recredit_terminal_claim_free_residual_for_asset_not_atomic(
-        &mut self,
-        asset_index: usize,
-    ) -> V16Result<u128> {
-        self.validate_shape()?;
+    fn require_terminal_claim_free_state(&self) -> V16Result<()> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved
             || self.header.materialized_portfolio_count.get() != 0
             || self.header.c_tot.get() != 0
@@ -11691,7 +11698,80 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::LockActive);
         }
+        Ok(())
+    }
 
+    fn terminal_claim_free_recredit_for_asset(
+        &self,
+        asset_index: usize,
+        mut claim_free_residual_remaining: u128,
+    ) -> V16Result<u128> {
+        self.validate_configured_asset_index(asset_index)?;
+        let mut recredited_total = 0u128;
+        for side in [SideV16::Long, SideV16::Short] {
+            if claim_free_residual_remaining == 0 {
+                break;
+            }
+            let source_domain = self.insurance_domain_index(asset_index, side)?;
+            let insurance_domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
+            let (_, insurance_spent) = self.domain_insurance_budget_spent(insurance_domain)?;
+            let provider_receivable_atoms = self
+                .source_credit_for_domain(source_domain)?
+                .provider_receivable_num
+                / BOUND_SCALE;
+            let recredited = V16Core::terminal_claim_free_overlap_recredit(
+                provider_receivable_atoms,
+                insurance_spent,
+                claim_free_residual_remaining,
+            );
+            recredited_total = recredited_total
+                .checked_add(recredited)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            claim_free_residual_remaining = claim_free_residual_remaining
+                .checked_sub(recredited)
+                .ok_or(V16Error::CounterUnderflow)?;
+        }
+        Ok(recredited_total)
+    }
+
+    fn first_terminal_claim_free_recredit_asset(&self) -> V16Result<Option<usize>> {
+        let residual = self.residual();
+        if residual == 0 {
+            return Ok(None);
+        }
+        let configured_assets = self.header.config.max_market_slots.get() as usize;
+        for asset_index in 0..configured_assets {
+            if self.terminal_claim_free_recredit_for_asset(asset_index, residual)? != 0 {
+                return Ok(Some(asset_index));
+            }
+        }
+        Ok(None)
+    }
+
+    fn first_terminal_lapsed_backing_domain(&self) -> V16Result<Option<usize>> {
+        let now_slot = self.header.current_slot.get();
+        let configured_domains = self.configured_domain_count()?;
+        for domain in 0..configured_domains {
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= now_slot {
+                return Ok(Some(domain));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Restores one asset's claim-free terminal residual that is also backed by
+    /// both an outstanding counterparty-provider receivable and historical
+    /// insurance spend on the paired side. The final materialized-portfolio gate
+    /// makes the residual unowned by traders before any reclassification occurs.
+    ///
+    /// This operation is intentionally asset-local: wrapper callers can make
+    /// bounded progress even when the market account contains thousands of
+    /// configured slots.
+    fn recredit_terminal_claim_free_residual_for_asset_core_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<u128> {
         let mut claim_free_residual_remaining = self.residual();
         let mut recredited_total = 0u128;
         for side in [SideV16::Long, SideV16::Short] {
@@ -11708,8 +11788,59 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_add(recredited)
                 .ok_or(V16Error::ArithmeticOverflow)?;
         }
-        self.validate_shape()?;
         Ok(recredited_total)
+    }
+
+    pub fn recredit_terminal_claim_free_residual_for_asset_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<u128> {
+        self.validate_shape()?;
+        self.require_terminal_claim_free_state()?;
+        let recredited =
+            self.recredit_terminal_claim_free_residual_for_asset_core_not_atomic(asset_index)?;
+        self.validate_shape()?;
+        Ok(recredited)
+    }
+
+    /// Advances one bounded terminal cleanup step. The wrapper authenticates
+    /// `authenticated_slot`, persists `Progress` outcomes, and closes external
+    /// custody only for `ReadyToClose`.
+    pub fn advance_terminal_slab_not_atomic(
+        &mut self,
+        authenticated_slot: u64,
+    ) -> V16Result<TerminalSlabOutcomeV16> {
+        self.validate_shape()?;
+        self.require_terminal_claim_free_state()?;
+        self.advance_resolved_slot_not_atomic(authenticated_slot)?;
+
+        if let Some(domain) = self.first_terminal_lapsed_backing_domain()? {
+            self.expire_source_backing_bucket_not_atomic(domain, authenticated_slot)?;
+            self.validate_shape()?;
+            return Ok(TerminalSlabOutcomeV16::BackingExpired { domain });
+        }
+
+        if let Some(asset_index) = self.first_terminal_claim_free_recredit_asset()? {
+            let amount =
+                self.recredit_terminal_claim_free_residual_for_asset_core_not_atomic(asset_index)?;
+            if amount == 0 {
+                return Err(V16Error::InvalidConfig);
+            }
+            self.validate_shape()?;
+            return Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+                asset_index,
+                amount,
+            });
+        }
+
+        if self.header.backing_provider_earnings_total.get() != 0
+            || self.header.source_fresh_backing_total_num.get() != 0
+        {
+            return Err(V16Error::LockActive);
+        }
+        let retired = self.retire_terminal_unbudgeted_insurance_core_not_atomic()?;
+        self.validate_shape()?;
+        Ok(TerminalSlabOutcomeV16::ReadyToClose { retired })
     }
 
     // Loss settlement may consume whatever whole-atom support exists; routes

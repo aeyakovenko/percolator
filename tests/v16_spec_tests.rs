@@ -13,9 +13,9 @@ use percolator::{
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceRequestV16,
     ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account,
     ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
-    SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16, V16Config, V16Error,
-    V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32, V16PodU64,
-    V16_EMPTY_ACTIVE_BITMAP,
+    SourceCreditStateV16, SourceCreditStateV16Account, TerminalSlabOutcomeV16, TradeRequestV16,
+    V16Config, V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32,
+    V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
 #[cfg(feature = "fuzz")]
 use percolator::{
@@ -3687,6 +3687,128 @@ fn v16_terminal_unbudgeted_insurance_retirement_is_claim_free_and_exact() {
     );
     assert_eq!(market.header.vault.get(), 0);
     assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_retirement_includes_claim_free_protocol_surplus() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(3);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(1).unwrap();
+
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Ok(10)
+    );
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_slab_progress_expires_one_domain_before_retiring_residual() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(0, 10, 5)
+        .unwrap();
+    market.resolve_market_not_atomic(1).unwrap();
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(5),
+        Ok(TerminalSlabOutcomeV16::BackingExpired { domain: 0 })
+    );
+    assert_eq!(market.header.current_slot.get(), 5);
+    assert_eq!(market.header.vault.get(), 10);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired
+    );
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(5),
+        Ok(TerminalSlabOutcomeV16::ReadyToClose { retired: 10 })
+    );
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
+    const RESIDUAL: u128 = 750;
+    const SPENT: u128 = 123;
+    const RECEIVABLE: u128 = 776;
+    const ASSET: usize = 2;
+
+    let (mut header, mut markets) = market_fixture(3, 100);
+    let market_id = markets[ASSET].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(RESIDUAL);
+    markets[ASSET].engine.insurance_domain_budget_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.insurance_domain_spent_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: RECEIVABLE * BOUND_SCALE,
+            provider_receivable_num: RECEIVABLE * BOUND_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[ASSET].engine.backing_short =
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            consumed_liened_backing_num: RECEIVABLE * BOUND_SCALE,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(3).unwrap();
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(3),
+        Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+            asset_index: ASSET,
+            amount: SPENT,
+        })
+    );
+    assert_eq!(market.header.vault.get(), RESIDUAL);
+    assert_eq!(market.header.insurance.get(), SPENT);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        SPENT
+    );
+    assert_eq!(
+        market.markets[ASSET]
+            .engine
+            .insurance_domain_spent_long
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(3),
+        Err(V16Error::LockActive),
+        "restored domain insurance must be withdrawn before final retirement"
+    );
+
+    market
+        .withdraw_domain_insurance_not_atomic(ASSET * 2, SPENT)
+        .unwrap();
+    assert_eq!(market.header.vault.get(), RESIDUAL - SPENT);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(3),
+        Ok(TerminalSlabOutcomeV16::ReadyToClose {
+            retired: RESIDUAL - SPENT,
+        })
+    );
+    assert_eq!(market.header.vault.get(), 0);
     assert_eq!(market.validate_shape(), Ok(()));
 }
 

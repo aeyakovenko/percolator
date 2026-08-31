@@ -12201,10 +12201,14 @@ fn proof_v16_terminal_unbudgeted_insurance_retirement_is_exact_and_claim_safe() 
         budget_remaining,
         source_reserved,
     );
-    let expected_ok = vault == insurance && budget_remaining == 0 && source_reserved == 0;
+    let expected_ok = insurance <= vault && budget_remaining == 0 && source_reserved == 0;
     kani::cover!(
         expected_ok && insurance > 0,
         "terminal retirement covers a nonzero unbudgeted insurance burn"
+    );
+    kani::cover!(
+        expected_ok && vault > insurance,
+        "terminal retirement covers claim-free protocol surplus"
     );
     kani::cover!(
         vault == insurance && budget_remaining > 0,
@@ -12216,7 +12220,7 @@ fn proof_v16_terminal_unbudgeted_insurance_retirement_is_exact_and_claim_safe() 
     );
     assert_eq!(result.is_ok(), expected_ok);
     if let Ok((retired, next_vault, next_insurance)) = result {
-        assert_eq!(retired, insurance);
+        assert_eq!(retired, vault);
         assert_eq!(next_vault, 0);
         assert_eq!(next_insurance, 0);
         assert_eq!(vault - next_vault, retired);
