@@ -504,6 +504,37 @@ fn funding_market_fixture(init_price: u64) -> (MarketGroupV16HeaderAccount, Vec<
     (header, markets)
 }
 
+#[test]
+fn v16_asset_local_committed_accrual_can_trail_global_clock() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .accrue_asset_to_not_atomic(0, 10, 100, 0, true)
+        .expect("the first asset must advance the authenticated market clock");
+    let global_slot = market.header.current_slot.get();
+    let lagging_before = market.markets[1].engine.asset.slot_last.get();
+    let committed_slot = lagging_before + 1;
+    assert!(committed_slot < global_slot);
+
+    let outcome = market
+        .accrue_asset_to_not_atomic(1, committed_slot, 100, 0, true)
+        .expect("a lagging asset must settle an earlier committed checkpoint");
+
+    assert_eq!(outcome.dt, 1);
+    assert_eq!(
+        market.markets[1].engine.asset.slot_last.get(),
+        committed_slot
+    );
+    assert_eq!(market.header.current_slot.get(), global_slot);
+    assert_eq!(
+        market.accrue_asset_to_not_atomic(1, committed_slot - 1, 100, 0, true),
+        Err(V16Error::InvalidConfig),
+        "an asset-local checkpoint still cannot move behind that asset's own clock"
+    );
+    market.validate_shape().unwrap();
+}
+
 fn canonical_path_market_fixture(
     init_price: u64,
 ) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
