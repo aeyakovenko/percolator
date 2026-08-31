@@ -401,6 +401,37 @@ pub fn kani_terminal_claim_free_overlap_recredit(
     )
 }
 
+pub fn kani_terminal_slab_asset_step(
+    long_status: BackingBucketStatusV16,
+    long_expiry_slot: u64,
+    short_status: BackingBucketStatusV16,
+    short_expiry_slot: u64,
+    authenticated_slot: u64,
+    recreditable: bool,
+) -> u8 {
+    match V16Core::kernel_terminal_slab_asset_step(
+        long_status,
+        long_expiry_slot,
+        short_status,
+        short_expiry_slot,
+        authenticated_slot,
+        recreditable,
+    ) {
+        TerminalSlabAssetStepV16::Expire(0) => 0,
+        TerminalSlabAssetStepV16::Expire(_) => 1,
+        TerminalSlabAssetStepV16::Recredit => 2,
+        TerminalSlabAssetStepV16::Wait => 3,
+        TerminalSlabAssetStepV16::Continue => 4,
+    }
+}
+
+pub fn kani_terminal_slab_wait_continuation(
+    scan_start_asset_index: usize,
+    asset_index: usize,
+) -> V16Result<usize> {
+    V16Core::kernel_terminal_slab_wait_continuation(scan_start_asset_index, asset_index)
+}
+
 pub fn kani_backing_utilization_rate_e9_for_source_state(
     config: V16Config,
     source: SourceCreditStateV16,

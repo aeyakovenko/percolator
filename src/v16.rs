@@ -955,6 +955,42 @@ impl V16Core {
             .min(claim_free_residual_remaining)
     }
 
+    fn kernel_terminal_slab_asset_step(
+        long_status: BackingBucketStatusV16,
+        long_expiry_slot: u64,
+        short_status: BackingBucketStatusV16,
+        short_expiry_slot: u64,
+        authenticated_slot: u64,
+        recreditable: bool,
+    ) -> TerminalSlabAssetStepV16 {
+        let long_fresh = long_status == BackingBucketStatusV16::Fresh;
+        let short_fresh = short_status == BackingBucketStatusV16::Fresh;
+        if long_fresh && long_expiry_slot <= authenticated_slot {
+            TerminalSlabAssetStepV16::Expire(0)
+        } else if short_fresh && short_expiry_slot <= authenticated_slot {
+            TerminalSlabAssetStepV16::Expire(1)
+        } else if recreditable {
+            TerminalSlabAssetStepV16::Recredit
+        } else if (long_fresh && long_expiry_slot > authenticated_slot)
+            || (short_fresh && short_expiry_slot > authenticated_slot)
+        {
+            TerminalSlabAssetStepV16::Wait
+        } else {
+            TerminalSlabAssetStepV16::Continue
+        }
+    }
+
+    fn kernel_terminal_slab_wait_continuation(
+        scan_start_asset_index: usize,
+        asset_index: usize,
+    ) -> V16Result<usize> {
+        if asset_index <= scan_start_asset_index {
+            Err(V16Error::LockActive)
+        } else {
+            Ok(asset_index)
+        }
+    }
+
     #[inline]
     fn validate_bound_num_atom_aligned(bound_num: u128) -> V16Result<()> {
         if bound_num == 0 {
@@ -7179,6 +7215,14 @@ pub enum TerminalSlabOutcomeV16 {
     ReadyToClose { retired: u128 },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalSlabAssetStepV16 {
+    Expire(usize),
+    Recredit,
+    Wait,
+    Continue,
+}
+
 pub const TERMINAL_SLAB_SCAN_ASSETS_PER_CALL: usize = 256;
 
 #[repr(C)]
@@ -11815,63 +11859,61 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?
                 .min(configured_assets);
             for asset_index in scan_start_asset_index..scan_end {
-                let (lapsed_backing_side, has_unexpired_backing, recreditable) = {
+                let step = {
                     let slot = self.markets[asset_index].engine_slot();
                     let long_status = decode_backing_bucket_status(slot.backing_long.status)?;
                     let short_status = decode_backing_bucket_status(slot.backing_short.status)?;
-                    let long_fresh =
-                        inspect_backing && long_status == BackingBucketStatusV16::Fresh;
-                    let short_fresh =
-                        inspect_backing && short_status == BackingBucketStatusV16::Fresh;
-                    let lapsed_backing_side = if long_fresh
-                        && slot.backing_long.expiry_slot.get() <= authenticated_slot
-                    {
-                        Some(0usize)
-                    } else if short_fresh
-                        && slot.backing_short.expiry_slot.get() <= authenticated_slot
-                    {
-                        Some(1usize)
-                    } else {
-                        None
-                    };
-                    let has_unexpired_backing = (long_fresh
-                        && slot.backing_long.expiry_slot.get() > authenticated_slot)
-                        || (short_fresh
-                            && slot.backing_short.expiry_slot.get() > authenticated_slot);
                     let recreditable = inspect_recredit
                         && Self::terminal_claim_free_recredit_for_slot(slot, residual)? != 0;
-                    (lapsed_backing_side, has_unexpired_backing, recreditable)
+                    V16Core::kernel_terminal_slab_asset_step(
+                        if inspect_backing {
+                            long_status
+                        } else {
+                            BackingBucketStatusV16::Empty
+                        },
+                        slot.backing_long.expiry_slot.get(),
+                        if inspect_backing {
+                            short_status
+                        } else {
+                            BackingBucketStatusV16::Empty
+                        },
+                        slot.backing_short.expiry_slot.get(),
+                        authenticated_slot,
+                        recreditable,
+                    )
                 };
-                if let Some(side_offset) = lapsed_backing_side {
-                    let domain = asset_index
-                        .checked_mul(2)
-                        .and_then(|value| value.checked_add(side_offset))
-                        .ok_or(V16Error::ArithmeticOverflow)?;
-                    self.expire_source_backing_bucket_not_atomic(domain, authenticated_slot)?;
-                    self.validate_shape()?;
-                    return Ok(TerminalSlabOutcomeV16::BackingExpired { domain });
-                }
-                if recreditable {
-                    let amount = self
-                        .recredit_terminal_claim_free_residual_for_asset_core_not_atomic(
+                match step {
+                    TerminalSlabAssetStepV16::Expire(side_offset) => {
+                        let domain = asset_index
+                            .checked_mul(2)
+                            .and_then(|value| value.checked_add(side_offset))
+                            .ok_or(V16Error::ArithmeticOverflow)?;
+                        self.expire_source_backing_bucket_not_atomic(domain, authenticated_slot)?;
+                        self.validate_shape()?;
+                        return Ok(TerminalSlabOutcomeV16::BackingExpired { domain });
+                    }
+                    TerminalSlabAssetStepV16::Recredit => {
+                        let amount = self
+                            .recredit_terminal_claim_free_residual_for_asset_core_not_atomic(
+                                asset_index,
+                            )?;
+                        if amount == 0 {
+                            return Err(V16Error::InvalidConfig);
+                        }
+                        self.validate_shape()?;
+                        return Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+                            asset_index,
+                            amount,
+                        });
+                    }
+                    TerminalSlabAssetStepV16::Wait => {
+                        let next_asset_index = V16Core::kernel_terminal_slab_wait_continuation(
+                            scan_start_asset_index,
                             asset_index,
                         )?;
-                    if amount == 0 {
-                        return Err(V16Error::InvalidConfig);
+                        return Ok(TerminalSlabOutcomeV16::ScanProgress { next_asset_index });
                     }
-                    self.validate_shape()?;
-                    return Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
-                        asset_index,
-                        amount,
-                    });
-                }
-                if has_unexpired_backing {
-                    if asset_index == scan_start_asset_index {
-                        return Err(V16Error::LockActive);
-                    }
-                    return Ok(TerminalSlabOutcomeV16::ScanProgress {
-                        next_asset_index: asset_index,
-                    });
+                    TerminalSlabAssetStepV16::Continue => {}
                 }
             }
             if scan_end != configured_assets {
