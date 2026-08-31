@@ -11837,31 +11837,37 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?
                 .min(configured_assets);
             for asset_index in scan_start_asset_index..scan_end {
-                let slot = self.markets[asset_index].engine_slot();
-                if inspect_backing {
-                    for (side_offset, bucket) in
-                        [(0usize, &slot.backing_long), (1, &slot.backing_short)]
-                    {
-                        if decode_backing_bucket_status(bucket.status)?
+                let (lapsed_backing_side, recreditable) = {
+                    let slot = self.markets[asset_index].engine_slot();
+                    let lapsed_backing_side = if inspect_backing
+                        && decode_backing_bucket_status(slot.backing_long.status)?
                             == BackingBucketStatusV16::Fresh
-                            && bucket.expiry_slot.get() <= authenticated_slot
-                        {
-                            let domain = asset_index
-                                .checked_mul(2)
-                                .and_then(|value| value.checked_add(side_offset))
-                                .ok_or(V16Error::ArithmeticOverflow)?;
-                            self.expire_source_backing_bucket_not_atomic(
-                                domain,
-                                authenticated_slot,
-                            )?;
-                            self.validate_shape()?;
-                            return Ok(TerminalSlabOutcomeV16::BackingExpired { domain });
-                        }
-                    }
+                        && slot.backing_long.expiry_slot.get() <= authenticated_slot
+                    {
+                        Some(0usize)
+                    } else if inspect_backing
+                        && decode_backing_bucket_status(slot.backing_short.status)?
+                            == BackingBucketStatusV16::Fresh
+                        && slot.backing_short.expiry_slot.get() <= authenticated_slot
+                    {
+                        Some(1usize)
+                    } else {
+                        None
+                    };
+                    let recreditable = inspect_recredit
+                        && Self::terminal_claim_free_recredit_for_slot(slot, residual)? != 0;
+                    (lapsed_backing_side, recreditable)
+                };
+                if let Some(side_offset) = lapsed_backing_side {
+                    let domain = asset_index
+                        .checked_mul(2)
+                        .and_then(|value| value.checked_add(side_offset))
+                        .ok_or(V16Error::ArithmeticOverflow)?;
+                    self.expire_source_backing_bucket_not_atomic(domain, authenticated_slot)?;
+                    self.validate_shape()?;
+                    return Ok(TerminalSlabOutcomeV16::BackingExpired { domain });
                 }
-                if inspect_recredit
-                    && Self::terminal_claim_free_recredit_for_slot(slot, residual)? != 0
-                {
+                if recreditable {
                     let amount = self
                         .recredit_terminal_claim_free_residual_for_asset_core_not_atomic(
                             asset_index,
