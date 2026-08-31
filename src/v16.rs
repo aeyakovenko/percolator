@@ -11701,37 +11701,38 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    fn terminal_claim_free_recredit_for_slot(
+        slot: &EngineAssetSlotV16Account,
+        claim_free_residual: u128,
+    ) -> V16Result<u128> {
+        let long_source_recredit = V16Core::terminal_claim_free_overlap_recredit(
+            slot.source_credit_long.provider_receivable_num.get() / BOUND_SCALE,
+            slot.insurance_domain_spent_short.get(),
+            claim_free_residual,
+        );
+        let residual_after_long = claim_free_residual
+            .checked_sub(long_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let short_source_recredit = V16Core::terminal_claim_free_overlap_recredit(
+            slot.source_credit_short.provider_receivable_num.get() / BOUND_SCALE,
+            slot.insurance_domain_spent_long.get(),
+            residual_after_long,
+        );
+        long_source_recredit
+            .checked_add(short_source_recredit)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
     fn terminal_claim_free_recredit_for_asset(
         &self,
         asset_index: usize,
-        mut claim_free_residual_remaining: u128,
+        claim_free_residual: u128,
     ) -> V16Result<u128> {
         self.validate_configured_asset_index(asset_index)?;
-        let mut recredited_total = 0u128;
-        for side in [SideV16::Long, SideV16::Short] {
-            if claim_free_residual_remaining == 0 {
-                break;
-            }
-            let source_domain = self.insurance_domain_index(asset_index, side)?;
-            let insurance_domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
-            let (_, insurance_spent) = self.domain_insurance_budget_spent(insurance_domain)?;
-            let provider_receivable_atoms = self
-                .source_credit_for_domain(source_domain)?
-                .provider_receivable_num
-                / BOUND_SCALE;
-            let recredited = V16Core::terminal_claim_free_overlap_recredit(
-                provider_receivable_atoms,
-                insurance_spent,
-                claim_free_residual_remaining,
-            );
-            recredited_total = recredited_total
-                .checked_add(recredited)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            claim_free_residual_remaining = claim_free_residual_remaining
-                .checked_sub(recredited)
-                .ok_or(V16Error::CounterUnderflow)?;
-        }
-        Ok(recredited_total)
+        Self::terminal_claim_free_recredit_for_slot(
+            self.markets[asset_index].engine_slot(),
+            claim_free_residual,
+        )
     }
 
     fn first_terminal_claim_free_recredit_asset(&self) -> V16Result<Option<usize>> {
@@ -11741,7 +11742,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let configured_assets = self.header.config.max_market_slots.get() as usize;
         for asset_index in 0..configured_assets {
-            if self.terminal_claim_free_recredit_for_asset(asset_index, residual)? != 0 {
+            if Self::terminal_claim_free_recredit_for_slot(
+                self.markets[asset_index].engine_slot(),
+                residual,
+            )? != 0
+            {
                 return Ok(Some(asset_index));
             }
         }
@@ -11753,11 +11758,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(None);
         }
         let now_slot = self.header.current_slot.get();
-        let configured_domains = self.configured_domain_count()?;
-        for domain in 0..configured_domains {
-            let bucket = self.backing_bucket_for_domain(domain)?;
-            if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= now_slot {
-                return Ok(Some(domain));
+        let configured_assets = self.header.config.max_market_slots.get() as usize;
+        for asset_index in 0..configured_assets {
+            let slot = self.markets[asset_index].engine_slot();
+            for (side_offset, bucket) in [(0usize, &slot.backing_long), (1, &slot.backing_short)] {
+                if decode_backing_bucket_status(bucket.status)? == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot.get() <= now_slot
+                {
+                    return asset_index
+                        .checked_mul(2)
+                        .and_then(|domain| domain.checked_add(side_offset))
+                        .map(Some)
+                        .ok_or(V16Error::ArithmeticOverflow);
+                }
             }
         }
         Ok(None)
