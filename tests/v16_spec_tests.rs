@@ -461,8 +461,10 @@ fn market_fixture(
     init_price: u64,
 ) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
     let (market_id, _, _) = ids();
+    let max_portfolio_assets =
+        market_slots.min(percolator::V16_MAX_PORTFOLIO_ASSETS_N as u32) as u16;
     let cfg =
-        V16Config::public_user_fund_with_market_slots(market_slots as u16, market_slots, 0, 10);
+        V16Config::public_user_fund_with_market_slots(max_portfolio_assets, market_slots, 0, 10);
     let mut header =
         MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, market_slots, 0).unwrap();
     let mut markets = (0..market_slots)
@@ -3814,11 +3816,12 @@ fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
 
 #[test]
 fn v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement() {
-    const ASSETS: usize = TERMINAL_SLAB_SCAN_ASSETS_PER_CALL + 1;
-    const ASSET: usize = ASSETS - 1;
+    const ASSETS: u32 = percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL as u32 + 1;
+    const ASSET: usize = ASSETS as usize - 1;
     const RESIDUAL: u128 = 10;
     const SPENT: u128 = 3;
     const RECEIVABLE: u128 = 7;
+    const SLOT: u64 = ASSETS as u64 + 1;
 
     let (mut header, mut markets) = market_fixture(ASSETS, 100);
     let market_id = markets[ASSET].engine.asset.market_id.get();
@@ -3839,13 +3842,19 @@ fn v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement() 
             ..BackingBucketV16::EMPTY
         });
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
-    market.resolve_market_not_atomic(2).unwrap();
+    market.resolve_market_not_atomic(SLOT).unwrap();
 
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(2, 0, 2),
+        market.advance_terminal_slab_not_atomic(SLOT, 1, SLOT),
+        Err(V16Error::InvalidConfig),
+        "a caller cannot forge a non-chunk-aligned continuation"
+    );
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(SLOT, 0, SLOT),
         Ok(TerminalSlabOutcomeV16::ScanProgress {
-            next_asset_index: TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
-            authenticated_slot: 2,
+            next_asset_index: percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
+            authenticated_slot: SLOT,
         })
     );
     assert_eq!(
@@ -3854,7 +3863,11 @@ fn v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement() 
         "a scan-only step cannot reclassify terminal value"
     );
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(2, TERMINAL_SLAB_SCAN_ASSETS_PER_CALL, 2,),
+        market.advance_terminal_slab_not_atomic(
+            SLOT,
+            percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
+            SLOT,
+        ),
         Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
             asset_index: ASSET,
             amount: SPENT,

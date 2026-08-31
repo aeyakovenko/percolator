@@ -11736,18 +11736,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
-    fn terminal_claim_free_recredit_for_asset(
-        &self,
-        asset_index: usize,
-        claim_free_residual: u128,
-    ) -> V16Result<u128> {
-        self.validate_configured_asset_index(asset_index)?;
-        Self::terminal_claim_free_recredit_for_slot(
-            self.markets[asset_index].engine_slot(),
-            claim_free_residual,
-        )
-    }
-
     fn first_terminal_claim_free_recredit_asset(&self) -> V16Result<Option<usize>> {
         let residual = self.residual();
         if residual == 0 {
@@ -11809,9 +11797,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(recredited)
     }
 
-    /// Advances one bounded terminal cleanup step. The wrapper authenticates
-    /// `authenticated_slot`, persists `Progress` outcomes, and closes external
-    /// custody only for `ReadyToClose`.
+    /// Advances one bounded terminal cleanup step. A nonzero scan start must be the exact
+    /// `ScanProgress` continuation persisted by the wrapper at `scan_slot`; no transition that can
+    /// create a candidate in the already-scanned prefix may intervene. The wrapper authenticates
+    /// the slot, owns that continuation state, and closes external custody only for `ReadyToClose`.
     pub fn advance_terminal_slab_not_atomic(
         &mut self,
         authenticated_slot: u64,
@@ -11824,6 +11813,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         let configured_assets = self.header.config.max_market_slots.get() as usize;
         if scan_start_asset_index > configured_assets
+            || scan_start_asset_index % TERMINAL_SLAB_SCAN_ASSETS_PER_CALL != 0
             || (scan_start_asset_index != 0 && scan_slot != authenticated_slot)
         {
             return Err(V16Error::InvalidConfig);
