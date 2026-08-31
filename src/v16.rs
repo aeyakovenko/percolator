@@ -7173,10 +7173,23 @@ pub enum ResolvedCloseOutcomeV16 {
 /// terminal amount that the wrapper must remove from external custody.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalSlabOutcomeV16 {
-    BackingExpired { domain: usize },
-    InsuranceRecredited { asset_index: usize, amount: u128 },
-    ReadyToClose { retired: u128 },
+    ScanProgress {
+        next_asset_index: usize,
+        authenticated_slot: u64,
+    },
+    BackingExpired {
+        domain: usize,
+    },
+    InsuranceRecredited {
+        asset_index: usize,
+        amount: u128,
+    },
+    ReadyToClose {
+        retired: u128,
+    },
 }
+
+pub const TERMINAL_SLAB_SCAN_ASSETS_PER_CALL: usize = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
@@ -11753,29 +11766,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(None)
     }
 
-    fn first_terminal_lapsed_backing_domain(&self) -> V16Result<Option<usize>> {
-        if self.header.source_fresh_backing_total_num.get() == 0 {
-            return Ok(None);
-        }
-        let now_slot = self.header.current_slot.get();
-        let configured_assets = self.header.config.max_market_slots.get() as usize;
-        for asset_index in 0..configured_assets {
-            let slot = self.markets[asset_index].engine_slot();
-            for (side_offset, bucket) in [(0usize, &slot.backing_long), (1, &slot.backing_short)] {
-                if decode_backing_bucket_status(bucket.status)? == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot.get() <= now_slot
-                {
-                    return asset_index
-                        .checked_mul(2)
-                        .and_then(|domain| domain.checked_add(side_offset))
-                        .map(Some)
-                        .ok_or(V16Error::ArithmeticOverflow);
-                }
-            }
-        }
-        Ok(None)
-    }
-
     /// Restores one asset's claim-free terminal residual that is also backed by
     /// both an outstanding counterparty-provider receivable and historical
     /// insurance spend on the paired side. The final materialized-portfolio gate
@@ -11825,28 +11815,73 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn advance_terminal_slab_not_atomic(
         &mut self,
         authenticated_slot: u64,
+        scan_start_asset_index: usize,
+        scan_slot: u64,
     ) -> V16Result<TerminalSlabOutcomeV16> {
         self.validate_shape()?;
         self.require_terminal_claim_free_state()?;
         self.advance_resolved_slot_not_atomic(authenticated_slot)?;
 
-        if let Some(domain) = self.first_terminal_lapsed_backing_domain()? {
-            self.expire_source_backing_bucket_not_atomic(domain, authenticated_slot)?;
-            self.validate_shape()?;
-            return Ok(TerminalSlabOutcomeV16::BackingExpired { domain });
+        let configured_assets = self.header.config.max_market_slots.get() as usize;
+        if scan_start_asset_index > configured_assets
+            || (scan_start_asset_index != 0 && scan_slot != authenticated_slot)
+        {
+            return Err(V16Error::InvalidConfig);
         }
-
-        if let Some(asset_index) = self.first_terminal_claim_free_recredit_asset()? {
-            let amount =
-                self.recredit_terminal_claim_free_residual_for_asset_core_not_atomic(asset_index)?;
-            if amount == 0 {
-                return Err(V16Error::InvalidConfig);
+        let inspect_backing = self.header.source_fresh_backing_total_num.get() != 0;
+        let residual = self.residual();
+        let inspect_recredit = residual != 0;
+        if inspect_backing || inspect_recredit {
+            let scan_end = scan_start_asset_index
+                .checked_add(TERMINAL_SLAB_SCAN_ASSETS_PER_CALL)
+                .ok_or(V16Error::ArithmeticOverflow)?
+                .min(configured_assets);
+            for asset_index in scan_start_asset_index..scan_end {
+                let slot = self.markets[asset_index].engine_slot();
+                if inspect_backing {
+                    for (side_offset, bucket) in
+                        [(0usize, &slot.backing_long), (1, &slot.backing_short)]
+                    {
+                        if decode_backing_bucket_status(bucket.status)?
+                            == BackingBucketStatusV16::Fresh
+                            && bucket.expiry_slot.get() <= authenticated_slot
+                        {
+                            let domain = asset_index
+                                .checked_mul(2)
+                                .and_then(|value| value.checked_add(side_offset))
+                                .ok_or(V16Error::ArithmeticOverflow)?;
+                            self.expire_source_backing_bucket_not_atomic(
+                                domain,
+                                authenticated_slot,
+                            )?;
+                            self.validate_shape()?;
+                            return Ok(TerminalSlabOutcomeV16::BackingExpired { domain });
+                        }
+                    }
+                }
+                if inspect_recredit
+                    && Self::terminal_claim_free_recredit_for_slot(slot, residual)? != 0
+                {
+                    let amount = self
+                        .recredit_terminal_claim_free_residual_for_asset_core_not_atomic(
+                            asset_index,
+                        )?;
+                    if amount == 0 {
+                        return Err(V16Error::InvalidConfig);
+                    }
+                    self.validate_shape()?;
+                    return Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+                        asset_index,
+                        amount,
+                    });
+                }
             }
-            self.validate_shape()?;
-            return Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
-                asset_index,
-                amount,
-            });
+            if scan_end != configured_assets {
+                return Ok(TerminalSlabOutcomeV16::ScanProgress {
+                    next_asset_index: scan_end,
+                    authenticated_slot,
+                });
+            }
         }
 
         if self.header.backing_provider_earnings_total.get() != 0

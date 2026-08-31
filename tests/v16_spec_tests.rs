@@ -3717,7 +3717,7 @@ fn v16_terminal_slab_progress_expires_one_domain_before_retiring_residual() {
     market.resolve_market_not_atomic(1).unwrap();
 
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(5),
+        market.advance_terminal_slab_not_atomic(5, 0, 5),
         Ok(TerminalSlabOutcomeV16::BackingExpired { domain: 0 })
     );
     assert_eq!(market.header.current_slot.get(), 5);
@@ -3735,7 +3735,7 @@ fn v16_terminal_slab_progress_expires_one_domain_before_retiring_residual() {
     );
 
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(5),
+        market.advance_terminal_slab_not_atomic(5, 0, 5),
         Ok(TerminalSlabOutcomeV16::ReadyToClose { retired: 10 })
     );
     assert_eq!(market.header.vault.get(), 0);
@@ -3772,7 +3772,7 @@ fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
     market.resolve_market_not_atomic(3).unwrap();
 
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(3),
+        market.advance_terminal_slab_not_atomic(3, 0, 3),
         Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
             asset_index: ASSET,
             amount: SPENT,
@@ -3792,7 +3792,7 @@ fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
         0
     );
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(3),
+        market.advance_terminal_slab_not_atomic(3, 0, 3),
         Err(V16Error::LockActive),
         "restored domain insurance must be withdrawn before final retirement"
     );
@@ -3803,7 +3803,7 @@ fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
     assert_eq!(market.header.vault.get(), RESIDUAL - SPENT);
     assert_eq!(market.header.insurance.get(), 0);
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(3),
+        market.advance_terminal_slab_not_atomic(3, 0, 3),
         Ok(TerminalSlabOutcomeV16::ReadyToClose {
             retired: RESIDUAL - SPENT,
         })
