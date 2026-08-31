@@ -11749,6 +11749,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn first_terminal_lapsed_backing_domain(&self) -> V16Result<Option<usize>> {
+        if self.header.source_fresh_backing_total_num.get() == 0 {
+            return Ok(None);
+        }
         let now_slot = self.header.current_slot.get();
         let configured_domains = self.configured_domain_count()?;
         for domain in 0..configured_domains {
