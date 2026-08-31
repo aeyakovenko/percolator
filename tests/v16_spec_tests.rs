@@ -3719,7 +3719,7 @@ fn v16_terminal_slab_progress_expires_one_domain_before_retiring_residual() {
     market.resolve_market_not_atomic(1).unwrap();
 
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(5, 0, 5),
+        market.advance_terminal_slab_not_atomic(5, 0),
         Ok(TerminalSlabOutcomeV16::BackingExpired { domain: 0 })
     );
     assert_eq!(market.header.current_slot.get(), 5);
@@ -3737,7 +3737,7 @@ fn v16_terminal_slab_progress_expires_one_domain_before_retiring_residual() {
     );
 
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(5, 0, 5),
+        market.advance_terminal_slab_not_atomic(5, 0),
         Ok(TerminalSlabOutcomeV16::ReadyToClose { retired: 10 })
     );
     assert_eq!(market.header.vault.get(), 0);
@@ -3774,7 +3774,7 @@ fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
     market.resolve_market_not_atomic(3).unwrap();
 
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(3, 0, 3),
+        market.advance_terminal_slab_not_atomic(3, 0),
         Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
             asset_index: ASSET,
             amount: SPENT,
@@ -3794,7 +3794,7 @@ fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
         0
     );
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(3, 0, 3),
+        market.advance_terminal_slab_not_atomic(3, 0),
         Err(V16Error::LockActive),
         "restored domain insurance must be withdrawn before final retirement"
     );
@@ -3805,7 +3805,7 @@ fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
     assert_eq!(market.header.vault.get(), RESIDUAL - SPENT);
     assert_eq!(market.header.insurance.get(), 0);
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(3, 0, 3),
+        market.advance_terminal_slab_not_atomic(3, 0),
         Ok(TerminalSlabOutcomeV16::ReadyToClose {
             retired: RESIDUAL - SPENT,
         })
@@ -3845,16 +3845,9 @@ fn v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement() 
     market.resolve_market_not_atomic(SLOT).unwrap();
 
     assert_eq!(
-        market.advance_terminal_slab_not_atomic(SLOT, 1, SLOT),
-        Err(V16Error::InvalidConfig),
-        "a caller cannot forge a non-chunk-aligned continuation"
-    );
-
-    assert_eq!(
-        market.advance_terminal_slab_not_atomic(SLOT, 0, SLOT),
+        market.advance_terminal_slab_not_atomic(SLOT, 0),
         Ok(TerminalSlabOutcomeV16::ScanProgress {
             next_asset_index: percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
-            authenticated_slot: SLOT,
         })
     );
     assert_eq!(
@@ -3864,9 +3857,8 @@ fn v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement() 
     );
     assert_eq!(
         market.advance_terminal_slab_not_atomic(
-            SLOT,
+            SLOT + 1,
             percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
-            SLOT,
         ),
         Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
             asset_index: ASSET,
@@ -3878,6 +3870,43 @@ fn v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement() 
         (market.header.vault.get(), market.header.insurance.get()),
         (RESIDUAL, SPENT)
     );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_slab_cursor_stops_at_unexpired_backing_across_slots() {
+    const ASSETS: u32 = percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL as u32 + 1;
+    const BLOCKING_ASSET: usize = 100;
+    const SLOT: u64 = ASSETS as u64 + 1;
+    const EXPIRY: u64 = SLOT + 2;
+
+    let (mut header, mut markets) = market_fixture(ASSETS, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(BLOCKING_ASSET * 2, 7, EXPIRY)
+        .unwrap();
+    market.resolve_market_not_atomic(SLOT).unwrap();
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(SLOT, 0),
+        Ok(TerminalSlabOutcomeV16::ScanProgress {
+            next_asset_index: BLOCKING_ASSET,
+        }),
+        "the scan may advance up to, but never past, a still-live bucket"
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(SLOT + 1, BLOCKING_ASSET),
+        Err(V16Error::LockActive),
+        "a parked cursor cannot report a successful no-op before expiry"
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(EXPIRY, BLOCKING_ASSET),
+        Ok(TerminalSlabOutcomeV16::BackingExpired {
+            domain: BLOCKING_ASSET * 2,
+        }),
+        "authenticated time makes the parked bucket actionable without restarting the prefix"
+    );
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
     assert_eq!(market.validate_shape(), Ok(()));
 }
 

@@ -7173,20 +7173,10 @@ pub enum ResolvedCloseOutcomeV16 {
 /// terminal amount that the wrapper must remove from external custody.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalSlabOutcomeV16 {
-    ScanProgress {
-        next_asset_index: usize,
-        authenticated_slot: u64,
-    },
-    BackingExpired {
-        domain: usize,
-    },
-    InsuranceRecredited {
-        asset_index: usize,
-        amount: u128,
-    },
-    ReadyToClose {
-        retired: u128,
-    },
+    ScanProgress { next_asset_index: usize },
+    BackingExpired { domain: usize },
+    InsuranceRecredited { asset_index: usize, amount: u128 },
+    ReadyToClose { retired: u128 },
 }
 
 pub const TERMINAL_SLAB_SCAN_ASSETS_PER_CALL: usize = 256;
@@ -11798,24 +11788,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     /// Advances one bounded terminal cleanup step. A nonzero scan start must be the exact
-    /// `ScanProgress` continuation persisted by the wrapper at `scan_slot`; no transition that can
-    /// create a candidate in the already-scanned prefix may intervene. The wrapper authenticates
-    /// the slot, owns that continuation state, and closes external custody only for `ReadyToClose`.
+    /// `ScanProgress` continuation persisted by the wrapper. The scan never advances past a Fresh
+    /// backing bucket: it expires an elapsed bucket, advances up to a still-live bucket, or returns
+    /// `LockActive` when already parked on one. This makes the prefix stable across authenticated
+    /// slot changes without requiring every continuation to land in one slot. The wrapper owns the
+    /// continuation state and closes external custody only for `ReadyToClose`.
     pub fn advance_terminal_slab_not_atomic(
         &mut self,
         authenticated_slot: u64,
         scan_start_asset_index: usize,
-        scan_slot: u64,
     ) -> V16Result<TerminalSlabOutcomeV16> {
         self.validate_shape()?;
         self.require_terminal_claim_free_state()?;
         self.advance_resolved_slot_not_atomic(authenticated_slot)?;
 
         let configured_assets = self.header.config.max_market_slots.get() as usize;
-        if scan_start_asset_index > configured_assets
-            || scan_start_asset_index % TERMINAL_SLAB_SCAN_ASSETS_PER_CALL != 0
-            || (scan_start_asset_index != 0 && scan_slot != authenticated_slot)
-        {
+        if scan_start_asset_index != 0 && scan_start_asset_index >= configured_assets {
             return Err(V16Error::InvalidConfig);
         }
         let inspect_backing = self.header.source_fresh_backing_total_num.get() != 0;
@@ -11827,26 +11815,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .ok_or(V16Error::ArithmeticOverflow)?
                 .min(configured_assets);
             for asset_index in scan_start_asset_index..scan_end {
-                let (lapsed_backing_side, recreditable) = {
+                let (lapsed_backing_side, has_unexpired_backing, recreditable) = {
                     let slot = self.markets[asset_index].engine_slot();
-                    let lapsed_backing_side = if inspect_backing
-                        && decode_backing_bucket_status(slot.backing_long.status)?
-                            == BackingBucketStatusV16::Fresh
+                    let long_status = decode_backing_bucket_status(slot.backing_long.status)?;
+                    let short_status = decode_backing_bucket_status(slot.backing_short.status)?;
+                    let long_fresh =
+                        inspect_backing && long_status == BackingBucketStatusV16::Fresh;
+                    let short_fresh =
+                        inspect_backing && short_status == BackingBucketStatusV16::Fresh;
+                    let lapsed_backing_side = if long_fresh
                         && slot.backing_long.expiry_slot.get() <= authenticated_slot
                     {
                         Some(0usize)
-                    } else if inspect_backing
-                        && decode_backing_bucket_status(slot.backing_short.status)?
-                            == BackingBucketStatusV16::Fresh
+                    } else if short_fresh
                         && slot.backing_short.expiry_slot.get() <= authenticated_slot
                     {
                         Some(1usize)
                     } else {
                         None
                     };
+                    let has_unexpired_backing = (long_fresh
+                        && slot.backing_long.expiry_slot.get() > authenticated_slot)
+                        || (short_fresh
+                            && slot.backing_short.expiry_slot.get() > authenticated_slot);
                     let recreditable = inspect_recredit
                         && Self::terminal_claim_free_recredit_for_slot(slot, residual)? != 0;
-                    (lapsed_backing_side, recreditable)
+                    (lapsed_backing_side, has_unexpired_backing, recreditable)
                 };
                 if let Some(side_offset) = lapsed_backing_side {
                     let domain = asset_index
@@ -11871,11 +11865,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         amount,
                     });
                 }
+                if has_unexpired_backing {
+                    if asset_index == scan_start_asset_index {
+                        return Err(V16Error::LockActive);
+                    }
+                    return Ok(TerminalSlabOutcomeV16::ScanProgress {
+                        next_asset_index: asset_index,
+                    });
+                }
             }
             if scan_end != configured_assets {
                 return Ok(TerminalSlabOutcomeV16::ScanProgress {
                     next_asset_index: scan_end,
-                    authenticated_slot,
                 });
             }
         }
