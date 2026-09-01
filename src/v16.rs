@@ -13979,7 +13979,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             slot += 1;
         }
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        // This composition validated the account before applying only canonical K/F and B
+        // transitions. Avoid repeating the same full source-domain and leg scan here.
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         account.header.health_cert.valid = 0;
         Ok(PermissionlessProgressOutcomeV16::AccountCurrent)
     }
@@ -17278,7 +17280,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::LockActive);
         }
         self.reduce_position(account, request.asset_index, reduce_q)?;
-        self.settle_negative_pnl_from_principal_not_atomic(account)?;
+        // The entry validation and canonical reduction establish the core preconditions. The
+        // following certification and audit-feature scans validate the resulting state.
+        self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         self.certify_account_after_local_settlement_with_price_override(account, None)?;
         self.begin_zero_oi_residue_resets(request.asset_index)?;
         self.validate_liquidation_progress_from_score(before_score, &account.as_view())?;
