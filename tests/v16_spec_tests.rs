@@ -6681,7 +6681,7 @@ fn v16_auto_crank_expires_one_lapsed_live_source_domain_per_step() {
 }
 
 #[test]
-fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
+fn v16_auto_crank_expires_authenticated_slot_backing_before_live_refresh() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 23);
     let mut counterparty_header = account_fixture(1, 24);
@@ -6741,6 +6741,33 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
                 .stale
         );
 
+        let expiry = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: 10,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            expiry.outcome,
+            AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain: 1 }
+            )
+        );
+        assert!(market.header.current_slot.get() < 10);
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .backing_short
+                .try_to_runtime()
+                .unwrap()
+                .status,
+            BackingBucketStatusV16::Expired
+        );
+
         let catchup = market
             .permissionless_auto_crank_not_atomic(
                 &mut account,
@@ -6756,32 +6783,6 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
             AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
         );
         assert_eq!(market.header.current_slot.get(), 10);
-        assert_eq!(
-            market.markets[0]
-                .engine
-                .backing_short
-                .try_to_runtime()
-                .unwrap()
-                .status,
-            BackingBucketStatusV16::Fresh
-        );
-
-        let result = market
-            .permissionless_auto_crank_not_atomic(
-                &mut account,
-                AutoCrankWorkV16 {
-                    now_slot: 10,
-                    observations: &[],
-                    resolved_close_fee_rate_per_slot: 0,
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            result.outcome,
-            AutoCrankOutcomeV16::Progressed(
-                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain: 1 }
-            )
-        );
         let bucket = market.markets[0]
             .engine
             .backing_short

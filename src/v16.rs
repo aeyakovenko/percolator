@@ -15145,6 +15145,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
             }
             AutoCrankPlanV16::RefreshAccount { asset_index } => {
+                // Classification uses the authenticated execution slot, so dispatch must expire
+                // the same account-scoped prerequisite at that slot. Using header.current_slot
+                // inside the legacy refresh path can leave a newly lapsed bucket Fresh, after
+                // which K/F settlement rejects Stale and the selected plan cannot progress.
+                if let Some(domain) = self.first_lapsed_source_backing_for_account_at_slot(
+                    &account.as_view(),
+                    work.now_slot,
+                )? {
+                    self.expire_source_backing_bucket_not_atomic(domain, work.now_slot)?;
+                    self.validate_shape_audit_scan()?;
+                    account.validate_with_market(&self.as_view())?;
+                    return Ok(AutoCrankResultV16 {
+                        selected: plan,
+                        outcome: AutoCrankOutcomeV16::Progressed(
+                            PermissionlessProgressOutcomeV16::SourceBackingExpired { domain },
+                        ),
+                    });
+                }
                 // Accrue the engine-selected active asset from either a fresh
                 // observation or committed state; if no active asset exists, use
                 // the first supplied observation to give the refresh a price.
