@@ -7787,6 +7787,112 @@ fn v16_recovery_forfeit_retains_loss_weight_until_opposite_positions_settle() {
 }
 
 #[test]
+fn v16_resolved_close_retains_pending_obligation_until_opposite_position_is_gone() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut pending_header = account_fixture(1, 231);
+    let mut opposite_header = account_fixture(1, 232);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut pending = PortfolioV16ViewMut::new(&mut pending_header);
+        let mut opposite = PortfolioV16ViewMut::new(&mut opposite_header);
+        market.deposit_not_atomic(&mut pending, 1_000).unwrap();
+        market.deposit_not_atomic(&mut opposite, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut pending,
+                &mut opposite,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market.force_asset_recovery_not_atomic(0, 2).unwrap();
+        let outcome = market
+            .forfeit_recovery_leg_not_atomic(&mut pending, 0, u128::MAX)
+            .expect("the first Recovery exit must retain its loss weight");
+        assert!(!outcome.detached);
+        market.resolve_market_not_atomic(2).unwrap();
+    }
+
+    let pending_leg_before = pending_header.legs[0].try_to_runtime().unwrap();
+    assert!(pending_leg_before.active);
+    assert_eq!(pending_leg_before.basis_pos_q, 0);
+    assert_ne!(pending_leg_before.loss_weight, 0);
+    let asset_before = markets[0].engine.asset.try_to_runtime().unwrap();
+    let (pending_count_before, loss_weight_before, opposite_real_before) =
+        match pending_leg_before.side {
+            SideV16::Long => (
+                asset_before.pending_obligation_count_long,
+                asset_before.loss_weight_sum_long,
+                asset_before.stored_pos_count_short - asset_before.pending_obligation_count_short,
+            ),
+            SideV16::Short => (
+                asset_before.pending_obligation_count_short,
+                asset_before.loss_weight_sum_short,
+                asset_before.stored_pos_count_long - asset_before.pending_obligation_count_long,
+            ),
+        };
+    assert_eq!(pending_count_before, 1);
+    assert_eq!(opposite_real_before, 1);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut pending = PortfolioV16ViewMut::new(&mut pending_header);
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut pending, 0)
+            .expect("an unreleased obligation must be skipped, not block resolved progress");
+        assert_eq!(outcome, ResolvedCloseOutcomeV16::ProgressOnly);
+        let retained = pending.header.legs[0].try_to_runtime().unwrap();
+        assert_eq!(retained, pending_leg_before);
+        assert_eq!(pending.header.capital.get(), 1_000);
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        match retained.side {
+            SideV16::Long => {
+                assert_eq!(asset.pending_obligation_count_long, pending_count_before);
+                assert_eq!(asset.loss_weight_sum_long, loss_weight_before);
+            }
+            SideV16::Short => {
+                assert_eq!(asset.pending_obligation_count_short, pending_count_before);
+                assert_eq!(asset.loss_weight_sum_short, loss_weight_before);
+            }
+        }
+        market.validate_shape().unwrap();
+        pending.validate_with_market(&market.as_view()).unwrap();
+    }
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut opposite = PortfolioV16ViewMut::new(&mut opposite_header);
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut opposite, 0)
+            .expect("the opposite real position must remain terminally closeable");
+        assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: 1_000 });
+    }
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut pending = PortfolioV16ViewMut::new(&mut pending_header);
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut pending, 0)
+            .expect("the obligation must detach after its opposite real position is gone");
+        assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: 1_000 });
+        assert!(active_bitmap_is_empty(
+            pending.header.active_bitmap.map(V16PodU64::get)
+        ));
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(asset.pending_obligation_count_long, 0);
+        assert_eq!(asset.pending_obligation_count_short, 0);
+        assert_eq!(asset.loss_weight_sum_long, 0);
+        assert_eq!(asset.loss_weight_sum_short, 0);
+        market.validate_shape().unwrap();
+        pending.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
 fn v16_post_quantity_adl_recovery_forfeit_retires_only_effective_oi() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut long_header = account_fixture(1, 229);
