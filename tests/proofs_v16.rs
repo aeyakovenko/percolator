@@ -16478,14 +16478,10 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
     assert_eq!(market.kani_residual(), residual_before);
 }
 
-// Terminal realization of a source-backed claim (Issue-2 class) — KANI
-// TRACTABILITY NOTE (flagged): every harness that enters the realize/convert
-// path times out at the 900s solver budget, even fully concrete (the in-path
-// account validation forces unwind 40 and the per-domain U256 credit math
-// blows up the formula; a single concrete witness passed once at 658s and
-// timed out on three re-runs — permanently on the budget line). The realize
-// primitive therefore has NO direct Kani harness. Its coverage decomposes
-// into already-passing proofs — consume-delta exactness
+// Terminal realization of a source-backed claim (Issue-2 class) — KANI.
+// The full converting branch remains above the solver budget because account
+// validation and per-domain U256 credit math compose poorly. Its value-moving
+// coverage decomposes into already-passing proofs — consume-delta exactness
 // (proof_v16_public_counterparty_lien_consume_creates_receivable_without_
 // value_movement, proof_v16_counterparty_lien_consume_delta_is_receivable_
 // exact_and_fail_closed, proof_v16_counterparty_credit_consumption_reports_
@@ -16494,10 +16490,140 @@ fn proof_v16_residual_excludes_recoverable_counterparty_backing_principal() {
 // sum_capped_by_shared_backing), the close-ledger partition equality
 // (proof_v16_close_progress_ledger_residual_equation_is_enforced), and the
 // expired-backing liveness witness (proof_v16_expired_backing_yields_zero_
-// realizable_support_after_expiry) — while the end-to-end realize semantics
-// (exact payout values, no-double-pay, idempotence, ordering, expiry
-// liveness) are asserted at runtime by tests/backing_double_claim_fuzz.rs
-// (5 randomized properties, 300 cases each) and the spec tests.
+// realizable_support_after_expiry). The direct harnesses below prove that all
+// three no-op guards preserve the complete persisted market/account frame.
+// End-to-end converting semantics are additionally exercised at runtime by
+// tests/backing_double_claim_fuzz.rs and the spec tests.
+
+// Once a resolved payout receipt exists, terminal source realization must be
+// idempotent: the claim face is already frozen into the receipt pool, so the
+// source-backed realization pass cannot consume backing, credit capital, or
+// mutate account/market state a second time.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_source_realization_is_noop_after_receipt() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let claim = claim_raw as u128;
+    let claim_num = claim * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let source_market_id = markets[0].engine.asset.market_id.get();
+    header.mode = 1; // Resolved
+    account_header.pnl = V16PodI128::new(claim as i128);
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: claim_num,
+            terminal_positive_claim_face: claim,
+            ..ResolvedPayoutReceiptV16::EMPTY
+        });
+    // Deliberately leave a source claim present: receipt existence must win and
+    // prevent a second realization pass over the same terminal face.
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(source_market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let converted = market
+        .kani_realize_source_backed_claims_for_resolved_close_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(claim > 3, "receipt-present realization no-op covers claim");
+    assert_eq!(converted, 0);
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
+}
+
+// Source realization is only for source-attributed claims. A positive ordinary
+// junior PnL claim with no source domains must be left untouched for the
+// resolved receipt/junior-pool path; otherwise the realization pass could mint
+// capital from unsupported junior PnL.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_source_realization_is_noop_without_source_claims() {
+    let pnl_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&pnl_raw));
+    let pnl = pnl_raw as u128;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 1; // Resolved
+    account_header.pnl = V16PodI128::new(pnl as i128);
+
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let converted = market
+        .kani_realize_source_backed_claims_for_resolved_close_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(pnl > 3, "no-source realization no-op covers junior PnL");
+    assert_eq!(converted, 0);
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
+}
+
+fn assert_resolved_source_realization_is_noop_at_pnl(pnl: i128) {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let claim_num = (claim_raw as u128) * BOUND_SCALE;
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let source_market_id = markets[0].engine.asset.market_id.get();
+    header.mode = 1; // Resolved
+    account_header.pnl = V16PodI128::new(pnl);
+    account_header.source_domains[0].domain = V16PodU32::new(0);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(source_market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let converted = market
+        .kani_realize_source_backed_claims_for_resolved_close_not_atomic(&mut account)
+        .unwrap();
+
+    kani::cover!(claim_raw > 3, "nonpositive realization no-op covers claim");
+    assert_eq!(converted, 0);
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
+}
+
+// A persisted source claim alone is not value: without positive PnL there is
+// no winning claim to realize. Constant-sign harnesses prevent CBMC from
+// expanding the unreachable value-moving branch before solving.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_source_realization_is_noop_at_zero_pnl() {
+    assert_resolved_source_realization_is_noop_at_pnl(0);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_source_realization_is_noop_at_negative_pnl() {
+    assert_resolved_source_realization_is_noop_at_pnl(-1);
+}
 
 // Expiry-liveness primitive (wrapper finding 2026-06-10): the resolved-close
 // realize step must not strand a source-backed winner whose backing has lapsed
