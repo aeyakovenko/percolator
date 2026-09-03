@@ -1965,6 +1965,25 @@ impl V16Core {
         Ok((ledger, legacy_snapshot))
     }
 
+    /// A haircut payout rate is final only after both claim discovery and every
+    /// still-fresh backing source are exhausted. Fresh backing can later expire
+    /// into post-snapshot residual and raise the common receipt rate. A full
+    /// rate is already final because recomputation caps it at one.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &bool| {
+        *result
+            == (ledger.terminal_claim_bound_unreceipted_num == 0
+                && (ledger.current_payout_rate_num == ledger.current_payout_rate_den
+                    || source_fresh_backing_total_num == 0))
+    }))]
+    pub(crate) fn kernel_resolved_payout_rate_is_terminal(
+        ledger: ResolvedPayoutLedgerV16,
+        source_fresh_backing_total_num: u128,
+    ) -> bool {
+        ledger.terminal_claim_bound_unreceipted_num == 0
+            && (ledger.current_payout_rate_num == ledger.current_payout_rate_den
+                || source_fresh_backing_total_num == 0)
+    }
+
     /// PRODUCTION KERNEL (roadmap 3A.1 trade spine): classify a position change
     /// from (current signed, new signed) into its leg route — the EXACT total
     /// decision the position-delta body dispatches on. `delta != 0` is enforced
@@ -6236,10 +6255,11 @@ impl ActionableSummaryV16 {
     }
 }
 
-/// One oracle observation a keeper submits to the auto-crank (engine.md). The
-/// caller supplies a bounded set of these for the assets it has fresh data for;
-/// the ENGINE selects which (if any) the highest-priority step needs. The caller
-/// never chooses the action TYPE or the asset.
+/// One asset observation a keeper submits to the auto-crank (engine.md). In live
+/// mode its price and funding inputs are wrapper-authenticated. In resolved mode
+/// only `asset_index` is used, as a discovery hint for elapsed backing; the
+/// engine re-derives status and expiry from committed state. The caller never
+/// chooses the action type or its economic result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AutoCrankObservationV16 {
     pub asset_index: usize,
@@ -9509,6 +9529,47 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot += 1;
         }
         Ok(selected)
+    }
+
+    /// Validates a caller's discovery-only asset hint and finds one elapsed
+    /// Fresh bucket in that asset's two source domains. The engine derives the
+    /// bucket status and expiry from committed state; the hint cannot choose an
+    /// economic outcome.
+    fn first_lapsed_source_backing_for_asset_at_slot(
+        &self,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> V16Result<Option<usize>> {
+        if self.header.source_fresh_backing_total_num.get() == 0 {
+            return Ok(None);
+        }
+        let configured_assets = self.header.config.max_market_slots.get() as usize;
+        if asset_index >= configured_assets {
+            return Err(V16Error::InvalidLeg);
+        }
+        let slot = self
+            .markets
+            .get(asset_index)
+            .ok_or(V16Error::InvalidConfig)?
+            .engine_slot();
+        let (long_domain, short_domain) = v16_domain_pair_for_asset_index(asset_index)?;
+        for (domain, status, expiry_slot) in [
+            (
+                long_domain,
+                decode_backing_bucket_status(slot.backing_long.status)?,
+                slot.backing_long.expiry_slot.get(),
+            ),
+            (
+                short_domain,
+                decode_backing_bucket_status(slot.backing_short.status)?,
+                slot.backing_short.expiry_slot.get(),
+            ),
+        ] {
+            if status == BackingBucketStatusV16::Fresh && expiry_slot <= now_slot {
+                return Ok(Some(domain));
+            }
+        }
+        Ok(None)
     }
 
     fn expire_first_lapsed_source_backing_for_account_not_atomic(
@@ -15228,6 +15289,42 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             AutoCrankPlanV16::FinalizeRecovery => return Err(V16Error::InvalidConfig),
             AutoCrankPlanV16::CloseResolved => {
                 self.advance_resolved_slot_not_atomic(work.now_slot)?;
+                let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
+                let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
+                let waiting_for_rate = receipt.present
+                    && !receipt.finalized
+                    && !V16Core::kernel_resolved_payout_rate_is_terminal(
+                        ledger,
+                        self.header.source_fresh_backing_total_num.get(),
+                    );
+                if waiting_for_rate {
+                    if let Some(asset_index) = work
+                        .observations
+                        .first()
+                        .map(|observation| observation.asset_index)
+                    {
+                        if let Some(domain) = self.first_lapsed_source_backing_for_asset_at_slot(
+                            asset_index,
+                            self.header.current_slot.get(),
+                        )? {
+                            self.expire_source_backing_bucket_not_atomic(
+                                domain,
+                                self.header.current_slot.get(),
+                            )?;
+                            self.validate_shape()?;
+                            account.validate_with_market(&self.as_view())?;
+                            return Ok(AutoCrankResultV16 {
+                                selected: plan,
+                                outcome: AutoCrankOutcomeV16::ResolvedClose(
+                                    ResolvedCloseOutcomeV16::ProgressOnly,
+                                ),
+                            });
+                        }
+                    }
+                    if self.resolved_receipt_claimable_now(receipt)? == 0 {
+                        return Err(V16Error::NonProgress);
+                    }
+                }
                 AutoCrankOutcomeV16::ResolvedClose(self.close_resolved_account_not_atomic(
                     account,
                     work.resolved_close_fee_rate_per_slot,
@@ -18922,14 +19019,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    // A resolved-payout receipt that has been paid its full entitlement at the TERMINAL
-    // payout rate (no unreceipted bound remains, so the rate can no longer rise) holds
-    // only unrecoverable insolvency bad debt: the haircut shortfall (face - paid) is not
-    // an open obligation. The only finalize site requires paid_effective == FULL face,
-    // which is unreachable under a haircut, so the receipt would otherwise stay
-    // `present && !finalized` forever and permanently block the portfolio from
-    // dematerializing (stranding insurance + backing earnings + residual vault + rent).
-    // Clear such a fully-diluted receipt so the account can close.
+    // A resolved-payout receipt that has been paid its full entitlement at the terminal
+    // payout rate holds only unrecoverable insolvency bad debt. Claim discovery alone is
+    // insufficient to make a haircut rate terminal: any Fresh backing can later expire
+    // into post-snapshot residual and raise the rate. Keep the receipt until that latent
+    // source is gone (or the rate is already full), then clear it so the account can close.
     fn clear_fully_diluted_resolved_receipt_if_terminal(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -18939,8 +19033,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(());
         }
         let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        // Rate is terminal only once all junior bound has been receipted/refined.
-        if ledger.terminal_claim_bound_unreceipted_num != 0 {
+        if !V16Core::kernel_resolved_payout_rate_is_terminal(
+            ledger,
+            self.header.source_fresh_backing_total_num.get(),
+        ) {
             return Ok(());
         }
         if self.resolved_receipt_claimable_now(receipt)? != 0 {
