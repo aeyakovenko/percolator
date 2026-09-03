@@ -16364,10 +16364,55 @@ fn proof_v16_terminal_resolved_receipt_core_restores_dematerialization() {
 // paid at most floor(face * rate) < face, so paid_effective never reaches face: the
 // receipt stays present && !finalized forever, the portfolio can never dematerialize,
 // and the market (insurance + earnings + residual vault + rent) is stranded permanently.
-// Fix: once a receipt is fully paid at the TERMINAL rate (no unreceipted bound remains,
-// so the rate can no longer rise), it is fully diluted -- the shortfall is unrecoverable
-// bad debt, not an obligation -- so it is cleared, letting the portfolio close. RED until
-// claim_resolved_payout_topup_not_atomic clears a fully-diluted-at-terminal receipt.
+// A zero unreceipted bound is not sufficient by itself: Fresh backing can later expire into
+// post-snapshot residual. This scalar proof pins the complete terminal-rate gate. Haircut receipts
+// remain live while either undiscovered claims or latent Fresh backing can improve their rate;
+// full-rate receipts and haircut receipts with neither source can be dematerialized.
+#[kani::proof]
+fn proof_v16_resolved_payout_rate_terminal_gate_includes_fresh_backing() {
+    let exact_receipts_num: u128 = kani::any();
+    let unreceipted_num: u128 = kani::any();
+    let rate_num: u128 = kani::any();
+    let rate_den: u128 = kani::any();
+    let fresh_backing_num: u128 = kani::any();
+    let ledger = ResolvedPayoutLedgerV16 {
+        snapshot_residual: 0,
+        terminal_claim_exact_receipts_num: exact_receipts_num,
+        terminal_claim_bound_unreceipted_num: unreceipted_num,
+        current_payout_rate_num: rate_num,
+        current_payout_rate_den: rate_den,
+        snapshot_slot: 0,
+        payout_halted: false,
+        finalized: false,
+    };
+
+    let terminal = MarketGroupV16ViewMut::<u64>::kani_kernel_resolved_payout_rate_is_terminal(
+        ledger,
+        fresh_backing_num,
+    );
+    assert_eq!(
+        terminal,
+        unreceipted_num == 0 && (rate_num == rate_den || fresh_backing_num == 0)
+    );
+    if unreceipted_num != 0 || (rate_num != rate_den && fresh_backing_num != 0) {
+        assert!(!terminal);
+    }
+    if unreceipted_num == 0 && (rate_num == rate_den || fresh_backing_num == 0) {
+        assert!(terminal);
+    }
+    kani::cover!(
+        unreceipted_num == 0 && rate_num != rate_den && fresh_backing_num != 0 && !terminal,
+        "haircut receipt remains live while Fresh backing can raise its rate"
+    );
+    kani::cover!(
+        unreceipted_num == 0 && rate_num != rate_den && fresh_backing_num == 0 && terminal,
+        "haircut receipt clears after every rate-increasing source is exhausted"
+    );
+}
+
+// Once a receipt is fully paid at the TERMINAL rate (no unreceipted bound or latent Fresh backing
+// remains), it is fully diluted -- the shortfall is unrecoverable bad debt, not an obligation --
+// so it is cleared, letting the portfolio close.
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
@@ -16384,6 +16429,7 @@ fn proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate() {
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
     header.mode = 1; // Resolved
     header.vault = V16PodU128::new(residual);
+    header.source_fresh_backing_total_num = V16PodU128::new(0);
     header.payout_snapshot_captured = 1;
     header.resolved_payout_ledger =
         ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {

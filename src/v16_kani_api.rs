@@ -762,6 +762,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         V16Core::kernel_credit_post_snapshot_residual(ledger, legacy_snapshot, released)
     }
 
+    pub fn kani_kernel_resolved_payout_rate_is_terminal(
+        ledger: ResolvedPayoutLedgerV16,
+        source_fresh_backing_total_num: u128,
+    ) -> bool {
+        V16Core::kernel_resolved_payout_rate_is_terminal(ledger, source_fresh_backing_total_num)
+    }
+
     pub fn kani_kernel_unilateral_close_capacity(
         account_effective_abs: u128,
         oi_eff_long_q: u128,
