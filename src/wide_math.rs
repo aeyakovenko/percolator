@@ -2167,4 +2167,324 @@ mod tests {
             U256::ONE
         );
     }
+
+    // ========================================================================
+    // div_rem_u256 differential properties: the binary long-division path
+    //
+    // `div_rem_u256` is the arithmetic core of the engine: `checked_div`,
+    // `checked_rem`, `mul_div_floor_u256_with_rem` and `wide_mul_div_floor_u128`
+    // all bottom out here. Its native fast path (`num.hi() == 0 && den.hi() == 0`)
+    // delegates to u128 `/` and `%`, so it inherits rustc's correctness. The
+    // shift/subtract long-division loop that runs when either operand exceeds
+    // u128 has no such backing, and no existing proof reaches it: every Kani
+    // arithmetic harness in tests/proofs_v16_arithmetic.rs bounds its inputs to
+    // <= 500, which is always the fast path.
+    //
+    // These differentials close that gap against an independent base-2^32
+    // schoolbook reference that shares no code with the divider.
+    // ========================================================================
+
+    /// Deterministic xorshift64* PRNG. Reproducible and dependency-free, so
+    /// these differentials run under a plain `cargo test`.
+    struct DivRng(u64);
+
+    impl DivRng {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn next_u128(&mut self) -> u128 {
+            (u128::from(self.next_u64()) << 64) | u128::from(self.next_u64())
+        }
+
+        /// Uniform over bit-lengths so the generated `shift` values (and hence
+        /// long-division iteration counts) are spread across the whole range.
+        fn next_u256(&mut self, max_bits: u32) -> U256 {
+            let bits = (self.next_u64() as u32) % (max_bits + 1);
+            if bits == 0 {
+                return U256::ZERO;
+            }
+            let v = U256::new(self.next_u128(), self.next_u128());
+            if bits >= 256 {
+                v
+            } else {
+                v.shr(256 - bits)
+            }
+        }
+    }
+
+    /// Split a U256 into eight base-2^32 limbs, held in u64 for carry headroom.
+    fn ref_limbs(v: U256) -> [u64; 8] {
+        let (lo, hi) = (v.lo(), v.hi());
+        let mut out = [0u64; 8];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let src = if i < 4 { lo } else { hi };
+            *slot = ((src >> (32 * (i % 4))) & 0xFFFF_FFFF) as u64;
+        }
+        out
+    }
+
+    fn ref_from_limbs(l: &[u64]) -> U256 {
+        let mut lo = 0u128;
+        let mut hi = 0u128;
+        for i in 0..4 {
+            lo |= u128::from(l[i]) << (32 * i);
+            hi |= u128::from(l[i + 4]) << (32 * i);
+        }
+        U256::new(lo, hi)
+    }
+
+    /// Independent `<` on the limb decomposition, so case selection never
+    /// depends on the production comparator being right.
+    fn ref_lt(a: U256, b: U256) -> bool {
+        let (x, y) = (ref_limbs(a), ref_limbs(b));
+        for i in (0..8).rev() {
+            if x[i] != y[i] {
+                return x[i] < y[i];
+            }
+        }
+        false
+    }
+
+    /// Independent schoolbook `q * den + r` in base 2^32, returning `None` when
+    /// the exact result needs more than 256 bits. Multiplication and addition
+    /// only: this recomputes the dividend without dividing, so it cannot share a
+    /// bug with the shift/subtract loop under test.
+    fn ref_mul_add(q: U256, den: U256, r: U256) -> Option<U256> {
+        let (a, b, rl) = (ref_limbs(q), ref_limbs(den), ref_limbs(r));
+        let mut acc = [0u64; 16];
+
+        for i in 0..8 {
+            let mut carry = 0u64;
+            for j in 0..8 {
+                // Exact schoolbook bound: (2^32-1)^2 + 2*(2^32-1) == u64::MAX,
+                // so this never overflows even with debug overflow checks on.
+                let cur = acc[i + j] + a[i] * b[j] + carry;
+                acc[i + j] = cur & 0xFFFF_FFFF;
+                carry = cur >> 32;
+            }
+            let mut k = i + 8;
+            while carry != 0 && k < 16 {
+                let cur = acc[k] + carry;
+                acc[k] = cur & 0xFFFF_FFFF;
+                carry = cur >> 32;
+                k += 1;
+            }
+        }
+
+        let mut carry = 0u64;
+        for i in 0..8 {
+            let cur = acc[i] + rl[i] + carry;
+            acc[i] = cur & 0xFFFF_FFFF;
+            carry = cur >> 32;
+        }
+        let mut k = 8;
+        while carry != 0 && k < 16 {
+            let cur = acc[k] + carry;
+            acc[k] = cur & 0xFFFF_FFFF;
+            carry = cur >> 32;
+            k += 1;
+        }
+
+        if acc[8..16].iter().any(|&limb| limb != 0) {
+            return None;
+        }
+        Some(ref_from_limbs(&acc[0..8]))
+    }
+
+    /// True exactly when `div_rem_u256(num, den)` reaches the shift/subtract
+    /// loop rather than an early return or the native u128 path.
+    fn reaches_long_division(num: U256, den: U256) -> bool {
+        !den.is_zero() && !num.is_zero() && !ref_lt(num, den) && !(num.hi() == 0 && den.hi() == 0)
+    }
+
+    /// Soundness with an exact expected answer: build the dividend from a known
+    /// `(q, r)` with the independent reference, then require the production
+    /// divider to recover exactly that pair.
+    #[test]
+    fn div_rem_u256_recovers_constructed_quotient_and_remainder() {
+        let mut rng = DivRng(0x9E37_79B9_7F4A_7C15);
+        let mut checked = 0usize;
+        let mut long_division = 0usize;
+
+        for _ in 0..20_000 {
+            let den = rng.next_u256(256);
+            if den.is_zero() {
+                continue;
+            }
+            let q = rng.next_u256(256);
+
+            // Draw a remainder strictly below the divisor without dividing.
+            let mut r = rng.next_u256(256);
+            let mut attempts = 0;
+            while !ref_lt(r, den) && attempts < 4 {
+                r = rng.next_u256(256);
+                attempts += 1;
+            }
+            if !ref_lt(r, den) {
+                continue;
+            }
+
+            let Some(num) = ref_mul_add(q, den, r) else {
+                continue; // exceeds 256 bits; not a representable dividend
+            };
+
+            let (got_q, got_r) = div_rem_u256(num, den);
+            assert_eq!(got_q, q, "quotient mismatch for {num:?} / {den:?}");
+            assert_eq!(got_r, r, "remainder mismatch for {num:?} / {den:?}");
+
+            checked += 1;
+            if reaches_long_division(num, den) {
+                long_division += 1;
+            }
+        }
+
+        assert!(checked > 5_000, "too few usable cases: {checked}");
+        assert!(
+            long_division > 1_000,
+            "long-division loop under-exercised: {long_division} of {checked}"
+        );
+    }
+
+    /// Completeness over arbitrary inputs: `(q, r)` with `r < den` and
+    /// `q * den + r == num` is unique, so checking the defining identity
+    /// against the independent reference pins the result exactly.
+    #[test]
+    fn div_rem_u256_satisfies_division_identity_on_arbitrary_inputs() {
+        let mut rng = DivRng(0xDEAD_BEEF_CAFE_F00D);
+        let mut long_division = 0usize;
+
+        for _ in 0..20_000 {
+            let num = rng.next_u256(256);
+            let den = rng.next_u256(256);
+            if den.is_zero() {
+                continue;
+            }
+
+            let (q, r) = div_rem_u256(num, den);
+            assert!(
+                ref_lt(r, den),
+                "remainder not below divisor: {num:?} / {den:?}"
+            );
+            assert_eq!(
+                ref_mul_add(q, den, r),
+                Some(num),
+                "q*den + r != num for {num:?} / {den:?}"
+            );
+
+            if reaches_long_division(num, den) {
+                long_division += 1;
+            }
+        }
+
+        assert!(
+            long_division > 1_000,
+            "long-division loop under-exercised: {long_division}"
+        );
+    }
+
+    /// Concrete mirror of the two Kani harnesses in
+    /// tests/proofs_v16_arithmetic.rs, over exactly the input ranges they
+    /// assume. Kani cannot run on every contributor's platform, so this pins
+    /// the same claims exhaustively under `cargo test`: if this passes, the
+    /// harnesses are asserting true statements, and Kani is then proving them
+    /// bit-precisely rather than discovering them.
+    #[test]
+    fn div_rem_u256_kani_harness_claims_hold_exhaustively() {
+        // Mirrors proof_v16_div_rem_u256_long_division_matches_small_reference.
+        let mut non_exact = 0usize;
+        let mut multi_bit_quotient = 0usize;
+        for hi_n in 1u128..=15 {
+            for hi_d in 1u128..=15 {
+                if hi_n < hi_d {
+                    continue;
+                }
+                let num = U256::new(0, hi_n);
+                let den = U256::new(0, hi_d);
+                assert!(
+                    reaches_long_division(num, den),
+                    "harness inputs must reach the loop: {hi_n} / {hi_d}"
+                );
+                // shift stays small, so unwind(12) is sufficient.
+                let shift = leading_zeros_u256(den) - leading_zeros_u256(num);
+                assert!(shift <= 3, "unexpected shift {shift} for {hi_n} / {hi_d}");
+
+                let (q, r) = div_rem_u256(num, den);
+                assert_eq!(q, U256::from_u128(hi_n / hi_d));
+                assert_eq!(r, U256::new(0, hi_n % hi_d));
+
+                non_exact += usize::from(hi_n % hi_d != 0);
+                multi_bit_quotient += usize::from(hi_n / hi_d > 1);
+            }
+        }
+        // The cover! conditions in that harness are satisfiable.
+        assert!(non_exact > 0 && multi_bit_quotient > 0);
+
+        // Mirrors proof_v16_div_rem_u256_long_division_satisfies_division_identity.
+        let mut borrow_cases = 0usize;
+        let mut nonzero_quotient = 0usize;
+        for hi_n in 1u128..=7 {
+            for hi_d in 1u128..=7 {
+                if hi_n < hi_d {
+                    continue;
+                }
+                for lo_n in [0u128, 1, 127, 128, 254, 255] {
+                    for lo_d in [0u128, 1, 127, 128, 254, 255] {
+                        let num = U256::new(lo_n, hi_n);
+                        let den = U256::new(lo_d, hi_d);
+                        let (q, r) = div_rem_u256(num, den);
+                        assert!(r < den, "remainder not below divisor: {num:?} / {den:?}");
+                        assert_eq!(
+                            q.checked_mul(den).and_then(|p| p.checked_add(r)),
+                            Some(num),
+                            "q * den + r != num for {num:?} / {den:?}"
+                        );
+                        borrow_cases += usize::from(hi_n > hi_d && lo_n < lo_d);
+                        nonzero_quotient += usize::from(q != U256::ZERO);
+                    }
+                }
+            }
+        }
+        assert!(borrow_cases > 0 && nonzero_quotient > 0);
+    }
+
+    /// Boundaries the random sweep is unlikely to hit: exact multiples, the
+    /// `den > num` and `num == den` early returns, single-bit operands, and the
+    /// fast-path/long-division seam at the u128 boundary.
+    #[test]
+    fn div_rem_u256_edge_cases() {
+        let two_128 = U256::new(0, 1); // 2^128: first value past the fast path
+        let cases: [(U256, U256); 12] = [
+            (U256::MAX, U256::MAX),
+            (U256::MAX, U256::ONE),
+            (U256::MAX, two_128),
+            (U256::MAX, U256::new(u128::MAX, 0)),
+            (two_128, two_128),
+            (two_128, U256::ONE),
+            (two_128, U256::new(u128::MAX, 0)),
+            (U256::new(u128::MAX, 0), two_128), // den > num early return
+            (U256::ZERO, U256::MAX),            // num == 0 early return
+            (U256::ONE, U256::MAX),             // den > num early return
+            (U256::new(0, u128::MAX), U256::new(0, 1)),
+            (U256::new(u128::MAX, u128::MAX - 1), U256::new(1, 1)),
+        ];
+
+        for (num, den) in cases {
+            let (q, r) = div_rem_u256(num, den);
+            assert!(
+                ref_lt(r, den),
+                "remainder not below divisor: {num:?} / {den:?}"
+            );
+            assert_eq!(
+                ref_mul_add(q, den, r),
+                Some(num),
+                "q*den + r != num for {num:?} / {den:?}"
+            );
+        }
+    }
 }
