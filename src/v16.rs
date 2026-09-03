@@ -6255,10 +6255,11 @@ impl ActionableSummaryV16 {
     }
 }
 
-/// One oracle observation a keeper submits to the auto-crank (engine.md). The
-/// caller supplies a bounded set of these for the assets it has fresh data for;
-/// the ENGINE selects which (if any) the highest-priority step needs. The caller
-/// never chooses the action TYPE or the asset.
+/// One asset observation a keeper submits to the auto-crank (engine.md). In live
+/// mode its price and funding inputs are wrapper-authenticated. In resolved mode
+/// only `asset_index` is used, as a discovery hint for elapsed backing; the
+/// engine re-derives status and expiry from committed state. The caller never
+/// chooses the action type or its economic result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AutoCrankObservationV16 {
     pub asset_index: usize,
@@ -9530,40 +9531,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(selected)
     }
 
-    /// Finds one elapsed Fresh backing bucket across the bounded configured
-    /// market. Resolved receipts can outlive their account-local source entries,
-    /// while expiry of any remaining bucket can still raise the global payout
-    /// rate, so terminal receipt progress cannot use account-local discovery.
-    fn first_lapsed_source_backing_at_slot(&self, now_slot: u64) -> V16Result<Option<usize>> {
+    /// Validates a caller's discovery-only asset hint and finds one elapsed
+    /// Fresh bucket in that asset's two source domains. The engine derives the
+    /// bucket status and expiry from committed state; the hint cannot choose an
+    /// economic outcome.
+    fn first_lapsed_source_backing_for_asset_at_slot(
+        &self,
+        asset_index: usize,
+        now_slot: u64,
+    ) -> V16Result<Option<usize>> {
         if self.header.source_fresh_backing_total_num.get() == 0 {
             return Ok(None);
         }
         let configured_assets = self.header.config.max_market_slots.get() as usize;
-        let mut asset_index = 0usize;
-        while asset_index < configured_assets {
-            let slot = self
-                .markets
-                .get(asset_index)
-                .ok_or(V16Error::InvalidConfig)?
-                .engine_slot();
-            let (long_domain, short_domain) = v16_domain_pair_for_asset_index(asset_index)?;
-            for (domain, status, expiry_slot) in [
-                (
-                    long_domain,
-                    decode_backing_bucket_status(slot.backing_long.status)?,
-                    slot.backing_long.expiry_slot.get(),
-                ),
-                (
-                    short_domain,
-                    decode_backing_bucket_status(slot.backing_short.status)?,
-                    slot.backing_short.expiry_slot.get(),
-                ),
-            ] {
-                if status == BackingBucketStatusV16::Fresh && expiry_slot <= now_slot {
-                    return Ok(Some(domain));
-                }
+        if asset_index >= configured_assets {
+            return Err(V16Error::InvalidLeg);
+        }
+        let slot = self
+            .markets
+            .get(asset_index)
+            .ok_or(V16Error::InvalidConfig)?
+            .engine_slot();
+        let (long_domain, short_domain) = v16_domain_pair_for_asset_index(asset_index)?;
+        for (domain, status, expiry_slot) in [
+            (
+                long_domain,
+                decode_backing_bucket_status(slot.backing_long.status)?,
+                slot.backing_long.expiry_slot.get(),
+            ),
+            (
+                short_domain,
+                decode_backing_bucket_status(slot.backing_short.status)?,
+                slot.backing_short.expiry_slot.get(),
+            ),
+        ] {
+            if status == BackingBucketStatusV16::Fresh && expiry_slot <= now_slot {
+                return Ok(Some(domain));
             }
-            asset_index += 1;
         }
         Ok(None)
     }
@@ -15285,6 +15289,42 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             AutoCrankPlanV16::FinalizeRecovery => return Err(V16Error::InvalidConfig),
             AutoCrankPlanV16::CloseResolved => {
                 self.advance_resolved_slot_not_atomic(work.now_slot)?;
+                let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
+                let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
+                let waiting_for_rate = receipt.present
+                    && !receipt.finalized
+                    && !V16Core::kernel_resolved_payout_rate_is_terminal(
+                        ledger,
+                        self.header.source_fresh_backing_total_num.get(),
+                    );
+                if waiting_for_rate {
+                    if let Some(asset_index) = work
+                        .observations
+                        .first()
+                        .map(|observation| observation.asset_index)
+                    {
+                        if let Some(domain) = self.first_lapsed_source_backing_for_asset_at_slot(
+                            asset_index,
+                            self.header.current_slot.get(),
+                        )? {
+                            self.expire_source_backing_bucket_not_atomic(
+                                domain,
+                                self.header.current_slot.get(),
+                            )?;
+                            self.validate_shape()?;
+                            account.validate_with_market(&self.as_view())?;
+                            return Ok(AutoCrankResultV16 {
+                                selected: plan,
+                                outcome: AutoCrankOutcomeV16::ResolvedClose(
+                                    ResolvedCloseOutcomeV16::ProgressOnly,
+                                ),
+                            });
+                        }
+                    }
+                    if self.resolved_receipt_claimable_now(receipt)? == 0 {
+                        return Err(V16Error::NonProgress);
+                    }
+                }
                 AutoCrankOutcomeV16::ResolvedClose(self.close_resolved_account_not_atomic(
                     account,
                     work.resolved_close_fee_rate_per_slot,
@@ -19340,27 +19380,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.validate_shape()?;
             account.validate_with_market(&self.as_view())?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
-        }
-        let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
-        let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        if receipt.present
-            && !receipt.finalized
-            && !V16Core::kernel_resolved_payout_rate_is_terminal(
-                ledger,
-                self.header.source_fresh_backing_total_num.get(),
-            )
-        {
-            if let Some(domain) =
-                self.first_lapsed_source_backing_at_slot(self.header.current_slot.get())?
-            {
-                self.expire_source_backing_bucket_not_atomic(
-                    domain,
-                    self.header.current_slot.get(),
-                )?;
-                self.validate_shape()?;
-                account.validate_with_market(&self.as_view())?;
-                return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
-            }
         }
         if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
             .settle_account_side_effects_not_atomic(
