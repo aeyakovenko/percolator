@@ -12,11 +12,12 @@
 
 use percolator::BOUND_SCALE;
 use percolator::{
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
-    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16,
+    AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account,
+    EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
+    PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, SideV16,
     SourceCreditStateV16, SourceCreditStateV16Account, V16Config, V16PodI128, V16PodU128,
-    V16PodU32, V16PodU64, CREDIT_RATE_SCALE,
+    V16PodU32, V16PodU64, ADL_ONE, CREDIT_RATE_SCALE, POS_SCALE,
 };
 use proptest::prelude::*;
 
@@ -198,19 +199,117 @@ fn resolved_market_with_backed_winner(
     (header, markets, account_header)
 }
 
+fn resolved_market_with_two_backed_sources() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 2],
+    PortfolioAccountV16Account,
+) {
+    const CLAIM_PER_SOURCE: u128 = 200;
+    const BACKING: [u128; 2] = [150, 100];
+    const EXTRA_RESIDUAL: u128 = 150;
+
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id(), cfg, 2, 0).unwrap();
+    let mut markets = [
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+    ];
+    for (asset_index, market) in markets.iter_mut().enumerate() {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                asset_index as u32,
+                &mut market.engine,
+                100,
+                asset_index as u64 + 1,
+            )
+            .unwrap();
+        let backing_num = BACKING[asset_index] * BOUND_SCALE;
+        market.engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: market.engine.asset.market_id.get(),
+            fresh_unliened_backing_num: backing_num,
+            expiry_slot: 100,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+        market.engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                positive_claim_bound_num: CLAIM_PER_SOURCE * BOUND_SCALE,
+                exact_positive_claim_num: CLAIM_PER_SOURCE * BOUND_SCALE,
+                fresh_reserved_backing_num: backing_num,
+                credit_rate_num: BACKING[asset_index] * CREDIT_RATE_SCALE / CLAIM_PER_SOURCE,
+                ..SourceCreditStateV16::EMPTY
+            });
+    }
+
+    let total_claim = 2 * CLAIM_PER_SOURCE;
+    header.mode = 1;
+    header.resolved_slot = V16PodU64::new(2);
+    header.current_slot = V16PodU64::new(2);
+    header.vault = V16PodU128::new(BACKING.iter().sum::<u128>() + EXTRA_RESIDUAL);
+    header.pnl_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_matured_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_claim * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(total_claim * BOUND_SCALE);
+    header.source_fresh_backing_total_num =
+        V16PodU128::new(BACKING.iter().sum::<u128>() * BOUND_SCALE);
+
+    let mut account = winner_account(0, total_claim);
+    for (slot, domain) in [0u32, 2].into_iter().enumerate() {
+        let asset_index = domain as usize / 2;
+        account.source_domains[slot].domain = V16PodU32::new(domain);
+        account.source_domains[slot].source_claim_market_id =
+            V16PodU64::new(markets[asset_index].engine.asset.market_id.get());
+        account.source_domains[slot].source_claim_bound_num =
+            V16PodU128::new(CLAIM_PER_SOURCE * BOUND_SCALE);
+    }
+    (header, markets, account)
+}
+
+#[test]
+fn bounded_terminal_source_realization_preserves_intermediate_attribution() {
+    let (mut header, mut markets, mut account_header) = resolved_market_with_two_backed_sources();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut account, 0),
+        Ok(ResolvedCloseOutcomeV16::ProgressOnly)
+    );
+    assert_eq!(account.header.capital.get(), 150);
+    assert_eq!(account.header.pnl.get(), 250);
+    assert_eq!(account.header.reserved_pnl.get(), 50);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    assert_eq!(market.validate_shape(), Ok(()));
+
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut account, 0),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 400 })
+    );
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
     /// A source-backed winner's claim is realizable against its domain backing at
     /// the current credit rate in Live (convert_released_pnl_to_capital). Resolution
-    /// must not strip that entitlement: at resolved close the winner must be paid
-    /// exactly the Live-realizable portion — funded by consuming the backing —
-    /// instead of being haircut from a pool that excludes the very backing
-    /// underwriting the claim while the provider exits whole.
+    /// must not strip either component of that entitlement: resolved close first
+    /// converts the Live-realizable portion using source backing, then retains the
+    /// source haircut remainder as ordinary junior face against the terminal pool.
+    /// Otherwise a tiny source rate can burn a large claim and strand unrelated
+    /// junior value in the vault.
     #[test]
     fn terminal_close_realizes_backed_source_claim(
         pnl in 1u128..=1_000_000u128,
         backing_frac in 1u128..=1000u128,
+        extra_residual in 0u128..=1_000_000u128,
     ) {
         let backing = (pnl.saturating_mul(backing_frac) / 1000).max(1).min(pnl);
         // The engine's Live entitlement, mirrored exactly (floored credit rate,
@@ -221,9 +320,12 @@ proptest! {
         let rate = (backing_num * CREDIT_RATE_SCALE / claim_num).min(CREDIT_RATE_SCALE);
         let realizable =
             ((claim_num * rate / CREDIT_RATE_SCALE) / BOUND_SCALE).min(backing).min(pnl);
+        let retained_terminal_face = pnl - realizable;
+        let terminal_junior_payout = retained_terminal_face.min(extra_residual);
+        let expected_payout = realizable + terminal_junior_payout;
 
         let (mut header, mut markets, mut account_header) =
-            resolved_market_with_backed_winner(pnl, backing, 0);
+            resolved_market_with_backed_winner(pnl, backing, extra_residual);
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
         prop_assert_eq!(market.validate_shape(), Ok(()));
@@ -237,21 +339,17 @@ proptest! {
         prop_assert!(closed, "backed winner did not fully close");
         let paid = vault_before - market.header.vault.get();
 
-        // The Live-realizable portion of the claim must reach the winner...
-        prop_assert_eq!(paid, realizable);
+        // Source-backed atoms become capital, while the haircut remainder keeps
+        // its place in the terminal junior pool rather than disappearing.
+        prop_assert_eq!(paid, expected_payout);
         // ...a fully-backed claim realizes in full...
         if backing >= pnl {
             prop_assert_eq!(paid, pnl);
         }
-        // ...and the provider keeps exactly the unconsumed remainder.
-        prop_assert_eq!(market.header.vault.get(), backing - paid);
+        prop_assert_eq!(market.header.vault.get(), backing + extra_residual - paid);
         prop_assert_eq!(market.validate_shape(), Ok(()));
 
-        // NO DOUBLE-PAY (review finding 3): the winner is paid AT MOST its face
-        // (here exactly the realizable portion <= face); the unrealized
-        // remainder is burned with the consumed face, not also paid through the
-        // receipt pool. The account is fully extinguished (pnl=0, capital=0), so
-        // no surviving face can be double-paid.
+        // The two disjoint payout layers never exceed the original face.
         prop_assert!(paid <= pnl);
         prop_assert_eq!(account.header.pnl.get(), 0);
         prop_assert_eq!(account.header.capital.get(), 0);
@@ -263,7 +361,120 @@ proptest! {
         if let ResolvedCloseOutcomeV16::Closed { payout } = outcome2 {
             prop_assert_eq!(payout, 0);
         }
-        prop_assert_eq!(market.header.vault.get(), backing - paid);
+        prop_assert_eq!(market.header.vault.get(), backing + extra_residual - paid);
+    }
+}
+
+#[test]
+fn terminal_source_realization_recredits_paired_insurance_overlap() {
+    const CLAIM: u128 = 30;
+    const BACKING: u128 = 30;
+    const INSURANCE_BUDGET: u128 = 100;
+    const INSURANCE_SPENT: u128 = 20;
+
+    let (mut header, mut markets, mut account_header) =
+        resolved_market_with_backed_winner(CLAIM, BACKING, INSURANCE_SPENT);
+    let insurance_before = INSURANCE_BUDGET - INSURANCE_SPENT;
+    header.insurance = V16PodU128::new(insurance_before);
+    header.vault = V16PodU128::new(header.vault.get() + insurance_before);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(insurance_before);
+    // The positive claim consumes source domain 0. Its losing counterparty's
+    // insurance was charged to the opposite side of the same asset (domain 1).
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(INSURANCE_BUDGET);
+    markets[0].engine.insurance_domain_spent_short = V16PodU128::new(INSURANCE_SPENT);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("resolved source realization must close");
+    assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: CLAIM });
+    assert_eq!(
+        market
+            .recredit_terminal_claim_free_residual_for_asset_not_atomic(0)
+            .expect("claim-free terminal overlap must be recredited"),
+        INSURANCE_SPENT
+    );
+    assert_eq!(market.header.vault.get(), INSURANCE_BUDGET);
+    assert_eq!(market.header.insurance.get(), INSURANCE_BUDGET);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        INSURANCE_BUDGET
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .fresh_unliened_backing_num
+            .get(),
+        0
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+
+    #[test]
+    fn terminal_claim_free_overlap_recredit_is_capped_without_value_drift(
+        claim in 1u128..=1_000_000u128,
+        insurance_spent in 0u128..=1_000_000u128,
+        claim_free_residual in 0u128..=1_000_000u128,
+        insurance_before in 0u128..=1_000_000u128,
+    ) {
+        let insurance_budget = insurance_before + insurance_spent;
+        let expected_recredit = claim.min(insurance_spent).min(claim_free_residual);
+        let (mut header, mut markets, mut account_header) =
+            resolved_market_with_backed_winner(claim, claim, claim_free_residual);
+        header.insurance = V16PodU128::new(insurance_before);
+        header.vault = V16PodU128::new(header.vault.get() + insurance_before);
+        header.insurance_domain_budget_remaining_total = V16PodU128::new(insurance_before);
+        markets[0].engine.insurance_domain_budget_short = V16PodU128::new(insurance_budget);
+        markets[0].engine.insurance_domain_spent_short = V16PodU128::new(insurance_spent);
+
+        let vault_before = header.vault.get();
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        prop_assert_eq!(market.validate_shape(), Ok(()));
+
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut account, 0)
+            .expect("fully source-backed resolved winner must close");
+        prop_assert_eq!(
+            outcome,
+            ResolvedCloseOutcomeV16::Closed { payout: claim }
+        );
+        let recredited = market
+            .recredit_terminal_claim_free_residual_for_asset_not_atomic(0)
+            .expect("terminal sweep must accept an extinguished claim set");
+        prop_assert_eq!(recredited, expected_recredit);
+        prop_assert_eq!(market.header.vault.get(), vault_before - claim);
+        prop_assert_eq!(
+            market.header.insurance.get(),
+            insurance_before + expected_recredit
+        );
+        prop_assert_eq!(
+            market.header.insurance_domain_budget_remaining_total.get(),
+            insurance_before + expected_recredit
+        );
+        prop_assert_eq!(
+            market.markets[0].engine.insurance_domain_spent_short.get(),
+            insurance_spent - expected_recredit
+        );
+        prop_assert_eq!(
+            market.header.vault.get() - market.header.insurance.get(),
+            claim_free_residual - expected_recredit
+        );
+        prop_assert_eq!(market.validate_shape(), Ok(()));
+        prop_assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
     }
 }
 
@@ -350,7 +561,12 @@ fn realization_after_snapshot_refines_unreceipted_bound() {
     let pnl_a = 1_000u128; // plain junior winner
     let pnl_b = 500u128; // source-backed winner
     let backing = pnl_b; // fully backed
-    let residual = pnl_a; // honest junior pool exactly covers A
+    let insurance_budget = 1_000u128;
+    let insurance_spent = 200u128;
+    let insurance_before = insurance_budget - insurance_spent;
+    // The junior pool exactly covers A. The historical insurance spend is part
+    // of that support, not a surplus overlapping B's paired source backing.
+    let residual = pnl_a;
 
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id(), cfg, 1, 0).unwrap();
@@ -361,7 +577,9 @@ fn realization_after_snapshot_refines_unreceipted_bound() {
     header.mode = 1; // Resolved
     header.resolved_slot = V16PodU64::new(1);
     header.current_slot = V16PodU64::new(1);
-    header.vault = V16PodU128::new(residual + backing);
+    header.vault = V16PodU128::new(residual + backing + insurance_before);
+    header.insurance = V16PodU128::new(insurance_before);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(insurance_before);
     header.pnl_pos_tot = V16PodU128::new(pnl_a + pnl_b);
     header.pnl_matured_pos_tot = V16PodU128::new(pnl_a + pnl_b);
     header.pnl_pos_bound_tot = V16PodU128::new(pnl_a + pnl_b);
@@ -384,6 +602,8 @@ fn realization_after_snapshot_refines_unreceipted_bound() {
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(insurance_budget);
+    markets[0].engine.insurance_domain_spent_short = V16PodU128::new(insurance_spent);
 
     let mut a_header = winner_account(0, pnl_a);
     let mut b_header = winner_account(0, pnl_b);
@@ -422,7 +642,19 @@ fn realization_after_snapshot_refines_unreceipted_bound() {
         "stale unreceipted bound left A unfinalizable"
     );
     assert!(topped > 0);
-    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(
+        market
+            .recredit_terminal_claim_free_residual_for_asset_not_atomic(0)
+            .expect("mixed exact support is terminal and claim-free"),
+        0,
+        "ordinary winner support must not be reclassified as insurance"
+    );
+    assert_eq!(market.header.vault.get(), insurance_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        insurance_spent
+    );
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
@@ -457,10 +689,16 @@ fn terminal_close_with_expired_backing_does_not_strand() {
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 
     let vault_before = market.header.vault.get();
-    let outcome = market
-        .close_resolved_account_not_atomic(&mut account, 0)
-        .expect("expired-backing winner close must not revert (liveness)");
-    let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { payout: _ });
+    let mut closed = false;
+    for _ in 0..3 {
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut account, 0)
+            .expect("expired-backing winner close must not revert (liveness)");
+        if matches!(outcome, ResolvedCloseOutcomeV16::Closed { .. }) {
+            closed = true;
+            break;
+        }
+    }
     assert!(closed, "expired-backing winner did not fully close");
     let paid = vault_before - market.header.vault.get();
 
@@ -482,6 +720,125 @@ fn terminal_close_with_expired_backing_does_not_strand() {
         .withdraw_fresh_counterparty_backing_not_atomic(0, backing)
         .is_err());
     assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn resolved_close_prepares_lapsed_backing_before_pending_k_loss() {
+    const CAPITAL: u128 = 50_000_000;
+    const PNL: u128 = 500_000;
+    const BACKING: u128 = 17;
+    const SLOT: u64 = 44;
+    const POSITION_Q: u128 = 50_000 * POS_SCALE;
+
+    let (mut header, mut markets) = resolved_market_with_backing(CAPITAL, PNL, 0, BACKING);
+    let engine_market_id = markets[0].engine.asset.market_id.get();
+    header.current_slot = V16PodU64::new(SLOT);
+    header.resolved_slot = V16PodU64::new(SLOT);
+    header.slot_last = V16PodU64::new(SLOT);
+    header.pnl_matured_pos_tot = V16PodU128::new(0);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    header.source_claim_bound_total_num = V16PodU128::new(PNL * BOUND_SCALE);
+
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(
+        &BackingBucketV16::empty_for_market(engine_market_id),
+    );
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16::EMPTY);
+    let claim_num = PNL * BOUND_SCALE;
+    let backing_num = BACKING * BOUND_SCALE;
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: engine_market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: SLOT,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: backing_num * CREDIT_RATE_SCALE / claim_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.slot_last = SLOT;
+    asset.oi_eff_long_q = POSITION_Q;
+    asset.stored_pos_count_long = 1;
+    asset.loss_weight_sum_long = POSITION_Q;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let mut account_header = winner_account(CAPITAL, PNL);
+    account_header.last_fee_slot = V16PodU64::new(SLOT);
+    account_header.source_domains[0].domain = V16PodU32::new(1);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(engine_market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(claim_num);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: engine_market_id,
+        side: SideV16::Long,
+        basis_pos_q: POSITION_Q as i128,
+        a_basis: ADL_ONE,
+        k_snap: 10 * ADL_ONE as i128,
+        f_snap: 0,
+        kf_epoch_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POSITION_Q,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+
+    let capital_before = account.header.capital.get();
+    let vault_before = market.header.vault.get();
+    let first = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("resolved close must commit the lapsed backing transition");
+    assert_eq!(first, ResolvedCloseOutcomeV16::ProgressOnly);
+    assert_eq!(account.header.capital.get(), capital_before);
+    assert_eq!(account.header.pnl.get(), PNL as i128);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired,
+    );
+
+    let mut closed = false;
+    for _ in 0..4 {
+        let outcome = market
+            .close_resolved_account_not_atomic(&mut account, 0)
+            .expect("prepared source state must not block K/F settlement");
+        if matches!(outcome, ResolvedCloseOutcomeV16::Closed { .. }) {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "bounded terminal continuation did not close");
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(
+        market.header.vault.get(),
+        BACKING,
+        "the pending mark loss consumes the matching positive face without charging principal",
+    );
+    assert_eq!(vault_before - market.header.vault.get(), capital_before);
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 }
 
 proptest! {

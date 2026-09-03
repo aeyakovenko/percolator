@@ -3,7 +3,7 @@
 **Educational research project. Not production ready. Not audited. Do not use
 with real funds.**
 
-Normative protocol spec: [`spec.md`](spec.md), v16.9.0. The spec is frozen; this
+Normative protocol spec: [`spec.md`](spec.md), v16.9.1. The spec is frozen; this
 README is only the short operator/auditor guide.
 
 Percolator is a zero-copy perpetual-futures risk-engine library. It is built
@@ -59,12 +59,12 @@ Source-checkable counts in this checkout:
 
 | Class | Count |
 | --- | ---: |
-| Plain Kani proofs in `tests/proofs_v16.rs` | 244 |
-| Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 11 |
-| Plain Kani proofs in `src/v16_proofs.rs` | 38 |
-| Function-contract proofs in `src/v16_proofs.rs` | 51 |
-| Production `kernel_*` helpers in `src/v16.rs` | 17 |
-| Public `*_not_atomic` engine APIs in `src/v16.rs` | 55 |
+| Plain Kani proofs in `tests/proofs_v16.rs` | 308 |
+| Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
+| Plain Kani proofs in `src/v16_proofs.rs` | 42 |
+| Function-contract proofs in `src/v16_proofs.rs` | 61 |
+| Production `kernel_*` helpers in `src/v16.rs` | 34 |
+| Public `*_not_atomic` engine APIs in `src/v16.rs` | 59 |
 
 Spot-check the inventory directly:
 

@@ -1,21 +1,27 @@
 use percolator::{
-    auto_crank_plan_requires_caller_observation, AutoCrankObservationV16, AutoCrankOutcomeV16,
-    AutoCrankPlanV16, AutoCrankWorkV16,
+    active_bitmap_count_ones, active_bitmap_is_empty, auto_crank_plan_requires_caller_observation,
+    AutoCrankObservationV16, AutoCrankOutcomeV16, AutoCrankPlanV16, AutoCrankResultV16,
+    AutoCrankWorkV16,
 };
 use percolator::{
-    v16_domain_count_for_market_slots, AssetLifecycleV16, AssetStateV16Account,
-    BackingBucketStatusV16, BackingBucketV16, BackingBucketV16Account, EngineAssetSlotV16Account,
-    HealthCertV16, HealthCertV16Account, LiquidationRequestV16, Market,
-    MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
-    PermissionlessCrankRequestV16, PermissionlessProgressOutcomeV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
-    PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut,
-    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedPayoutLedgerV16,
-    ResolvedPayoutLedgerV16Account, ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account,
-    SideModeV16, SideV16, SourceCreditStateV16, SourceCreditStateV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodI128, V16PodU128, V16PodU32, V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
+    canonical_accrual_price_step_v16, v16_domain_count_for_market_slots, AccrualStepV16,
+    AssetLifecycleV16, AssetStateV16Account, BackingBucketStatusV16, BackingBucketV16,
+    BackingBucketV16Account, EngineAssetSlotV16Account, HealthCertV16, HealthCertV16Account,
+    LiquidationRequestV16, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
+    PermissionlessProgressOutcomeV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioLegV16Account, PortfolioSourceDomainV16Account, PortfolioV16View,
+    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, RebalanceRequestV16,
+    ResolvedCloseOutcomeV16, ResolvedPayoutLedgerV16, ResolvedPayoutLedgerV16Account,
+    ResolvedPayoutReceiptV16, ResolvedPayoutReceiptV16Account, SideModeV16, SideV16,
+    SourceCreditStateV16, SourceCreditStateV16Account, TerminalSlabOutcomeV16, TradeRequestV16,
+    V16Config, V16Error, V16OptionalRecoveryReasonAccount, V16PodI128, V16PodU128, V16PodU32,
+    V16PodU64, V16_EMPTY_ACTIVE_BITMAP,
 };
-use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE};
+#[cfg(feature = "fuzz")]
+use percolator::{
+    AssetStateV16, MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
+};
+use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
 
 const FUNDING_COUNTER_PRICE: u64 = 1_000_000;
 const FUNDING_COUNTER_RATE_E9: i128 = 10_000;
@@ -25,13 +31,440 @@ fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
     ([1; 32], [2; 32], [3; 32])
 }
 
+#[test]
+fn v16_quantity_adl_blocks_fresh_basis_reissue_across_split_trades() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 220);
+    let mut short_header = account_fixture(1, 221);
+    let mut successor_header = account_fixture(1, 222);
+    let open_q = 4 * POS_SCALE;
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        let mut successor = PortfolioV16ViewMut::new(&mut successor_header);
+        market.deposit_not_atomic(&mut long, 10_000).unwrap();
+        market.deposit_not_atomic(&mut short, 10_000).unwrap();
+        market.deposit_not_atomic(&mut successor, 10_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(open_q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE,
+                },
+            )
+            .unwrap();
+    }
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, 3 * POS_SCALE);
+    assert_eq!(asset.oi_eff_short_q, 3 * POS_SCALE);
+    assert_eq!(asset.a_short, ADL_ONE * 3 / 4);
+    assert_eq!(
+        short_header.legs[0]
+            .try_to_runtime()
+            .unwrap()
+            .basis_pos_q
+            .unsigned_abs(),
+        open_q
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let mut successor = PortfolioV16ViewMut::new(&mut successor_header);
+    let result = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut short,
+        &mut successor,
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(open_q / 2),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+    );
+
+    assert_eq!(result, Err(V16Error::LockActive));
+}
+
+#[test]
+fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 223);
+    let mut short_header = account_fixture(1, 224);
+    let open_q = 12 * POS_SCALE;
+    let reduction_q = 3 * POS_SCALE;
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 100_000_000).unwrap();
+        market.deposit_not_atomic(&mut short, 100_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(open_q),
+                    exec_price: FUNDING_COUNTER_PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: reduction_q,
+                },
+            )
+            .unwrap();
+        let long_cert = market.full_account_refresh_not_atomic(&mut long).unwrap();
+        let short_cert = market.full_account_refresh_not_atomic(&mut short).unwrap();
+        assert_eq!(
+            (
+                short_cert.certified_initial_req,
+                short_cert.certified_maintenance_req,
+                short_cert.certified_worst_case_loss,
+            ),
+            (
+                long_cert.certified_initial_req,
+                long_cert.certified_maintenance_req,
+                long_cert.certified_worst_case_loss,
+            ),
+            "equal effective exposures must receive equal health requirements after quantity ADL"
+        );
+        market
+            .accrue_asset_to_not_atomic(
+                0,
+                2,
+                FUNDING_COUNTER_PRICE + 1,
+                FUNDING_COUNTER_RATE_E9,
+                true,
+            )
+            .unwrap();
+        market.markets[0].engine.asset.raw_oracle_target_price =
+            V16PodU64::new(FUNDING_COUNTER_PRICE + 1);
+    }
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    let scaled = (ADL_ONE * 3 / 4) as i128;
+    assert_eq!(asset.k_long, ADL_ONE as i128);
+    assert_eq!(asset.k_short, -scaled);
+    assert_eq!(
+        asset.f_long_num,
+        -(FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * ADL_ONE as i128)
+    );
+    assert_eq!(
+        asset.f_short_num,
+        FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * scaled
+    );
+
+    let total_value = |long: &PortfolioAccountV16Account,
+                       short: &PortfolioAccountV16Account|
+     -> i128 {
+        long.capital.get() as i128 + long.pnl.get() + short.capital.get() as i128 + short.pnl.get()
+    };
+    let value_before = total_value(&long_header, &short_header);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: -signed_q(reduction_q),
+                    exec_price: FUNDING_COUNTER_PRICE + 1,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(total_value(&long_header, &short_header), value_before);
+
+    let reduced_asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(reduced_asset.oi_eff_long_q, 6 * POS_SCALE);
+    assert_eq!(reduced_asset.oi_eff_short_q, 6 * POS_SCALE);
+    assert_eq!(
+        long_header.legs[0].try_to_runtime().unwrap().basis_pos_q,
+        signed_q(6 * POS_SCALE)
+    );
+    assert_eq!(
+        short_header.legs[0].try_to_runtime().unwrap().basis_pos_q,
+        -signed_q(8 * POS_SCALE),
+        "the ADL-scaled short must remove four raw lots for three effective lots"
+    );
+
+    let value_before_continuation = total_value(&long_header, &short_header);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .accrue_asset_to_not_atomic(
+                0,
+                3,
+                FUNDING_COUNTER_PRICE + 2,
+                FUNDING_COUNTER_RATE_E9,
+                true,
+            )
+            .unwrap();
+        market.markets[0].engine.asset.raw_oracle_target_price =
+            V16PodU64::new(FUNDING_COUNTER_PRICE + 2);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+    }
+    assert_eq!(
+        total_value(&long_header, &short_header),
+        value_before_continuation,
+        "future price/funding accrual must remain zero-sum after the partial ADL reduction"
+    );
+}
+
+#[test]
+fn v16_post_quantity_adl_bankrupt_effective_full_close_stays_live() {
+    const PRICE: u64 = 1_000_000;
+    const OPEN_Q: u128 = 12 * POS_SCALE;
+    const REDUCTION_Q: u128 = 3 * POS_SCALE;
+
+    let (mut header, mut markets) = funding_market_fixture(PRICE);
+    let mut long_header = account_fixture(1, 227);
+    let mut short_header = account_fixture(1, 228);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 100_000_000).unwrap();
+        market.deposit_not_atomic(&mut short, 13_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(OPEN_Q),
+                    exec_price: PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: REDUCTION_Q,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, PRICE + 900_000, 0, true)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 3, PRICE + 1_800_000, 0, true)
+            .unwrap();
+        market.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(PRICE + 1_800_000);
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let outcome = market
+        .liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 0 })
+        .expect("the full live exposure must remain liquidatable after quantity ADL");
+
+    assert_eq!(outcome.closed_q, OPEN_Q - REDUCTION_Q);
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.oi_eff_short_q, 0);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_recovery_pair_close_clamps_stale_work_to_dual_adl_effective_oi() {
+    const PRICE: u64 = 100;
+    const OPEN_Q: u128 = 2 * POS_SCALE;
+    const FIRST_REDUCE_Q: u128 = POS_SCALE / 100;
+    const SECOND_REDUCE_Q: u128 = POS_SCALE / 100;
+
+    let (mut header, mut markets) = market_fixture(1, PRICE);
+    let mut long_header = account_fixture(1, 229);
+    let mut short_header = account_fixture(1, 230);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 10_000).unwrap();
+        market.deposit_not_atomic(&mut short, 10_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(OPEN_Q),
+                    exec_price: PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: FIRST_REDUCE_Q,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut short,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: SECOND_REDUCE_Q,
+                },
+            )
+            .unwrap();
+    }
+
+    let before = markets[0].engine.asset.try_to_runtime().unwrap();
+    let long_raw_q = long_header.legs[0]
+        .try_to_runtime()
+        .unwrap()
+        .basis_pos_q
+        .unsigned_abs();
+    let short_raw_q = short_header.legs[0]
+        .try_to_runtime()
+        .unwrap()
+        .basis_pos_q
+        .unsigned_abs();
+    assert!(before.a_long < ADL_ONE && before.a_short < ADL_ONE);
+    assert_eq!(before.oi_eff_long_q, before.oi_eff_short_q);
+    assert!(long_raw_q > before.oi_eff_long_q);
+    assert!(short_raw_q > before.oi_eff_short_q);
+    let effective_q = before.oi_eff_long_q;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.force_asset_recovery_not_atomic(0, 1).unwrap();
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let landed_q = market
+        .force_close_recovery_pair_not_atomic(
+            &mut long,
+            &mut short,
+            0,
+            effective_q.checked_add(1).unwrap(),
+        )
+        .expect("stale Recovery work must clamp to canonical effective OI");
+
+    assert_eq!(landed_q, effective_q);
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_sub_minimum_drain_only_adl_leg_refreshes_and_exits() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 231);
+    let mut short_header = account_fixture(1, 232);
+    let open_q = 100 * POS_SCALE;
+    let surviving_q = POS_SCALE;
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 100_000_000).unwrap();
+        market.deposit_not_atomic(&mut short, 100_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(open_q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: open_q - surviving_q,
+                },
+            )
+            .unwrap();
+    }
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_short_q, surviving_q);
+    assert!(asset.a_short < percolator::MIN_A_SIDE);
+    assert_eq!(asset.mode_short, SideModeV16::DrainOnly);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market
+        .full_account_refresh_not_atomic(&mut short)
+        .expect("a surviving sub-minimum-A DrainOnly leg must remain refreshable");
+    market
+        .rebalance_reduce_position_not_atomic(
+            &mut short,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: surviving_q,
+            },
+        )
+        .expect("the owner must be able to close the final effective DrainOnly exposure");
+
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.oi_eff_short_q, 0);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
 fn market_fixture(
     market_slots: u32,
     init_price: u64,
 ) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
     let (market_id, _, _) = ids();
+    let max_portfolio_assets =
+        market_slots.min(percolator::V16_MAX_PORTFOLIO_ASSETS_N as u32) as u16;
     let cfg =
-        V16Config::public_user_fund_with_market_slots(market_slots as u16, market_slots, 0, 10);
+        V16Config::public_user_fund_with_market_slots(max_portfolio_assets, market_slots, 0, 10);
     let mut header =
         MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, market_slots, 0).unwrap();
     let mut markets = (0..market_slots)
@@ -71,6 +504,126 @@ fn funding_market_fixture(init_price: u64) -> (MarketGroupV16HeaderAccount, Vec<
     (header, markets)
 }
 
+#[test]
+fn v16_asset_local_committed_accrual_can_trail_global_clock() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .accrue_asset_to_not_atomic(0, 10, 100, 0, true)
+        .expect("the first asset must advance the authenticated market clock");
+    let global_slot = market.header.current_slot.get();
+    let lagging_before = market.markets[1].engine.asset.slot_last.get();
+    let committed_slot = lagging_before + 1;
+    assert!(committed_slot < global_slot);
+
+    let outcome = market
+        .accrue_asset_to_not_atomic(1, committed_slot, 100, 0, true)
+        .expect("a lagging asset must settle an earlier committed checkpoint");
+
+    assert_eq!(outcome.dt, 1);
+    assert_eq!(
+        market.markets[1].engine.asset.slot_last.get(),
+        committed_slot
+    );
+    assert_eq!(market.header.current_slot.get(), global_slot);
+    assert_eq!(
+        market.accrue_asset_to_not_atomic(1, committed_slot - 1, 100, 0, true),
+        Err(V16Error::InvalidConfig),
+        "an asset-local checkpoint still cannot move behind that asset's own clock"
+    );
+    market.validate_shape().unwrap();
+}
+
+fn canonical_path_market_fixture(
+    init_price: u64,
+) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.max_accrual_dt_slots = 10;
+    cfg.min_funding_lifetime_slots = 10;
+    cfg.max_abs_funding_e9_per_slot = 10_000;
+    cfg.max_price_move_bps_per_slot = 100;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, init_price, 1)
+        .unwrap();
+    (header, markets)
+}
+
+fn canonical_up_path(mut price: u64, count: usize) -> (u64, Vec<AccrualStepV16>) {
+    let target = price.checked_mul(2).unwrap();
+    let cap_anchor = price;
+    let mut remainder = 0;
+    let steps = (0..count)
+        .map(|index| {
+            let remainder_before = remainder;
+            (price, remainder) =
+                canonical_accrual_price_step_v16(price, target, cap_anchor, 100, true, remainder)
+                    .unwrap();
+            AccrualStepV16 {
+                effective_price: price,
+                funding_rate_e9: if index % 2 == 0 { 10_000 } else { -7_500 },
+                price_move_remainder_before_bps_num: remainder_before,
+                price_move_remainder_after_bps_num: remainder,
+            }
+        })
+        .collect();
+    (target, steps)
+}
+
+#[test]
+fn v16_canonical_accrual_path_scales_indices_after_quantity_adl() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    let (target, steps) = canonical_up_path(INITIAL_PRICE, 1);
+    let step = steps[0];
+    let (mut header, mut markets) = canonical_path_market_fixture(INITIAL_PRICE);
+    let mut long_header = account_fixture(1, 225);
+    let mut short_header = account_fixture(1, 226);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 100_000_000).unwrap();
+        market.deposit_not_atomic(&mut short, 100_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(4 * POS_SCALE),
+                    exec_price: INITIAL_PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_path_to_not_atomic(0, 2, target, &steps, true)
+            .unwrap();
+    }
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    let a_short = ADL_ONE * 3 / 4;
+    let price_delta = i128::from(step.effective_price - INITIAL_PRICE);
+    let funding_index_delta = FUNDING_COUNTER_ATOMS_PER_SLOT as i128;
+    assert_eq!(asset.a_short, a_short);
+    assert_eq!(asset.k_long, price_delta * ADL_ONE as i128);
+    assert_eq!(asset.k_short, -(price_delta * a_short as i128));
+    assert_eq!(asset.f_long_num, -(funding_index_delta * ADL_ONE as i128));
+    assert_eq!(asset.f_short_num, funding_index_delta * a_short as i128);
+}
+
 fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Account {
     let (market_id, _, owner) = ids();
     let header = ProvenanceHeaderV16Account::from_runtime(&ProvenanceHeaderV16::new(
@@ -84,8 +637,375 @@ fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Ac
     account
 }
 
+#[cfg(feature = "fuzz")]
+#[test]
+fn v16_cross_domain_unbacked_loss_burns_only_matching_positive_face() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 250);
+    let half_atom_num = BOUND_SCALE / 2;
+    let asset_market_id = markets[0].engine.asset.market_id.get();
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: BOUND_SCALE,
+        exact_positive_claim_num: BOUND_SCALE,
+        fresh_reserved_backing_num: half_atom_num,
+        credit_rate_num: CREDIT_RATE_SCALE / 2,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let backing = BackingBucketV16 {
+        market_id: asset_market_id,
+        fresh_unliened_backing_num: half_atom_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(&source);
+    markets[0].engine.source_credit_short = SourceCreditStateV16Account::from_runtime(&source);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&backing);
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&backing);
+
+    account_header.pnl = V16PodI128::new(2);
+    for (slot, domain) in [0u32, 1u32].into_iter().enumerate() {
+        account_header.source_domains[slot].domain = V16PodU32::new(domain);
+        account_header.source_domains[slot].source_claim_market_id =
+            V16PodU64::new(asset_market_id);
+        account_header.source_domains[slot].source_claim_bound_num = V16PodU128::new(BOUND_SCALE);
+    }
+    header.vault = V16PodU128::new(1);
+    header.pnl_pos_tot = V16PodU128::new(2);
+    header.pnl_pos_bound_tot = V16PodU128::new(2);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(2 * BOUND_SCALE);
+    header.source_claim_bound_total_num = V16PodU128::new(2 * BOUND_SCALE);
+    header.source_fresh_backing_total_num = V16PodU128::new(BOUND_SCALE);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .validate_shape()
+        .expect("fractional source fixture must be a valid market state");
+    account
+        .validate_with_market(&market.as_view())
+        .expect("fractional source fixture must be a valid portfolio state");
+    let outcome = market
+        .kani_apply_signed_kf_delta_to_pnl(&mut account, -1, None)
+        .expect("an unbacked cross-domain loss must remain settleable");
+
+    assert_eq!(outcome, (0, 1));
+    assert_eq!(account.header.pnl.get(), 1);
+    assert_eq!(market.header.pnl_pos_tot.get(), 1);
+    assert_eq!(
+        market.header.source_claim_bound_total_num.get(),
+        BOUND_SCALE
+    );
+    assert_eq!(market.header.vault.get(), 1);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
 fn signed_q(q: u128) -> i128 {
     i128::try_from(q).unwrap()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct KfSettlementOrderOutcome {
+    vault: u128,
+    c_tot: u128,
+    long_capital: u128,
+    long_pnl: i128,
+    long_equity: i128,
+    long_claims: Vec<(u32, u128)>,
+    long_funding: (u128, u128, u128, u128),
+    short_capital: u128,
+    short_pnl: i128,
+    short_equity: i128,
+    short_claims: Vec<(u32, u128)>,
+    short_funding: (u128, u128, u128, u128),
+    source_stock: Vec<(u128, u128, u128)>,
+}
+
+fn multi_asset_funding_fixture(
+    market_slots: u32,
+    init_price: u64,
+) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (market_id, _, _) = ids();
+    let mut cfg =
+        V16Config::public_user_fund_with_market_slots(market_slots as u16, market_slots, 0, 10);
+    cfg.max_abs_funding_e9_per_slot = FUNDING_COUNTER_RATE_E9 as u64;
+    cfg.max_price_move_bps_per_slot = 9_000;
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, market_slots, 0).unwrap();
+    let mut markets = (0..market_slots)
+        .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
+    for (asset_index, market) in markets.iter_mut().enumerate() {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                asset_index as u32,
+                &mut market.engine,
+                init_price,
+                (asset_index + 1) as u64,
+            )
+            .unwrap();
+    }
+    (header, markets)
+}
+
+fn account_claims(account: &PortfolioAccountV16Account) -> Vec<(u32, u128)> {
+    account
+        .source_domains
+        .iter()
+        .filter(|source| source.is_occupied())
+        .map(|source| (source.domain.get(), source.source_claim_bound_num.get()))
+        .collect()
+}
+
+fn kf_settlement_order_outcome(
+    attach_order: [usize; 3],
+    settle_short_first: bool,
+    funding_only: bool,
+) -> KfSettlementOrderOutcome {
+    let initial_price = if funding_only {
+        FUNDING_COUNTER_PRICE
+    } else {
+        100
+    };
+    let (mut header, mut markets) = if funding_only {
+        multi_asset_funding_fixture(3, initial_price)
+    } else {
+        market_fixture(3, initial_price)
+    };
+    let mut long_header = account_fixture(3, 180);
+    let mut short_header = account_fixture(3, 181);
+    let quantities = [20u128, 10, 15];
+    let marks = if funding_only {
+        [initial_price; 3]
+    } else {
+        [110u64, 95, 98]
+    };
+    let funding_rates = [
+        FUNDING_COUNTER_RATE_E9,
+        -FUNDING_COUNTER_RATE_E9,
+        FUNDING_COUNTER_RATE_E9,
+    ];
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        let deposit = if funding_only { 100_000_000 } else { 10_000 };
+        market.deposit_not_atomic(&mut long, deposit).unwrap();
+        market.deposit_not_atomic(&mut short, deposit).unwrap();
+        for asset_index in attach_order {
+            market
+                .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                    &mut long,
+                    &mut short,
+                    TradeRequestV16 {
+                        asset_index,
+                        size_q: signed_q(quantities[asset_index] * POS_SCALE),
+                        exec_price: initial_price,
+                        fee_bps: 0,
+                    },
+                )
+                .unwrap();
+        }
+        if funding_only {
+            for asset_index in 0..3 {
+                market
+                    .accrue_asset_to_not_atomic(asset_index, 4, initial_price, 0, true)
+                    .unwrap();
+            }
+        }
+        for asset_index in 0..3 {
+            if !funding_only {
+                market
+                    .set_asset_raw_oracle_target_not_atomic(asset_index, marks[asset_index])
+                    .unwrap();
+            }
+            market
+                .accrue_asset_to_not_atomic(
+                    asset_index,
+                    if funding_only { 5 } else { 4 },
+                    marks[asset_index],
+                    if funding_only {
+                        funding_rates[asset_index]
+                    } else {
+                        0
+                    },
+                    true,
+                )
+                .unwrap_or_else(|err| panic!("asset {asset_index} accrual failed: {err:?}"));
+        }
+        if settle_short_first {
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+            market.full_account_refresh_not_atomic(&mut long).unwrap();
+        } else {
+            market.full_account_refresh_not_atomic(&mut long).unwrap();
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+        }
+        let first_cert = if settle_short_first {
+            short.header.health_cert.try_to_runtime().unwrap()
+        } else {
+            long.header.health_cert.try_to_runtime().unwrap()
+        };
+        assert_ne!(
+            first_cert.cert_risk_epoch,
+            market.header.risk_epoch.get(),
+            "later source-backing settlement must invalidate the earlier health certificate",
+        );
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        short.validate_with_market(&market.as_view()).unwrap();
+    }
+
+    let mut source_stock = Vec::new();
+    for market in &markets {
+        for (source, backing) in [
+            (
+                &market.engine.source_credit_long,
+                &market.engine.backing_long,
+            ),
+            (
+                &market.engine.source_credit_short,
+                &market.engine.backing_short,
+            ),
+        ] {
+            let source = source.try_to_runtime().unwrap();
+            let backing = backing.try_to_runtime().unwrap();
+            source_stock.push((
+                source.positive_claim_bound_num,
+                source.fresh_reserved_backing_num,
+                backing.fresh_unliened_backing_num,
+            ));
+        }
+    }
+    KfSettlementOrderOutcome {
+        vault: header.vault.get(),
+        c_tot: header.c_tot.get(),
+        long_capital: long_header.capital.get(),
+        long_pnl: long_header.pnl.get(),
+        long_equity: long_header
+            .health_cert
+            .try_to_runtime()
+            .unwrap()
+            .certified_equity,
+        long_claims: account_claims(&long_header),
+        long_funding: funding_counter_tuple(&long_header),
+        short_capital: short_header.capital.get(),
+        short_pnl: short_header.pnl.get(),
+        short_equity: short_header
+            .health_cert
+            .try_to_runtime()
+            .unwrap()
+            .certified_equity,
+        short_claims: account_claims(&short_header),
+        short_funding: funding_counter_tuple(&short_header),
+        source_stock,
+    }
+}
+
+#[test]
+fn v16_whole_account_kf_settlement_is_leg_and_account_order_independent() {
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let expected = kf_settlement_order_outcome(orders[0], false, false);
+    for order in orders {
+        for settle_short_first in [false, true] {
+            assert_eq!(
+                kf_settlement_order_outcome(order, settle_short_first, false),
+                expected,
+                "K/F settlement changed under attach order {order:?}, short-first={settle_short_first}",
+            );
+        }
+    }
+
+    assert_eq!(expected.vault, 20_000);
+    assert_eq!(expected.c_tot, 19_720);
+    assert_eq!(
+        (
+            expected.long_capital,
+            expected.long_pnl,
+            expected.long_equity,
+        ),
+        (9_920, 200, 10_120),
+    );
+    assert_eq!(
+        (
+            expected.short_capital,
+            expected.short_pnl,
+            expected.short_equity,
+        ),
+        (9_800, 80, 9_880),
+    );
+    assert_eq!(expected.long_claims, vec![(1, 200 * BOUND_SCALE)]);
+    assert_eq!(
+        expected.short_claims,
+        vec![(2, 50 * BOUND_SCALE), (4, 30 * BOUND_SCALE)],
+    );
+    assert_eq!(
+        expected.source_stock,
+        vec![
+            (0, 0, 0),
+            (200 * BOUND_SCALE, 200 * BOUND_SCALE, 200 * BOUND_SCALE),
+            (50 * BOUND_SCALE, 50 * BOUND_SCALE, 50 * BOUND_SCALE),
+            (0, 0, 0),
+            (30 * BOUND_SCALE, 30 * BOUND_SCALE, 30 * BOUND_SCALE),
+            (0, 0, 0),
+        ],
+    );
+
+    let funding_expected = kf_settlement_order_outcome(orders[0], false, true);
+    for order in orders {
+        for settle_short_first in [false, true] {
+            assert_eq!(
+                kf_settlement_order_outcome(order, settle_short_first, true),
+                funding_expected,
+                "funding settlement changed under attach order {order:?}, short-first={settle_short_first}",
+            );
+        }
+    }
+    assert_eq!(funding_expected.c_tot, 199_999_550);
+    assert_eq!(
+        (
+            funding_expected.long_capital,
+            funding_expected.long_pnl,
+            funding_expected.long_equity,
+            funding_expected.long_funding,
+        ),
+        (99_999_650, 100, 99_999_750, (350, 100, 0, 0)),
+    );
+    assert_eq!(
+        (
+            funding_expected.short_capital,
+            funding_expected.short_pnl,
+            funding_expected.short_equity,
+            funding_expected.short_funding,
+        ),
+        (99_999_900, 350, 100_000_250, (0, 0, 100, 350)),
+    );
+    assert_eq!(funding_expected.long_claims, vec![(3, 100 * BOUND_SCALE)],);
+    assert_eq!(
+        funding_expected.short_claims,
+        vec![(0, 200 * BOUND_SCALE), (4, 150 * BOUND_SCALE)],
+    );
+    assert_eq!(
+        funding_expected.source_stock,
+        vec![
+            (200 * BOUND_SCALE, 200 * BOUND_SCALE, 200 * BOUND_SCALE),
+            (0, 0, 0),
+            (0, 0, 0),
+            (100 * BOUND_SCALE, 100 * BOUND_SCALE, 100 * BOUND_SCALE),
+            (150 * BOUND_SCALE, 150 * BOUND_SCALE, 150 * BOUND_SCALE),
+            (0, 0, 0),
+        ],
+    );
 }
 
 fn funding_counter_tuple(account: &PortfolioAccountV16Account) -> (u128, u128, u128, u128) {
@@ -116,6 +1036,201 @@ fn open_one_lot_pair(
             },
         )
         .unwrap();
+}
+
+#[test]
+fn v16_canonical_accrual_path_matches_every_complete_transaction_partition() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    let (target, steps) = canonical_up_path(INITIAL_PRICE, 10);
+    assert_eq!(target, 2_000_000);
+    assert_eq!(steps.last().unwrap().effective_price, 1_100_000);
+
+    let run = |fragmented: bool| {
+        let (mut header, mut markets) = canonical_path_market_fixture(INITIAL_PRICE);
+        let mut long_account = account_fixture(1, 41);
+        let mut short_account = account_fixture(1, 42);
+        {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let mut long = PortfolioV16ViewMut::new(&mut long_account);
+            let mut short = PortfolioV16ViewMut::new(&mut short_account);
+            open_one_lot_pair(&mut market, &mut long, &mut short);
+
+            if fragmented {
+                for (index, step) in steps.iter().enumerate() {
+                    let now_slot = u64::try_from(index + 2).unwrap();
+                    let outcome = market
+                        .accrue_asset_path_to_not_atomic(
+                            0,
+                            now_slot,
+                            target,
+                            core::slice::from_ref(step),
+                            true,
+                        )
+                        .unwrap();
+                    assert_eq!(outcome.dt, 1);
+                }
+            } else {
+                let outcome = market
+                    .accrue_asset_path_to_not_atomic(0, 11, target, &steps, true)
+                    .unwrap();
+                assert_eq!(outcome.dt, 10);
+            }
+        }
+        (header, markets.remove(0).engine.asset)
+    };
+
+    let (fragmented_header, fragmented_asset) = run(true);
+    let (delayed_header, delayed_asset) = run(false);
+    assert_eq!(delayed_asset, fragmented_asset);
+    assert_eq!(delayed_asset.effective_price.get(), 1_100_000);
+    assert_eq!(delayed_asset.fund_px_last.get(), INITIAL_PRICE);
+    assert_eq!(delayed_header.current_slot, fragmented_header.current_slot);
+    assert_eq!(delayed_header.slot_last, fragmented_header.slot_last);
+    assert_eq!(delayed_header.oracle_epoch, fragmented_header.oracle_epoch);
+    assert_eq!(
+        delayed_header.funding_epoch,
+        fragmented_header.funding_epoch
+    );
+    assert_eq!(
+        delayed_header.loss_stale_active,
+        fragmented_header.loss_stale_active
+    );
+}
+
+#[test]
+fn v16_canonical_accrual_path_requires_the_complete_bounded_prefix() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    let (target, steps) = canonical_up_path(INITIAL_PRICE, 10);
+    let (mut header, mut markets) = canonical_path_market_fixture(INITIAL_PRICE);
+    let mut long_account = account_fixture(1, 43);
+    let mut short_account = account_fixture(1, 44);
+    let before_header;
+    let before_asset;
+    let result;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_account);
+        let mut short = PortfolioV16ViewMut::new(&mut short_account);
+        open_one_lot_pair(&mut market, &mut long, &mut short);
+        before_header = *market.header;
+        before_asset = market.markets[0].engine.asset;
+        result = market.accrue_asset_path_to_not_atomic(0, 11, target, &steps[..9], true);
+    }
+
+    assert_eq!(result, Err(V16Error::InvalidConfig));
+    assert_eq!(header, before_header);
+    assert_eq!(markets[0].engine.asset, before_asset);
+}
+
+#[test]
+fn v16_canonical_accrual_path_bounds_long_gap_work_and_remains_actionable() {
+    const INITIAL_PRICE: u64 = 1_000_000;
+    let (target, steps) = canonical_up_path(INITIAL_PRICE, percolator::V16_MAX_ACCRUAL_PATH_STEPS);
+    let (mut header, mut markets) = canonical_path_market_fixture(INITIAL_PRICE);
+    header.config.max_accrual_dt_slots = V16PodU64::new(64);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(64);
+    let mut long_account = account_fixture(1, 45);
+    let mut short_account = account_fixture(1, 46);
+    let outcome;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_account);
+        let mut short = PortfolioV16ViewMut::new(&mut short_account);
+        open_one_lot_pair(&mut market, &mut long, &mut short);
+        outcome = market
+            .accrue_asset_path_to_not_atomic(0, 65, target, &steps, true)
+            .unwrap();
+    }
+
+    assert_eq!(outcome.dt as usize, percolator::V16_MAX_ACCRUAL_PATH_STEPS);
+    assert!(outcome.loss_stale_after);
+    assert_eq!(markets[0].engine.asset.slot_last.get(), 33);
+    assert_eq!(header.current_slot.get(), 65);
+    assert_eq!(header.loss_stale_active, 1);
+}
+
+#[test]
+fn v16_canonical_accrual_path_carries_sub_atom_price_progress_across_calls() {
+    let mut price = 100;
+    let mut remainder = 0;
+    let mut steps = Vec::new();
+    for _ in 0..5 {
+        let before = remainder;
+        (price, remainder) =
+            canonical_accrual_price_step_v16(price, 200, 100, 20, true, remainder).unwrap();
+        steps.push(AccrualStepV16 {
+            effective_price: price,
+            funding_rate_e9: 0,
+            price_move_remainder_before_bps_num: before,
+            price_move_remainder_after_bps_num: remainder,
+        });
+    }
+    assert_eq!(price, 101);
+    assert_eq!(remainder, 0);
+
+    let run = |fragmented: bool| {
+        let (mut header, mut markets) = canonical_path_market_fixture(100);
+        header.config.max_accrual_dt_slots = V16PodU64::new(5);
+        header.config.min_funding_lifetime_slots = V16PodU64::new(5);
+        header.config.max_price_move_bps_per_slot = V16PodU64::new(20);
+        let mut long_account = account_fixture(1, 47);
+        let mut short_account = account_fixture(1, 48);
+        {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let mut long = PortfolioV16ViewMut::new(&mut long_account);
+            let mut short = PortfolioV16ViewMut::new(&mut short_account);
+            open_one_lot_pair(&mut market, &mut long, &mut short);
+            if fragmented {
+                for (index, step) in steps.iter().enumerate() {
+                    market
+                        .accrue_asset_path_to_not_atomic(
+                            0,
+                            u64::try_from(index + 2).unwrap(),
+                            200,
+                            core::slice::from_ref(step),
+                            true,
+                        )
+                        .unwrap();
+                }
+            } else {
+                market
+                    .accrue_asset_path_to_not_atomic(0, 6, 200, &steps, true)
+                    .unwrap();
+            }
+        }
+        (header, markets.remove(0).engine.asset)
+    };
+
+    assert_eq!(run(false), run(true));
+}
+
+#[test]
+fn v16_canonical_accrual_path_rejects_discontinuous_remainder_before_mutation() {
+    let (mut header, mut markets) = canonical_path_market_fixture(100);
+    header.config.max_accrual_dt_slots = V16PodU64::new(2);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(2);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(20);
+    let steps = [
+        AccrualStepV16 {
+            effective_price: 100,
+            funding_rate_e9: 0,
+            price_move_remainder_before_bps_num: 0,
+            price_move_remainder_after_bps_num: 2_000,
+        },
+        AccrualStepV16 {
+            effective_price: 100,
+            funding_rate_e9: 0,
+            price_move_remainder_before_bps_num: 1_999,
+            price_move_remainder_after_bps_num: 4_000,
+        },
+    ];
+    let before_header = header;
+    let before_asset = markets[0].engine.asset;
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .accrue_asset_path_to_not_atomic(0, 3, 200, &steps, true);
+    assert_eq!(result, Err(V16Error::InvalidConfig));
+    assert_eq!(header, before_header);
+    assert_eq!(markets[0].engine.asset, before_asset);
 }
 
 #[test]
@@ -532,6 +1647,12 @@ fn v16_finalize_side_reset_is_public_value_neutral_and_epoch_bumping() {
     let risk_epoch_before = header.risk_epoch.get();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.mode_long = SideModeV16::ResetPending;
+    asset.k_epoch_start_long = -17;
+    asset.f_epoch_start_long_num = 23;
+    asset.b_epoch_start_long_num = 29;
+    asset.k_epoch_start_short = 31;
+    asset.f_epoch_start_short_num = -37;
+    asset.b_epoch_start_short_num = 41;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -541,6 +1662,12 @@ fn v16_finalize_side_reset_is_public_value_neutral_and_epoch_bumping() {
 
     let finalized = market.markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(finalized.mode_long, SideModeV16::Normal);
+    assert_eq!(finalized.k_epoch_start_long, 0);
+    assert_eq!(finalized.f_epoch_start_long_num, 0);
+    assert_eq!(finalized.b_epoch_start_long_num, 0);
+    assert_eq!(finalized.k_epoch_start_short, 31);
+    assert_eq!(finalized.f_epoch_start_short_num, -37);
+    assert_eq!(finalized.b_epoch_start_short_num, 41);
     assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
@@ -736,6 +1863,7 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: SURVIVOR_Q,
         b_snap: asset.b_long_num,
@@ -755,6 +1883,7 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         a_basis: ADL_ONE,
         k_snap: asset.k_short,
         f_snap: asset.f_short_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset.epoch_short,
         loss_weight: MATCHED_Q,
         b_snap: asset.b_short_num,
@@ -800,6 +1929,220 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
         ),
         value_before
     );
+}
+
+#[test]
+fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
+    const SURVIVOR_Q: u128 = 13 * POS_SCALE;
+    const MATCHED_Q: u128 = 10 * POS_SCALE;
+
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut survivor_header = account_fixture(1, 20);
+    let mut liquidated_header = account_fixture(1, 21);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+        let mut liquidated = PortfolioV16ViewMut::new(&mut liquidated_header);
+        market.deposit_not_atomic(&mut survivor, 100).unwrap();
+        market.deposit_not_atomic(&mut liquidated, 100).unwrap();
+    }
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.a_long = ADL_ONE * MATCHED_Q / SURVIVOR_Q;
+    asset.oi_eff_long_q = MATCHED_Q;
+    asset.oi_eff_short_q = MATCHED_Q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = SURVIVOR_Q;
+    asset.loss_weight_sum_short = MATCHED_Q;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    survivor_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: signed_q(SURVIVOR_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: SURVIVOR_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    survivor_header.active_bitmap[0] = V16PodU64::new(1);
+    survivor_header.health_cert.valid = 0;
+    liquidated_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -signed_q(MATCHED_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_short,
+        f_snap: asset.f_short_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_short,
+        loss_weight: MATCHED_Q,
+        b_snap: asset.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    liquidated_header.active_bitmap[0] = V16PodU64::new(1);
+    liquidated_header.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+    let mut liquidated = PortfolioV16ViewMut::new(&mut liquidated_header);
+    market.validate_shape().unwrap();
+    survivor.validate_with_market(&market.as_view()).unwrap();
+    liquidated.validate_with_market(&market.as_view()).unwrap();
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut liquidated,
+            &mut survivor,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(MATCHED_Q),
+                exec_price: 1,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    assert!(!survivor.header.legs[0].try_to_runtime().unwrap().active);
+    assert!(!liquidated.header.legs[0].try_to_runtime().unwrap().active);
+    assert_eq!(after.mode_long, SideModeV16::ResetPending);
+    assert_eq!(after.loss_weight_sum_long, 0);
+    market.validate_shape().unwrap();
+    survivor.validate_with_market(&market.as_view()).unwrap();
+    liquidated.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
+    const SURVIVOR_Q: u128 = 13 * POS_SCALE;
+    const MATCHED_Q: u128 = 10 * POS_SCALE;
+
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut survivor_header = account_fixture(1, 22);
+    let mut counterparty_header = account_fixture(1, 23);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        market.deposit_not_atomic(&mut survivor, 100).unwrap();
+        market.deposit_not_atomic(&mut counterparty, 100).unwrap();
+    }
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.a_long = ADL_ONE * MATCHED_Q / SURVIVOR_Q;
+    asset.oi_eff_long_q = MATCHED_Q;
+    asset.oi_eff_short_q = MATCHED_Q;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = SURVIVOR_Q;
+    asset.loss_weight_sum_short = MATCHED_Q;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    survivor_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: signed_q(SURVIVOR_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: SURVIVOR_Q,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    survivor_header.active_bitmap[0] = V16PodU64::new(1);
+    survivor_header.health_cert.valid = 0;
+    counterparty_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -signed_q(MATCHED_Q),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_short,
+        f_snap: asset.f_short_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_short,
+        loss_weight: MATCHED_Q,
+        b_snap: asset.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    counterparty_header.active_bitmap[0] = V16PodU64::new(1);
+    counterparty_header.health_cert.valid = 0;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut survivor = PortfolioV16ViewMut::new(&mut survivor_header);
+    let counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+    market.validate_shape().unwrap();
+    survivor.validate_with_market(&market.as_view()).unwrap();
+    counterparty
+        .validate_with_market(&market.as_view())
+        .unwrap();
+
+    market
+        .permissionless_auto_crank_not_atomic(
+            &mut survivor,
+            AutoCrankWorkV16 {
+                now_slot: 1,
+                observations: &[AutoCrankObservationV16 {
+                    asset_index: 0,
+                    effective_price: 1,
+                    funding_rate_e9: 0,
+                }],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+    market
+        .rebalance_reduce_position_not_atomic(
+            &mut survivor,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: MATCHED_Q,
+            },
+        )
+        .unwrap();
+
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.oi_eff_long_q, 0);
+    assert_eq!(after.oi_eff_short_q, 0);
+    assert!(!survivor.header.legs[0].try_to_runtime().unwrap().active);
+    assert_eq!(after.mode_long, SideModeV16::ResetPending);
+    assert_eq!(after.mode_short, SideModeV16::ResetPending);
+    market.validate_shape().unwrap();
+    survivor.validate_with_market(&market.as_view()).unwrap();
+    counterparty
+        .validate_with_market(&market.as_view())
+        .unwrap();
 }
 
 #[test]
@@ -857,6 +2200,94 @@ fn v16_batch_trade_applies_multiple_fills_after_inline_refresh() {
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_close_detaches_one_solvent_leg_per_call() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut long_header = account_fixture(2, 203);
+    let mut short_header = account_fixture(2, 204);
+    let requests = [
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+        TradeRequestV16 {
+            asset_index: 1,
+            size_q: signed_q(POS_SCALE),
+            exec_price: 100,
+            fee_bps: 0,
+        },
+    ];
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, &requests)
+        .unwrap();
+    let resolved_slot = market.header.current_slot.get();
+    market.resolve_market_not_atomic(resolved_slot).unwrap();
+
+    let first = market
+        .close_resolved_account_not_atomic(&mut long, 0)
+        .expect("the first resolved continuation must clear one leg");
+    assert_eq!(first, ResolvedCloseOutcomeV16::ProgressOnly);
+    assert_eq!(
+        active_bitmap_count_ones(long.header.active_bitmap.map(V16PodU64::get)),
+        1
+    );
+    assert_eq!(long.header.capital.get(), 1_000);
+
+    let second = market
+        .close_resolved_account_not_atomic(&mut long, 0)
+        .expect("the final resolved continuation must clear and pay");
+    assert_eq!(second, ResolvedCloseOutcomeV16::Closed { payout: 1_000 });
+    assert!(active_bitmap_is_empty(
+        long.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(long.header.capital.get(), 0);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_auto_crank_closes_capital_only_account() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 205);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    let resolved_slot = market.header.current_slot.get();
+    market.resolve_market_not_atomic(resolved_slot).unwrap();
+
+    let summary = market
+        .build_actionable_summary(&account.as_view())
+        .expect("capital-only resolved account must classify");
+    assert!(summary.resolved_winner);
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: resolved_slot,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("permissionless close must return capital");
+    assert_eq!(result.selected, AutoCrankPlanV16::CloseResolved);
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { payout: 1_000 })
+    );
+    assert_eq!(account.header.capital.get(), 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 }
 
 #[test]
@@ -1198,6 +2629,196 @@ fn v16_batch_trade_rejects_loss_stale_risk_increase_after_inline_settlement() {
 }
 
 #[test]
+fn v16_fully_accrued_kf_cohort_blocks_fresh_risk_until_every_side_settles() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut winner_header = account_fixture(1, 211);
+    let mut loser_header = account_fixture(1, 212);
+    let mut entrant_header = account_fixture(1, 213);
+    let request = TradeRequestV16 {
+        asset_index: 0,
+        size_q: signed_q(POS_SCALE),
+        exec_price: 101,
+        fee_bps: 0,
+    };
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    let mut loser = PortfolioV16ViewMut::new(&mut loser_header);
+    let mut entrant = PortfolioV16ViewMut::new(&mut entrant_header);
+    for account in [&mut winner, &mut loser, &mut entrant] {
+        market.deposit_not_atomic(account, 10_000).unwrap();
+    }
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut winner,
+            &mut loser,
+            TradeRequestV16 {
+                exec_price: 100,
+                ..request
+            },
+        )
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 101, 0, true)
+        .unwrap();
+    market.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(101);
+    let accrued = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(accrued.slot_last, market.header.current_slot.get());
+    assert_eq!(accrued.stale_account_count_long, 1);
+    assert_eq!(accrued.stale_account_count_short, 1);
+
+    market.full_account_refresh_not_atomic(&mut winner).unwrap();
+    let winner_current = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(winner_current.stale_account_count_long, 0);
+    assert_eq!(winner_current.stale_account_count_short, 1);
+
+    let rejected = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut entrant,
+        &mut winner,
+        request,
+    );
+    assert_eq!(rejected, Err(V16Error::LockActive));
+    assert_eq!(entrant.header.active_bitmap[0].get(), 0);
+    assert_ne!(winner.header.active_bitmap[0].get(), 0);
+
+    market.full_account_refresh_not_atomic(&mut loser).unwrap();
+    let current = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(current.stale_account_count_long, 0);
+    assert_eq!(current.stale_account_count_short, 0);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut entrant, &mut winner, request)
+        .expect("settling the final stale cohort must reopen risk transfer");
+    market.validate_shape().unwrap();
+    winner.validate_with_market(&market.as_view()).unwrap();
+    loser.validate_with_market(&market.as_view()).unwrap();
+    entrant.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_kf_epoch_clears_exact_index_reversal_without_duplicate_discharge() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 214);
+    let mut short_header = account_fixture(1, 215);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 10_000).unwrap();
+    market.deposit_not_atomic(&mut short, 10_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    market
+        .accrue_asset_to_not_atomic(0, 2, 101, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    let first = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(first.kf_epoch_long, 2);
+    assert_eq!(first.kf_epoch_short, 2);
+    assert_eq!(first.stale_account_count_long, 0);
+    assert_eq!(first.stale_account_count_short, 1);
+
+    market
+        .accrue_asset_to_not_atomic(0, 3, 100, 0, true)
+        .unwrap();
+    let reversed = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(reversed.k_long, 0);
+    assert_eq!(reversed.k_short, 0);
+    assert_eq!(reversed.kf_epoch_long, 3);
+    assert_eq!(reversed.kf_epoch_short, 3);
+    assert_eq!(reversed.stale_account_count_long, 1);
+    assert_eq!(reversed.stale_account_count_short, 1);
+
+    // The short's arithmetic snapshots already equal the reversed targets, but
+    // its older epoch still owns one cohort membership and must discharge it.
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    let short_current = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(short_current.stale_account_count_long, 1);
+    assert_eq!(short_current.stale_account_count_short, 0);
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(
+        short.header.legs[0].try_to_runtime().unwrap().kf_epoch_snap,
+        3
+    );
+
+    // Repeating the same account at the same epoch cannot discharge the long.
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    let repeated = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(repeated.stale_account_count_long, 1);
+    assert_eq!(repeated.stale_account_count_short, 0);
+
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    let current = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(current.stale_account_count_long, 0);
+    assert_eq!(current.stale_account_count_short, 0);
+    assert_eq!(long.header.pnl.get(), 0);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_stale_opposite_cohort_does_not_block_bounded_owner_reduction() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 216);
+    let mut short_header = account_fixture(1, 217);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 10_000).unwrap();
+    market.deposit_not_atomic(&mut short, 10_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 101, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    let stale = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(stale.stale_account_count_long, 0);
+    assert_eq!(stale.stale_account_count_short, 1);
+
+    let reduced = market
+        .rebalance_reduce_position_not_atomic(
+            &mut long,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: POS_SCALE,
+            },
+        )
+        .expect("a stale counterparty cannot block the owner's bounded exit");
+    assert_eq!(reduced.reduced_q, POS_SCALE);
+    assert_eq!(long.header.active_bitmap[0].get(), 0);
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.stored_pos_count_long, 0);
+    assert_eq!(after.stale_account_count_long, 0);
+    assert_eq!(after.stale_account_count_short, 1);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_public_scoped_trade_preserves_unrelated_loss_stale_summary() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut long_header = account_fixture(2, 209);
@@ -1318,6 +2939,51 @@ fn v16_public_raw_oracle_target_update_is_value_neutral_and_lifecycle_gated() {
 }
 
 #[test]
+fn v16_public_raw_oracle_target_batch_updates_distinct_assets_with_one_epoch() {
+    let (mut header, mut markets) = market_fixture(3, 100);
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let oracle_epoch_before = header.oracle_epoch.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .set_asset_raw_oracle_targets_not_atomic(&[(0, 111), (1, 90), (2, 125)])
+        .unwrap();
+
+    assert_eq!(
+        market.markets[0].engine.asset.raw_oracle_target_price.get(),
+        111
+    );
+    assert_eq!(
+        market.markets[1].engine.asset.raw_oracle_target_price.get(),
+        90
+    );
+    assert_eq!(
+        market.markets[2].engine.asset.raw_oracle_target_price.get(),
+        125
+    );
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+
+    market
+        .set_asset_raw_oracle_targets_not_atomic(&[(2, 125), (0, 111), (1, 90)])
+        .unwrap();
+    assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
+    assert_eq!(
+        market.set_asset_raw_oracle_targets_not_atomic(&[(0, 112), (0, 113)]),
+        Err(V16Error::InvalidConfig)
+    );
+    assert_eq!(
+        market.markets[0].engine.asset.raw_oracle_target_price.get(),
+        111
+    );
+    market.validate_shape().unwrap();
+}
+
+#[test]
 fn v16_public_empty_asset_oracle_anchor_reset_rejects_any_group_position_state() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut other_asset = markets[1].engine.asset.try_to_runtime().unwrap();
@@ -1433,7 +3099,7 @@ fn v16_restart_empty_asset_preserves_domain_budget_for_nonzero_asset() {
 }
 
 #[test]
-fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
+fn v16_restart_normalizes_only_inert_terminal_history() {
     let (mut header, mut markets) = market_fixture(2, 100);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -1443,6 +3109,18 @@ fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
     header.insurance = V16PodU128::new(0);
     header.insurance_domain_budget_remaining_total = V16PodU128::new(0);
     markets[1].engine.insurance_domain_spent_long = V16PodU128::new(10);
+    let mut historical_asset = markets[1].engine.asset.try_to_runtime().unwrap();
+    historical_asset.k_long = -601 * ADL_ONE as i128;
+    historical_asset.f_short_num = 17;
+    historical_asset.k_epoch_start_long = -3;
+    historical_asset.f_epoch_start_short_num = 5;
+    historical_asset.social_loss_dust_long_num = 7;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&historical_asset);
+    markets[1].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: 11,
+            ..SourceCreditStateV16::EMPTY
+        });
     let old_market_id = markets[1].engine.asset.market_id.get();
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
@@ -1451,14 +3129,13 @@ fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     assert_eq!(market.validate_shape(), Ok(()));
-    assert_eq!(
-        market.restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3),
-        Err(V16Error::LockActive)
-    );
-
     market
-        .clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(1)
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3)
         .unwrap();
+    let asset = market.markets[1].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+    assert_ne!(asset.market_id, old_market_id);
+    assert_eq!(asset.effective_price, 222);
     assert_eq!(market.header.vault.get(), vault_before);
     assert_eq!(market.header.c_tot.get(), c_tot_before);
     assert_eq!(market.header.insurance.get(), insurance_before);
@@ -1474,19 +3151,19 @@ fn v16_terminal_spent_domain_budget_cleanup_unblocks_empty_asset_restart() {
         market.markets[1].engine.insurance_domain_spent_long.get(),
         0
     );
-
-    market
-        .restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3)
-        .unwrap();
-    let asset = market.markets[1].engine.asset.try_to_runtime().unwrap();
-    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
-    assert_ne!(asset.market_id, old_market_id);
-    assert_eq!(asset.effective_price, 222);
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .source_credit_short
+            .try_to_runtime()
+            .unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
     market.validate_shape().unwrap();
 }
 
 #[test]
-fn v16_terminal_spent_domain_budget_cleanup_rejects_remaining_budget() {
+fn v16_restart_rejects_remaining_insurance_budget_without_mutation() {
     let (mut header, mut markets) = market_fixture(2, 100);
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -1505,7 +3182,7 @@ fn v16_terminal_spent_domain_budget_cleanup_rejects_remaining_budget() {
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(
-        market.clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(1),
+        market.restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3),
         Err(V16Error::LockActive)
     );
     assert_eq!(market.header.vault, vault_before);
@@ -1525,12 +3202,12 @@ fn v16_terminal_spent_domain_budget_cleanup_rejects_remaining_budget() {
 }
 
 #[test]
-fn v16_terminal_spent_domain_budget_cleanup_rejects_active_asset() {
+fn v16_restart_rejects_active_asset() {
     let (mut header, mut markets) = market_fixture(2, 100);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     assert_eq!(market.validate_shape(), Ok(()));
     assert_eq!(
-        market.clear_terminal_spent_domain_budgets_for_empty_asset_not_atomic(1),
+        market.restart_empty_asset_preserving_insurance_budget_not_atomic(1, 222, 3),
         Err(V16Error::LockActive)
     );
 }
@@ -1579,6 +3256,200 @@ fn v16_canonicalize_retired_empty_asset_slot_clears_inert_domain_state() {
 }
 
 #[test]
+fn v16_retire_normalizes_unreferenced_lapsed_backing() {
+    const BACKING: u128 = 7;
+    const EXPIRY_SLOT: u64 = 5;
+    const DOMAIN: usize = 2;
+
+    let (mut header, mut markets) = market_fixture(2, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(DOMAIN, BACKING, EXPIRY_SLOT)
+            .unwrap();
+    }
+    let vault_before = header.vault.get();
+    let bucket_before = markets[1].engine.backing_long.try_to_runtime().unwrap();
+    assert_eq!(bucket_before.status, BackingBucketStatusV16::Fresh);
+    assert_eq!(
+        bucket_before.fresh_unliened_backing_num,
+        BACKING * BOUND_SCALE
+    );
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert_eq!(
+            market.retire_empty_asset_not_atomic(1, EXPIRY_SLOT - 1),
+            Err(V16Error::LockActive),
+            "fresh principal remains a retirement blocker"
+        );
+    }
+    assert_eq!(header.vault.get(), vault_before);
+    assert_eq!(
+        markets[1].engine.asset.try_to_runtime().unwrap().lifecycle,
+        AssetLifecycleV16::Active
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .retire_empty_asset_not_atomic(1, EXPIRY_SLOT)
+        .unwrap();
+    let bucket = market.markets[1]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[1]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.status, BackingBucketStatusV16::Empty);
+    assert_eq!(bucket.expiry_slot, 0);
+    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+    assert_eq!(source.fresh_reserved_backing_num, 0);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .lifecycle,
+        AssetLifecycleV16::Retired
+    );
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_retire_normalizes_only_inert_social_loss_audit_state() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.social_loss_remainder_long_num = SOCIAL_LOSS_DEN - 1;
+    asset.social_loss_remainder_short_num = 1;
+    asset.social_loss_dust_long_num = 1;
+    asset.social_loss_dust_short_num = SOCIAL_LOSS_DEN - 1;
+    asset.explicit_unallocated_loss_long = 7;
+    asset.explicit_unallocated_loss_short = u128::MAX;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: 17 * BOUND_SCALE,
+            credit_epoch: 9,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.retire_empty_asset_not_atomic(0, 1).unwrap();
+    let retired = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(retired.lifecycle, AssetLifecycleV16::Retired);
+    assert_eq!(retired.social_loss_remainder_long_num, 0);
+    assert_eq!(retired.social_loss_remainder_short_num, 0);
+    assert_eq!(retired.social_loss_dust_long_num, 0);
+    assert_eq!(retired.social_loss_dust_short_num, 0);
+    assert_eq!(retired.explicit_unallocated_loss_long, 0);
+    assert_eq!(retired.explicit_unallocated_loss_short, 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_long
+            .try_to_runtime()
+            .unwrap(),
+        SourceCreditStateV16::EMPTY
+    );
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    market.validate_shape().unwrap();
+
+    let (mut live_header, mut live_markets) = market_fixture(1, 100);
+    let mut live_asset = live_markets[0].engine.asset.try_to_runtime().unwrap();
+    live_asset.social_loss_dust_long_num = 1;
+    live_asset.explicit_unallocated_loss_long = 1;
+    live_asset.oi_eff_long_q = POS_SCALE;
+    live_asset.oi_eff_short_q = POS_SCALE;
+    live_asset.stored_pos_count_long = 1;
+    live_asset.stored_pos_count_short = 1;
+    live_asset.loss_weight_sum_long = POS_SCALE;
+    live_asset.loss_weight_sum_short = POS_SCALE;
+    live_markets[0].engine.asset = AssetStateV16Account::from_runtime(&live_asset);
+    let slot_before = live_markets[0].engine;
+
+    let mut live = MarketGroupV16ViewMut::new(&mut live_header, &mut live_markets);
+    assert_eq!(
+        live.retire_empty_asset_not_atomic(0, 1),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(live.markets[0].engine, slot_before);
+}
+
+#[test]
+fn v16_retire_rejects_live_provider_receivable_without_mutation() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let receivable_num = 19 * BOUND_SCALE;
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: receivable_num,
+            provider_receivable_num: receivable_num,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        consumed_liened_backing_num: receivable_num,
+        expiry_slot: 1,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    let header_before = header;
+    let slot_before = markets[0].engine;
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.retire_empty_asset_not_atomic(0, 2),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(*market.header, header_before);
+    assert_eq!(market.markets[0].engine, slot_before);
+}
+
+#[test]
+fn v16_resolved_clock_advance_is_monotonic_and_value_neutral() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let vault_before = header.vault;
+    let c_tot_before = header.c_tot;
+    let insurance_before = header.insurance;
+    let markets_before = markets.clone();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(5).unwrap();
+    market.advance_resolved_slot_not_atomic(9).unwrap();
+    assert_eq!(market.header.current_slot.get(), 9);
+    assert_eq!(market.header.resolved_slot.get(), 5);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    assert_eq!(market.markets, &markets_before);
+
+    assert_eq!(
+        market.advance_resolved_slot_not_atomic(8),
+        Err(V16Error::Stale)
+    );
+    assert_eq!(market.header.current_slot.get(), 9);
+
+    let (mut live_header, mut live_markets) = market_fixture(1, 100);
+    let live_slot = live_header.current_slot;
+    let mut live = MarketGroupV16ViewMut::new(&mut live_header, &mut live_markets);
+    assert_eq!(
+        live.advance_resolved_slot_not_atomic(9),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(live.header.current_slot, live_slot);
+}
+
+#[test]
 fn v16_reused_market_slot_rejects_old_market_id_leg() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 16);
@@ -1601,6 +3472,7 @@ fn v16_reused_market_slot_rejects_old_market_id_leg() {
         a_basis: ADL_ONE,
         k_snap: 0,
         f_snap: 0,
+        kf_epoch_snap: 0,
         epoch_snap: 0,
         loss_weight: POS_SCALE,
         b_snap: 0,
@@ -1756,6 +3628,40 @@ fn v16_domain_insurance_deposit_and_withdraw_use_engine_budget_accounting() {
 }
 
 #[test]
+fn v16_domain_insurance_bulk_credit_accumulates_duplicates_with_one_exact_delta() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    header.vault = V16PodU128::new(21);
+    header.insurance = V16PodU128::new(21);
+    let vault_before = header.vault.get();
+    let insurance_before = header.insurance.get();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .credit_domain_insurance_budgets_not_atomic(&[(0, 3), (2, 5), (0, 7), (3, 6)])
+        .unwrap();
+
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        21
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_budget_long.get(),
+        10
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        5
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_short.get(),
+        6
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
 fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
     let (mut header, mut markets) = market_fixture(1, 100);
     header.vault = V16PodU128::new(10);
@@ -1783,6 +3689,256 @@ fn v16_credit_account_from_insurance_uses_unbudgeted_surplus_only() {
         Err(V16Error::LockActive),
         "budgeted domain insurance must not be paid as a cranker reward"
     );
+}
+
+#[test]
+fn v16_terminal_unbudgeted_insurance_retirement_is_claim_free_and_exact() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(10);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Err(V16Error::LockActive),
+        "live insurance cannot be retired"
+    );
+    market.resolve_market_not_atomic(1).unwrap();
+    market
+        .credit_domain_insurance_budget_not_atomic(0, 1)
+        .unwrap();
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Err(V16Error::LockActive),
+        "a remaining domain claim protects the whole terminal pool"
+    );
+    market.withdraw_domain_insurance_not_atomic(0, 1).unwrap();
+
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Ok(9)
+    );
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_retirement_includes_claim_free_protocol_surplus() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.vault = V16PodU128::new(10);
+    header.insurance = V16PodU128::new(3);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(1).unwrap();
+
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Ok(10)
+    );
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_slab_progress_expires_one_domain_before_retiring_residual() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(0, 10, 5)
+        .unwrap();
+    market.resolve_market_not_atomic(1).unwrap();
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(5, 0),
+        Ok(TerminalSlabOutcomeV16::BackingExpired { domain: 0 })
+    );
+    assert_eq!(market.header.current_slot.get(), 5);
+    assert_eq!(market.header.vault.get(), 10);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired
+    );
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(5, 0),
+        Ok(TerminalSlabOutcomeV16::ReadyToClose { retired: 10 })
+    );
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_slab_progress_restores_insurance_before_retiring_surplus() {
+    const RESIDUAL: u128 = 750;
+    const SPENT: u128 = 123;
+    const RECEIVABLE: u128 = 776;
+    const ASSET: usize = 2;
+
+    let (mut header, mut markets) = market_fixture(3, 100);
+    let market_id = markets[ASSET].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(RESIDUAL);
+    markets[ASSET].engine.insurance_domain_budget_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.insurance_domain_spent_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: RECEIVABLE * BOUND_SCALE,
+            provider_receivable_num: RECEIVABLE * BOUND_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[ASSET].engine.backing_short =
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            consumed_liened_backing_num: RECEIVABLE * BOUND_SCALE,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(3).unwrap();
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(3, 0),
+        Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+            asset_index: ASSET,
+            amount: SPENT,
+        })
+    );
+    assert_eq!(market.header.vault.get(), RESIDUAL);
+    assert_eq!(market.header.insurance.get(), SPENT);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        SPENT
+    );
+    assert_eq!(
+        market.markets[ASSET]
+            .engine
+            .insurance_domain_spent_long
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(3, 0),
+        Err(V16Error::LockActive),
+        "restored domain insurance must be withdrawn before final retirement"
+    );
+
+    market
+        .withdraw_domain_insurance_not_atomic(ASSET * 2, SPENT)
+        .unwrap();
+    assert_eq!(market.header.vault.get(), RESIDUAL - SPENT);
+    assert_eq!(market.header.insurance.get(), 0);
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(3, 0),
+        Ok(TerminalSlabOutcomeV16::ReadyToClose {
+            retired: RESIDUAL - SPENT,
+        })
+    );
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_slab_chunk_cursor_finds_last_asset_recredit_before_retirement() {
+    const ASSETS: u32 = percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL as u32 + 1;
+    const ASSET: usize = ASSETS as usize - 1;
+    const RESIDUAL: u128 = 10;
+    const SPENT: u128 = 3;
+    const RECEIVABLE: u128 = 7;
+    const SLOT: u64 = ASSETS as u64 + 1;
+
+    let (mut header, mut markets) = market_fixture(ASSETS, 100);
+    let market_id = markets[ASSET].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(RESIDUAL);
+    markets[ASSET].engine.insurance_domain_budget_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.insurance_domain_spent_long = V16PodU128::new(SPENT);
+    markets[ASSET].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: RECEIVABLE * BOUND_SCALE,
+            provider_receivable_num: RECEIVABLE * BOUND_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[ASSET].engine.backing_short =
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            consumed_liened_backing_num: RECEIVABLE * BOUND_SCALE,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        });
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(SLOT).unwrap();
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(SLOT, 0),
+        Ok(TerminalSlabOutcomeV16::ScanProgress {
+            next_asset_index: percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
+        })
+    );
+    assert_eq!(
+        (market.header.vault.get(), market.header.insurance.get()),
+        (RESIDUAL, 0),
+        "a scan-only step cannot reclassify terminal value"
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(
+            SLOT + 1,
+            percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
+        ),
+        Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+            asset_index: ASSET,
+            amount: SPENT,
+        }),
+        "the persisted continuation cannot skip a candidate in the last chunk"
+    );
+    assert_eq!(
+        (market.header.vault.get(), market.header.insurance.get()),
+        (RESIDUAL, SPENT)
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_slab_cursor_stops_at_unexpired_backing_across_slots() {
+    const ASSETS: u32 = percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL as u32 + 1;
+    const BLOCKING_ASSET: usize = 100;
+    const SLOT: u64 = ASSETS as u64 + 1;
+    const EXPIRY: u64 = SLOT + 2;
+
+    let (mut header, mut markets) = market_fixture(ASSETS, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(BLOCKING_ASSET * 2, 7, EXPIRY)
+        .unwrap();
+    market.resolve_market_not_atomic(SLOT).unwrap();
+
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(SLOT, 0),
+        Ok(TerminalSlabOutcomeV16::ScanProgress {
+            next_asset_index: BLOCKING_ASSET,
+        }),
+        "the scan may advance up to, but never past, a still-live bucket"
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(SLOT + 1, BLOCKING_ASSET),
+        Err(V16Error::LockActive),
+        "a parked cursor cannot report a successful no-op before expiry"
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(EXPIRY, BLOCKING_ASSET),
+        Ok(TerminalSlabOutcomeV16::BackingExpired {
+            domain: BLOCKING_ASSET * 2,
+        }),
+        "authenticated time makes the parked bucket actionable without restarting the prefix"
+    );
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
 }
 
 #[test]
@@ -2108,6 +4264,7 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset.b_long_num,
@@ -2176,6 +4333,7 @@ fn v16_liquidation_engine_selects_full_close_and_allows_dust_min_fee() {
             a_basis: ADL_ONE,
             k_snap: asset.k_long,
             f_snap: asset.f_long_num,
+            kf_epoch_snap: 0,
             epoch_snap: asset.epoch_long,
             loss_weight: POSITION_Q,
             b_snap: asset.b_long_num,
@@ -2214,8 +4372,8 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
     const PRICE: u64 = POS_SCALE as u64;
     const POSITION_Q: u128 = 10_000;
     const ACCOUNT_CAPITAL: u128 = 980;
-    const EXPECTED_CLOSE_Q: u128 = 981;
-    const EXPECTED_FEE: u128 = 79;
+    const EXPECTED_CLOSE_Q: u128 = 1_000;
+    const EXPECTED_FEE: u128 = 80;
 
     let (mut header, mut markets) = market_fixture(1, PRICE);
     header.config.maintenance_margin_bps = V16PodU64::new(1_000);
@@ -2258,6 +4416,7 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POSITION_Q,
         b_snap: asset.b_long_num,
@@ -2285,8 +4444,8 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
     );
     let cert = account.header.health_cert.try_to_runtime().unwrap();
     assert_eq!(cert.certified_liq_deficit, 0);
-    assert_eq!(cert.certified_equity, 901);
-    assert_eq!(cert.certified_maintenance_req, 901);
+    assert_eq!(cert.certified_equity, 900);
+    assert_eq!(cert.certified_maintenance_req, 900);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
 }
@@ -2333,6 +4492,7 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset0.b_long_num,
@@ -2449,6 +4609,52 @@ fn v16_permissionless_recovery_crank_is_value_neutral_and_idempotent() {
     assert_eq!(account.header.pnl, pnl_before);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[cfg(feature = "fuzz")]
+#[test]
+fn v16_b_index_headroom_exhaustion_declares_value_neutral_recovery() {
+    // This is the deployed-arithmetic boundary half of the liveness argument.
+    // The generic residual-step contract proves the resulting capacity split;
+    // this test executes the production U256 calculation at absolute B-index
+    // saturation and checks that it enters recovery without moving value.
+    for residual in [1, u64::MAX as u128] {
+        let (mut header, mut markets) = market_fixture(1, 100);
+        header.config.public_b_chunk_atoms = V16PodU128::new(1);
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.oi_eff_long_q = POS_SCALE;
+        asset.oi_eff_short_q = POS_SCALE;
+        asset.stored_pos_count_long = 1;
+        asset.stored_pos_count_short = 1;
+        asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+        asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+        asset.b_short_num = u128::MAX;
+        asset.social_loss_remainder_short_num = 0;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        let asset_before = markets[0].engine.asset;
+        let vault_before = header.vault;
+        let c_tot_before = header.c_tot;
+        let insurance_before = header.insurance;
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let capacity = market
+            .kani_bankruptcy_residual_single_step_capacity(0, SideV16::Long, residual)
+            .unwrap();
+        let result =
+            market.kani_book_bankruptcy_residual_chunk_internal(0, SideV16::Long, residual);
+
+        assert_eq!(capacity, 0);
+        assert_eq!(result, Err(V16Error::RecoveryRequired));
+        assert_eq!(market.header.mode, MarketModeV16::Recovery as u8);
+        assert_eq!(
+            market.header.recovery_reason.try_to_runtime().unwrap(),
+            Some(PermissionlessRecoveryReasonV16::BIndexHeadroomExhausted)
+        );
+        assert_eq!(market.header.vault, vault_before);
+        assert_eq!(market.header.c_tot, c_tot_before);
+        assert_eq!(market.header.insurance, insurance_before);
+        assert_eq!(market.markets[0].engine.asset, asset_before);
+    }
 }
 
 #[test]
@@ -2626,6 +4832,755 @@ fn v16_risk_increasing_trade_creates_source_credit_lien_for_im() {
 }
 
 #[test]
+fn v16_resolved_impaired_source_accepts_prospective_terminal_loss() {
+    const Q: u128 = 1_000 * POS_SCALE;
+    const INCREASE_Q: u128 = POS_SCALE;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.initial_margin_bps = 5_000;
+    cfg.max_price_move_bps_per_slot = 500;
+    cfg.max_accrual_dt_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+
+    let mut liened_winner_header = account_fixture(1, 40);
+    let mut liened_peer_header = account_fixture(1, 41);
+    let mut expiry_trigger_header = account_fixture(1, 42);
+    let mut prospective_loser_header = account_fixture(1, 43);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut liened_winner = PortfolioV16ViewMut::new(&mut liened_winner_header);
+    let mut liened_peer = PortfolioV16ViewMut::new(&mut liened_peer_header);
+    let mut expiry_trigger = PortfolioV16ViewMut::new(&mut expiry_trigger_header);
+    let mut prospective_loser = PortfolioV16ViewMut::new(&mut prospective_loser_header);
+
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 3)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut liened_winner, 52_501)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut liened_peer, 1_000_000)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut expiry_trigger, 1_000_000)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut prospective_loser, 1_000_000)
+        .unwrap();
+    for (long, short) in [
+        (&mut liened_winner, &mut liened_peer),
+        (&mut expiry_trigger, &mut prospective_loser),
+    ] {
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                long,
+                short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    for account in [
+        &mut liened_peer,
+        &mut liened_winner,
+        &mut expiry_trigger,
+        &mut prospective_loser,
+    ] {
+        market.full_account_refresh_not_atomic(account).unwrap();
+    }
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut liened_winner,
+            &mut liened_peer,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(INCREASE_Q),
+                exec_price: 105,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 110)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 3, 110, 0, true)
+        .unwrap();
+
+    market.resolve_market_not_atomic(4).unwrap();
+    assert_eq!(
+        market
+            .close_resolved_account_not_atomic(&mut expiry_trigger, 0)
+            .unwrap(),
+        percolator::ResolvedCloseOutcomeV16::ProgressOnly,
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Impaired,
+    );
+
+    market
+        .close_resolved_account_not_atomic(&mut prospective_loser, 0)
+        .expect("an impaired source bucket must accept a prospective terminal loss");
+    assert_eq!(prospective_loser.header.pnl.get(), 0);
+    market.validate_shape().unwrap();
+    prospective_loser
+        .validate_with_market(&market.as_view())
+        .unwrap();
+}
+
+#[test]
+fn v16_resolved_close_normalizes_prospective_lapsed_source_before_settlement() {
+    const Q: u128 = 1_000 * POS_SCALE;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.max_price_move_bps_per_slot = 500;
+    cfg.max_accrual_dt_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+
+    let mut long_header = account_fixture(1, 50);
+    let mut short_header = account_fixture(1, 51);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 3)
+        .unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    market.resolve_market_not_atomic(4).unwrap();
+
+    assert_eq!(long.header.pnl.get(), 0);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Fresh,
+    );
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut long, 0),
+        Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly),
+    );
+    assert_eq!(long.header.pnl.get(), 0);
+    assert!(long.header.legs[0].try_to_runtime().unwrap().active);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired,
+    );
+
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut long, 0),
+        Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly),
+    );
+    assert!(long.header.pnl.get() > 0);
+    assert!(!long.header.legs[0].try_to_runtime().unwrap().active);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_foreign_expiry_impairs_account_lien_before_release() {
+    const Q: u128 = 1_000 * POS_SCALE;
+    const INCREASE_Q: u128 = POS_SCALE;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.initial_margin_bps = 5_000;
+    cfg.max_price_move_bps_per_slot = 500;
+    cfg.max_accrual_dt_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+
+    let mut target_header = account_fixture(1, 44);
+    let mut target_peer_header = account_fixture(1, 45);
+    let mut expiry_trigger_header = account_fixture(1, 46);
+    let mut trigger_peer_header = account_fixture(1, 47);
+    let mut sibling_target_header = account_fixture(1, 48);
+    let mut sibling_peer_header = account_fixture(1, 49);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut target = PortfolioV16ViewMut::new(&mut target_header);
+    let mut target_peer = PortfolioV16ViewMut::new(&mut target_peer_header);
+    let mut expiry_trigger = PortfolioV16ViewMut::new(&mut expiry_trigger_header);
+    let mut trigger_peer = PortfolioV16ViewMut::new(&mut trigger_peer_header);
+    let mut sibling_target = PortfolioV16ViewMut::new(&mut sibling_target_header);
+    let mut sibling_peer = PortfolioV16ViewMut::new(&mut sibling_peer_header);
+
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 3)
+        .unwrap();
+    market.deposit_not_atomic(&mut target, 52_501).unwrap();
+    market
+        .deposit_not_atomic(&mut target_peer, 1_000_000)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut expiry_trigger, 1_000_000)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut trigger_peer, 1_000_000)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut sibling_target, 52_501)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut sibling_peer, 1_000_000)
+        .unwrap();
+    for (long, short) in [
+        (&mut target, &mut target_peer),
+        (&mut expiry_trigger, &mut trigger_peer),
+        (&mut sibling_target, &mut sibling_peer),
+    ] {
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                long,
+                short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    for account in [
+        &mut target_peer,
+        &mut trigger_peer,
+        &mut sibling_peer,
+        &mut target,
+        &mut expiry_trigger,
+        &mut sibling_target,
+    ] {
+        market.full_account_refresh_not_atomic(account).unwrap();
+    }
+    for (long, short) in [
+        (&mut target, &mut target_peer),
+        (&mut sibling_target, &mut sibling_peer),
+    ] {
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                long,
+                short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(INCREASE_Q),
+                    exec_price: 105,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    let lien_before = target.header.source_domains[0];
+    let sibling_lien_before = sibling_target.header.source_domains[0];
+    assert!(lien_before.source_claim_counterparty_liened_num.get() > 0);
+    assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+    assert!(
+        sibling_lien_before
+            .source_lien_counterparty_backing_num
+            .get()
+            > 0
+    );
+    assert_eq!(lien_before.source_claim_impaired_num.get(), 0);
+    assert!(
+        expiry_trigger.header.source_domains[0]
+            .source_claim_bound_num
+            .get()
+            > 0
+    );
+    assert_eq!(
+        expiry_trigger.header.source_domains[0]
+            .source_claim_liened_num
+            .get(),
+        0
+    );
+
+    market.resolve_market_not_atomic(3).unwrap();
+    assert_eq!(
+        market
+            .close_resolved_account_not_atomic(&mut expiry_trigger, 0)
+            .unwrap(),
+        percolator::ResolvedCloseOutcomeV16::ProgressOnly,
+    );
+    let bucket_before = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket_before.status, BackingBucketStatusV16::Impaired);
+
+    let mut relabeled = false;
+    for _ in 0..4 {
+        assert_eq!(
+            market
+                .close_resolved_account_not_atomic(&mut target, 0)
+                .expect("foreign bucket expiry must leave bounded lien-impairment continuations",),
+            percolator::ResolvedCloseOutcomeV16::ProgressOnly,
+        );
+        if target.header.source_domains[0]
+            .source_claim_counterparty_liened_num
+            .get()
+            == 0
+        {
+            relabeled = true;
+            break;
+        }
+    }
+    assert!(relabeled, "the account-local lien never became impaired");
+    let impaired = target.header.source_domains[0];
+    assert_eq!(impaired.source_claim_liened_num.get(), 0);
+    assert_eq!(impaired.source_claim_counterparty_liened_num.get(), 0);
+    assert_eq!(impaired.source_lien_counterparty_backing_num.get(), 0);
+    assert_eq!(
+        impaired.source_claim_impaired_num.get(),
+        lien_before.source_claim_counterparty_liened_num.get()
+    );
+    assert_eq!(
+        impaired.source_lien_impaired_effective_reserved.get(),
+        0,
+        "expired provider principal must not be reclassified as impaired insurance"
+    );
+    let bucket_after_target_relabel = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(
+        bucket_after_target_relabel.impaired_liened_backing_num,
+        bucket_before.impaired_liened_backing_num
+            - lien_before.source_lien_counterparty_backing_num.get(),
+        "the target must retire exactly its own expired provider-lien label"
+    );
+    assert!(
+        bucket_after_target_relabel.impaired_liened_backing_num
+            >= sibling_lien_before
+                .source_lien_counterparty_backing_num
+                .get(),
+        "the first relabel must preserve its sibling's provider-lien label"
+    );
+
+    let mut all_closed = false;
+    let mut last_outcomes = Vec::new();
+    for _ in 0..16 {
+        last_outcomes.clear();
+        for account in [
+            &mut target_peer,
+            &mut trigger_peer,
+            &mut sibling_peer,
+            &mut expiry_trigger,
+            &mut target,
+            &mut sibling_target,
+        ] {
+            last_outcomes.push(
+                market
+                    .close_resolved_account_not_atomic(account, 0)
+                    .expect("foreign-expired source claims must retain a terminal continuation"),
+            );
+        }
+        all_closed = [
+            &target_peer,
+            &trigger_peer,
+            &sibling_peer,
+            &expiry_trigger,
+            &target,
+            &sibling_target,
+        ]
+        .iter()
+        .all(|account| {
+            account.header.capital.get() == 0
+                && account.header.pnl.get() == 0
+                && active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
+        });
+        if all_closed {
+            break;
+        }
+    }
+    assert!(
+        all_closed,
+        "foreign-expired source claims did not terminate: last={last_outcomes:?}"
+    );
+    let bucket_after = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    let source_after = market.markets[0]
+        .engine
+        .source_credit_short
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket_after.status, BackingBucketStatusV16::Expired);
+    assert_eq!(bucket_after.impaired_liened_backing_num, 0);
+    assert_eq!(source_after.impaired_liened_backing_num, 0);
+    market.validate_shape().unwrap();
+    target.validate_with_market(&market.as_view()).unwrap();
+}
+
+fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed: bool) {
+    const OPEN_Q: u128 = 1_000 * POS_SCALE;
+    const INCREASE_Q: u128 = 50 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(1, 10);
+    let mut short_header = account_fixture(1, 11);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    if insurance_backed {
+        #[cfg(feature = "fuzz")]
+        {
+            market
+                .deposit_domain_insurance_not_atomic(1, 100_000)
+                .unwrap();
+            market
+                .reserve_insurance_credit_not_atomic(1, 100_000 * BOUND_SCALE)
+                .unwrap();
+        }
+        #[cfg(not(feature = "fuzz"))]
+        unreachable!("the insurance-backed variant requires the fuzz test API");
+    } else {
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 100)
+            .unwrap();
+    }
+    market.deposit_not_atomic(&mut long, 52_501).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(OPEN_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    if insurance_backed {
+        let fresh_backing_atoms = market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .fresh_unliened_backing_num
+            / BOUND_SCALE;
+        assert!(fresh_backing_atoms > 0);
+        market
+            .withdraw_fresh_counterparty_backing_not_atomic(1, fresh_backing_atoms)
+            .expect("reserved insurance must fully replace withdrawn counterparty backing");
+    }
+    assert_eq!(long.header.pnl.get(), 5_000);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(INCREASE_Q),
+                exec_price: 105,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    let lien_before = long.header.source_domains[0];
+    assert_eq!(long.header.pnl.get(), 5_000);
+    assert!(lien_before.source_claim_liened_num.get() > 0);
+    if insurance_backed {
+        assert!(
+            lien_before.source_lien_insurance_backing_num.get() > 0,
+            "expected insurance-backed lien: {lien_before:?}"
+        );
+        assert_eq!(lien_before.source_lien_counterparty_backing_num.get(), 0);
+    } else {
+        assert!(lien_before.source_lien_counterparty_backing_num.get() > 0);
+        assert_eq!(lien_before.source_lien_insurance_backing_num.get(), 0);
+    }
+    let capital_before_reversal = long.header.capital.get();
+    let lien_effective = lien_before.source_lien_effective_reserved.get();
+    let backing_before_reversal = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    let reservation_before_reversal = market.markets[0]
+        .engine
+        .insurance_reservation_short
+        .try_to_runtime()
+        .unwrap();
+    let insurance_before_reversal = market.header.insurance.get();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 100)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 3, 100, 0, true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    let cert = market
+        .full_account_refresh_not_atomic(&mut long)
+        .expect("a mark reversal must settle even when the prior positive claim backed IM");
+
+    let backing_after_reversal = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    let unliened_support_consumed = 5_000 - lien_effective;
+    let principal_loss = 5_250 - 5_000;
+    assert_eq!(long.header.pnl.get(), 0);
+    assert_eq!(
+        long.header.capital.get(),
+        capital_before_reversal - principal_loss,
+        "the prior positive face absorbs the reversal one-for-one before principal"
+    );
+    assert_eq!(long.header.source_domains[0], Default::default());
+    if insurance_backed {
+        let reservation_after_reversal = market.markets[0]
+            .engine
+            .insurance_reservation_short
+            .try_to_runtime()
+            .unwrap();
+        let source_after_reversal = market.markets[0]
+            .engine
+            .source_credit_short
+            .try_to_runtime()
+            .unwrap();
+        assert_eq!(reservation_after_reversal.valid_liened_insurance_num, 0);
+        assert_eq!(source_after_reversal.valid_liened_insurance_num, 0);
+        assert_eq!(
+            reservation_after_reversal.consumed_insurance_num,
+            reservation_before_reversal.consumed_insurance_num
+                + unliened_support_consumed * BOUND_SCALE,
+            "only realizable unliened support consumes insurance"
+        );
+        assert_eq!(
+            market.header.insurance.get() + unliened_support_consumed,
+            insurance_before_reversal,
+            "the fused burn spends each insurance-backed support atom exactly once"
+        );
+        assert_eq!(backing_after_reversal, backing_before_reversal);
+    } else {
+        assert_eq!(
+            backing_after_reversal.fresh_unliened_backing_num,
+            backing_before_reversal
+                .fresh_unliened_backing_num
+                .checked_sub(unliened_support_consumed * BOUND_SCALE)
+                .unwrap()
+                .checked_add(lien_before.source_lien_counterparty_backing_num.get())
+                .unwrap(),
+            "the still-liened backing is unpledged rather than consumed"
+        );
+        assert_eq!(backing_after_reversal.valid_liened_backing_num, 0);
+        assert_eq!(
+            backing_after_reversal.consumed_liened_backing_num,
+            backing_before_reversal.consumed_liened_backing_num
+                + unliened_support_consumed * BOUND_SCALE,
+            "only realizable unliened support offsets the reversal loss"
+        );
+        assert_eq!(market.header.insurance.get(), insurance_before_reversal);
+    }
+    assert!(cert.valid);
+    assert!(
+        cert.certified_equity >= 0 && (cert.certified_equity as u128) < cert.certified_initial_req,
+        "the regression requires a funded account below initial margin"
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .expect("risk-reducing trade remains available after source-lien unwind");
+}
+
+#[test]
+fn v16_live_mark_reversal_unwinds_counterparty_lien_before_claim_burn() {
+    run_live_mark_reversal_unwinds_source_lien_before_claim_burn(false);
+}
+
+#[cfg(feature = "fuzz")]
+#[test]
+fn v16_live_mark_reversal_unwinds_insurance_lien_before_claim_burn() {
+    run_live_mark_reversal_unwinds_source_lien_before_claim_burn(true);
+}
+
+#[test]
+fn v16_under_margin_owner_can_transfer_risk_to_margin_healthy_counterparty() {
+    const OPEN_Q: u128 = 100 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(1_000);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    let mut owner_header = account_fixture(1, 12);
+    let mut original_short_header = account_fixture(1, 13);
+    let mut new_holder_header = account_fixture(1, 14);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut owner = PortfolioV16ViewMut::new(&mut owner_header);
+    let mut original_short = PortfolioV16ViewMut::new(&mut original_short_header);
+    let mut new_holder = PortfolioV16ViewMut::new(&mut new_holder_header);
+    market.deposit_not_atomic(&mut owner, 5_001).unwrap();
+    market
+        .deposit_not_atomic(&mut original_short, 100_000)
+        .unwrap();
+    market.deposit_not_atomic(&mut new_holder, 10_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut owner,
+            &mut original_short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(OPEN_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 90)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 90, 0, true)
+        .unwrap();
+    market
+        .full_account_refresh_not_atomic(&mut original_short)
+        .unwrap();
+    let owner_cert = market.full_account_refresh_not_atomic(&mut owner).unwrap();
+    market
+        .full_account_refresh_not_atomic(&mut new_holder)
+        .unwrap();
+    assert!(
+        owner_cert.certified_equity >= 0
+            && (owner_cert.certified_equity as u128) < owner_cert.certified_initial_req,
+        "owner must be below IM before the transfer"
+    );
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut owner,
+            &mut new_holder,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(POS_SCALE),
+                exec_price: 90,
+                fee_bps: 0,
+            },
+        )
+        .expect("strict reducer may exit while the new risk holder passes IM");
+
+    assert_eq!(
+        owner.header.legs[0].try_to_runtime().unwrap().basis_pos_q,
+        signed_q(99 * POS_SCALE)
+    );
+    assert_eq!(
+        new_holder.header.legs[0]
+            .try_to_runtime()
+            .unwrap()
+            .basis_pos_q,
+        signed_q(POS_SCALE)
+    );
+    let new_holder_cert = new_holder.header.health_cert.try_to_runtime().unwrap();
+    assert!(
+        new_holder_cert.valid
+            && new_holder_cert.certified_equity >= 0
+            && (new_holder_cert.certified_equity as u128) >= new_holder_cert.certified_initial_req,
+        "new risk holder remains fully margined"
+    );
+    market.validate_shape().unwrap();
+    owner.validate_with_market(&market.as_view()).unwrap();
+    original_short
+        .validate_with_market(&market.as_view())
+        .unwrap();
+    new_holder.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_residual_reward_credit_uses_real_principal_not_notional() {
     let (mut header, mut markets) = market_fixture(1, 1_000);
     header.config.initial_margin_bps = V16PodU64::new(500);
@@ -2672,6 +5627,371 @@ fn v16_residual_reward_credit_uses_real_principal_not_notional() {
     );
     taker.validate_with_market(&market.as_view()).unwrap();
     lp.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+fn flat_source_credit_lien_fixture(
+    source_count: usize,
+) -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+) {
+    assert!((1..=2).contains(&source_count));
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut winner_header = account_fixture(1, 10);
+    let mut counterparty_header = account_fixture(1, 11);
+    let claim = 100;
+    let claim_num = claim * BOUND_SCALE;
+    let total_claim = claim * source_count as u128;
+    let total_claim_num = claim_num * source_count as u128;
+    winner_header.pnl = V16PodI128::new(total_claim as i128);
+    for domain in 0..source_count {
+        winner_header.source_domains[domain].domain = V16PodU32::new(domain as u32);
+        winner_header.source_domains[domain].source_claim_market_id = V16PodU64::new(1);
+        winner_header.source_domains[domain].source_claim_bound_num = V16PodU128::new(claim_num);
+    }
+    header.pnl_pos_tot = V16PodU128::new(total_claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(total_claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(total_claim);
+    header.source_claim_bound_total_num = V16PodU128::new(total_claim_num);
+    header.vault = V16PodU128::new(total_claim);
+    header.source_fresh_backing_total_num = V16PodU128::new(total_claim_num);
+    let source_credit = SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: claim_num,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    });
+    let backing = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: claim_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long = source_credit;
+    markets[0].engine.backing_long = backing;
+    if source_count == 2 {
+        markets[0].engine.source_credit_short = source_credit;
+        markets[0].engine.backing_short = backing;
+    }
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        market.deposit_not_atomic(&mut counterparty, 1_000).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+    let open_units = if source_count == 1 { 10 } else { 200 };
+    let open = TradeRequestV16 {
+        asset_index: 0,
+        size_q: signed_q(open_units * POS_SCALE),
+        exec_price: 1,
+        fee_bps: 0,
+    };
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut winner, &mut counterparty, open)
+        .unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut winner,
+            &mut counterparty,
+            TradeRequestV16 {
+                size_q: -open.size_q,
+                ..open
+            },
+        )
+        .unwrap();
+    drop(market);
+    drop(winner);
+    drop(counterparty);
+    (header, markets, winner_header)
+}
+
+#[test]
+fn v16_auto_crank_releases_flat_source_credit_lien_for_conversion() {
+    const CLAIM: u128 = 100;
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture(1);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+
+    assert!(active_bitmap_is_empty(
+        winner.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_ne!(
+        winner.header.source_domains[0]
+            .source_claim_liened_num
+            .get(),
+        0,
+        "the public trades must reach the flat retained-lien state"
+    );
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut winner,
+            AutoCrankWorkV16 {
+                now_slot: market.header.current_slot.get(),
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("a flat funded source claim must have a bounded crank continuation");
+    assert_eq!(result.selected, AutoCrankPlanV16::ReleaseSourceLiens);
+    assert_eq!(
+        winner.header.source_domains[0]
+            .source_claim_liened_num
+            .get(),
+        0,
+        "the crank must release the obsolete source-credit encumbrance"
+    );
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("released source-backed PnL must become convertible"),
+        CLAIM
+    );
+    winner.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_auto_crank_releases_source_liens_in_strict_chunks() {
+    const TOTAL_CLAIM: u128 = 200;
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture(2);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+
+    let lien_count = |account: &PortfolioV16ViewMut<'_>| {
+        account
+            .header
+            .source_domains
+            .iter()
+            .filter(|source| source.source_claim_liened_num.get() != 0)
+            .count()
+    };
+    assert_eq!(lien_count(&winner), 2);
+    for remaining in [1usize, 0] {
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut winner,
+                AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("each source-lien chunk must make progress");
+        assert_eq!(result.selected, AutoCrankPlanV16::ReleaseSourceLiens);
+        assert_eq!(lien_count(&winner), remaining);
+    }
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("all chunks release the complete claim"),
+        TOTAL_CLAIM
+    );
+    winner.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_auto_crank_normalizes_impaired_flat_lien_before_releasing_fresh_sibling() {
+    const CLAIM: u128 = 100;
+    const EXPIRY_SLOT: u64 = 5;
+    let claim_num = CLAIM * BOUND_SCALE;
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture(2);
+    markets[0].engine.backing_long.expiry_slot = V16PodU64::new(EXPIRY_SLOT);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    let observations = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: market.markets[0].engine.asset.effective_price.get(),
+        funding_rate_e9: 0,
+    }];
+    let work = AutoCrankWorkV16 {
+        now_slot: EXPIRY_SLOT,
+        observations: &observations,
+        resolved_close_fee_rate_per_slot: 0,
+    };
+
+    assert_eq!(
+        winner.header.source_domains[0]
+            .source_claim_counterparty_liened_num
+            .get(),
+        claim_num,
+        "global expiry cannot mutate an account that was not part of that transition"
+    );
+
+    let mut release_steps = 0usize;
+    let mut saw_expiry = false;
+    for _ in 0..6 {
+        let summary = market
+            .build_actionable_summary_at_slot(&winner.as_view(), EXPIRY_SLOT)
+            .unwrap();
+        if !summary.is_actionable() {
+            break;
+        }
+        let result = market
+            .permissionless_auto_crank_not_atomic(&mut winner, work)
+            .expect("each selected flat-lien continuation must succeed");
+        release_steps += usize::from(result.selected == AutoCrankPlanV16::ReleaseSourceLiens);
+        saw_expiry |= result.outcome
+            == AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain: 0 },
+            );
+    }
+    assert!(
+        saw_expiry,
+        "authenticated expiry must be selected in finite cranks"
+    );
+    assert_eq!(release_steps, 2, "one bounded step per source domain");
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired
+    );
+    let impaired_claim_num = winner
+        .header
+        .source_domains
+        .iter()
+        .map(|source| source.source_claim_impaired_num.get())
+        .sum::<u128>();
+    assert_eq!(
+        impaired_claim_num, claim_num,
+        "impaired claim attribution was not retained: {:?}",
+        winner.header.source_domains
+    );
+    assert_eq!(
+        winner.header.source_domains[0]
+            .source_claim_liened_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        winner.header.source_domains[1]
+            .source_claim_liened_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_long
+            .impaired_liened_backing_num
+            .get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .valid_liened_backing_num
+            .get(),
+        0
+    );
+
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("the independently fresh source claim must remain convertible"),
+        CLAIM
+    );
+    assert_eq!(winner.header.pnl.get(), CLAIM as i128);
+    winner.validate_with_market(&market.as_view()).unwrap();
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_released_pnl_conversion_consumes_the_backed_source_claim_exactly_once() {
+    const CLAIM: u128 = 100;
+    const BACKING: u128 = 2 * CLAIM;
+    let claim_num = CLAIM * BOUND_SCALE;
+    let backing_num = BACKING * BOUND_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut winner_header = account_fixture(1, 12);
+
+    winner_header.pnl = V16PodI128::new((2 * CLAIM) as i128);
+    for domain in 0..2 {
+        winner_header.source_domains[domain].domain = V16PodU32::new(domain as u32);
+        winner_header.source_domains[domain].source_claim_market_id = V16PodU64::new(1);
+        winner_header.source_domains[domain].source_claim_bound_num = V16PodU128::new(claim_num);
+    }
+    header.pnl_pos_tot = V16PodU128::new(2 * CLAIM);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(2 * claim_num);
+    header.pnl_pos_bound_tot = V16PodU128::new(2 * CLAIM);
+    header.source_claim_bound_total_num = V16PodU128::new(2 * claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    header.vault = V16PodU128::new(BACKING);
+
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            credit_rate_num: 0,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+    market
+        .validate_shape()
+        .expect("cross-domain fixture must be a valid market state");
+    winner
+        .validate_with_market(&market.as_view())
+        .expect("cross-domain fixture must be a valid portfolio state");
+    market.full_account_refresh_not_atomic(&mut winner).unwrap();
+
+    assert_eq!(
+        market
+            .convert_released_pnl_to_capital_not_atomic(&mut winner)
+            .expect("the funded source claim must convert"),
+        CLAIM
+    );
+    assert_eq!(winner.header.capital.get(), CLAIM);
+    assert_eq!(winner.header.pnl.get(), CLAIM as i128);
+    assert_eq!(winner.header.source_domains[0].domain.get(), 0);
+    assert_eq!(
+        winner.header.source_domains[0].source_claim_bound_num.get(),
+        claim_num,
+        "the unfunded source claim must not be burned for another domain's backing"
+    );
+    assert_eq!(winner.header.source_domains[1], Default::default());
+
+    market.full_account_refresh_not_atomic(&mut winner).unwrap();
+    assert_eq!(
+        market.convert_released_pnl_to_capital_not_atomic(&mut winner),
+        Err(V16Error::LockActive),
+        "the same funded source backing must not convert a second source claim"
+    );
+    assert_eq!(winner.header.capital.get(), CLAIM);
+    winner.validate_with_market(&market.as_view()).unwrap();
     market.validate_shape().unwrap();
 }
 
@@ -2742,17 +6062,22 @@ fn v16_principal_loss_crystallizes_residual_budget_monotonically() {
 }
 
 #[test]
-fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
+fn v16_source_backed_conversion_ignores_unrelated_historical_bankruptcy() {
     let (mut header, mut markets) = market_fixture(1, 1);
     let mut account_header = account_fixture(1, 18);
     let claim = 20u128;
     let claim_num = claim * BOUND_SCALE;
-    header.vault = V16PodU128::new(claim);
+    // Keep an unrelated live residual and historical opposite-domain insurance
+    // spend present. Only the claim-free terminal sweep may recredit an overlap.
+    header.vault = V16PodU128::new(claim + 10);
+    header.insurance = V16PodU128::new(5);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(5);
     header.pnl_pos_tot = V16PodU128::new(claim);
     header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
     header.pnl_pos_bound_tot = V16PodU128::new(claim);
     header.source_claim_bound_total_num = V16PodU128::new(claim_num);
     header.source_fresh_backing_total_num = V16PodU128::new(claim_num);
+    header.bankruptcy_hlock_active = 1;
     account_header.pnl = V16PodI128::new(claim as i128);
     account_header.source_domains[0].domain = V16PodU32::new(0);
     account_header.source_domains[0].source_claim_market_id = V16PodU64::new(1);
@@ -2772,6 +6097,8 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
         status: BackingBucketStatusV16::Fresh,
         ..BackingBucketV16::EMPTY
     });
+    markets[0].engine.insurance_domain_budget_short = V16PodU128::new(10);
+    markets[0].engine.insurance_domain_spent_short = V16PodU128::new(5);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -2785,6 +6112,15 @@ fn v16_source_backed_conversion_clears_sparse_source_domain_slot() {
     assert_eq!(converted, claim);
     assert_eq!(account.header.pnl.get(), 0);
     assert_eq!(account.header.capital.get(), claim);
+    assert_eq!(
+        market.header.insurance.get(),
+        5,
+        "live conversion must not recredit historical insurance spend"
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        5
+    );
     assert_eq!(
         account.header.source_domains[0],
         PortfolioSourceDomainV16Account::default()
@@ -2865,6 +6201,37 @@ fn v16_mutable_view_compacts_persisted_domain_indexed_source_claim_before_deposi
     );
     account.validate_with_market(&market.as_view()).unwrap();
     market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_mutable_view_canonicalizes_persisted_source_domain_order() {
+    let mut account_header = account_fixture(2, 120);
+    account_header.source_domains[0].domain = V16PodU32::new(3);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(2);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(3 * BOUND_SCALE);
+    account_header.source_domains[2].domain = V16PodU32::new(1);
+    account_header.source_domains[2].source_claim_market_id = V16PodU64::new(1);
+    account_header.source_domains[2].source_claim_bound_num = V16PodU128::new(BOUND_SCALE);
+
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    assert_eq!(account.header.source_domains[0].domain.get(), 1);
+    assert_eq!(
+        account.header.source_domains[0]
+            .source_claim_bound_num
+            .get(),
+        BOUND_SCALE
+    );
+    assert_eq!(account.header.source_domains[1].domain.get(), 3);
+    assert_eq!(
+        account.header.source_domains[1]
+            .source_claim_bound_num
+            .get(),
+        3 * BOUND_SCALE
+    );
+    assert!(account.header.source_domains[2..]
+        .iter()
+        .all(|source| *source == PortfolioSourceDomainV16Account::default()));
 }
 
 #[test]
@@ -2984,6 +6351,7 @@ fn v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean() {
             && !summary.pending_close
             && !summary.expired_close
             && !summary.liquidatable
+            && !summary.source_liens_releasable
             && !summary.recovery_eligible
             && !summary.resolved_winner,
         "no other actionable class on a fresh empty account"
@@ -3028,6 +6396,1676 @@ fn v16_auto_crank_classifies_fresh_account_stale_then_refreshes_to_clean() {
 
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_auto_crank_releases_current_flat_pending_obligations_on_both_sides() {
+    for side in [SideV16::Long, SideV16::Short] {
+        let (mut header, mut markets) = market_fixture(1, 100);
+        let mut account_header = account_fixture(1, 22);
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        match side {
+            SideV16::Long => {
+                asset.stored_pos_count_long = 1;
+                asset.pending_obligation_count_long = 1;
+                asset.loss_weight_sum_long = POS_SCALE;
+            }
+            SideV16::Short => {
+                asset.stored_pos_count_short = 1;
+                asset.pending_obligation_count_short = 1;
+                asset.loss_weight_sum_short = POS_SCALE;
+            }
+        }
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        header.resolved_payout_blocker_count = V16PodU64::new(1);
+        header.materialized_portfolio_count = V16PodU64::new(1);
+
+        account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index: 0,
+            market_id: asset.market_id,
+            side,
+            basis_pos_q: 0,
+            a_basis: ADL_ONE,
+            k_snap: match side {
+                SideV16::Long => asset.k_long,
+                SideV16::Short => asset.k_short,
+            },
+            f_snap: match side {
+                SideV16::Long => asset.f_long_num,
+                SideV16::Short => asset.f_short_num,
+            },
+            kf_epoch_snap: match side {
+                SideV16::Long => asset.kf_epoch_long,
+                SideV16::Short => asset.kf_epoch_short,
+            },
+            epoch_snap: match side {
+                SideV16::Long => asset.epoch_long,
+                SideV16::Short => asset.epoch_short,
+            },
+            loss_weight: POS_SCALE,
+            b_snap: match side {
+                SideV16::Long => asset.b_long_num,
+                SideV16::Short => asset.b_short_num,
+            },
+            b_rem: 0,
+            b_epoch_snap: match side {
+                SideV16::Long => asset.epoch_long,
+                SideV16::Short => asset.epoch_short,
+            },
+            b_stale: false,
+            stale: false,
+        });
+        account_header.active_bitmap[0] = V16PodU64::new(1);
+        account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+            cert_oracle_epoch: header.oracle_epoch.get(),
+            cert_funding_epoch: header.funding_epoch.get(),
+            cert_risk_epoch: header.risk_epoch.get(),
+            cert_asset_set_epoch: header.asset_set_epoch.get(),
+            active_bitmap_at_cert: account_header.active_bitmap.map(V16PodU64::get),
+            valid: true,
+            ..HealthCertV16::default()
+        });
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.validate_shape().unwrap();
+        account.validate_with_market(&market.as_view()).unwrap();
+        assert!(
+            market
+                .build_actionable_summary(&account.as_view())
+                .unwrap()
+                .stale
+        );
+        let current_slot = market.header.current_slot.get();
+
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: current_slot,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.selected,
+            AutoCrankPlanV16::RefreshAccount {
+                asset_index: Some(0)
+            }
+        );
+        assert_eq!(
+            result.outcome,
+            AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+        );
+        assert_eq!(account.header.active_bitmap[0].get(), 0);
+        let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(after.stored_pos_count_long, 0);
+        assert_eq!(after.stored_pos_count_short, 0);
+        assert_eq!(after.pending_obligation_count_long, 0);
+        assert_eq!(after.pending_obligation_count_short, 0);
+        assert_eq!(after.loss_weight_sum_long, 0);
+        assert_eq!(after.loss_weight_sum_short, 0);
+        assert_eq!(market.header.resolved_payout_blocker_count.get(), 0);
+        market.validate_shape().unwrap();
+        account.validate_with_market(&market.as_view()).unwrap();
+        market
+            .deregister_empty_materialized_portfolio_not_atomic(&account.as_view())
+            .unwrap();
+        assert_eq!(market.header.materialized_portfolio_count.get(), 0);
+    }
+}
+
+#[test]
+fn v16_auto_crank_expires_one_lapsed_live_source_domain_per_step() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 22);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, 100).unwrap();
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 40, 5)
+            .unwrap();
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(3, 40, 5)
+            .unwrap();
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut account, 1, 40)
+            .unwrap();
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut account, 3, 40)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 10, 100, 0, true)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(1, 10, 100, 0, true)
+            .unwrap();
+    }
+
+    let before = markets[0].engine.backing_short.try_to_runtime().unwrap();
+    assert_eq!(before.status, BackingBucketStatusV16::Fresh);
+    assert_eq!(before.expiry_slot, 5);
+    assert_eq!(
+        markets[1]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Fresh
+    );
+    assert!(header.current_slot.get() > before.expiry_slot);
+    let vault_before = header.vault.get();
+    let c_tot_before = header.c_tot.get();
+    let insurance_before = header.insurance.get();
+    let earnings_before = header.backing_provider_earnings_total.get();
+    let source_backing_before = header.source_fresh_backing_total_num.get();
+    let risk_epoch_before = header.risk_epoch.get();
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let observations = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: 100,
+        funding_rate_e9: 0,
+    }];
+    let expiry = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &observations,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("Live auto-crank must expire lapsed backing instead of returning Stale");
+
+    assert!(matches!(
+        expiry.selected,
+        AutoCrankPlanV16::RefreshAccount { .. }
+    ));
+    assert_eq!(
+        expiry.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::SourceBackingExpired {
+            domain: 1
+        })
+    );
+    let after = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(after.status, BackingBucketStatusV16::Expired);
+    assert_eq!(after.fresh_unliened_backing_num, 0);
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Fresh,
+        "one auto-crank expires exactly one source domain"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before
+    );
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        source_backing_before - 40 * BOUND_SCALE
+    );
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 1);
+    assert_eq!(account.header.capital.get(), 100);
+    assert_eq!(account.header.pnl.get(), 80);
+    assert!(!account.header.health_cert.try_to_runtime().unwrap().valid);
+
+    let second_expiry = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &observations,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the next bounded auto-crank must expire the next domain");
+    assert_eq!(
+        second_expiry.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::SourceBackingExpired {
+            domain: 3
+        })
+    );
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Expired
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before
+    );
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(market.header.risk_epoch.get(), risk_epoch_before + 2);
+
+    let refresh = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &observations,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the final bounded auto-crank must finish account refresh");
+    assert_eq!(
+        refresh.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+    );
+    assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 23);
+    let mut counterparty_header = account_fixture(1, 24);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        let mut counterparty = PortfolioV16ViewMut::new(&mut counterparty_header);
+        market.deposit_not_atomic(&mut account, 10_000).unwrap();
+        market
+            .deposit_not_atomic(&mut counterparty, 10_000)
+            .unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut account,
+                &mut counterparty,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 40, 5)
+            .unwrap();
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut account, 1, 40)
+            .unwrap();
+        market
+            .full_account_refresh_not_atomic(&mut account)
+            .unwrap();
+        assert!(account.header.health_cert.try_to_runtime().unwrap().valid);
+
+        // The committed market slot remains before expiry and every certificate
+        // epoch is current. Authenticated execution time must nevertheless make
+        // the lapsed bucket actionable without an oracle hint.
+        let cert = account.header.health_cert.try_to_runtime().unwrap();
+        assert_eq!(cert.cert_oracle_epoch, market.header.oracle_epoch.get());
+        assert_eq!(cert.cert_funding_epoch, market.header.funding_epoch.get());
+        assert_eq!(cert.cert_risk_epoch, market.header.risk_epoch.get());
+        assert_eq!(
+            cert.cert_asset_set_epoch,
+            market.header.asset_set_epoch.get()
+        );
+
+        assert!(
+            !market
+                .build_actionable_summary(&account.as_view())
+                .unwrap()
+                .stale
+        );
+        assert!(
+            market
+                .build_actionable_summary_at_slot(&account.as_view(), 10)
+                .unwrap()
+                .stale
+        );
+
+        let catchup = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: 10,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            catchup.outcome,
+            AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+        );
+        assert_eq!(market.header.current_slot.get(), 10);
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .backing_short
+                .try_to_runtime()
+                .unwrap()
+                .status,
+            BackingBucketStatusV16::Fresh
+        );
+
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: 10,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            result.outcome,
+            AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain: 1 }
+            )
+        );
+        let bucket = market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap();
+        assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
+        assert_eq!(bucket.fresh_unliened_backing_num, 0);
+        assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+        assert_eq!(market.header.vault.get(), 20_040);
+        assert_eq!(account.header.capital.get(), 10_000);
+        assert_eq!(account.header.pnl.get(), 40);
+        market.validate_shape().unwrap();
+        account.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
+fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 22);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    }
+
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset0.lifecycle = AssetLifecycleV16::Recovery;
+    asset0.slot_last = 10;
+    asset0.oi_eff_long_q = POS_SCALE;
+    asset0.oi_eff_short_q = POS_SCALE;
+    asset0.loss_weight_sum_long = POS_SCALE;
+    asset0.loss_weight_sum_short = POS_SCALE;
+    asset0.stored_pos_count_long = 1;
+    asset0.stored_pos_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+
+    let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset1.slot_last = 10;
+    asset1.oi_eff_long_q = POS_SCALE;
+    asset1.oi_eff_short_q = POS_SCALE;
+    asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.stored_pos_count_long = 1;
+    asset1.stored_pos_count_short = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset0.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset0.k_long,
+        f_snap: asset0.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset0.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset0.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset0.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: asset1.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -(POS_SCALE as i128),
+        a_basis: ADL_ONE,
+        k_snap: asset1.k_short,
+        f_snap: asset1.f_short_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset1.epoch_short,
+        loss_weight: POS_SCALE,
+        b_snap: asset1.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset1.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+
+    let obs = [AutoCrankObservationV16 {
+        asset_index: 1,
+        effective_price: 100,
+        funding_rate_e9: 0,
+    }];
+    let work = AutoCrankWorkV16 {
+        now_slot: 10,
+        observations: &obs,
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert!(
+        market
+            .build_actionable_summary(&account.as_view())
+            .unwrap()
+            .stale
+    );
+
+    let result = market
+        .permissionless_auto_crank_not_atomic(&mut account, work)
+        .expect("a Recovery first leg must not block the live asset refresh");
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(1),
+        },
+    );
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent),
+    );
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+#[cfg(feature = "fuzz")]
+fn v16_fractional_social_loss_carry_normalizes_on_reset_and_clear() {
+    for side in [SideV16::Long, SideV16::Short] {
+        let mut reset_asset = AssetStateV16::default();
+        reset_asset.lifecycle = AssetLifecycleV16::Active;
+        let remainder = SOCIAL_LOSS_DEN / 2 + 1;
+        let dust = SOCIAL_LOSS_DEN / 2;
+        match side {
+            SideV16::Long => {
+                reset_asset.oi_eff_long_q = 0;
+                reset_asset.stored_pos_count_long = 1;
+                reset_asset.social_loss_remainder_long_num = remainder;
+                reset_asset.social_loss_dust_long_num = dust;
+                reset_asset.explicit_unallocated_loss_long = 7;
+            }
+            SideV16::Short => {
+                reset_asset.oi_eff_short_q = 0;
+                reset_asset.stored_pos_count_short = 1;
+                reset_asset.social_loss_remainder_short_num = remainder;
+                reset_asset.social_loss_dust_short_num = dust;
+                reset_asset.explicit_unallocated_loss_short = 7;
+            }
+        }
+
+        let reset =
+            MarketGroupV16ViewMut::<u64>::kani_kernel_begin_full_drain_reset(reset_asset, side)
+                .expect("a valid fractional carry must not block reset");
+        match side {
+            SideV16::Long => {
+                assert_eq!(reset.social_loss_remainder_long_num, 0);
+                assert_eq!(reset.social_loss_dust_long_num, 1);
+                assert_eq!(reset.explicit_unallocated_loss_long, 8);
+            }
+            SideV16::Short => {
+                assert_eq!(reset.social_loss_remainder_short_num, 0);
+                assert_eq!(reset.social_loss_dust_short_num, 1);
+                assert_eq!(reset.explicit_unallocated_loss_short, 8);
+            }
+        }
+
+        let mut clear_asset = AssetStateV16::default();
+        clear_asset.lifecycle = AssetLifecycleV16::Active;
+        let basis_q = POS_SCALE;
+        match side {
+            SideV16::Long => {
+                clear_asset.oi_eff_long_q = basis_q;
+                clear_asset.loss_weight_sum_long = basis_q;
+                clear_asset.stored_pos_count_long = 1;
+                clear_asset.social_loss_dust_long_num = SOCIAL_LOSS_DEN / 2;
+                clear_asset.explicit_unallocated_loss_long = 11;
+            }
+            SideV16::Short => {
+                clear_asset.oi_eff_short_q = basis_q;
+                clear_asset.loss_weight_sum_short = basis_q;
+                clear_asset.stored_pos_count_short = 1;
+                clear_asset.social_loss_dust_short_num = SOCIAL_LOSS_DEN / 2;
+                clear_asset.explicit_unallocated_loss_short = 11;
+            }
+        }
+        let basis_pos_q = match side {
+            SideV16::Long => basis_q as i128,
+            SideV16::Short => -(basis_q as i128),
+        };
+        let leg = PortfolioLegV16 {
+            active: true,
+            side,
+            basis_pos_q,
+            loss_weight: basis_q,
+            b_rem: SOCIAL_LOSS_DEN / 2,
+            ..PortfolioLegV16::EMPTY
+        };
+        let cleared =
+            MarketGroupV16ViewMut::<u64>::kani_kernel_clear_leg(leg, clear_asset, basis_q)
+                .expect("a valid fractional carry must not block leg clear");
+        match side {
+            SideV16::Long => {
+                assert_eq!(cleared.social_loss_dust_long_num, 0);
+                assert_eq!(cleared.explicit_unallocated_loss_long, 12);
+            }
+            SideV16::Short => {
+                assert_eq!(cleared.social_loss_dust_short_num, 0);
+                assert_eq!(cleared.explicit_unallocated_loss_short, 12);
+            }
+        }
+    }
+
+    assert_eq!(
+        MarketGroupV16ViewMut::<u64>::kani_kernel_normalize_social_loss_carry(
+            SOCIAL_LOSS_DEN - 1,
+            1,
+            u128::MAX,
+        )
+        .unwrap(),
+        (0, u128::MAX),
+        "audit-counter saturation must remain a successful value-neutral normalization"
+    );
+}
+
+#[test]
+fn v16_auto_crank_detaches_prior_reset_obligation_after_asset_recovery() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 23);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.slot_last = 10;
+    asset.epoch_long = 1;
+    asset.mode_long = SideModeV16::ResetPending;
+    asset.oi_eff_long_q = 0;
+    asset.oi_eff_short_q = 0;
+    asset.loss_weight_sum_long = 0;
+    asset.loss_weight_sum_short = 0;
+    asset.stored_pos_count_long = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_epoch_start_long,
+        f_snap: asset.f_epoch_start_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_epoch_start_long_num,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let cleanup = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("Recovery must retain permissionless prior-reset cleanup");
+
+    assert_eq!(
+        cleanup.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(0)
+        }
+    );
+    assert_eq!(
+        cleanup.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+    );
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert!(!account.header.legs[0].try_to_runtime().unwrap().active);
+    let cleaned = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(cleaned.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(cleaned.mode_long, SideModeV16::ResetPending);
+    assert_eq!(cleaned.stored_pos_count_long, 0);
+    market
+        .finalize_side_reset_not_atomic(0, SideV16::Long)
+        .expect("the cleaned Recovery side must finalize");
+    let finalized = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(finalized.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(finalized.mode_long, SideModeV16::Normal);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 23);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+
+    let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset0.slot_last = 10;
+    asset0.epoch_long = 1;
+    asset0.mode_long = SideModeV16::ResetPending;
+    asset0.oi_eff_long_q = 0;
+    asset0.oi_eff_short_q = 0;
+    asset0.loss_weight_sum_long = 0;
+    asset0.loss_weight_sum_short = 0;
+    asset0.stored_pos_count_long = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+
+    let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset1.slot_last = 10;
+    asset1.oi_eff_long_q = 2 * POS_SCALE;
+    asset1.oi_eff_short_q = 2 * POS_SCALE;
+    asset1.loss_weight_sum_long = 2 * POS_SCALE;
+    asset1.loss_weight_sum_short = 2 * POS_SCALE;
+    asset1.stored_pos_count_long = 2;
+    asset1.stored_pos_count_short = 2;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    header.resolved_payout_blocker_count = V16PodU64::new(5);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset0.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset0.k_epoch_start_long,
+        f_snap: asset0.f_epoch_start_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: 0,
+        loss_weight: POS_SCALE,
+        b_snap: asset0.b_epoch_start_long_num,
+        b_rem: 0,
+        b_epoch_snap: 0,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.legs[1] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 1,
+        market_id: asset1.market_id,
+        side: SideV16::Short,
+        basis_pos_q: -(POS_SCALE as i128),
+        a_basis: ADL_ONE,
+        k_snap: asset1.k_short,
+        f_snap: asset1.f_short_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset1.epoch_short,
+        loss_weight: POS_SCALE,
+        b_snap: asset1.b_short_num,
+        b_rem: 0,
+        b_epoch_snap: asset1.epoch_short,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(3);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_equity: 0,
+        certified_initial_req: 2,
+        certified_maintenance_req: 2,
+        certified_liq_deficit: 2,
+        certified_worst_case_loss: 200,
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: [3],
+        valid: true,
+    });
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    let refresh = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the prior-reset first leg must be detached permissionlessly");
+
+    assert_eq!(
+        refresh.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(0)
+        }
+    );
+    assert!(!account.header.legs[0].try_to_runtime().unwrap().active);
+    assert!(account.header.legs[1].try_to_runtime().unwrap().active);
+
+    let liquidation = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the next step must liquidate the remaining live asset");
+    assert_eq!(
+        liquidation.selected,
+        AutoCrankPlanV16::Liquidate { asset_index: 1 }
+    );
+    assert!(!account.header.legs[1].try_to_runtime().unwrap().active);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_adl_reduced_basis_caps_exit_to_effective_oi_then_detaches_residue() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 24);
+
+    // A partial ADL can leave a winner's stored basis larger than the side's
+    // remaining effective OI. This is the exact state reached by the public
+    // wrapper regression: basis=2 lots, matched effective OI=1 lot.
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.a_long = ADL_ONE / 2;
+    asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: (2 * POS_SCALE) as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: 2 * POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.deposit_not_atomic(&mut account, 1_000).unwrap();
+
+    let reduced = market
+        .rebalance_reduce_position_not_atomic(
+            &mut account,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: 2 * POS_SCALE,
+            },
+        )
+        .expect("max-work exit must clamp to matched effective OI");
+    assert_eq!(reduced.reduced_q, POS_SCALE);
+    assert!(!account.header.legs[0].try_to_runtime().unwrap().active);
+    let reset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(reset.oi_eff_long_q, 0);
+    assert_eq!(reset.oi_eff_short_q, 0);
+    assert_eq!(reset.mode_long, SideModeV16::ResetPending);
+    assert_eq!(reset.mode_short, SideModeV16::ResetPending);
+
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_auto_crank_migrates_legacy_normal_adl_residue_into_reset_cleanup() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 25);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = 0;
+    asset.oi_eff_short_q = 0;
+    asset.a_long = ADL_ONE / 2;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 1,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("a legacy zero-effective-OI residue must remain crankable after upgrade");
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::RefreshAccount {
+            asset_index: Some(0)
+        }
+    );
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert!(!account.header.legs[0].try_to_runtime().unwrap().active);
+    let reset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(reset.mode_long, SideModeV16::ResetPending);
+    assert_eq!(reset.stored_pos_count_long, 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_close_migrates_legacy_normal_adl_residue_before_detach() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 26);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = 0;
+    asset.oi_eff_short_q = 0;
+    asset.a_long = ADL_ONE / 2;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    market.resolve_market_not_atomic(1).unwrap();
+    let outcome = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("resolution must not strand an upgraded zero-effective-OI residue");
+    assert_eq!(
+        outcome,
+        percolator::ResolvedCloseOutcomeV16::Closed { payout: 1_000 }
+    );
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(market.header.vault.get(), 0);
+    let reset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(reset.mode_long, SideModeV16::ResetPending);
+    assert_eq!(reset.stored_pos_count_long, 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_resolved_close_caps_adl_reduced_basis_before_reset_detach() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 28);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.a_long = ADL_ONE / 2;
+    asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: (2 * POS_SCALE) as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: 2 * POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    market.resolve_market_not_atomic(1).unwrap();
+
+    let first = market
+        .close_resolved_account_not_atomic(&mut account, 0)
+        .expect("resolved close must consume the remaining effective OI");
+    assert_eq!(
+        first,
+        percolator::ResolvedCloseOutcomeV16::Closed { payout: 1_000 }
+    );
+    assert!(!account.header.legs[0].try_to_runtime().unwrap().active);
+    let reset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(reset.oi_eff_long_q, 0);
+    assert_eq!(reset.oi_eff_short_q, POS_SCALE);
+    assert_eq!(reset.mode_long, SideModeV16::ResetPending);
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(market.header.vault.get(), 0);
+    let terminal = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(terminal.oi_eff_long_q, 0);
+    assert_eq!(terminal.oi_eff_short_q, POS_SCALE);
+    assert_eq!(terminal.stored_pos_count_long, 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 27);
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = 0;
+    asset.oi_eff_short_q = 0;
+    asset.a_long = ADL_ONE / 2;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    market.force_asset_recovery_not_atomic(0, 1).unwrap();
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let capital_before = account.header.capital.get();
+    let pnl_before = account.header.pnl.get();
+    let outcome = market
+        .forfeit_recovery_leg_not_atomic(&mut account, 0, POS_SCALE)
+        .expect("Recovery forfeit must detach a zero-effective-OI ADL residue");
+    assert!(outcome.detached);
+    assert_eq!(account.header.active_bitmap[0].get(), 0);
+    let reset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(reset.mode_long, SideModeV16::ResetPending);
+    assert_eq!(reset.stored_pos_count_long, 0);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(account.header.capital.get(), capital_before);
+    assert_eq!(account.header.pnl.get(), pnl_before);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_recovery_forfeit_commits_terminal_recovery_when_absorbing_side_is_empty() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 28);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.force_asset_recovery_not_atomic(0, 2).unwrap();
+    }
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    header.resolved_payout_blocker_count = V16PodU64::new(1);
+    account_header.pnl = V16PodI128::new(-5);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+
+    let outcome = market
+        .forfeit_recovery_leg_not_atomic(&mut account, 0, u128::MAX)
+        .expect("forfeit must commit Recovery instead of returning a rollback-only error");
+    assert!(!outcome.detached);
+    assert_eq!(outcome.residual_booked, 0);
+    assert_eq!(outcome.explicit_loss, 0);
+    assert_eq!(market.header.mode, 2);
+    assert_eq!(
+        market.header.recovery_reason.try_to_runtime().unwrap(),
+        Some(PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress)
+    );
+    assert_eq!(account.header.pnl.get(), -5);
+    assert_eq!(
+        account
+            .header
+            .close_progress
+            .try_to_runtime()
+            .unwrap()
+            .residual_remaining,
+        5
+    );
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+
+    let finalized = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 2,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the next public crank must make terminal settlement reachable");
+    assert_eq!(finalized.selected, AutoCrankPlanV16::FinalizeRecovery);
+    assert_eq!(finalized.outcome, AutoCrankOutcomeV16::RecoveryResolved);
+
+    let mut closed = false;
+    for _ in 0..8 {
+        let step = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: 2,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("resolved terminal continuation must remain executable");
+        if matches!(
+            step.outcome,
+            AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { .. })
+        ) {
+            closed = true;
+            break;
+        }
+    }
+    assert!(closed, "the retained residual must reach terminal close");
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(account.header.pnl.get(), 0);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_recovery_forfeit_retains_loss_weight_until_opposite_positions_settle() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut first_header = account_fixture(1, 29);
+    let mut second_header = account_fixture(1, 30);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut first = PortfolioV16ViewMut::new(&mut first_header);
+        let mut second = PortfolioV16ViewMut::new(&mut second_header);
+        market.deposit_not_atomic(&mut first, 1_000).unwrap();
+        market.deposit_not_atomic(&mut second, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut first,
+                &mut second,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: POS_SCALE as i128,
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market.force_asset_recovery_not_atomic(0, 2).unwrap();
+    }
+
+    let first_side = first_header.legs[0].try_to_runtime().unwrap().side;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut first = PortfolioV16ViewMut::new(&mut first_header);
+        let outcome = market
+            .forfeit_recovery_leg_not_atomic(&mut first, 0, u128::MAX)
+            .expect("first Recovery exit must retain future loss absorption");
+        assert!(!outcome.detached);
+        let obligation = first.header.legs[0].try_to_runtime().unwrap();
+        assert!(obligation.active);
+        assert_eq!(obligation.basis_pos_q, 0);
+        assert_ne!(obligation.loss_weight, 0);
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        match first_side {
+            SideV16::Long => {
+                assert_eq!(asset.oi_eff_long_q, 0);
+                assert_eq!(asset.pending_obligation_count_long, 1);
+                assert_ne!(asset.oi_eff_short_q, 0);
+            }
+            SideV16::Short => {
+                assert_eq!(asset.oi_eff_short_q, 0);
+                assert_eq!(asset.pending_obligation_count_short, 1);
+                assert_ne!(asset.oi_eff_long_q, 0);
+            }
+        }
+        market.validate_shape().unwrap();
+        first.validate_with_market(&market.as_view()).unwrap();
+    }
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut first = PortfolioV16ViewMut::new(&mut first_header);
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut first,
+                AutoCrankWorkV16 {
+                    now_slot: 2,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("Recovery obligation must permit one committed-state refresh");
+        assert_eq!(
+            result.selected,
+            AutoCrankPlanV16::RefreshAccount {
+                asset_index: Some(0)
+            }
+        );
+        assert_eq!(
+            result.outcome,
+            AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+        );
+        let obligation = first.header.legs[0].try_to_runtime().unwrap();
+        assert!(obligation.active);
+        assert_eq!(obligation.basis_pos_q, 0);
+        assert_ne!(obligation.loss_weight, 0);
+        let fixed_point = market.permissionless_auto_crank_not_atomic(
+            &mut first,
+            AutoCrankWorkV16 {
+                now_slot: 2,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        );
+        assert_eq!(
+            fixed_point,
+            Ok(AutoCrankResultV16 {
+                selected: AutoCrankPlanV16::NoAction,
+                outcome: AutoCrankOutcomeV16::NoAction,
+            })
+        );
+        market.validate_shape().unwrap();
+        first.validate_with_market(&market.as_view()).unwrap();
+    }
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut second = PortfolioV16ViewMut::new(&mut second_header);
+        let outcome = market
+            .forfeit_recovery_leg_not_atomic(&mut second, 0, u128::MAX)
+            .expect("last non-pending opposite position can detach");
+        assert!(outcome.detached);
+        assert!(active_bitmap_is_empty(
+            second.header.active_bitmap.map(V16PodU64::get)
+        ));
+        market.validate_shape().unwrap();
+        second.validate_with_market(&market.as_view()).unwrap();
+    }
+
+    {
+        let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.header.mode = 2;
+        market.header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        ));
+        market.validate_shape().unwrap();
+    }
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut first = PortfolioV16ViewMut::new(&mut first_header);
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut first,
+                AutoCrankWorkV16 {
+                    now_slot: 2,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("global Recovery must first clear a released zero-basis obligation");
+        assert_eq!(
+            result.selected,
+            AutoCrankPlanV16::RefreshAccount {
+                asset_index: Some(0)
+            }
+        );
+        assert_eq!(
+            result.outcome,
+            AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+        );
+        assert!(active_bitmap_is_empty(
+            first.header.active_bitmap.map(V16PodU64::get)
+        ));
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(asset.pending_obligation_count_long, 0);
+        assert_eq!(asset.pending_obligation_count_short, 0);
+        assert_eq!(asset.loss_weight_sum_long, 0);
+        assert_eq!(asset.loss_weight_sum_short, 0);
+        market.validate_shape().unwrap();
+        first.validate_with_market(&market.as_view()).unwrap();
+
+        let finalized = market
+            .permissionless_auto_crank_not_atomic(
+                &mut first,
+                AutoCrankWorkV16 {
+                    now_slot: 2,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("the next public crank must finalize Recovery");
+        assert_eq!(finalized.selected, AutoCrankPlanV16::FinalizeRecovery);
+        assert_eq!(finalized.outcome, AutoCrankOutcomeV16::RecoveryResolved);
+        market.validate_shape().unwrap();
+        first.validate_with_market(&market.as_view()).unwrap();
+    }
+}
+
+#[test]
+fn v16_post_quantity_adl_recovery_forfeit_retires_only_effective_oi() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 229);
+    let mut short_header = account_fixture(1, 230);
+    let open_q = 12 * POS_SCALE;
+    let reduction_q = 3 * POS_SCALE;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 100_000_000).unwrap();
+        market.deposit_not_atomic(&mut short, 100_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(open_q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: reduction_q,
+                },
+            )
+            .unwrap();
+        market.force_asset_recovery_not_atomic(0, 2).unwrap();
+    }
+
+    assert_eq!(
+        short_header.legs[0]
+            .try_to_runtime()
+            .unwrap()
+            .basis_pos_q
+            .unsigned_abs(),
+        open_q,
+        "quantity ADL must retain raw K/F basis until settlement"
+    );
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let outcome = market
+        .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+        .expect("post-ADL recovery forfeit must consume live OI rather than stale raw basis");
+
+    assert!(!outcome.detached);
+    let obligation = short.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(obligation.basis_pos_q, 0);
+    assert_ne!(obligation.loss_weight, 0);
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_short_q, 0);
+    assert_eq!(asset.oi_eff_long_q, open_q - reduction_q);
+    assert_eq!(asset.pending_obligation_count_short, 1);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_auto_crank_clears_released_recovery_obligation_with_finalized_close() {
+    use percolator::{CloseProgressLedgerV16, CloseProgressLedgerV16Account};
+
+    for (b_short_num, expected_capital) in [(0, 7), (100_000_000_000_000_000, 4)] {
+        let (mut header, mut markets) = market_fixture(1, 100);
+        let mut account_header = account_fixture(1, 31);
+        header.current_slot = V16PodU64::new(44);
+        header.slot_last = V16PodU64::new(41);
+        header.resolved_payout_blocker_count = V16PodU64::new(1);
+        header.vault = V16PodU128::new(7);
+        header.c_tot = V16PodU128::new(7);
+
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.lifecycle = AssetLifecycleV16::Recovery;
+        asset.raw_oracle_target_price = 300;
+        asset.effective_price = 300;
+        asset.fund_px_last = 300;
+        asset.slot_last = 41;
+        asset.k_long = 200_000_000_000_000_000;
+        asset.k_short = -200_000_000_000_000_000;
+        asset.b_long_num = 100_000_000_000_000_000;
+        asset.b_short_num = b_short_num;
+        asset.oi_eff_long_q = 0;
+        asset.oi_eff_short_q = 0;
+        asset.stored_pos_count_long = 0;
+        asset.stored_pos_count_short = 1;
+        asset.pending_obligation_count_long = 0;
+        asset.pending_obligation_count_short = 1;
+        asset.loss_weight_sum_long = 0;
+        asset.loss_weight_sum_short = 30_000;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+        account_header.capital = V16PodU128::new(7);
+        account_header.residual_crystallized_loss_atoms_total = V16PodU128::new(3);
+        account_header.active_bitmap[0] = V16PodU64::new(1);
+        account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index: 0,
+            market_id: asset.market_id,
+            side: SideV16::Short,
+            basis_pos_q: 0,
+            a_basis: ADL_ONE,
+            k_snap: asset.k_short,
+            f_snap: asset.f_short_num,
+            kf_epoch_snap: 0,
+            epoch_snap: asset.epoch_short,
+            loss_weight: 30_000,
+            b_snap: 0,
+            b_rem: 0,
+            b_epoch_snap: asset.epoch_short,
+            b_stale: false,
+            stale: false,
+        });
+        account_header.close_progress =
+            CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
+                active: true,
+                finalized: true,
+                canceled: false,
+                close_id: 1,
+                asset_index: 0,
+                market_id: asset.market_id,
+                domain_side: SideV16::Long,
+                gross_loss_at_close_start: 3,
+                drift_reference_slot: 41,
+                max_close_slot: 141,
+                b_loss_booked: 3,
+                ..CloseProgressLedgerV16::EMPTY
+            });
+
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        account.validate_with_market(&market.as_view()).unwrap();
+        let summary = market
+            .build_actionable_summary_at_slot(&account.as_view(), 44)
+            .unwrap();
+        assert!(summary.stale);
+        let mut result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: 44,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("a released Recovery obligation must be a successful bounded continuation");
+        if b_short_num != 0 {
+            assert_eq!(
+                result.selected,
+                AutoCrankPlanV16::SettleBChunk { asset_index: 0 }
+            );
+            assert_eq!(account.header.capital.get(), 7);
+            assert_eq!(account.header.pnl.get(), -3);
+            assert!(!active_bitmap_is_empty(
+                account.header.active_bitmap.map(V16PodU64::get)
+            ));
+            result = market
+                .permissionless_auto_crank_not_atomic(
+                    &mut account,
+                    AutoCrankWorkV16 {
+                        now_slot: 44,
+                        observations: &[],
+                        resolved_close_fee_rate_per_slot: 0,
+                    },
+                )
+                .expect("settled Recovery obligation must detach on the next bounded step");
+        }
+        assert_eq!(
+            result.selected,
+            AutoCrankPlanV16::RefreshAccount {
+                asset_index: Some(0)
+            }
+        );
+        assert!(active_bitmap_is_empty(
+            account.header.active_bitmap.map(V16PodU64::get)
+        ));
+        assert_eq!(account.header.capital.get(), expected_capital);
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(asset.stored_pos_count_short, 0);
+        assert_eq!(asset.pending_obligation_count_short, 0);
+        assert_eq!(asset.loss_weight_sum_short, 0);
+    }
+}
+
+#[test]
+fn v16_auto_crank_refreshes_recovery_kf_without_forfeiting_position() {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 211);
+    let mut short_header = account_fixture(1, 212);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        open_one_lot_pair(&mut market, &mut long, &mut short);
+        market
+            .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
+            .unwrap();
+        market.force_asset_recovery_not_atomic(0, 2).unwrap();
+    }
+
+    let stale = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(stale.lifecycle, AssetLifecycleV16::Recovery);
+    assert_eq!(stale.stale_account_count_long, 1);
+    assert_eq!(stale.stale_account_count_short, 1);
+
+    for (account_header, expected_side) in [
+        (&mut long_header, SideV16::Long),
+        (&mut short_header, SideV16::Short),
+    ] {
+        let position_before = account_header.legs[0].basis_pos_q.get();
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(account_header);
+        let result = market
+            .permissionless_auto_crank_not_atomic(
+                &mut account,
+                AutoCrankWorkV16 {
+                    now_slot: 2,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("Recovery K/F work must be refreshable without an oracle observation");
+        assert_eq!(
+            result.selected,
+            AutoCrankPlanV16::RefreshAccount {
+                asset_index: Some(0)
+            }
+        );
+        assert_eq!(
+            result.outcome,
+            AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
+        );
+        let leg = account.header.legs[0].try_to_runtime().unwrap();
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert!(leg.active);
+        assert_eq!(leg.side, expected_side);
+        assert_eq!(leg.basis_pos_q, position_before);
+        assert_eq!(
+            leg.kf_epoch_snap,
+            match expected_side {
+                SideV16::Long => asset.kf_epoch_long,
+                SideV16::Short => asset.kf_epoch_short,
+            }
+        );
+        assert_eq!(asset.lifecycle, AssetLifecycleV16::Recovery);
+        market.validate_shape().unwrap();
+        account.validate_with_market(&market.as_view()).unwrap();
+    }
+
+    let settled = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(settled.stale_account_count_long, 0);
+    assert_eq!(settled.stale_account_count_short, 0);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(POS_SCALE),
+                exec_price: FUNDING_COUNTER_PRICE,
+                fee_bps: 0,
+            },
+        )
+        .expect("settled Recovery positions must retain their matched owner exit");
+    assert!(active_bitmap_is_empty(
+        long.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
 }
 
 // ROADMAP 3C step 4 / NB2 finite-multi-step liveness via the self-classifying
@@ -3076,6 +8114,7 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset0.b_long_num,
@@ -3153,6 +8192,354 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
 }
 
 #[test]
+fn v16_trade_final_leg_residual_routes_through_close_without_forcing_market_recovery() {
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(1, 61);
+    let mut short_header = account_fixture(1, 62);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 250).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(SIZE_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    for (offset, price) in (105u64..=150).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, price)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap();
+    }
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(SIZE_Q),
+                exec_price: 150,
+                fee_bps: 0,
+            },
+        )
+        .expect("risk-reducing final trade must remain available");
+
+    let pending = short.header.close_progress.try_to_runtime().unwrap();
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(short.header.capital.get(), 0);
+    assert_eq!(short.header.pnl.get(), -250);
+    assert!(pending.active && !pending.finalized && pending.residual_remaining != 0);
+    assert_eq!(pending.asset_index, 0);
+    assert_eq!(pending.domain_side, SideV16::Long);
+    assert_eq!(pending.residual_remaining, 250);
+    assert!(
+        market
+            .build_actionable_summary(&short.as_view())
+            .unwrap()
+            .pending_close
+    );
+
+    let work = AutoCrankWorkV16 {
+        now_slot: 11,
+        observations: &[],
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let booked = market
+        .permissionless_auto_crank_not_atomic(&mut short, work)
+        .expect("pending close must have a committed-state continuation");
+    assert_eq!(booked.selected, AutoCrankPlanV16::AdvanceClose);
+    assert!(matches!(
+        booked.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::ResidualBooked(_))
+    ));
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(market.header.negative_pnl_account_count.get(), 0);
+    let finalized = short.header.close_progress.try_to_runtime().unwrap();
+    assert!(finalized.active && finalized.finalized && finalized.residual_remaining == 0);
+
+    let observations = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: 150,
+        funding_rate_e9: 0,
+    }];
+    let normalized = market
+        .permissionless_auto_crank_not_atomic(
+            &mut short,
+            AutoCrankWorkV16 {
+                now_slot: work.now_slot,
+                observations: &observations,
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the completed close account must normalize its stale certificate");
+    assert_eq!(
+        normalized.selected,
+        AutoCrankPlanV16::RefreshAccount { asset_index: None }
+    );
+
+    let no_forced_recovery = market
+        .permissionless_auto_crank_not_atomic(&mut short, work)
+        .expect("a completed account close is not market-wide recovery authority");
+    assert_eq!(
+        no_forced_recovery.selected,
+        AutoCrankPlanV16::NoAction,
+        "completed residual work must not terminate unrelated market activity"
+    );
+    assert_eq!(market.header.mode, 0);
+
+    market
+        .resolve_market_not_atomic(work.now_slot)
+        .expect("an explicit market-level transition can start terminal settlement");
+    assert_eq!(market.header.mode, 1);
+
+    let loser_close = market
+        .close_resolved_account_not_atomic(&mut short, 0)
+        .expect("the flat bankrupt account must close in Resolved mode");
+    assert!(matches!(
+        loser_close,
+        percolator::ResolvedCloseOutcomeV16::Closed { payout: 0 }
+    ));
+    let mut winner_closed = false;
+    let mut last_winner_close = None;
+    for _ in 0..8 {
+        let close = market
+            .close_resolved_account_not_atomic(&mut long, 0)
+            .expect("the loss-side obligation must make bounded resolved progress");
+        last_winner_close = Some(close);
+        if matches!(close, percolator::ResolvedCloseOutcomeV16::Closed { .. }) {
+            winner_closed = true;
+            break;
+        }
+    }
+    assert!(
+        winner_closed,
+        "the winner must reach terminal payout finitely: last={last_winner_close:?}, \
+         blockers={}, b_stale={}, stale={}, pnl={}, capital={}, bitmap={:?}, asset={:?}",
+        market.header.resolved_payout_blocker_count.get(),
+        long.header.b_stale_state,
+        long.header.stale_state,
+        long.header.pnl.get(),
+        long.header.capital.get(),
+        long.header.active_bitmap,
+        market.markets[0].engine.asset.try_to_runtime().unwrap(),
+    );
+    assert!(active_bitmap_is_empty(
+        long.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(long.header.capital.get(), 0);
+    assert_eq!(long.header.pnl.get(), 0);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_batch_trade_starts_terminal_residual_only_at_final_fill() {
+    const HALF_Q: u128 = 5 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(2, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(2, 63);
+    let mut short_header = account_fixture(2, 64);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 250).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(2 * HALF_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    for (offset, price) in (105u64..=150).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, price)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap();
+    }
+
+    let outcome = market
+        .execute_batch_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            &[
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: -signed_q(HALF_Q),
+                    exec_price: 150,
+                    fee_bps: 0,
+                },
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: -signed_q(HALF_Q),
+                    exec_price: 150,
+                    fee_bps: 0,
+                },
+            ],
+        )
+        .expect("an intermediate partial close must not lock the final fill");
+
+    assert_eq!(outcome.fill_count, 2);
+    let pending = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(pending.close_id, 1);
+    assert_eq!(pending.gross_loss_at_close_start, 250);
+    assert_eq!(pending.residual_remaining, 250);
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_trade_does_not_charge_prior_multi_asset_deficit_or_force_market_recovery() {
+    const SIZE_Q: u128 = 10 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(2, 100);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+    header.config.max_accrual_dt_slots = V16PodU64::new(1);
+    header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+    let mut long_header = account_fixture(2, 65);
+    let mut short_header = account_fixture(2, 66);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 2_000).unwrap();
+    market.deposit_not_atomic(&mut short, 250).unwrap();
+    for asset_index in 0..2 {
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index,
+                    size_q: signed_q(SIZE_Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    for (offset, price) in (105u64..=150).step_by(5).enumerate() {
+        let slot = 2 + offset as u64;
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, price)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap();
+    }
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(SIZE_Q),
+                exec_price: 150,
+                fee_bps: 0,
+            },
+        )
+        .expect("the first risk-reducing close must remain available");
+    assert_eq!(short.header.pnl.get(), -250);
+    assert_eq!(
+        short.header.liquidation_lock, 1,
+        "detaching one leg from an uncovered multi-asset deficit must retain its unattributed-loss marker"
+    );
+    assert_eq!(
+        short
+            .header
+            .close_progress
+            .try_to_runtime()
+            .unwrap()
+            .residual_remaining,
+        0
+    );
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 1,
+                size_q: -signed_q(SIZE_Q),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .expect("the final risk-reducing close must remain available");
+    assert!(active_bitmap_is_empty(
+        short.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(short.header.liquidation_lock, 1);
+    let ledger = short.header.close_progress.try_to_runtime().unwrap();
+    assert_eq!(ledger.residual_remaining, 0);
+    assert!(
+        !market
+            .build_actionable_summary(&short.as_view())
+            .unwrap()
+            .recovery_eligible,
+        "an unattributed account must not gain authority to recover the whole market"
+    );
+
+    assert_eq!(market.header.mode, 0);
+    market
+        .resolve_market_not_atomic(market.header.current_slot.get())
+        .expect("explicit market resolution handles unattributed terminal debt");
+    let loser_close = market
+        .close_resolved_account_not_atomic(&mut short, 0)
+        .expect("resolved settlement clears unattributed negative PnL without domain guessing");
+    assert!(matches!(
+        loser_close,
+        percolator::ResolvedCloseOutcomeV16::Closed { payout: 0 }
+    ));
+    assert_eq!(short.header.pnl.get(), 0);
+    assert_eq!(short.header.liquidation_lock, 0);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_auto_crank_liquidates_current_account_without_observation() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut account_header = account_fixture(1, 14);
@@ -3183,6 +8570,7 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
         a_basis: ADL_ONE,
         k_snap: asset.k_long,
         f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset.b_long_num,
@@ -3226,6 +8614,122 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
         0,
         "liquidation must close the selected position"
     );
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 15);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    header.vault = V16PodU128::new(50);
+    header.insurance = V16PodU128::new(50);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    for (asset_index, market_slot) in markets.iter_mut().enumerate() {
+        let mut asset = market_slot.engine.asset.try_to_runtime().unwrap();
+        asset.slot_last = 10;
+        asset.oi_eff_long_q = 2 * POS_SCALE;
+        asset.oi_eff_short_q = 2 * POS_SCALE;
+        asset.loss_weight_sum_long = 2 * POS_SCALE;
+        asset.loss_weight_sum_short = 2 * POS_SCALE;
+        asset.stored_pos_count_long = 2;
+        asset.stored_pos_count_short = 2;
+        market_slot.engine.asset = AssetStateV16Account::from_runtime(&asset);
+        account_header.legs[asset_index] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+            active: true,
+            asset_index: asset_index as u32,
+            market_id: asset.market_id,
+            side: SideV16::Long,
+            basis_pos_q: POS_SCALE as i128,
+            a_basis: ADL_ONE,
+            k_snap: asset.k_long,
+            f_snap: asset.f_long_num,
+            kf_epoch_snap: 0,
+            epoch_snap: asset.epoch_long,
+            loss_weight: POS_SCALE,
+            b_snap: asset.b_long_num,
+            b_rem: 0,
+            b_epoch_snap: asset.epoch_long,
+            b_stale: false,
+            stale: false,
+        });
+    }
+    header.resolved_payout_blocker_count = V16PodU64::new(8);
+    account_header.active_bitmap[0] = V16PodU64::new(0b11);
+    account_header.pnl = V16PodI128::new(-5);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market
+        .full_account_refresh_not_atomic(&mut account)
+        .expect("setup must produce a current cross-margin liquidation cert");
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(summary.liquidatable && !summary.recovery_eligible);
+
+    let bitmap_before = account.header.active_bitmap;
+    let pnl_before = account.header.pnl;
+    let capital_before = account.header.capital;
+    let vault_before = market.header.vault;
+    let c_tot_before = market.header.c_tot;
+    let insurance_before = market.header.insurance;
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("recovery-required liquidation must be successful crank progress");
+
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::Liquidate { asset_index: 0 }
+    );
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::RecoveryDeclared(
+            PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+        ))
+    );
+    assert_eq!(market.header.mode, 2, "market must commit Recovery mode");
+    assert_eq!(account.header.active_bitmap, bitmap_before);
+    assert_eq!(account.header.pnl, pnl_before);
+    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+
+    let recovery_reason_before = market.header.recovery_reason;
+    let finalized = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("the next public crank must finalize Recovery into Resolved");
+    assert_eq!(finalized.selected, AutoCrankPlanV16::FinalizeRecovery);
+    assert_eq!(finalized.outcome, AutoCrankOutcomeV16::RecoveryResolved);
+    assert_eq!(
+        market.header.mode, 1,
+        "terminal close must become reachable"
+    );
+    assert_eq!(market.header.recovery_reason, recovery_reason_before);
+    assert_eq!(account.header.active_bitmap, bitmap_before);
+    assert_eq!(account.header.pnl, pnl_before);
+    assert_eq!(account.header.capital, capital_before);
+    assert_eq!(market.header.vault, vault_before);
+    assert_eq!(market.header.c_tot, c_tot_before);
+    assert_eq!(market.header.insurance, insurance_before);
     market.validate_shape().unwrap();
     account.validate_with_market(&market.as_view()).unwrap();
 }
@@ -3342,6 +8846,59 @@ fn v16_auto_crank_classifies_payout_ready_resolved_winner_without_snapshot() {
     assert!(!summary.recovery_eligible && !summary.stale && !summary.liquidatable);
 }
 
+#[test]
+fn v16_auto_crank_normalizes_empty_resolved_account_fee_anchor() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 43);
+    account_header.last_fee_slot = V16PodU64::new(0);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.resolve_market_not_atomic(1).unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    assert!(active_bitmap_is_empty(
+        account.header.active_bitmap.map(V16PodU64::get)
+    ));
+    assert_eq!(account.header.capital.get(), 0);
+    assert_eq!(account.header.pnl.get(), 0);
+    assert_eq!(account.header.reserved_pnl.get(), 0);
+    assert_eq!(account.header.fee_credits.get(), 0);
+    assert_eq!(account.header.cancel_deposit_escrow.get(), 0);
+    assert_eq!(account.header.last_fee_slot.get(), 0);
+    assert_eq!(market.header.resolved_slot.get(), 1);
+
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(
+        summary.resolved_winner,
+        "an empty account with a stale resolved fee anchor still has one bounded normalization step"
+    );
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 1,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(result.selected, AutoCrankPlanV16::CloseResolved);
+    assert_eq!(
+        result.outcome,
+        AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { payout: 0 })
+    );
+    assert_eq!(account.header.last_fee_slot.get(), 1);
+    assert!(
+        !market
+            .build_actionable_summary(&account.as_view())
+            .unwrap()
+            .is_actionable(),
+        "the one-step fee-anchor normalization must reach a fixed point"
+    );
+}
+
 // ROADMAP 3C step 4 — b-stale dispatch arm: an account with a b-stale active leg
 // is classified b_stale (priority over the stale-cert refresh), and the auto-crank
 // dispatches the B-chunk settle without requiring oracle observations.
@@ -3372,6 +8929,7 @@ fn v16_auto_crank_settles_b_stale_leg() {
         a_basis: ADL_ONE,
         k_snap: asset0.k_long,
         f_snap: asset0.f_long_num,
+        kf_epoch_snap: 0,
         epoch_snap: asset0.epoch_long,
         loss_weight: POS_SCALE,
         b_snap: asset0.b_long_num,
@@ -3412,6 +8970,85 @@ fn v16_auto_crank_settles_b_stale_leg() {
         AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountBChunk(_))
     ));
     market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_auto_crank_settles_latent_b_delta_on_recovery_leg() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 52);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, 1_000).unwrap();
+    }
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.lifecycle = AssetLifecycleV16::Recovery;
+    asset.slot_last = 10;
+    asset.b_long_num = SOCIAL_LOSS_DEN / POS_SCALE;
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
+
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    account.validate_with_market(&market.as_view()).unwrap();
+    let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+    assert!(
+        summary.b_stale,
+        "a current B target above the leg snapshot is actionable even when the cached stale bit is false: {summary:?}"
+    );
+
+    let result = market
+        .permissionless_auto_crank_not_atomic(
+            &mut account,
+            AutoCrankWorkV16 {
+                now_slot: 10,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .expect("latent Recovery B must have a permissionless bounded continuation");
+    assert_eq!(
+        result.selected,
+        AutoCrankPlanV16::SettleBChunk { asset_index: 0 }
+    );
+    assert!(matches!(
+        result.outcome,
+        AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountBChunk(_))
+    ));
+    let settled_leg = account.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(settled_leg.b_snap, asset.b_long_num);
+    assert_eq!(account.header.pnl.get(), -1);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
 }
 
 // ENGINE.MD order-insensitivity: when the engine-selected step needs an
@@ -3616,6 +9253,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 a_basis: ADL_ONE,
                 k_snap: asset0.k_long,
                 f_snap: asset0.f_long_num,
+                kf_epoch_snap: 0,
                 epoch_snap: asset0.epoch_long,
                 loss_weight: POS_SCALE,
                 b_snap: asset0.b_long_num,
@@ -3630,6 +9268,69 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         0,
         10,
         AutoCrankPlanV16::SettleBChunk { asset_index: 0 },
+        false,
+    );
+
+    // --- A3 pending_close: the immutable close ledger carries all dispatch
+    // inputs, so AdvanceClose must not depend on a caller observation.
+    assert_observation_independent(
+        "pending_close",
+        || {
+            const SIZE_Q: u128 = 10 * POS_SCALE;
+            let (mut header, mut markets) = market_fixture(1, 100);
+            header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+            header.config.initial_margin_bps = V16PodU64::new(1_000);
+            header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
+            header.config.max_accrual_dt_slots = V16PodU64::new(1);
+            header.config.min_funding_lifetime_slots = V16PodU64::new(1);
+            header.config.public_b_chunk_atoms = V16PodU128::new(100);
+            let mut long_header = account_fixture(1, 211);
+            let mut short_header = account_fixture(1, 212);
+            {
+                let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+                let mut long = PortfolioV16ViewMut::new(&mut long_header);
+                let mut short = PortfolioV16ViewMut::new(&mut short_header);
+                market.deposit_not_atomic(&mut long, 1_000).unwrap();
+                market.deposit_not_atomic(&mut short, 250).unwrap();
+                market
+                    .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                        &mut long,
+                        &mut short,
+                        TradeRequestV16 {
+                            asset_index: 0,
+                            size_q: signed_q(SIZE_Q),
+                            exec_price: 100,
+                            fee_bps: 0,
+                        },
+                    )
+                    .unwrap();
+                for (offset, price) in (105u64..=150).step_by(5).enumerate() {
+                    let slot = 2 + offset as u64;
+                    market
+                        .set_asset_raw_oracle_target_not_atomic(0, price)
+                        .unwrap();
+                    market
+                        .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+                        .unwrap();
+                }
+                market
+                    .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                        &mut long,
+                        &mut short,
+                        TradeRequestV16 {
+                            asset_index: 0,
+                            size_q: -signed_q(SIZE_Q),
+                            exec_price: 150,
+                            fee_bps: 0,
+                        },
+                    )
+                    .unwrap();
+            }
+            (header, markets, short_header)
+        },
+        0,
+        11,
+        AutoCrankPlanV16::AdvanceClose,
         false,
     );
 
@@ -3664,6 +9365,7 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
                 a_basis: ADL_ONE,
                 k_snap: asset.k_long,
                 f_snap: asset.f_long_num,
+                kf_epoch_snap: 0,
                 epoch_snap: asset.epoch_long,
                 loss_weight: POS_SCALE,
                 b_snap: asset.b_long_num,
@@ -3685,6 +9387,17 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         0,
         10,
         AutoCrankPlanV16::Liquidate { asset_index: 0 },
+        false,
+    );
+
+    // --- A6 flat source lien: release uses only the current certificate and
+    // committed source ledgers, so no oracle observation may gate the exit.
+    assert_observation_independent(
+        "flat_source_lien",
+        || flat_source_credit_lien_fixture(1),
+        0,
+        0,
+        AutoCrankPlanV16::ReleaseSourceLiens,
         false,
     );
 
@@ -3728,7 +9441,26 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 
-    // --- A7 resolved_winner: CloseResolved needs no price -> observation REDUNDANT.
+    // --- A7 terminal Recovery: the next step is a value-neutral transition to
+    // Resolved and needs no oracle observation.
+    assert_observation_independent(
+        "finalize_recovery",
+        || {
+            let (mut header, markets) = market_fixture(1, 100);
+            let account_header = account_fixture(1, 205);
+            header.mode = 2;
+            header.recovery_reason = V16OptionalRecoveryReasonAccount::from_runtime(Some(
+                PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+            ));
+            (header, markets, account_header)
+        },
+        0,
+        10,
+        AutoCrankPlanV16::FinalizeRecovery,
+        false,
+    );
+
+    // --- A8 resolved_winner: CloseResolved needs no price -> observation REDUNDANT.
     // (Previously only its CLASSIFICATION was tested; the empty-observation DISPATCH
     // — including a legitimate RecoveryRequired terminal — was uncovered.)
     assert_observation_independent(

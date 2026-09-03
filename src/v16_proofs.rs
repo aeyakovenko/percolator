@@ -12,6 +12,122 @@ use super::*;
 use crate::wide_math::{checked_mul_div_ceil_u256, U256};
 use crate::{BOUND_SCALE, MAX_VAULT_TVL, V16_TOKEN_VALUE_CLASS_COUNT};
 
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_account_kf_settlement_key_roundtrip_and_priority() {
+    let phase: u8 = kani::any();
+    let source_domain: usize = kani::any();
+    let leg_slot: usize = kani::any();
+    kani::assume(phase <= 1);
+    kani::assume(source_domain <= ACCOUNT_KF_SETTLEMENT_DOMAIN_MAX as usize);
+    kani::assume(leg_slot < V16_MAX_PORTFOLIO_ASSETS_N);
+
+    let key = account_kf_settlement_plan_key(phase, source_domain, leg_slot).unwrap();
+    assert!(key <= ACCOUNT_KF_SETTLEMENT_KEY_MAX);
+    assert_eq!(
+        decode_account_kf_settlement_plan_key(key),
+        Ok((phase, source_domain, leg_slot)),
+    );
+
+    let other_domain: usize = kani::any();
+    let other_slot: usize = kani::any();
+    kani::assume(other_domain <= ACCOUNT_KF_SETTLEMENT_DOMAIN_MAX as usize);
+    kani::assume(other_slot < V16_MAX_PORTFOLIO_ASSETS_N);
+    let loss_key = account_kf_settlement_plan_key(0, source_domain, leg_slot).unwrap();
+    let gain_key = account_kf_settlement_plan_key(1, other_domain, other_slot).unwrap();
+    assert!(loss_key < gain_key);
+
+    if source_domain < other_domain {
+        let earlier_domain =
+            account_kf_settlement_plan_key(phase, source_domain, leg_slot).unwrap();
+        let later_domain = account_kf_settlement_plan_key(phase, other_domain, other_slot).unwrap();
+        assert!(earlier_domain < later_domain);
+    }
+    if leg_slot < other_slot {
+        let earlier_slot = account_kf_settlement_plan_key(phase, source_domain, leg_slot).unwrap();
+        let later_slot = account_kf_settlement_plan_key(phase, source_domain, other_slot).unwrap();
+        assert!(earlier_slot < later_slot);
+    }
+}
+
+// The whole-account K/F settlement plan is built one entry at a time by this
+// production insertion kernel. Prove the induction step over the full 16-leg
+// bound: any sorted valid prefix remains sorted, gains exactly the incoming
+// entry, loses no existing entry, and leaves the unused tail untouched.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::unwind(18)]
+#[kani::solver(cadical)]
+fn proof_account_kf_settlement_plan_insert_preserves_order_and_multiset() {
+    let entries: [u64; V16_MAX_PORTFOLIO_ASSETS_N] = kani::any();
+    let incoming: u64 = kani::any();
+    let prefix_len: usize = kani::any();
+    kani::assume(prefix_len < V16_MAX_PORTFOLIO_ASSETS_N);
+    kani::assume(incoming <= ACCOUNT_KF_SETTLEMENT_KEY_MAX);
+
+    let mut plan = [None; V16_MAX_PORTFOLIO_ASSETS_N];
+    let mut index = 0usize;
+    while index < prefix_len {
+        kani::assume(entries[index] <= ACCOUNT_KF_SETTLEMENT_KEY_MAX);
+        plan[index] = Some(entries[index]);
+        index += 1;
+    }
+    index = 1;
+    while index < prefix_len {
+        kani::assume(entries[index - 1] <= entries[index]);
+        index += 1;
+    }
+
+    let before = plan;
+    let mut expected_insert_at = prefix_len;
+    index = 0;
+    while index < prefix_len {
+        if incoming < entries[index] {
+            expected_insert_at = index;
+            break;
+        }
+        index += 1;
+    }
+    let next_len = match insert_account_kf_settlement_plan_entry(&mut plan, prefix_len, incoming) {
+        Ok(next_len) => next_len,
+        Err(_) => {
+            assert!(false, "a valid entry must fit in a non-full canonical plan");
+            return;
+        }
+    };
+    let mut proof_holds = next_len == prefix_len + 1;
+
+    index = 0;
+    while index < next_len {
+        proof_holds &= plan[index].is_some();
+        if index > 0 {
+            proof_holds &= plan[index - 1] <= plan[index];
+        }
+        index += 1;
+    }
+    while index < V16_MAX_PORTFOLIO_ASSETS_N {
+        proof_holds &= plan[index].is_none();
+        index += 1;
+    }
+
+    // The forward reference scan chooses the first strictly greater key. The
+    // production backward scan must produce that exact stable insertion:
+    // unchanged prefix, incoming entry, then the old suffix shifted by one.
+    index = 0;
+    while index < expected_insert_at {
+        proof_holds &= plan[index] == before[index];
+        index += 1;
+    }
+    proof_holds &= plan[expected_insert_at] == Some(incoming);
+    index = expected_insert_at + 1;
+    while index < next_len {
+        proof_holds &= plan[index] == before[index - 1];
+        index += 1;
+    }
+    assert!(proof_holds);
+}
+
 // ===================== KANI FUNCTION-CONTRACT LAYER =====================
 // Built ONLY by scripts/contracts_runner.sh (cargo feature `contracts` +
 // CLI -Z function-contracts + a separate CARGO_TARGET_DIR). The main proof
@@ -490,6 +606,31 @@ fn contract_check_prepare_source_positive_claim_bound_delta() {
         claim_bound_num,
         exact_claim_num,
     );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::prepare_source_positive_claim_burn_delta)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_prepare_source_positive_claim_burn_delta() {
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: kani::any(),
+        valid_liened_backing_num: kani::any(),
+        impaired_liened_backing_num: kani::any(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: kani::any(),
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let face_burn_num: u128 = kani::any();
+    kani::assume(source.exact_positive_claim_num <= source.positive_claim_bound_num);
+    kani::assume(face_burn_num <= source.positive_claim_bound_num);
+    let _ = V16Core::prepare_source_positive_claim_burn_delta(source, face_burn_num);
 }
 
 #[cfg(all(kani, feature = "contracts"))]
@@ -1400,6 +1541,7 @@ fn contract_check_kernel_resize_leg_same_side() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        kf_epoch_snap: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -1422,6 +1564,8 @@ fn contract_check_kernel_resize_leg_same_side() {
         k_short: kani::any(),
         f_long_num: kani::any(),
         f_short_num: kani::any(),
+        kf_epoch_long: kani::any(),
+        kf_epoch_short: kani::any(),
         k_epoch_start_long: kani::any(),
         k_epoch_start_short: kani::any(),
         f_epoch_start_long_num: kani::any(),
@@ -1462,6 +1606,8 @@ fn contract_check_kernel_resize_leg_same_side() {
     let new_signed: i128 = kani::any();
     let new_weight: u128 = kani::any();
     let preserve: bool = kani::any();
+    let old_effective_abs: u128 = kani::any();
+    let new_effective_abs: u128 = kani::any();
     kani::assume(new_signed != 0);
     kani::assume(new_signed > i128::MIN);
     let _ = V16Core::kernel_resize_leg_same_side(
@@ -1470,6 +1616,8 @@ fn contract_check_kernel_resize_leg_same_side() {
         new_signed,
         new_weight,
         preserve,
+        old_effective_abs,
+        new_effective_abs,
     );
 }
 
@@ -1492,6 +1640,8 @@ fn contract_check_kernel_attach_leg() {
         k_short: kani::any(),
         f_long_num: kani::any(),
         f_short_num: kani::any(),
+        kf_epoch_long: kani::any(),
+        kf_epoch_short: kani::any(),
         k_epoch_start_long: kani::any(),
         k_epoch_start_short: kani::any(),
         f_epoch_start_long_num: kani::any(),
@@ -1548,6 +1698,17 @@ fn contract_check_kernel_attach_leg() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_normalize_social_loss_carry)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_normalize_social_loss_carry() {
+    let remainder: u128 = kani::any();
+    let dust: u128 = kani::any();
+    let explicit_loss: u128 = kani::any();
+    let _ = V16Core::kernel_normalize_social_loss_carry(remainder, dust, explicit_loss);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::kernel_clear_leg)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -1565,6 +1726,7 @@ fn contract_check_kernel_clear_leg() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        kf_epoch_snap: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -1587,6 +1749,8 @@ fn contract_check_kernel_clear_leg() {
         k_short: kani::any(),
         f_long_num: kani::any(),
         f_short_num: kani::any(),
+        kf_epoch_long: kani::any(),
+        kf_epoch_short: kani::any(),
         k_epoch_start_long: kani::any(),
         k_epoch_start_short: kani::any(),
         f_epoch_start_long_num: kani::any(),
@@ -1625,7 +1789,8 @@ fn contract_check_kernel_clear_leg() {
         },
     };
     kani::assume(leg.basis_pos_q > i128::MIN);
-    let _ = V16Core::kernel_clear_leg(leg, asset);
+    let clear_effective_oi_q: u128 = kani::any();
+    let _ = V16Core::kernel_clear_leg(leg, asset, clear_effective_oi_q);
 }
 
 #[cfg(all(kani, feature = "contracts"))]
@@ -1646,6 +1811,7 @@ fn contract_check_kernel_advance_leg_b_snap() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        kf_epoch_snap: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -1793,6 +1959,8 @@ fn contract_check_kernel_accumulate_batch_trade() {
         fee_b: kani::any(),
         notional: kani::any(),
         risk_increasing: kani::any(),
+        long_requires_initial_margin: kani::any(),
+        short_requires_initial_margin: kani::any(),
         long_has_source_claims: kani::any(),
         short_has_source_claims: kani::any(),
     };
@@ -2079,6 +2247,7 @@ fn liveness_b_stale_leg_has_advancing_chunk() {
         a_basis: kani::any(),
         k_snap: kani::any(),
         f_snap: kani::any(),
+        kf_epoch_snap: kani::any(),
         epoch_snap: kani::any(),
         loss_weight: kani::any(),
         b_snap: kani::any(),
@@ -2215,6 +2384,172 @@ fn composition_attach_value_conservation_under_axiom() {
     assert_eq!(leg_basis, basis);
 }
 
+// Credit-rate arithmetic is already discharged against an independent model
+// in rounding_residue_fuzz. This abstraction preserves the exact extrema used
+// by the source-lien unwind (zero available backing => zero rate; no claim or
+// enough available backing => full rate) and over-approximates only the
+// division-bearing partial-haircut branch, which this composition never uses.
+#[cfg(all(kani, feature = "closure"))]
+fn axiom_source_credit_rate_extrema(state: SourceCreditStateV16) -> V16Result<u128> {
+    V16Core::validate_source_credit_state_shape_static(state)?;
+    let available = V16Core::available_backing_num_for_source_credit_state(state)?;
+    if state.positive_claim_bound_num == 0 || available >= state.positive_claim_bound_num {
+        return Ok(CREDIT_RATE_SCALE);
+    }
+    if available == 0 {
+        return Ok(0);
+    }
+    let rate: u128 = kani::any();
+    kani::assume(rate < CREDIT_RATE_SCALE);
+    Ok(rate)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn complete_counterparty_source_lien_fixture(
+    claim: u128,
+) -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+) {
+    let face_num = claim * BOUND_SCALE;
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    let mut account = PortfolioAccountV16Account::default();
+    account
+        .init_empty_in_place(ProvenanceHeaderV16Account::from_runtime(
+            &ProvenanceHeaderV16::new([1u8; 32], [2u8; 32], [3u8; 32]),
+        ))
+        .unwrap();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(claim);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(face_num);
+    header.source_claim_bound_total_num = V16PodU128::new(face_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(face_num);
+    account.pnl = V16PodI128::new(claim as i128);
+    account.source_domains[0] = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(0),
+        source_claim_market_id: V16PodU64::new(market_id),
+        source_claim_bound_num: V16PodU128::new(face_num),
+        source_claim_liened_num: V16PodU128::new(face_num),
+        source_claim_counterparty_liened_num: V16PodU128::new(face_num),
+        source_lien_effective_reserved: V16PodU128::new(claim),
+        source_lien_counterparty_backing_num: V16PodU128::new(face_num),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        valid_liened_backing_num: face_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: face_num,
+            exact_positive_claim_num: face_num,
+            fresh_reserved_backing_num: face_num,
+            valid_liened_backing_num: face_num,
+            credit_rate_num: 0,
+            ..SourceCreditStateV16::EMPTY
+        });
+    (header, markets, account)
+}
+
+// Nonvacuity companion for the whole-setter composition below. Keeping the
+// fixture in one constructor prevents the validity proof and mutation proof
+// from silently drifting while avoiding three full validation scans in one
+// CBMC query.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    axiom_source_credit_rate_extrema
+)]
+fn composition_complete_counterparty_source_lien_fixture_is_valid_under_rate_axiom() {
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    let (mut header, mut markets, mut account_header) =
+        complete_counterparty_source_lien_fixture(claim_raw as u128);
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
+    kani::cover!(claim_raw > 1, "nontrivial valid complete source lien");
+}
+
+// INV-071/073 whole-setter composition: a valid live positive-PnL claim whose
+// complete face is counterparty-liened cannot survive the canonical PnL setter
+// crossing below zero. Every close-producing route uses this setter before it
+// can install a pending residual, so a source-lien release cannot remain hidden
+// behind the higher-priority close continuation.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    axiom_source_credit_rate_extrema
+)]
+fn composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom() {
+    let claim_raw: u8 = kani::any();
+    let loss_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&claim_raw));
+    kani::assume((1..=8).contains(&loss_raw));
+    let claim = claim_raw as u128;
+    let face_num = claim * BOUND_SCALE;
+    let loss = loss_raw as i128;
+
+    let (mut header, mut markets, mut account_header) =
+        complete_counterparty_source_lien_fixture(claim);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    market.set_account_pnl(&mut account, -loss).unwrap();
+
+    kani::cover!(
+        claim > 1 && loss > 1,
+        "nontrivial source-lien loss crossing"
+    );
+    assert_eq!(account.header.pnl.get(), -loss);
+    assert!(account
+        .header
+        .source_domains
+        .iter()
+        .all(|source| source.source_claim_bound_num.get() == 0
+            && source.source_claim_liened_num.get() == 0
+            && source.source_claim_impaired_num.get() == 0));
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.fresh_unliened_backing_num, face_num);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(source.positive_claim_bound_num, 0);
+    assert_eq!(source.exact_positive_claim_num, 0);
+    assert_eq!(source.valid_liened_backing_num, 0);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_bound_tot_num.get(), 0);
+    assert_eq!(market.header.source_claim_bound_total_num.get(), 0);
+}
+
 // VALUE-CONSERVATION composition for the CLEAR body — the inverse of attach,
 // and a second instance of the helper-stub recipe (the review's named next
 // candidate). clear has NO division (it subtracts the leg's STORED weight), so
@@ -2334,6 +2669,47 @@ fn contract_check_kernel_resolved_payout_step() {
     let claimable: u128 = kani::any();
     let vault: u128 = kani::any();
     let _ = V16Core::kernel_resolved_payout_step(claimable, vault);
+}
+
+// INV-067: full-domain contract check for the conversion partition used by
+// resolved close. A source haircut can change attribution, but only atoms
+// actually converted to capital may leave terminal junior claim face.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_released_pnl_conversion_partition)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_released_pnl_conversion_partition() {
+    let positive_face: u128 = kani::any();
+    let converted: u128 = kani::any();
+    let source_face_burn: u128 = kani::any();
+    let retain_haircut_face: bool = kani::any();
+    let _ = V16Core::kernel_released_pnl_conversion_partition(
+        positive_face,
+        converted,
+        source_face_burn,
+        retain_haircut_face,
+    );
+}
+
+// INV-067/INV-071: a bounded resolved close may realize one source domain per
+// call. Prove that its unconverted haircut is reserved exactly once and that
+// the remaining released PnL is precisely the unprocessed source-attributed
+// face, preventing a later source from realizing the same junior value.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_retain_terminal_source_haircut)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_retain_terminal_source_haircut() {
+    let positive_pnl: u128 = kani::any();
+    let reserved_pnl: u128 = kani::any();
+    let source_attributed_face: u128 = kani::any();
+    let converted: u128 = kani::any();
+    let _ = V16Core::kernel_retain_terminal_source_haircut(
+        positive_pnl,
+        reserved_pnl,
+        source_attributed_face,
+        converted,
+    );
 }
 
 // ROADMAP Phase 3A.1 (Pillar S, trade spine): full-domain contract check of the
@@ -2488,14 +2864,15 @@ fn contract_check_kernel_cert_is_current() {
 
 // ROADMAP 3C step 3 (A7 close-rank fidelity): full-domain contract check that
 // build_resolved_close_rank maps each real per-component signal to its rank flag
-// (b-stale, negative PnL, live leg via non-empty bitmap, capital, receipt,
-// recovery). unwind(16): the active-bitmap is-empty scan / memcmp.
+// (b-stale, signed PnL, live leg via non-empty bitmap, source claim, capital,
+// receipt, recovery). unwind(16): the active-bitmap is-empty scan / memcmp.
 #[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::build_resolved_close_rank)]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
 fn contract_check_build_resolved_close_rank() {
     let _ = V16Core::build_resolved_close_rank(
+        kani::any(),
         kani::any(),
         kani::any(),
         kani::any(),
@@ -2521,7 +2898,19 @@ fn contract_check_actionable_summary_from_signals() {
         kani::any(),
         kani::any(),
         kani::any(),
+        kani::any(),
     );
+}
+
+// INV-076/074: close-snapshot freshness is scoped to the originating asset.
+// The production guard has no market-wide slot input, so unrelated accrual is
+// observationally irrelevant; only an attached originating leg whose own asset
+// slot advanced beyond the immutable anchor is stale.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_open_close_snapshot_is_stale)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_open_close_snapshot_is_stale() {
+    let _ = V16Core::kernel_open_close_snapshot_is_stale(kani::any(), kani::any(), kani::any());
 }
 
 // ROADMAP workstream B.3 (social-loss shell, no-LoF): the live booking division
@@ -2585,6 +2974,46 @@ fn contract_check_kernel_bresidual_step() {
     };
     let resolved: bool = kani::any();
     let _ = V16Core::kernel_bresidual_step(residual_remaining, booked, resolved);
+}
+
+// Exhaustive scalar routing for terminal forfeit: the formerly rollback-only
+// zero-capacity branch is uniquely classified as successful Recovery progress.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_forfeit_residual_step)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_forfeit_residual_step() {
+    let residual_remaining: u128 = kani::any();
+    let booking_capacity: u128 = kani::any();
+    let _ = V16Core::kernel_forfeit_residual_step(residual_remaining, booking_capacity);
+}
+
+// A Recovery exit that moves basis to zero preserves the exact loss weight and
+// only changes effective OI plus the matching pending-obligation count.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_retain_leg_as_pending_obligation)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_retain_leg_as_pending_obligation() {
+    let leg: PortfolioLegV16 = kani::any();
+    let asset: AssetStateV16 = kani::any();
+    let retained_effective_oi_q: u128 = kani::any();
+    let _ = V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, retained_effective_oi_q);
+}
+
+// Exhaust all lifecycle/count inputs for the overlap-safe release predicate.
+// Recovery release is possible exactly when every opposite stored leg is
+// already a zero-basis obligation; malformed count summaries fail closed.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_recovery_pending_obligation_release_allowed)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_recovery_pending_obligation_release_allowed() {
+    let lifecycle: AssetLifecycleV16 = kani::any();
+    let opposite_stored_count: u64 = kani::any();
+    let opposite_pending_count: u64 = kani::any();
+    let _ = V16Core::kernel_recovery_pending_obligation_release_allowed(
+        lifecycle,
+        opposite_stored_count,
+        opposite_pending_count,
+    );
 }
 
 // ROADMAP workstream B.2 (cross-layer conservation): book_bankruptcy_residual_
@@ -2769,4 +3198,25 @@ fn contract_check_select_auto_crank_plan() {
         refresh_asset,
         recovery_reason,
     );
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_mark_kf_stale_cohorts)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_mark_kf_stale_cohorts() {
+    let asset: AssetStateV16 = kani::any();
+    let long_changed: bool = kani::any();
+    let short_changed: bool = kani::any();
+    let cohort_epoch: u64 = kani::any();
+    let _ = V16Core::kernel_mark_kf_stale_cohorts(asset, long_changed, short_changed, cohort_epoch);
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_settle_kf_stale_cohort)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_settle_kf_stale_cohort() {
+    let asset: AssetStateV16 = kani::any();
+    let side: SideV16 = kani::any();
+    let leg_kf_epoch_snap: u64 = kani::any();
+    let _ = V16Core::kernel_settle_kf_stale_cohort(asset, side, leg_kf_epoch_snap);
 }

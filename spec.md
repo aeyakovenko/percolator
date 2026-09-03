@@ -1,8 +1,10 @@
-# Risk Engine Spec (Source of Truth) — v16.9.0 Realizable Full Shared Cross-Margin
+# Risk Engine Spec (Source of Truth) — v16.9.1 Realizable Full Shared Cross-Margin
 
 **Design:** protected principal + full instance-local cross-margin + source-domain realizable PnL credit + source-credit liens + insurance-credit reservations + exact counterparty/insurance lien lifecycle + single-category residual-cure accounting + quote-value flow proof + reservation encumbrance proof + stock reconciliation + explicit rounding-residue sink + reserved recovery-fallback envelope (mechanism reserved; see req 31) + expiry-reconciled backing buckets + non-double-counted insurance capacity + single-sided margin penalties + exclusive per-domain close serialization + local market-side bankruptcy domains + mutable asset lifecycle + domain-serialized bankrupt close + durable close-progress ledger + pending-loss obligations + instance isolation.  
 **Scope:** one Percolator market-group instance for one quote-token vault, with up to `N` configured asset slots per `PortfolioAccount` and unbounded global account count. A UI MAY aggregate multiple instances, but each instance is an independent vault, solvency, credit, insurance, B, PnL, payout, and recovery domain.  
 **Status:** normative source of truth. Terms **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are normative.
+
+This revision (v16.9.1) supersedes v16.9.0 by making whole-account K/F settlement order normative: each refresh builds one bounded plan from all active legs, applies newly observed negative deltas before newly observed nonnegative deltas, and orders each phase by source domain then canonical leg slot. This prevents keeper-selected account or leg order from deciding whether same-refresh gains erase losses before those losses reserve source-domain backing. The rule is account-local and never nets value across source domains; historical positive face retains the v16.9.0 support-and-burn semantics. The production key encoding and full 16-entry insertion step are machine-proven, and three-asset price-only and funding-only regressions check all leg permutations and both counterparty refresh orders against exact domain-local stocks and funding counters.
 
 This revision (v16.9.0) supersedes v16.8.11 by reconciling three specified-but-never-implemented mechanisms with the PROVEN implementation (formal-verification campaign, ~265 certified Kani artifacts: conservation lattice, function contracts, inductive closure, exact whole-state frames, no-steal composition in `scripts/no-steal-theorem.md`): (1) requirement 21's priority-preemption (`ClosePriority` tuple) is replaced by the implemented and machine-proven EXCLUSIVE close serialization — one active close per domain via the pending-domain-loss barrier (occupied-domain begin rejects before mutation), one active close per account, strictly monotone `close_id`, liveness via the immutable `max_close_slot` lifetime; hold-and-wait and livelock are impossible by construction rather than by comparison; (2) requirement 23's close-drift reserve is replaced by the implemented bounded-lifetime rule — `drift_consumed` remains a reserved, always-zero partition category (no engine path funds a drift reserve) so the ledger shape is forward-compatible; (3) requirement 31's recovery fallback pricing is marked RESERVED — the config knobs exist and are bound-validated but no code path may synthesize fallback prices until the mechanism lands with its own envelope proofs; recovery operates on the last authenticated effective price with proven accounting-neutral transitions. This revision supersedes v16.8.10 with reviewer-driven wording precision (no engine change): (1) realization is RELEASE pre-existing liens then CREATE-AND-CONSUME fresh backing — it never consumes a Released lien (the prior "release followed by consumption" wording mis-described the lien state machine); (2) flow-proof obligation is keyed on the FUNDED-STOCK DEBIT, not the destination — counterparty cure (no funded debit, pure reclassification to the derived junior pool) is exempt like forfeit, insurance cure (debits I) keeps its CloseInsuranceSpent flow proof, resolving the v16.8.10 exemption-predicate-vs-req-12 inconsistency; (3) reserve crystallizes on a REALIZED-loss settlement with basis rebase, not on mark-to-market refresh (no unrealized-drawdown ratchet, no double-charge); (4) the realization payout is characterized as realizable-limited and conservation-exact (proven across the full backing range) rather than monotone — the unbacked shortfall is refined back to the junior pool, and snapshot order-independence is stated precisely. v16.8.10 superseded v16.8.9 with one typing clarification: forfeit moves (impair/expiry) whose only credit is the derived closing class `junior_residual_pool` are proven by their `ReservationEncumbranceProof` plus the lockstepped `counterparty_backing_principal` aggregate delta and the residual identity — not by a `TokenValueFlowProof` credit entry, which would double-book a derived class; all moves with non-derived destinations keep their balanced flow proofs. v16.8.9 superseded v16.8.8 by closing the `counterparty_backing_principal` lifecycle over ALL transitions that move `Σ fresh_reserved_backing_num` (a v16.8.8 review showed conservation was stated only for reserve/consume): (1) the stock equality gains its defined CLOSING class `junior_residual_pool` (and `backing_provider_earnings`), so impairment and expiry are not orphanings — the forfeited principal lands atom-for-atom in the junior pool with `V` flat (engine-proven: the impair/expiry witnesses are value-neutral on `V/C_tot/I` and raise residual by exactly the forfeit); (2) the phantom "release (claim no longer owed): principal −X; C_tot += X" lifecycle line is REMOVED — reserve crystallizes a realized loss, so no internal backing→capital teardown exists or may be synthesized, and the only "release" is the lien un-pledge encumbrance relabel (no stock movement); (3) the lifecycle table now lists every transition with its lockstepped stock movement (external deposit/withdrawal, reserve, un-pledge, realize, cure, forfeit) and clarifies the reserve flow-proof transit label (`ExplicitBackedLoss`) does not name the destination class; (4) proof item 24's partition→class map is scoped per cure transition (transit classes net to zero at reconciliation points; no persistent sub-decomposition of `support_consumed` is required). The v16.8.8 corrections (below) stand. This revision supersedes v16.8.7 with stock-class typing closures for the terminal-realization mechanism: (1) `counterparty_backing_principal` is named as a FIRST-CLASS persistent stock class in the §5.1.1 equality (not merely a senior-stack inequality term), so the conservation of counterparty-backed realization is explicit — `C_tot += X` is funded by `counterparty_backing_principal -= X`, with the full reserve→realize→release lifecycle and its `TokenValueFlowProof` transit classes (`ExplicitBackedLoss`, `CloseCounterpartyCreditConsumed`) spelled out; (2) requirement 13's flow-proof ban is scoped to the `BackingBucket` encumbrance counters only, explicitly NOT the `counterparty_backing_principal` stock class or the transit value classes; (3) realization EXTENT is defined (consume the backed face, credit `floor(r·F)`, burn the consumed face so it never also enters the receipt pool; only non-source-backed PnL survives into the pool) with `total_paid ≤ face` and idempotence; (4) §14 proof items 22/24 are rewritten to the single-category (`support_consumed`) model with a pinned partition→close-flow-class map so per-class reconciliation (proof 102) is well-defined. The earlier v16.8.7 corrections (below) stand. This revision supersedes v16.8.6 with two corrections. (1) The residual partition no longer lists `consumed_counterparty_credit_lien_backing` as a separate subtrahend: ALL source-credit lien consumption used for residual cure (counterparty- or insurance-backed) is recorded exactly once as `support_consumed`, `insurance_spent` records direct insurance allocation only, and partition categories are pairwise disjoint — the prior text put counterparty-backed liens inside `SupportPool` while also requiring a standalone counterparty subtrahend, so one conforming reading subtracted the same cure twice and finalized closes with uncovered loss. (2) The v16.8.6 senior classification of recoverable counterparty backing principal is completed with a terminal-realization rule: at resolved close, an account's outstanding source-credit claims MUST be realized against their domain backing at the current credit rate before the claim face enters the resolved payout receipt pool; otherwise resolution would strip claims that were realizable in Live (the wind-down releases the backing to the provider while the winner is haircut from a pool that excludes it). v16.8.6 classified recoverable counterparty backing principal as senior-side vault stock (`C_tot + I + backing_provider_earnings + counterparty_backing_principal <= V`, excluded from the junior residual pool and the resolved payout snapshot); v16.8.5 superseded v16.8.4 for the product goal of Hyperliquid-like cross-margin UX in permissionless accounts while containing oracle/market failure by limiting usable PnL to realizable source-domain backing.
 
@@ -97,6 +99,18 @@ Every live, resolved, raw target, effective engine, and recovery price (and any 
 RiskNotional(asset, account) =
     0 if effective_pos_q == 0
     else ceil(abs(effective_pos_q) * conservative_effective_price / POS_SCALE)
+
+effective_pos_q =
+    0 for a prior-reset obligation
+    else sign(raw_basis_pos_q)
+       * ceil(abs(raw_basis_pos_q) * current_A_side / leg_a_basis)
+
+For a same-side public resize, `size_q` is an effective-quantity delta. A
+post-ADL risk reduction selects the largest raw basis no greater than the prior
+raw basis whose conservative effective quantity equals the requested post-trade
+quantity. Aggregate effective OI, health, liquidation sizing, full-close
+detection, and pending-obligation conversion all use `effective_pos_q`; raw
+basis remains only for K/F settlement and social-loss weight accounting.
 
 trade_notional =
     floor(abs(size_q) * exec_price / POS_SCALE)
@@ -194,7 +208,7 @@ price_funding_loss_X  = ceil(X * loss_budget_num / (10_000 * FUNDING_DEN))
 worst_liq_notional_X  = ceil(X * (10_000 + price_budget_bps) / 10_000)
 liq_fee_raw_X         = ceil(worst_liq_notional_X * cfg_liquidation_fee_bps / 10_000)
 liq_fee_X             = min(max(liq_fee_raw_X, cfg_min_liquidation_abs), cfg_liquidation_fee_cap)
-mm_req_X              = max(floor(X * cfg_maintenance_bps / 10_000), cfg_min_nonzero_mm_req)
+mm_req_X              = max(ceil(X * cfg_maintenance_bps / 10_000), cfg_min_nonzero_mm_req)
 require price_funding_loss_X + liq_fee_X <= mm_req_X
 ```
 
@@ -332,6 +346,8 @@ For long-profit claims, use long-side best-case price/basis; for short-profit cl
 ### 2.2 Counterparty backing and insurance-credit reservations
 
 A full account refresh computes, for every domain where the account currently owes loss, a deterministic `BackingReservationPlan`. Reservation crystallization fires on a REALIZED-loss settlement event (K/F leg settlement, close, bankruptcy booking), not on every mark-to-market refresh: the settlement that reserves the loss also rebases the leg basis (`k_snap`, `f_snap` advanced to the settled point), so the same loss is never re-derived and re-reserved on a later settlement — there is no unrealized-drawdown ratchet and no double-charge. A round-trip that recovers the mark does NOT un-reserve backing (reserve is irreversible per §5.1.1); the recovery instead settles as fresh positive PnL — a new source-attributed claim that realizes against the domain's backing at terminal like any other, so the recovered value returns to the account through realization, not through a (nonexistent) reservation teardown.
+
+The plan MUST be built from every active leg before any newly observed K/F delta is applied. Its canonical order is `(negative phase first, source_domain ascending, canonical leg_slot ascending)`. A plan entry MAY cache the arithmetic delta computed while building that plan because the canonical account representation has at most one leg per asset and applying an earlier entry cannot mutate another asset's K/F target. Immediately before application, the implementation MUST reload the leg and asset, recompute the inexpensive live K/F target, and reject unless it matches the cached target; it MUST also recompute and match the phase and source domain encoded in the key. This is ordering, not netting: each negative delta reserves available capital in its own source domain, and a same-refresh positive delta cannot erase that loss before reservation. Positive face that existed before the refresh remains subject to the ordinary source-support and face-burn rules when a new loss is applied.
 
 A backing reservation may be funded only by:
 - senior capital `C_i`;
@@ -721,6 +737,10 @@ Activation requires:
 - certificates fail closed unless their schema explicitly excludes the new asset.
 
 DrainOnly blocks risk increase and new attaches. Retired requires zero OI, zero stored positions, no pending barriers, no obligations, no liens, all close ledgers finalized/canceled, and all prior-epoch stale accounts settled/migrated/recovered. A `ResetPending` side cannot reset again until all prior-epoch stale accounts are settled, migrated, or recovered.
+Successful side-reset finalization clears that side's prior-epoch K/F/B settlement baselines after
+proving there are no remaining stored or stale legs, pending obligations, or domain barriers that
+can reference them. These inert historical baselines cannot block an otherwise empty asset from
+entering DrainOnly or Retired.
 
 -------------------------------------------------------------------------------
 4. State
@@ -805,6 +825,7 @@ Asset {
     A_long, A_short
     K_long, K_short
     F_long_num, F_short_num
+    KF_epoch_long, KF_epoch_short
 
     B_long_num, B_short_num
     B_epoch_start_long_num, B_epoch_start_short_num
@@ -843,7 +864,7 @@ PortfolioAccount {
     fee_credits_i <= 0 and != i128::MIN
 
     active_bitmap
-    legs[0..N)
+    legs[0..N)                   // each leg stores KF_epoch_snap
     account_claim_bound_contributions
     source_credit_lien_keys[0..bounded]
 
@@ -858,6 +879,24 @@ PortfolioAccount {
 ```
 
 Each account has at most one canonical signed net leg per asset. Same-asset opposite exposure MUST net into that leg.
+
+Whenever a side's K or F target changes, its `KF_epoch` advances to that
+change's authenticated asset settlement slot and its
+`stale_account_count` resets to that side's stored-position count. Settling a
+leg with an older `KF_epoch_snap` decrements the count exactly once and advances
+the leg snapshot to the current epoch, even when intervening index movement has
+returned K/F to the leg's prior arithmetic values. Risk-increasing trades remain
+blocked until both affected side cohorts are empty; bounded unilateral reduction
+remains available to a current owner while another account is stale.
+
+Entering asset Recovery does not erase or discharge an outstanding K/F cohort.
+The self-classifying permissionless crank MUST prefer an ordinary Active or
+DrainOnly refresh when one exists; otherwise it MUST select the first active
+Recovery leg as a committed-state refresh target. That Recovery step settles
+already-committed K/F/B and source-expiry work and recertifies the account
+without accruing the frozen asset, liquidating it, detaching a live position, or
+forfeiting positive PnL. The settled position remains available to a matched
+risk-reducing owner trade.
 
 -------------------------------------------------------------------------------
 5. Global invariants
@@ -917,6 +956,25 @@ if loss_weight_sum_side == 0: residual may clear only via fully backed protocol-
 social_loss_remainder_side_num < SOCIAL_LOSS_DEN
 social_loss_dust_side_num < SOCIAL_LOSS_DEN
 ```
+
+When a side reset or leg clear combines two valid sub-atom social-loss carries,
+the sum is normalized modulo `SOCIAL_LOSS_DEN`. Crossing the denominator adds
+one to the side-local `explicit_unallocated_loss` audit counter; that counter
+saturates and never creates payout capacity. Remainder, dust, and explicit-loss
+audit fields remain durable while the asset has any live economic obligation.
+An otherwise empty asset may clear only those inert fields inside the single
+retirement transition so historical rounding cannot permanently block terminal
+progress; callers do not need a preparatory cleanup transition.
+After every source claim, provider receivable, backing amount, lien, and insurance
+reservation is zero, cumulative `spent_backing_num` is likewise audit-only and is
+cleared atomically with retirement. A nonzero provider receivable or consumed backing
+remains a hard retirement blocker.
+After every position, effective-OI atom, pending obligation, and social-loss weight is
+also zero, historical K/F indices and their prior-epoch baselines have no remaining
+claimant and are audit-only. Retirement clears them atomically. Restart performs the
+same terminal normalization, including spent-only domain budgets and source/social
+audit, before assigning the fresh market generation; any live obligation or nonzero
+remaining insurance budget rejects the complete restart transition.
 
 ```text
 abs(K_side) + A_side * MAX_ORACLE_PRICE <= i128::MAX
@@ -1304,6 +1362,19 @@ KF_pnl_delta = exact signed-floor A/K/F settlement
 net_pnl_delta = KF_pnl_delta - B_loss
 ```
 
+When a negative `net_pnl_delta` is applied to existing positive face `P`, source
+support first consumes `S` effective atoms and burns `F` face. The uncovered
+tail is `R = abs(net_pnl_delta) - S`, and settlement MUST set
+`PNL_new = (P - F) - R` and burn total face `P - max(PNL_new, 0)`. A nonzero
+uncovered tail MUST NOT both burn all retained positive face and then be
+subtracted again. Permissionless settlement order therefore cannot change the
+account's terminal value merely by changing which account is refreshed first or
+which active-leg slot supplies a signed K/F delta first. Every full account
+refresh first settles all newly observed negative K/F deltas in canonical
+source-domain order, then settles nonnegative deltas. This rule MUST NOT
+aggregate losses across source domains or assign backing to a last-touched
+domain.
+
 If full B settlement is too large, partial settlement is allowed. While `B_remaining > 0`, no user-favorable action may continue.
 
 -------------------------------------------------------------------------------
@@ -1542,7 +1613,14 @@ Public wrappers MUST NOT expose caller-controlled:
 - recovery fallback price, recovery reference price, fallback deviation cap, or recovery value-transfer bound;
 - cross-instance netting or merged health.
 
-Wrappers MUST expose full refresh, hinted crank, bounded catchup, active close continuation, account-B settlement, source-credit/lien revalidation, domain-lock/pending-loss/pending-obligation continuation, permissionless recovery, cure-and-cancel, dead-leg forfeit/detach, resolved claim receipt, and rebalance-on-touch.
+Wrappers MUST expose one self-classifying permissionless crank that selects its
+action and asset from current engine state; caller observations are authenticated
+inputs for the selected work, not caller-selected actions. That route composes
+bounded refresh/catchup, active-close continuation, account-B settlement,
+source-credit/lien revalidation, pending-loss/pending-obligation continuation,
+permissionless recovery, and resolved close. Wrappers MUST also expose the
+owner-authorized risk-reducing, cure-and-cancel, dead-leg forfeit/detach,
+resolved-claim, and rebalance-on-touch routes required for user exits.
 
 -------------------------------------------------------------------------------
 14. Required proof and TDD coverage
@@ -1650,6 +1728,8 @@ Wrappers MUST expose full refresh, hinted crank, bounded catchup, active close c
 100. `stock_reconciliation_includes_settlement_rounding_residue_total`.
 101. `drift_consumed_partition_category_is_reserved_and_zero` *(v16.9.0)*.
 102. `per_class_stock_reconciliation_matches_o1_ledgers_where_available`.
+103. `account_kf_settlement_key_roundtrips_and_orders_loss_domain_slot_priority`.
+104. `whole_account_kf_settlement_is_leg_and_account_order_independent`.
 -------------------------------------------------------------------------------
 15. Audit summary and intended tradeoff
 -------------------------------------------------------------------------------
