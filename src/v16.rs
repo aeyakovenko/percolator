@@ -19448,6 +19448,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let account_effective_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
                 let close_q = side_effective_oi_q.min(account_effective_q);
                 if close_q == 0 {
+                    if leg.basis_pos_q == 0
+                        && leg.loss_weight != 0
+                        && !self
+                            .recovery_pending_obligation_release_allowed(asset_index, leg.side)?
+                    {
+                        slot += 1;
+                        continue;
+                    }
                     // Zero-effective legs are either prior-reset residue or a
                     // released pending-loss obligation. They own no live OI,
                     // but still have to detach so resolved close can finish.
