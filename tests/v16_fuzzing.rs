@@ -3,9 +3,10 @@
 use percolator::{
     EngineAssetSlotV16Account, LiquidationRequestV16, Market, MarketGroupV16HeaderAccount,
     MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodU128, MAX_VAULT_TVL,
+    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16,
+    PortfolioSourceDomainV16Account, PortfolioV16View, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, SideV16, TradeRequestV16, V16Config, V16Error, V16PodU128,
+    V16PodU32, V16PodU64, MAX_VAULT_TVL, PORTFOLIO_SOURCE_DOMAIN_CAP,
 };
 use percolator::{BOUND_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
 use proptest::prelude::*;
@@ -627,4 +628,118 @@ proptest! {
             );
         }
     }
+}
+
+#[test]
+fn v16_source_domain_capacity_reserves_favorable_settlement_for_each_active_leg() {
+    const MARKET_SLOTS: usize = 17;
+    const CANDIDATE_ASSET: usize = 16;
+    const EXISTING_ASSET: usize = 15;
+
+    let (market_id, _, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(16, MARKET_SLOTS as u32, 0, 10);
+    let mut header =
+        MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, MARKET_SLOTS as u32, 0).unwrap();
+    let mut markets = (0..MARKET_SLOTS)
+        .map(|index| Market::new(index as u64, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
+    for (asset_index, market) in markets.iter_mut().enumerate() {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                asset_index as u32,
+                &mut market.engine,
+                100,
+                asset_index as u64 + 1,
+            )
+            .unwrap();
+    }
+
+    let occupied_source = |domain: usize| PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(domain as u32),
+        source_claim_market_id: V16PodU64::new(1),
+        source_claim_bound_num: V16PodU128::new(BOUND_SCALE),
+        ..PortfolioSourceDomainV16Account::default()
+    };
+
+    let mut full = fuzz_account([20; 32]);
+    for (domain, source) in full.source_domains.iter_mut().enumerate() {
+        *source = occupied_source(domain);
+    }
+    let full_before = full;
+    let candidate_asset_before = markets[CANDIDATE_ASSET].engine.asset;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut full);
+        assert_eq!(
+            market.kani_attach_leg_at_slot(
+                &mut account,
+                CANDIDATE_ASSET,
+                SideV16::Long,
+                POS_SCALE as i128,
+                0,
+            ),
+            Err(V16Error::LockActive)
+        );
+    }
+    assert_eq!(full, full_before);
+    assert_eq!(
+        markets[CANDIDATE_ASSET].engine.asset,
+        candidate_asset_before
+    );
+
+    // A full table remains usable when it already contains the candidate's favorable domain.
+    let mut represented = fuzz_account([21; 32]);
+    for (domain, source) in represented.source_domains.iter_mut().enumerate() {
+        *source = occupied_source(domain);
+    }
+    represented.source_domains[PORTFOLIO_SOURCE_DOMAIN_CAP - 1] =
+        occupied_source(CANDIDATE_ASSET * 2 + 1);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut represented);
+        assert!(market
+            .kani_attach_leg_at_slot(
+                &mut account,
+                CANDIDATE_ASSET,
+                SideV16::Long,
+                POS_SCALE as i128,
+                0,
+            )
+            .is_ok());
+    }
+
+    // An active leg reserves capacity before its first favorable settlement creates a record.
+    let mut reserved = fuzz_account([22; 32]);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut reserved);
+        market
+            .kani_attach_leg_at_slot(
+                &mut account,
+                EXISTING_ASSET,
+                SideV16::Long,
+                POS_SCALE as i128,
+                0,
+            )
+            .unwrap();
+    }
+    for domain in 0..PORTFOLIO_SOURCE_DOMAIN_CAP - 1 {
+        reserved.source_domains[domain] = occupied_source(domain);
+    }
+    let reserved_before = reserved;
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut reserved);
+        assert_eq!(
+            market.kani_attach_leg_at_slot(
+                &mut account,
+                CANDIDATE_ASSET,
+                SideV16::Long,
+                POS_SCALE as i128,
+                1,
+            ),
+            Err(V16Error::LockActive)
+        );
+    }
+    assert_eq!(reserved, reserved_before);
 }

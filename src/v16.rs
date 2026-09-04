@@ -36,6 +36,25 @@ pub const BACKING_FEE_RATE_DEN_E9: u128 = 1_000_000_000;
 pub const MAX_BACKING_FEE_RATE_E9_PER_SLOT: u64 = 1_000_000_000;
 pub const MAX_BACKING_FEE_UTIL_BPS: u64 = 10_000;
 
+/// Admission resource invariant for latent favorable settlement domains.
+/// `occupied + missing_active` is the reserved pre-state; admission adds the
+/// candidate only when its favorable source is not already materialized.
+#[inline]
+fn source_domain_capacity_after_admission(
+    occupied: usize,
+    missing_active: usize,
+    candidate_missing: bool,
+) -> V16Result<usize> {
+    let required = occupied
+        .checked_add(missing_active)
+        .and_then(|value| value.checked_add(usize::from(candidate_missing)))
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if required > PORTFOLIO_SOURCE_DOMAIN_CAP {
+        return Err(V16Error::LockActive);
+    }
+    Ok(required)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BackingDomainFeeSplitV16 {
     pub lien_delta_atoms: u128,
@@ -16119,6 +16138,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         validate_basis(basis_pos_q)?;
         let asset = self.asset_state(asset_index)?;
         self.require_asset_risk_change_allowed(asset_index, true)?;
+        self.ensure_source_domain_capacity_for_new_exposure(&account.as_view(), asset_index, side)?;
         let a_basis = match side {
             SideV16::Long => asset.a_long,
             SideV16::Short => asset.a_short,
@@ -16132,6 +16152,60 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.header.active_bitmap = bitmap.map(V16PodU64::new);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)?;
+        Ok(())
+    }
+
+    fn ensure_source_domain_capacity_for_new_exposure(
+        &self,
+        account: &PortfolioV16View<'_>,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<()> {
+        // PortfolioV16ViewMut compacts source entries. Below this threshold, the configured
+        // active-leg bound proves that every current leg plus this candidate can materialize a
+        // distinct favorable domain, so ordinary admission avoids both bounded scans.
+        let max_active = self.header.config.max_portfolio_assets.get() as usize;
+        if max_active != 0 && max_active <= PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let safe_occupied = PORTFOLIO_SOURCE_DOMAIN_CAP - max_active;
+            if account.header.source_domains[safe_occupied].is_sparse_tail_default() {
+                return Ok(());
+            }
+        }
+
+        let candidate_domain = self.insurance_domain_index(asset_index, opposite_side(side))?;
+        let candidate_missing = account.source_domain_slot(candidate_domain)?.is_none();
+
+        let mut occupied = 0usize;
+        let mut source_slot = 0usize;
+        while source_slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[source_slot];
+            if source.is_sparse_tail_default() {
+                break;
+            }
+            if source.is_occupied() {
+                occupied += 1;
+            }
+            source_slot += 1;
+        }
+
+        // A favorable K/F move can create one source record for every active leg. Reserving
+        // those absent domains before attaching another leg prevents future settle/close paths
+        // from discovering that the fixed table has no insertion slot.
+        let mut missing_active = 0usize;
+        let mut leg_slot = 0usize;
+        while leg_slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[leg_slot].try_to_runtime()?;
+            if leg.active {
+                let domain =
+                    self.insurance_domain_index(leg.asset_index as usize, opposite_side(leg.side))?;
+                if account.source_domain_slot(domain)?.is_none() {
+                    missing_active += 1;
+                }
+            }
+            leg_slot += 1;
+        }
+
+        source_domain_capacity_after_admission(occupied, missing_active, candidate_missing)?;
         Ok(())
     }
 
