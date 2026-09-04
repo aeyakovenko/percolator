@@ -182,6 +182,14 @@ pub fn kani_unattributed_loss_lock_after_pnl(
     unattributed_loss_lock_after_pnl(was_locked, active_bitmap, new_pnl)
 }
 
+pub fn kani_source_domain_capacity_after_admission(
+    occupied: usize,
+    missing_active: usize,
+    candidate_missing: bool,
+) -> V16Result<usize> {
+    source_domain_capacity_after_admission(occupied, missing_active, candidate_missing)
+}
+
 pub fn kani_liquidation_projected_health_deficit_from_parts(
     certified_equity: i128,
     certified_maintenance_req: u128,
