@@ -23,7 +23,8 @@ use percolator::v16::{
     kani_select_auto_crank_plan, kani_settle_kf_stale_cohort,
     kani_should_clear_prior_reset_obligation, kani_source_claim_domain_first_burn_partition,
     kani_source_credit_state_realizable_support_for_claim_num,
-    kani_source_credit_state_realizable_support_for_face, kani_target_effective_lag_adverse_delta,
+    kani_source_credit_state_realizable_support_for_face,
+    kani_source_domain_capacity_after_admission, kani_target_effective_lag_adverse_delta,
     kani_terminal_claim_free_overlap_recredit, kani_terminal_slab_asset_step,
     kani_terminal_slab_wait_continuation, kani_trade_preexisting_oi_reduction_gate,
     kani_trade_preflight_risk_gate, kani_unattributed_loss_lock_after_pnl,
@@ -1948,6 +1949,61 @@ fn proof_v16_sparse_source_domain_cap_full_rejects_new_domain() {
         "sparse source-domain cap-full rejection covers symbolic new domain"
     );
     assert_eq!(rejected, Err(V16Error::LockActive));
+}
+
+// Every active leg has one distinct latent favorable source domain. An accepted candidate must
+// leave enough physical slots to materialize that entire reserved union in any settlement order.
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::solver(cadical)]
+fn proof_v16_source_capacity_admission_closes_all_favorable_domains() {
+    let occupied_raw: u8 = kani::any();
+    let missing_active_raw: u8 = kani::any();
+    let candidate_missing: bool = kani::any();
+    kani::assume(occupied_raw as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    kani::assume(missing_active_raw as usize <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+
+    let occupied = occupied_raw as usize;
+    let missing_active = missing_active_raw as usize;
+    let reserved_before = occupied + missing_active;
+    kani::assume(reserved_before <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+    let candidate_reservation = usize::from(candidate_missing);
+    let required = reserved_before + candidate_reservation;
+    let admission =
+        kani_source_domain_capacity_after_admission(occupied, missing_active, candidate_missing);
+
+    if required > PORTFOLIO_SOURCE_DOMAIN_CAP {
+        assert_eq!(admission, Err(V16Error::LockActive));
+        assert!(candidate_missing);
+        assert_eq!(reserved_before, PORTFOLIO_SOURCE_DOMAIN_CAP);
+        kani::cover!(
+            occupied < PORTFOLIO_SOURCE_DOMAIN_CAP && missing_active > 0,
+            "latent active domains reject over-admission before the table is physically full"
+        );
+        return;
+    }
+
+    let admitted_required = admission.unwrap();
+    assert_eq!(admitted_required, required);
+    let mut materialized = occupied;
+    let mut latent = missing_active + candidate_reservation;
+    while latent != 0 {
+        assert!(materialized < PORTFOLIO_SOURCE_DOMAIN_CAP);
+        materialized += 1;
+        latent -= 1;
+        assert_eq!(materialized + latent, admitted_required);
+    }
+    assert_eq!(materialized, admitted_required);
+    assert!(materialized <= PORTFOLIO_SOURCE_DOMAIN_CAP);
+
+    kani::cover!(
+        candidate_missing && missing_active > 0 && admitted_required == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "multiple latent domains materialize at the exact capacity boundary"
+    );
+    kani::cover!(
+        !candidate_missing && reserved_before == PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "a represented candidate remains admissible at full reserved capacity"
+    );
 }
 
 #[kani::proof]
