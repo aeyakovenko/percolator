@@ -10850,9 +10850,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if locked > source.source_claim_bound_num.get() {
                 return Err(V16Error::InvalidLeg);
             }
-            let valid_lien_effective = source
-                .source_lien_effective_reserved
-                .get()
+            let valid_lien_effective = self
+                .source_lien_effective_reserved_supporting(&source)?
                 .min(remaining_num / BOUND_SCALE);
             if valid_lien_effective != 0 {
                 support = support
@@ -10934,7 +10933,41 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    fn valid_source_lien_effective_reserved_sum(account: &PortfolioV16View<'_>) -> V16Result<u128> {
+    /// Effective lien reserve that may still support this account. A counterparty lien whose
+    /// backing bucket is impaired or has lapsed is impaired by spec (spec.md "Impaired" lien
+    /// rules) and cannot support risk, even before a normalization transition moves it into the
+    /// account's impaired fields. Insurance-backed lien reserve is unaffected by bucket expiry.
+    fn source_lien_effective_reserved_supporting(
+        &self,
+        source: &PortfolioSourceDomainV16Account,
+    ) -> V16Result<u128> {
+        let effective = source.source_lien_effective_reserved.get();
+        let counterparty_backing = source.source_lien_counterparty_backing_num.get();
+        if counterparty_backing == 0 {
+            return Ok(effective);
+        }
+        // Read only the two bucket fields needed; a full bucket decode per source domain is
+        // measurable at maximum portfolio shape.
+        let (asset_index, side) = self.domain_asset_side(source.domain.get() as usize)?;
+        let slot = self.markets[asset_index].engine_slot();
+        let bucket = match side {
+            SideV16::Long => &slot.backing_long,
+            SideV16::Short => &slot.backing_short,
+        };
+        if bucket.status == BackingBucketStatusV16::Fresh as u8
+            && bucket.expiry_slot.get() > self.header.current_slot.get()
+        {
+            return Ok(effective);
+        }
+        effective
+            .checked_sub(counterparty_backing / BOUND_SCALE)
+            .ok_or(V16Error::CounterUnderflow)
+    }
+
+    fn valid_source_lien_effective_reserved_sum(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<u128> {
         let mut sum = 0u128;
         let mut d = 0usize;
         while d < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -10942,15 +10975,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if source.has_default_sparse_tag() && !source.is_occupied() {
                 break;
             }
-            sum = sum
-                .checked_add(source.source_lien_effective_reserved.get())
-                .ok_or(V16Error::ArithmeticOverflow)?;
+            if source.is_occupied() {
+                sum = sum
+                    .checked_add(self.source_lien_effective_reserved_supporting(&source)?)
+                    .ok_or(V16Error::ArithmeticOverflow)?;
+            }
             d += 1;
         }
         Ok(sum)
     }
 
     fn incremental_initial_margin_source_credit_needed(
+        &self,
         account: &PortfolioV16View<'_>,
         no_positive_equity: i128,
     ) -> V16Result<u128> {
@@ -10958,7 +10994,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !cert.valid {
             return Err(V16Error::Stale);
         }
-        let existing_lien = Self::valid_source_lien_effective_reserved_sum(account)?;
+        let existing_lien = self.valid_source_lien_effective_reserved_sum(account)?;
         if no_positive_equity >= 0 {
             let covered = (no_positive_equity as u128)
                 .checked_add(existing_lien)
@@ -12318,7 +12354,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Err(V16Error::Stale);
             }
             let no_positive = Self::account_no_positive_credit_equity(&account.as_view())?;
-            let required_credit = Self::incremental_initial_margin_source_credit_needed(
+            let required_credit = self.incremental_initial_margin_source_credit_needed(
                 &account.as_view(),
                 no_positive,
             )?;
