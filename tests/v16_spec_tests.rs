@@ -9482,3 +9482,74 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+// ---- issue #205: forfeit must not leave an Active asset one-sided ----
+
+#[test]
+fn issue205_forfeit_rejects_drain_only_leg_on_active_asset() {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    header.config.initial_margin_bps = V16PodU64::new(500);
+    header.config.maintenance_margin_bps = V16PodU64::new(250);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(100);
+    let mut long_header = account_fixture(1, 215);
+    let mut short_header = account_fixture(1, 216);
+    let stranded_q = 10_751 * POS_SCALE;
+    let residual_q = POS_SCALE;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(stranded_q),
+                exec_price: 1,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    market
+        .rebalance_reduce_position_not_atomic(
+            &mut long,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: stranded_q - residual_q,
+            },
+        )
+        .unwrap();
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.mode_short, SideModeV16::DrainOnly);
+    assert_eq!(asset.lifecycle, AssetLifecycleV16::Active);
+
+    let short_before = *short.header;
+    let asset_before = market.markets[0].engine.asset;
+    assert_eq!(
+        market
+            .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+            .map(|_| ()),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(bytemuck::bytes_of(&*short.header), bytemuck::bytes_of(&short_before));
+    assert_eq!(
+        bytemuck::bytes_of(&market.markets[0].engine.asset),
+        bytemuck::bytes_of(&asset_before)
+    );
+
+    // The book stays two-sided and the residual pair can still close normally.
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, asset.oi_eff_short_q);
+    market
+        .rebalance_reduce_position_not_atomic(
+            &mut long,
+            RebalanceRequestV16 {
+                asset_index: 0,
+                reduce_q: residual_q,
+            },
+        )
+        .unwrap();
+    market.validate_shape().unwrap();
+}
