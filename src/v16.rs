@@ -1955,6 +1955,41 @@ impl V16Core {
         Ok(ledger)
     }
 
+    /// Principal paid by a closing account itself (issue #204) lowers its close ledger's gross
+    /// loss and remaining residual by the same amount, preserving
+    /// `residual = gross + drift - progress`. When the residual reaches zero the domain
+    /// barrier is released: with booked progress the close finalizes; with none it is cured
+    /// exactly as CureAndCancelClose would leave it. Returns the ledger and whether the
+    /// barrier is released.
+    pub(crate) fn kernel_principal_cure_close_ledger(
+        mut ledger: CloseProgressLedgerV16,
+        paid: u128,
+    ) -> V16Result<(CloseProgressLedgerV16, bool)> {
+        if paid == 0 || !ledger.has_pending_residual() {
+            return Ok((ledger, false));
+        }
+        // A cure never exceeds the gross loss it pays down (drift is never funded today, but
+        // residual may exceed gross by drift, which principal does not cure).
+        let cure = paid
+            .min(ledger.residual_remaining)
+            .min(ledger.gross_loss_at_close_start);
+        if cure == 0 {
+            return Ok((ledger, false));
+        }
+        ledger.gross_loss_at_close_start -= cure;
+        ledger.residual_remaining -= cure;
+        if ledger.residual_remaining != 0 {
+            return Ok((ledger, false));
+        }
+        if ledger.has_irreversible_progress() {
+            ledger.finalized = true;
+        } else {
+            ledger.active = false;
+            ledger.canceled = true;
+        }
+        Ok((ledger, true))
+    }
+
     /// Credit residual released after terminal snapshot capture into both
     /// persisted snapshots and immediately raise the common payout rate.
     pub(crate) fn kernel_credit_post_snapshot_residual(
@@ -16941,6 +16976,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ledger.asset_index as usize != asset_index || ledger.domain_side != domain_side {
             return Err(V16Error::LockActive);
         }
+        self.clamp_close_residual_to_account_loss(account)?;
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        if !ledger.has_pending_residual() {
+            return Ok(BResidualBookingOutcomeV16 {
+                booked_loss: 0,
+                explicit_loss: 0,
+                delta_b: 0,
+                remaining_after: 0,
+            });
+        }
         self.ensure_open_close_snapshot_current_or_recovery(&account.as_view(), ledger)?;
         let outcome = self.book_bankruptcy_residual_chunk_internal(
             asset_index,
@@ -16980,8 +17025,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if insurance_used != 0 {
             self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
         }
+        self.clamp_close_residual_to_account_loss(account)?;
 
-        let residual = if account.header.pnl.get() < 0 {
+        let residual = if account.header.pnl.get() < 0
+            && account.header.close_progress.try_to_runtime()?.has_pending_residual()
+        {
             account.header.pnl.get().unsigned_abs()
         } else {
             0
@@ -18085,7 +18133,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<()> {
         if account.header.pnl.get() >= 0 {
-            return Ok(());
+            // A pending close whose loss was cured after it began books nothing more.
+            return self.clamp_close_residual_to_account_loss(account);
         }
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
@@ -18152,6 +18201,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_account_audit_scan(&account.as_view())?;
         self.validate_shape_audit_scan()?;
         Ok(paid)
+    }
+
+    /// A close ledger must never book more residual than the account still owes (issue #204).
+    /// Principal, backed gains, or any other credit can lower the account's negative PnL after
+    /// the close began; the difference is cured by the account itself, so gross loss and
+    /// residual drop by it together (partition preserved) before anything is booked to the
+    /// opposite side. A loss booked on another leg after the close began raises |pnl| and so
+    /// never reads as a cure. When the residual reaches zero the domain barrier is released.
+    fn clamp_close_residual_to_account_loss(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        let before = account.header.close_progress.try_to_runtime()?;
+        if !before.has_pending_residual() {
+            return Ok(());
+        }
+        let owed = account.header.pnl.get().min(0).unsigned_abs();
+        if before.residual_remaining <= owed {
+            return Ok(());
+        }
+        let excess = before.residual_remaining - owed;
+        let (ledger, barrier_released) = V16Core::kernel_principal_cure_close_ledger(before, excess)?;
+        if ledger == before {
+            return Ok(());
+        }
+        if barrier_released {
+            let asset_index = ledger.asset_index as usize;
+            let count = self.pending_domain_loss_barrier_count(asset_index, ledger.domain_side)?;
+            self.set_pending_domain_loss_barrier_count(
+                asset_index,
+                ledger.domain_side,
+                count.checked_sub(1).ok_or(V16Error::CounterUnderflow)?,
+            )?;
+        }
+        account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
+        account.header.health_cert.valid = 0;
+        Ok(())
     }
 
     fn settle_negative_pnl_from_principal_core_not_atomic(
