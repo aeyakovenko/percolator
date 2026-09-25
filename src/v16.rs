@@ -1955,6 +1955,42 @@ impl V16Core {
         Ok(ledger)
     }
 
+    /// Whether some future public transition could still pay `receipt` another atom.
+    /// Claim refinement can raise the common rate while unreceipted bound remains. Otherwise
+    /// the rate can only rise through Fresh backing expiring into post-snapshot residual,
+    /// which releases whole atoms, at most the remaining Fresh backing rounded up to an
+    /// atom. The best case credits all of it at once. A receipt whose floor payout at that
+    /// best-case rate does not exceed what it was already paid holds only unrecoverable
+    /// shortfall.
+    pub(crate) fn kernel_resolved_receipt_can_still_gain(
+        ledger: ResolvedPayoutLedgerV16,
+        source_fresh_backing_total_num: u128,
+        receipt: ResolvedPayoutReceiptV16,
+    ) -> V16Result<bool> {
+        if ledger.terminal_claim_bound_unreceipted_num != 0 {
+            return Ok(true);
+        }
+        if ledger.current_payout_rate_num == ledger.current_payout_rate_den {
+            return Ok(false);
+        }
+        let releasable_num = source_fresh_backing_total_num
+            .checked_add(BOUND_SCALE - 1)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            / BOUND_SCALE
+            * BOUND_SCALE;
+        let best_rate_num = ledger
+            .current_payout_rate_num
+            .checked_add(releasable_num)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .min(ledger.current_payout_rate_den);
+        let best_gross = wide_mul_div_floor_u128(
+            receipt.terminal_positive_claim_face,
+            best_rate_num,
+            ledger.current_payout_rate_den,
+        );
+        Ok(best_gross > receipt.paid_effective)
+    }
+
     /// Credit residual released after terminal snapshot capture into both
     /// persisted snapshots and immediately raise the common payout rate.
     pub(crate) fn kernel_credit_post_snapshot_residual(
@@ -15315,7 +15351,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
                 if receipt.present
                     && !receipt.finalized
-                    && !self.resolved_payout_rate_is_terminal()?
+                    && self.resolved_receipt_can_still_gain(receipt)?
                 {
                     if let Some(observation) = work.observations.first() {
                         if let Some(domain) = self.first_lapsed_source_backing_for_asset_at_slot(
@@ -19034,15 +19070,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn resolved_payout_rate_is_terminal(&self) -> V16Result<bool> {
-        let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        Ok(ledger.terminal_claim_bound_unreceipted_num == 0
-            && (ledger.current_payout_rate_num == ledger.current_payout_rate_den
-                || self.header.source_fresh_backing_total_num.get() == 0))
+    /// Whether some future public transition could still pay this receipt another atom.
+    /// Claim refinement can raise the common rate without bound while unreceipted bound
+    /// remains. Otherwise the rate can only rise through Fresh backing expiring into
+    /// post-snapshot residual, so the best case credits all of it at once. A receipt whose
+    /// floor payout at that best-case rate does not exceed what it was already paid holds
+    /// only unrecoverable shortfall; waiting for dust backing to expire cannot pay it.
+    fn resolved_receipt_can_still_gain(&self, receipt: ResolvedPayoutReceiptV16) -> V16Result<bool> {
+        V16Core::kernel_resolved_receipt_can_still_gain(
+            self.header.resolved_payout_ledger.try_to_runtime()?,
+            self.header.source_fresh_backing_total_num.get(),
+            receipt,
+        )
     }
 
     // Clear a paid haircut receipt only when neither claim refinement nor future
-    // backing expiry can raise its rate. Otherwise the shortfall is still claimable.
+    // backing expiry can raise its payout. Otherwise the shortfall is still claimable.
     fn clear_fully_diluted_resolved_receipt_if_terminal(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -19051,7 +19094,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !receipt.present || receipt.finalized {
             return Ok(());
         }
-        if !self.resolved_payout_rate_is_terminal()? {
+        if self.resolved_receipt_can_still_gain(receipt)? {
             return Ok(());
         }
         if !self.resolved_positive_payout_ready()? {
