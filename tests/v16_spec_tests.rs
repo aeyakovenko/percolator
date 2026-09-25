@@ -9482,3 +9482,147 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+// ---- issue #206: a lapsed counterparty bucket must impair, not un-pledge, its lien ----
+
+fn issue206_lien_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.maintenance_margin_bps = V16PodU64::new(5_000);
+    let mut long_header = account_fixture(1, 242);
+    let mut short_header = account_fixture(1, 243);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100, 5)
+            .unwrap();
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 50).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market.set_asset_raw_oracle_target_not_atomic(0, 200).unwrap();
+        market.accrue_asset_to_not_atomic(0, 2, 200, 0, true).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE / 2),
+                    exec_price: 200,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        long_header.source_domains[0].source_lien_effective_reserved.get(),
+        100
+    );
+    (header, markets, long_header, short_header)
+}
+
+fn issue206_available(markets: &[Market<u64>]) -> u128 {
+    let s = markets[0].engine.source_credit_short.try_to_runtime().unwrap();
+    s.fresh_reserved_backing_num - s.valid_liened_backing_num
+}
+
+#[test]
+fn issue206_live_loss_on_lapsed_lien_impairs_and_stays_crankable() {
+    let (mut header, mut markets, mut long_header, _short_header) = issue206_lien_fixture();
+    let available_before = issue206_available(&markets);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut price = 200u64;
+    for slot in 3..=12 {
+        price -= 8;
+        market.set_asset_raw_oracle_target_not_atomic(0, price).unwrap();
+        market.accrue_asset_to_not_atomic(0, slot, price, 0, true).unwrap();
+    }
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut steps = 0;
+    loop {
+        let out = market
+            .permissionless_auto_crank_not_atomic(
+                &mut long,
+                AutoCrankWorkV16 {
+                    now_slot: 12,
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .expect("lapsed-lien account must stay crankable");
+        let bucket = market.markets[0].engine.backing_short.try_to_runtime().unwrap();
+        assert_ne!(bucket.status, BackingBucketStatusV16::Fresh, "lapsed bucket never stays Fresh");
+        let s = market.markets[0].engine.source_credit_short.try_to_runtime().unwrap();
+        assert!(
+            s.fresh_reserved_backing_num - s.valid_liened_backing_num <= available_before,
+            "a lapsed lien must never raise available backing"
+        );
+        if out.selected == AutoCrankPlanV16::NoAction {
+            break;
+        }
+        steps += 1;
+        assert!(steps < 12);
+    }
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn issue206_resolved_close_impairs_lapsed_lien_in_either_order() {
+    for liened_first in [true, false] {
+        let (mut header, mut markets, mut long_header, mut short_header) = issue206_lien_fixture();
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        for slot in 3..=6 {
+            market.accrue_asset_to_not_atomic(0, slot, 200, 0, true).unwrap();
+        }
+        market.resolve_market_not_atomic(6).unwrap();
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        let mut closed = [false, false];
+        let mut steps = 0;
+        while !(closed[0] && closed[1]) {
+            for turn in 0..2 {
+                let is_long = (turn == 0) == liened_first;
+                let idx = if is_long { 0 } else { 1 };
+                if closed[idx] {
+                    continue;
+                }
+                let account = if is_long { &mut long } else { &mut short };
+                let r = market.close_resolved_account_not_atomic(account, 0);
+                let bucket = market.markets[0].engine.backing_short.try_to_runtime().unwrap();
+                assert!(
+                    bucket.fresh_unliened_backing_num == 0 && bucket.valid_liened_backing_num == 0,
+                    "liened_first={liened_first}: lapsed principal returned to fresh backing: {bucket:?}"
+                );
+                match r {
+                    Ok(ResolvedCloseOutcomeV16::Closed { .. }) => closed[idx] = true,
+                    Ok(ResolvedCloseOutcomeV16::ProgressOnly) => {}
+                    Err(e) => panic!("liened_first={liened_first}: resolved close failed: {e:?}"),
+                }
+            }
+            steps += 1;
+            assert!(steps < 32, "liened_first={liened_first}: resolved close must finish");
+        }
+        market.validate_shape().unwrap();
+    }
+}
