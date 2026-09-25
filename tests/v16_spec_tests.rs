@@ -9482,3 +9482,166 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+// ---- issue #132: resolved close of a DrainOnly residual leg must not underflow OI ----
+
+#[test]
+fn issue132_drain_only_residual_leg_closes_after_resolution() {
+    let (mut header, mut markets) = market_fixture(1, 1);
+    header.config.initial_margin_bps = V16PodU64::new(500);
+    header.config.maintenance_margin_bps = V16PodU64::new(250);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(100);
+
+    let mut long_header = account_fixture(1, 213);
+    let mut short_header = account_fixture(1, 214);
+    let stranded_q = 10_751 * POS_SCALE;
+    let residual_q = POS_SCALE;
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(stranded_q),
+                    exec_price: 1,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        market
+            .rebalance_reduce_position_not_atomic(
+                &mut long,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: stranded_q - residual_q,
+                },
+            )
+            .unwrap();
+    }
+
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    let short_leg = short_header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, residual_q);
+    assert_eq!(asset.oi_eff_short_q, residual_q);
+    assert_eq!(asset.mode_short, SideModeV16::DrainOnly);
+    assert_eq!(short_leg.basis_pos_q, -signed_q(stranded_q));
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .resolve_market_not_atomic(market.header.current_slot.get())
+            .unwrap();
+    }
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.validate_shape().unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+
+    assert_eq!(
+        market
+            .close_resolved_account_not_atomic(&mut short, 0)
+            .map(|_| ()),
+        Ok(()),
+        "resolved close must scale the stranded DrainOnly leg by the side A factor"
+    );
+    market.validate_shape().unwrap();
+}
+
+// ---- issue #207: retirement must never burn a pending terminal recredit ----
+
+fn issue207_recredit_fixture() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    const RESIDUAL: u128 = 750;
+    const SPENT: u128 = 123;
+    const RECEIVABLE: u128 = 776;
+    let (mut header, mut markets) = market_fixture(3, 100);
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(RESIDUAL);
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(SPENT);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(SPENT);
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: RECEIVABLE * BOUND_SCALE,
+            provider_receivable_num: RECEIVABLE * BOUND_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short =
+        BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            consumed_liened_backing_num: RECEIVABLE * BOUND_SCALE,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        });
+    (header, markets)
+}
+
+/// Part (a) of #207: the direct retirement entry's recredit gate had no covering test.
+#[test]
+fn issue207_direct_retirement_refuses_to_burn_a_pending_insurance_recredit() {
+    let (mut header, mut markets) = issue207_recredit_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(3).unwrap();
+    let vault_before = market.header.vault.get();
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Err(V16Error::LockActive),
+        "retirement must not burn the provider-owed recredit"
+    );
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(3, 0),
+        Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+            asset_index: 0,
+            amount: 123,
+        })
+    );
+}
+
+/// The continuation protocol the wrapper follows: restart at 0 after an expiry, resume at the
+/// recredited asset otherwise. Following it, a recredit below the expired bucket is found
+/// before retirement.
+#[test]
+fn issue207_cursor_protocol_finds_recredit_below_expired_bucket() {
+    let (mut header, mut markets) = issue207_recredit_fixture();
+    // Asset 0's recredit needs positive residual; put all the residual behind a Fresh bucket on
+    // asset 2 so that it appears only when that bucket expires.
+    header.vault = V16PodU128::new(0);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_fresh_counterparty_backing_not_atomic(4, 750, 5)
+        .unwrap();
+    market.resolve_market_not_atomic(3).unwrap();
+    let mut cursor = 0usize;
+    let mut recredited = 0u128;
+    for _ in 0..8 {
+        match market.advance_terminal_slab_not_atomic(5, cursor) {
+            Ok(TerminalSlabOutcomeV16::ScanProgress { next_asset_index }) => {
+                cursor = next_asset_index
+            }
+            Ok(TerminalSlabOutcomeV16::BackingExpired { .. }) => cursor = 0,
+            Ok(TerminalSlabOutcomeV16::InsuranceRecredited { asset_index, amount }) => {
+                recredited += amount;
+                cursor = asset_index;
+            }
+            Ok(TerminalSlabOutcomeV16::ReadyToClose { retired }) => {
+                panic!("retired {retired} before the recredit")
+            }
+            // Restored insurance must be withdrawn before retirement: the scan is done.
+            Err(V16Error::LockActive) => break,
+            Err(e) => panic!("unexpected terminal error {e:?}"),
+        }
+    }
+    assert_eq!(recredited, 123, "the lower asset's recredit is not skipped");
+}
