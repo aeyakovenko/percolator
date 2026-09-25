@@ -19925,17 +19925,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
-    fn leg_is_dead_for_forfeit(&self, asset_index: usize, side: SideV16) -> V16Result<bool> {
-        let side_mode = self.side_mode_for(asset_index, side)?;
-        let asset_lifecycle = self.asset_state(asset_index)?.lifecycle;
-        Ok(
-            decode_market_mode(self.header.mode)? == MarketModeV16::Recovery
-                || asset_lifecycle == AssetLifecycleV16::Recovery
-                || matches!(
-                    side_mode,
-                    SideModeV16::DrainOnly | SideModeV16::ResetPending
-                ),
-        )
+    fn leg_is_dead_for_forfeit(&self, asset_index: usize, leg: PortfolioLegV16) -> V16Result<bool> {
+        let side_mode = self.side_mode_for(asset_index, leg.side)?;
+        let asset = self.asset_state(asset_index)?;
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Recovery
+            || asset.lifecycle == AssetLifecycleV16::Recovery
+        {
+            return Ok(true);
+        }
+        match side_mode {
+            SideModeV16::ResetPending => return Ok(true),
+            SideModeV16::DrainOnly => {}
+            _ => return Ok(false),
+        }
+        // A side collapses to DrainOnly whenever a unilateral close takes A below MIN_A_SIDE,
+        // including on an admin DrainOnly asset in a Live market. Forfeiting a leg that still
+        // carries effective OI there would leave the live book one-sided (spec: `if Live:
+        // OI_eff_long == OI_eff_short`) and strand every counterparty (issue #205); such legs
+        // exit through ordinary closes, or forfeit once the asset enters Recovery. A leg whose
+        // effective quantity is already zero (an ADL survivor) contributes no OI, so its
+        // forfeit remains the owner's cleanup route.
+        Ok(V16Core::effective_abs_quantity_for_leg(asset, leg)? == 0)
     }
 
     fn settle_forfeited_leg_kf_effects(
@@ -20061,7 +20071,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !leg.active {
             return Err(V16Error::InvalidLeg);
         }
-        if !self.leg_is_dead_for_forfeit(asset_index, leg.side)? {
+        if !self.leg_is_dead_for_forfeit(asset_index, leg)? {
             return Err(V16Error::LockActive);
         }
         if Self::leg_has_exhausted_effective_oi(self.asset_state(asset_index)?, leg)
