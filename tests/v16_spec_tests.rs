@@ -9482,3 +9482,106 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+// ---- issue #170: matched spent-backing history must not block restart of an empty asset ----
+
+fn issue170_consumed_history_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture(1);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+        market
+            .permissionless_auto_crank_not_atomic(
+                &mut winner,
+                AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            market.convert_released_pnl_to_capital_not_atomic(&mut winner).unwrap(),
+            100
+        );
+        let slot = market.header.current_slot.get();
+        market.force_asset_recovery_not_atomic(0, slot).unwrap();
+    }
+    let source = markets[0].engine.source_credit_long.try_to_runtime().unwrap();
+    let bucket = markets[0].engine.backing_long.try_to_runtime().unwrap();
+    assert_ne!(source.provider_receivable_num, 0);
+    assert_eq!(source.provider_receivable_num, bucket.consumed_liened_backing_num);
+    (header, markets, winner_header)
+}
+
+#[test]
+fn issue170_matched_spent_history_blocks_restart_until_canonicalized() {
+    let (mut header, mut markets, _winner) = issue170_consumed_history_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let slot = market.header.current_slot.get();
+    assert_eq!(
+        market.restart_empty_asset_preserving_insurance_budget_not_atomic(0, 5, slot),
+        Err(V16Error::LockActive),
+        "cumulative history blocks restart before canonicalization"
+    );
+    let (vault, c_tot, insurance) = (
+        market.header.vault.get(),
+        market.header.c_tot.get(),
+        market.header.insurance.get(),
+    );
+    market.canonicalize_spent_backing_history_not_atomic(0).unwrap();
+    assert_eq!(
+        (market.header.vault.get(), market.header.c_tot.get(), market.header.insurance.get()),
+        (vault, c_tot, insurance),
+        "canonicalization is value-neutral"
+    );
+    assert_eq!(
+        market.canonicalize_spent_backing_history_not_atomic(0),
+        Err(V16Error::NonProgress)
+    );
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(0, 5, slot)
+        .expect("restart succeeds once only history remained");
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn issue170_canonicalization_rejects_live_asset_and_live_principal() {
+    // Live asset: never allowed.
+    let (mut header, mut markets, mut winner_header) = flat_source_credit_lien_fixture(1);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut winner = PortfolioV16ViewMut::new(&mut winner_header);
+        market
+            .permissionless_auto_crank_not_atomic(
+                &mut winner,
+                AutoCrankWorkV16 {
+                    now_slot: market.header.current_slot.get(),
+                    observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .unwrap();
+        market.convert_released_pnl_to_capital_not_atomic(&mut winner).unwrap();
+        assert_eq!(
+            market.canonicalize_spent_backing_history_not_atomic(0),
+            Err(V16Error::LockActive)
+        );
+    }
+    // Recovery asset whose provider still has fresh principal: rejected.
+    let (mut header, mut markets, _winner) = issue170_consumed_history_fixture();
+    let mut bucket = markets[0].engine.backing_long.try_to_runtime().unwrap();
+    bucket.fresh_unliened_backing_num = BOUND_SCALE;
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&bucket);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let before = market.markets[0].engine;
+    assert!(market.canonicalize_spent_backing_history_not_atomic(0).is_err());
+    assert_eq!(
+        bytemuck::bytes_of(&market.markets[0].engine),
+        bytemuck::bytes_of(&before)
+    );
+}
