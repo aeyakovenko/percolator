@@ -2580,3 +2580,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.permissionless_crank_not_atomic(account, request)
     }
 }
+
+pub fn kani_receipt_can_still_gain(
+    ledger: ResolvedPayoutLedgerV16,
+    source_fresh_backing_total_num: u128,
+    receipt: ResolvedPayoutReceiptV16,
+) -> V16Result<bool> {
+    V16Core::kernel_resolved_receipt_can_still_gain(ledger, source_fresh_backing_total_num, receipt)
+}
