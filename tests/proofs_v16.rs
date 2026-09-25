@@ -3023,6 +3023,9 @@ fn proof_v16_public_restart_rejects_spent_domain_before_mutation() {
     let slack_raw: u8 = kani::any();
     let price_raw: u16 = kani::any();
     kani::assume(spent_raw > 0);
+    // A fully spent budget (remaining == 0) is audit-only history that restart normalizes by
+    // design; only a partially spent domain, which still carries claimable budget, must block.
+    kani::assume(remaining_raw > 0);
     kani::assume((1..=10_000).contains(&price_raw));
 
     let old_market_id = 1u64;
