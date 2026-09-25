@@ -9482,3 +9482,89 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+// ---- issue #105: an expired counterparty lien must not count as account margin ----
+#[test]
+fn issue105_expired_trade_created_lien_does_not_prevent_liquidation() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    header.config.initial_margin_bps = V16PodU64::new(5_000);
+    header.config.maintenance_margin_bps = V16PodU64::new(5_000);
+
+    let mut long_header = account_fixture(1, 240);
+    let mut short_header = account_fixture(1, 241);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100, 5)
+            .unwrap();
+
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 50).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+
+        market.set_asset_raw_oracle_target_not_atomic(0, 200).unwrap();
+        market.accrue_asset_to_not_atomic(0, 2, 200, 0, true).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE / 2),
+                    exec_price: 200,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        long_header.source_domains[0].source_lien_effective_reserved.get(),
+        100
+    );
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    for slot in 3..=5 {
+        market.accrue_asset_to_not_atomic(0, slot, 200, 0, true).unwrap();
+    }
+    market.expire_source_backing_bucket_not_atomic(1, 5).unwrap();
+
+    let bucket = market.markets[0]
+        .engine
+        .backing_short
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.status, BackingBucketStatusV16::Impaired);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(bucket.impaired_liened_backing_num, 100 * BOUND_SCALE);
+
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let cert = market.full_account_refresh_not_atomic(&mut long).unwrap();
+
+    assert_eq!(long.header.capital.get(), 50);
+    // The impaired lien no longer supports equity: the 100-atom deficit is visible.
+    assert_eq!(cert.certified_equity, 50);
+    assert_eq!(cert.certified_maintenance_req, 150);
+    assert_eq!(cert.certified_liq_deficit, 100);
+    assert!(market
+        .build_actionable_summary(&long.as_view())
+        .unwrap()
+        .liquidatable);
+}
