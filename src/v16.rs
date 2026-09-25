@@ -1955,6 +1955,41 @@ impl V16Core {
         Ok(ledger)
     }
 
+    /// Principal paid by a closing account itself (issue #204) lowers its close ledger's gross
+    /// loss and remaining residual by the same amount, preserving
+    /// `residual = gross + drift - progress`. When the residual reaches zero the domain
+    /// barrier is released: with booked progress the close finalizes; with none it is cured
+    /// exactly as CureAndCancelClose would leave it. Returns the ledger and whether the
+    /// barrier is released.
+    pub(crate) fn kernel_principal_cure_close_ledger(
+        mut ledger: CloseProgressLedgerV16,
+        paid: u128,
+    ) -> V16Result<(CloseProgressLedgerV16, bool)> {
+        if paid == 0 || !ledger.has_pending_residual() {
+            return Ok((ledger, false));
+        }
+        // A cure never exceeds the gross loss it pays down (drift is never funded today, but
+        // residual may exceed gross by drift, which principal does not cure).
+        let cure = paid
+            .min(ledger.residual_remaining)
+            .min(ledger.gross_loss_at_close_start);
+        if cure == 0 {
+            return Ok((ledger, false));
+        }
+        ledger.gross_loss_at_close_start -= cure;
+        ledger.residual_remaining -= cure;
+        if ledger.residual_remaining != 0 {
+            return Ok((ledger, false));
+        }
+        if ledger.has_irreversible_progress() {
+            ledger.finalized = true;
+        } else {
+            ledger.active = false;
+            ledger.canceled = true;
+        }
+        Ok((ledger, true))
+    }
+
     /// Credit residual released after terminal snapshot capture into both
     /// persisted snapshots and immediately raise the common payout rate.
     pub(crate) fn kernel_credit_post_snapshot_residual(
@@ -4080,16 +4115,6 @@ impl V16Core {
             Self::mul_div_floor_u128_or_wide(claim_num, state.credit_rate_num, CREDIT_RATE_SCALE)?;
         Ok((credited_num / BOUND_SCALE)
             .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
-    }
-
-    fn source_credit_state_realizable_support_for_face(
-        state: SourceCreditStateV16,
-        face_claim: u128,
-    ) -> V16Result<u128> {
-        Self::source_credit_state_realizable_support_for_claim_num(
-            state,
-            Self::bound_num_from_amount(face_claim)?,
-        )
     }
 
     fn target_effective_lag_loss_penalty(
@@ -10806,7 +10831,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.burn_account_source_claim_bound_num(account, fallback_burn_num)
     }
 
-    fn source_domain_realizable_support_for_face(
+    /// Support a gain that is about to become a claim in `domain` could realize: the incoming
+    /// face at the domain's current credit rate, capped by available backing. Unlike
+    /// `source_domain_realizable_support_for_face`, this does not require the domain to already
+    /// carry registered claims. A gain arriving at an account with an outstanding loss is such
+    /// a prospective claim; treating it as unsupported whenever the domain had no other claims
+    /// burned backed gains in full and ratcheted the loss (issue #172, site 2).
+    fn source_domain_prospective_support_for_face(
         &self,
         domain: usize,
         face_claim: u128,
@@ -10815,10 +10846,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         self.validate_source_domain_ledger_current(domain)?;
-        V16Core::source_credit_state_realizable_support_for_face(
-            self.source_credit_for_domain(domain)?,
-            face_claim,
-        )
+        let state = self.source_credit_for_domain(domain)?;
+        // Only fresh, unexpired counterparty backing may cure a loss here. Consuming it records
+        // the matching provider receivable; insurance-backed credit is not drawn by this path.
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.expiry_slot <= self.header.current_slot.get()
+        {
+            return Ok(0);
+        }
+        let fresh_num = bucket
+            .fresh_unliened_backing_num
+            .min(V16Core::available_backing_num_for_source_credit_state(state)?);
+        // Credit on the incoming face at the domain's rate, bounded by the fresh backing it
+        // consumes one atom per atom of credit.
+        let face_limited = V16Core::mul_div_floor_u128_or_wide(
+            V16Core::bound_num_from_amount(face_claim)?,
+            state.credit_rate_num,
+            CREDIT_RATE_SCALE,
+        )? / BOUND_SCALE;
+        Ok(face_limited.min(fresh_num / BOUND_SCALE))
     }
 
     fn account_source_realizable_support(
@@ -12940,7 +12987,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let new_face_support = delta as u128;
         let (effective_available, source_support_domain) = if let Some(domain) = source_domain {
             (
-                self.source_domain_realizable_support_for_face(domain, new_face_support)?,
+                self.source_domain_prospective_support_for_face(domain, new_face_support)?,
                 Some(domain),
             )
         } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {
@@ -16941,6 +16988,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if ledger.asset_index as usize != asset_index || ledger.domain_side != domain_side {
             return Err(V16Error::LockActive);
         }
+        self.clamp_close_residual_to_account_loss(account)?;
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        if !ledger.has_pending_residual() {
+            return Ok(BResidualBookingOutcomeV16 {
+                booked_loss: 0,
+                explicit_loss: 0,
+                delta_b: 0,
+                remaining_after: 0,
+            });
+        }
         self.ensure_open_close_snapshot_current_or_recovery(&account.as_view(), ledger)?;
         let outcome = self.book_bankruptcy_residual_chunk_internal(
             asset_index,
@@ -16980,8 +17037,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if insurance_used != 0 {
             self.advance_close_progress_ledger(account, 0, 0, insurance_used, 0, 0)?;
         }
+        self.clamp_close_residual_to_account_loss(account)?;
 
-        let residual = if account.header.pnl.get() < 0 {
+        let residual = if account.header.pnl.get() < 0
+            && account.header.close_progress.try_to_runtime()?.has_pending_residual()
+        {
             account.header.pnl.get().unsigned_abs()
         } else {
             0
@@ -18085,7 +18145,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<()> {
         if account.header.pnl.get() >= 0 {
-            return Ok(());
+            // A pending close whose loss was cured after it began books nothing more.
+            return self.clamp_close_residual_to_account_loss(account);
         }
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
@@ -18152,6 +18213,43 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_account_audit_scan(&account.as_view())?;
         self.validate_shape_audit_scan()?;
         Ok(paid)
+    }
+
+    /// A close ledger must never book more residual than the account still owes (issue #204).
+    /// Principal, backed gains, or any other credit can lower the account's negative PnL after
+    /// the close began; the difference is cured by the account itself, so gross loss and
+    /// residual drop by it together (partition preserved) before anything is booked to the
+    /// opposite side. A loss booked on another leg after the close began raises |pnl| and so
+    /// never reads as a cure. When the residual reaches zero the domain barrier is released.
+    fn clamp_close_residual_to_account_loss(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<()> {
+        let before = account.header.close_progress.try_to_runtime()?;
+        if !before.has_pending_residual() {
+            return Ok(());
+        }
+        let owed = account.header.pnl.get().min(0).unsigned_abs();
+        if before.residual_remaining <= owed {
+            return Ok(());
+        }
+        let excess = before.residual_remaining - owed;
+        let (ledger, barrier_released) = V16Core::kernel_principal_cure_close_ledger(before, excess)?;
+        if ledger == before {
+            return Ok(());
+        }
+        if barrier_released {
+            let asset_index = ledger.asset_index as usize;
+            let count = self.pending_domain_loss_barrier_count(asset_index, ledger.domain_side)?;
+            self.set_pending_domain_loss_barrier_count(
+                asset_index,
+                ledger.domain_side,
+                count.checked_sub(1).ok_or(V16Error::CounterUnderflow)?,
+            )?;
+        }
+        account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
+        account.header.health_cert.valid = 0;
+        Ok(())
     }
 
     fn settle_negative_pnl_from_principal_core_not_atomic(
