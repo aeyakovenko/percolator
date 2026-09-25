@@ -9482,3 +9482,76 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+// ---- issue #176: liquidation order must not depend on physical leg slot order ----
+
+fn issue176_selected_liquidation(asset0_first: bool) -> AutoCrankPlanV16 {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    header.config.initial_margin_bps = V16PodU64::new(1_000);
+    header.config.maintenance_margin_bps = V16PodU64::new(1_000);
+    header.config.max_price_move_bps_per_slot = V16PodU64::new(1_000);
+    let mut lp_header = account_fixture(2, 176);
+    let mut taker_header = account_fixture(2, 177);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut lp = PortfolioV16ViewMut::new(&mut lp_header);
+    let mut taker = PortfolioV16ViewMut::new(&mut taker_header);
+    market.deposit_not_atomic(&mut lp, 70).unwrap();
+    market.deposit_not_atomic(&mut taker, 100_000).unwrap();
+    // LP long 5 of asset 0 and long 1 of asset 1; the call order decides the LP's slots.
+    let legs = [(0usize, 5 * POS_SCALE), (1usize, POS_SCALE)];
+    let order: [usize; 2] = if asset0_first { [0, 1] } else { [1, 0] };
+    for i in order {
+        let (asset_index, q) = legs[i];
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut lp,
+                &mut taker,
+                TradeRequestV16 {
+                    asset_index,
+                    size_q: signed_q(q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        lp.header.legs[0].try_to_runtime().unwrap().asset_index as usize,
+        if asset0_first { 0 } else { 1 }
+    );
+    // Both assets fall; the LP becomes liquidatable.
+    for slot in 3..=4 {
+        for asset in 0..2 {
+            let price = 100 - 5 * (slot - 2);
+            market.set_asset_raw_oracle_target_not_atomic(asset, price).unwrap();
+            market.accrue_asset_to_not_atomic(asset, slot, price, 0, true).unwrap();
+        }
+    }
+    market.full_account_refresh_not_atomic(&mut lp).unwrap();
+    let summary = market.build_actionable_summary(&lp.as_view()).unwrap();
+    eprintln!("P176 current={} a0={} a1={}", market.header.current_slot.get(), market.markets[0].engine.asset.slot_last.get(), market.markets[1].engine.asset.slot_last.get());
+    assert!(summary.liquidatable, "setup must make the LP liquidatable");
+    market
+        .permissionless_auto_crank_not_atomic(
+            &mut lp,
+            AutoCrankWorkV16 {
+                now_slot: 4,
+                observations: &[],
+                resolved_close_fee_rate_per_slot: 0,
+            },
+        )
+        .unwrap()
+        .selected
+}
+
+#[test]
+fn issue176_liquidation_selects_same_leg_for_any_slot_order() {
+    let a = issue176_selected_liquidation(true);
+    let b = issue176_selected_liquidation(false);
+    assert_eq!(a, b, "slot order must not choose the liquidated leg");
+    assert_eq!(
+        a,
+        AutoCrankPlanV16::Liquidate { asset_index: 0 },
+        "the larger-notional leg is liquidated first"
+    );
+}
