@@ -9482,3 +9482,116 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+fn side_oi_cap_trade(
+    market: &mut MarketGroupV16ViewMut<'_, u64>,
+    long: &mut PortfolioV16ViewMut<'_>,
+    short: &mut PortfolioV16ViewMut<'_>,
+    size_q: u128,
+) -> Result<(), V16Error> {
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            long,
+            short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(size_q),
+                exec_price: 1,
+                fee_bps: 0,
+            },
+        )
+        .map(|_| ())
+}
+
+/// Issue #221: the aggregate MAX_OI_SIDE_Q cap is checked on the net
+/// post-fill side OI, so an OI-neutral handoff at `cap - 1` is admitted in
+/// BOTH directions (new long buying from an existing long, and new short
+/// selling to an existing short) regardless of which account attaches first,
+/// while any fill that would leave either side above the cap is rejected.
+#[test]
+fn v16_side_oi_cap_admits_oi_neutral_handoff_at_cap_in_both_directions() {
+    const CAP_MINUS_ONE: u128 = percolator::MAX_OI_SIDE_Q - 1;
+    const HANDOFF_Q: u128 = 1_000;
+    const DEPOSIT: u128 = 1_000_000_000_000;
+
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut a_header = account_fixture(1, 40); // original long
+    let mut b_header = account_fixture(1, 41); // original short
+    let mut c_header = account_fixture(1, 42); // new long (handoff)
+    let mut d_header = account_fixture(1, 43); // new short (handoff)
+    let mut e_header = account_fixture(1, 44); // fresh opener
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(&mut a_header);
+    let mut b = PortfolioV16ViewMut::new(&mut b_header);
+    let mut c = PortfolioV16ViewMut::new(&mut c_header);
+    let mut d = PortfolioV16ViewMut::new(&mut d_header);
+    let mut e = PortfolioV16ViewMut::new(&mut e_header);
+    for acct in [&mut a, &mut b, &mut c, &mut d, &mut e] {
+        market.deposit_not_atomic(acct, DEPOSIT).unwrap();
+    }
+    side_oi_cap_trade(&mut market, &mut a, &mut b, CAP_MINUS_ONE).unwrap();
+    let oi = |m: &MarketGroupV16ViewMut<'_, u64>| {
+        let asset = m.markets[0].engine.asset.try_to_runtime().unwrap();
+        (asset.oi_eff_long_q, asset.oi_eff_short_q)
+    };
+    assert_eq!(oi(&market), (CAP_MINUS_ONE, CAP_MINUS_ONE));
+
+    // Long-side handoff: the NEW long (attaching) is the trade's long
+    // account, so it mutates before the existing long's reduction.
+    side_oi_cap_trade(&mut market, &mut c, &mut a, HANDOFF_Q)
+        .expect("OI-neutral long-side handoff at cap-1 must be admitted");
+    assert_eq!(oi(&market), (CAP_MINUS_ONE, CAP_MINUS_ONE));
+
+    // Short-side handoff: the existing short reduces as the trade's long
+    // account while the NEW short attaches second.
+    side_oi_cap_trade(&mut market, &mut b, &mut d, HANDOFF_Q)
+        .expect("OI-neutral short-side handoff at cap-1 must be admitted");
+    assert_eq!(oi(&market), (CAP_MINUS_ONE, CAP_MINUS_ONE));
+    market.validate_shape().unwrap();
+
+    // A net OI-increasing fill (fresh long E attaches, existing short D
+    // grows) that would leave the sides above the cap stays rejected.
+    assert_eq!(
+        side_oi_cap_trade(&mut market, &mut e, &mut d, 2),
+        Err(V16Error::InvalidLeg)
+    );
+}
+
+#[test]
+fn v16_side_oi_cap_rejects_net_increase_over_cap_via_resize() {
+    const CAP_MINUS_ONE: u128 = percolator::MAX_OI_SIDE_Q - 1;
+    const DEPOSIT: u128 = 1_000_000_000_000;
+
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut a_header = account_fixture(1, 50);
+    let mut b_header = account_fixture(1, 51);
+    let mut c_header = account_fixture(1, 52);
+    let mut d_header = account_fixture(1, 53);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(&mut a_header);
+    let mut b = PortfolioV16ViewMut::new(&mut b_header);
+    let mut c = PortfolioV16ViewMut::new(&mut c_header);
+    let mut d = PortfolioV16ViewMut::new(&mut d_header);
+    for acct in [&mut a, &mut b, &mut c, &mut d] {
+        market.deposit_not_atomic(acct, DEPOSIT).unwrap();
+    }
+    // Split the cap-1 OI across two pairs so neither account sits at the
+    // per-position cap and a same-side resize can push the aggregate over.
+    side_oi_cap_trade(&mut market, &mut a, &mut b, CAP_MINUS_ONE / 2).unwrap();
+    side_oi_cap_trade(
+        &mut market,
+        &mut c,
+        &mut d,
+        CAP_MINUS_ONE - CAP_MINUS_ONE / 2,
+    )
+    .unwrap();
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, CAP_MINUS_ONE);
+
+    // Same-side resize growth of both existing legs (no attach at all) must
+    // also respect the aggregate cap; before #221 this path was unchecked.
+    assert_eq!(
+        side_oi_cap_trade(&mut market, &mut a, &mut b, 2),
+        Err(V16Error::InvalidLeg)
+    );
+}

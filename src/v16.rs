@@ -608,13 +608,15 @@ fn add_open_interest_for_new_position(
 ) -> V16Result<()> {
     match side {
         SideV16::Long => {
+            // The aggregate MAX_OI_SIDE_Q cap is enforced on the NET post-fill
+            // side OI by `kernel_trade_side_oi_cap_gate` once both trade legs
+            // are applied. Checking it here, before the counterparty's
+            // reducing leg is detached, made OI-neutral handoffs near the cap
+            // depend on which account mutated first.
             let oi_eff_long_q = asset
                 .oi_eff_long_q
                 .checked_add(abs_q)
                 .ok_or(V16Error::ArithmeticOverflow)?;
-            if oi_eff_long_q > crate::MAX_OI_SIDE_Q {
-                return Err(V16Error::InvalidLeg);
-            }
             asset.stored_pos_count_long = asset
                 .stored_pos_count_long
                 .checked_add(1)
@@ -626,13 +628,15 @@ fn add_open_interest_for_new_position(
                 .ok_or(V16Error::ArithmeticOverflow)?;
         }
         SideV16::Short => {
+            // The aggregate MAX_OI_SIDE_Q cap is enforced on the NET post-fill
+            // side OI by `kernel_trade_side_oi_cap_gate` once both trade legs
+            // are applied. Checking it here, before the counterparty's
+            // reducing leg is detached, made OI-neutral handoffs near the cap
+            // depend on which account mutated first.
             let oi_eff_short_q = asset
                 .oi_eff_short_q
                 .checked_add(abs_q)
                 .ok_or(V16Error::ArithmeticOverflow)?;
-            if oi_eff_short_q > crate::MAX_OI_SIDE_Q {
-                return Err(V16Error::InvalidLeg);
-            }
             asset.stored_pos_count_short = asset
                 .stored_pos_count_short
                 .checked_add(1)
@@ -2076,6 +2080,25 @@ impl V16Core {
             return Err(V16Error::InvalidLeg);
         }
         Ok(raw_abs_q)
+    }
+
+    /// Aggregate side-OI cap for a trade fill, evaluated on the NET post-fill
+    /// side OI (after both counterparties' legs are applied). Route- and
+    /// mutation-order-independent: an OI-neutral handoff at `cap - 1` is
+    /// admitted regardless of which account attaches first, while any fill
+    /// whose net effect leaves either side above MAX_OI_SIDE_Q is rejected.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<()>| match result {
+        Ok(()) => oi_long_q <= crate::MAX_OI_SIDE_Q && oi_short_q <= crate::MAX_OI_SIDE_Q,
+        Err(_) => oi_long_q > crate::MAX_OI_SIDE_Q || oi_short_q > crate::MAX_OI_SIDE_Q,
+    }))]
+    pub(crate) fn kernel_trade_side_oi_cap_gate(
+        oi_long_q: u128,
+        oi_short_q: u128,
+    ) -> V16Result<()> {
+        if oi_long_q > crate::MAX_OI_SIDE_Q || oi_short_q > crate::MAX_OI_SIDE_Q {
+            return Err(V16Error::InvalidLeg);
+        }
+        Ok(())
     }
 
     /// A trade may reduce only OI that existed before that trade. This makes
@@ -17691,6 +17714,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .checked_sub(trade_preflight.short_lookup.current_q)
                 .ok_or(V16Error::ArithmeticOverflow)?,
             trade_preflight.short_lookup,
+        )?;
+        // Net post-fill side-OI cap: both legs of the fill are applied, so the
+        // closing counterparty's OI has already been detached.
+        let post_fill_asset = self.asset_state(request.asset_index)?;
+        V16Core::kernel_trade_side_oi_cap_gate(
+            post_fill_asset.oi_eff_long_q,
+            post_fill_asset.oi_eff_short_q,
         )?;
         self.transfer_trade_residual_reward_credit(
             long_account,
