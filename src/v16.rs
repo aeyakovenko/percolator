@@ -1955,6 +1955,27 @@ impl V16Core {
         Ok(ledger)
     }
 
+    /// Fresh backing (BOUND_SCALE units, whole atoms) that resolved junior
+    /// claims can still need from a single bucket.
+    ///
+    /// Forfeited backing only raises the common rate, and every claim is paid
+    /// in full once `snapshot_residual * BOUND_SCALE >= claim_bound_num`, so
+    /// the atoms needed are `ceil(claim_bound_num / BOUND_SCALE) -
+    /// snapshot_residual`. After snapshot capture the residual never falls and
+    /// the bound never rises, so this need never grows. Any backing above it,
+    /// once expired, would go past full face into insurance recredit or
+    /// surplus, never to a claimant.
+    pub(crate) fn kernel_resolved_junior_backing_need_num(
+        snapshot_residual: u128,
+        claim_bound_num: u128,
+    ) -> V16Result<u128> {
+        claim_bound_num
+            .div_ceil(BOUND_SCALE)
+            .saturating_sub(snapshot_residual)
+            .checked_mul(BOUND_SCALE)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
     /// Credit residual released after terminal snapshot capture into both
     /// persisted snapshots and immediately raise the common payout rate.
     pub(crate) fn kernel_credit_post_snapshot_residual(
@@ -9438,6 +9459,82 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.header.vault = V16PodU128::new(next_vault);
         self.validate_source_domain_ledger(domain)?;
         self.validate_shape()
+    }
+
+    /// Resolved junior payout pool as `(residual, claim_bound_num)`, if it is final enough to
+    /// bound what forfeited backing can still add to claims.
+    ///
+    /// After capture this is the ledger: its residual only grows through post-snapshot credit
+    /// and its bound only shrinks through receipts and refinement. Before capture it is the
+    /// value capture would record now. That is used only when the market is payout-ready
+    /// (no stored positions, stale accounts, negative PnL, or loss barriers, so no claim can
+    /// grow) and no source claim remains (so no realization can reprice the residual first).
+    fn resolved_junior_payout_pool(&self) -> V16Result<(u128, u128)> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
+            return Err(V16Error::LockActive);
+        }
+        if decode_bool(self.header.payout_snapshot_captured)? {
+            let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
+            if ledger.payout_halted {
+                return Err(V16Error::RecoveryRequired);
+            }
+            let claim_bound_num = ledger
+                .terminal_claim_exact_receipts_num
+                .checked_add(ledger.terminal_claim_bound_unreceipted_num)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            return Ok((ledger.snapshot_residual, claim_bound_num));
+        }
+        if !self.resolved_positive_payout_ready()?
+            || self.header.source_claim_bound_total_num.get() != 0
+        {
+            return Err(V16Error::LockActive);
+        }
+        Ok((self.residual(), self.header.pnl_pos_bound_tot_num.get()))
+    }
+
+    /// Whole quote atoms of a domain's Fresh backing that no resolved claim can need.
+    ///
+    /// The bucket keeps two reserves. One covers every source claim still attributed to the
+    /// domain at full face, since terminal realization draws on counterparty backing first.
+    /// The other is the junior payout need: the backing that, once forfeited, raises the
+    /// common payout rate to full. Each bucket keeps the whole junior need by itself, so the
+    /// rule does not depend on other buckets or on the order providers exit. Claimants get
+    /// the same payout from the kept reserve as from the whole bucket, because expiry of the
+    /// reserve already brings every receipt to full face. Everything above it is surplus.
+    pub fn resolved_counterparty_backing_surplus(&self, domain: usize) -> V16Result<u128> {
+        self.domain_asset_side(domain)?;
+        let (residual, claim_bound_num) = self.resolved_junior_payout_pool()?;
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.expiry_slot <= self.header.current_slot.get()
+        {
+            return Ok(0);
+        }
+        let reserve_num =
+            V16Core::kernel_resolved_junior_backing_need_num(residual, claim_bound_num)?
+                .checked_add(
+                    self.source_credit_for_domain(domain)?
+                        .positive_claim_bound_num,
+                )
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(bucket
+            .fresh_unliened_backing_num
+            .saturating_sub(reserve_num)
+            / BOUND_SCALE)
+    }
+
+    /// Withdraws resolved Fresh backing surplus without waiting for portfolios to close.
+    /// The amount must fit within `resolved_counterparty_backing_surplus`. The ordinary
+    /// withdrawal checks (unliened principal, full credit rate) still apply.
+    pub fn withdraw_resolved_counterparty_backing_surplus_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        if amount > self.resolved_counterparty_backing_surplus(domain)? {
+            return Err(V16Error::LockActive);
+        }
+        self.withdraw_fresh_counterparty_backing_not_atomic(domain, amount)
     }
 
     pub fn expire_source_backing_bucket_not_atomic(
