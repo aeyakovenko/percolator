@@ -9153,13 +9153,45 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Lifetime granted to engine-created counterparty backing, and the bounded
+    /// post-resolution wait for any provider backing (#219).
+    fn backing_freshness_horizon_slots(&self) -> u64 {
+        let config = &self.header.config;
+        config
+            .max_accrual_dt_slots
+            .get()
+            .max(config.h_max.get())
+            .max(config.max_bankrupt_close_lifetime_slots.get())
+            .max(1)
+    }
+
+    /// Resolved markets bound every backing lifetime at
+    /// `resolved_slot + backing_freshness_horizon_slots`. A provider-chosen far
+    /// expiry must not keep underfunded resolved receipts or terminal wind-down
+    /// waiting forever; past the deadline the bucket lapses with natural-expiry
+    /// semantics. Live markets and expiries already inside the horizon are
+    /// unchanged.
+    fn effective_backing_expiry_slot(&self, expiry_slot: u64) -> V16Result<u64> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
+            return Ok(expiry_slot);
+        }
+        let deadline = self
+            .header
+            .resolved_slot
+            .get()
+            .saturating_add(self.backing_freshness_horizon_slots());
+        Ok(expiry_slot.min(deadline))
+    }
+
     fn backing_bucket_for_domain(&self, domain: usize) -> V16Result<BackingBucketV16> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let slot = self.markets[asset_index].engine_slot();
-        match side {
+        let mut bucket = match side {
             SideV16::Long => slot.backing_long.try_to_runtime(),
             SideV16::Short => slot.backing_short.try_to_runtime(),
-        }
+        }?;
+        bucket.expiry_slot = self.effective_backing_expiry_slot(bucket.expiry_slot)?;
+        Ok(bucket)
     }
 
     fn set_backing_bucket_for_domain(
@@ -9317,17 +9349,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Ok(bucket.expiry_slot);
         }
-        let config = self.header.config.try_to_runtime_shape()?;
-        let freshness_horizon = config
-            .max_accrual_dt_slots
-            .max(config.h_max)
-            .max(config.max_bankrupt_close_lifetime_slots)
-            .max(1);
-        self.header
+        self.header.config.try_to_runtime_shape()?;
+        let expiry_slot = self
+            .header
             .current_slot
             .get()
-            .checked_add(freshness_horizon)
-            .ok_or(V16Error::CounterOverflow)
+            .checked_add(self.backing_freshness_horizon_slots())
+            .ok_or(V16Error::CounterOverflow)?;
+        self.effective_backing_expiry_slot(expiry_slot)
     }
 
     fn add_fresh_counterparty_backing_unchecked(
@@ -9543,7 +9572,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             (short_domain, &slot.backing_short),
         ] {
             if decode_backing_bucket_status(bucket.status)? == BackingBucketStatusV16::Fresh
-                && bucket.expiry_slot.get() <= now_slot
+                && self.effective_backing_expiry_slot(bucket.expiry_slot.get())? <= now_slot
             {
                 return Ok(Some(domain));
             }
@@ -11911,13 +11940,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         } else {
                             BackingBucketStatusV16::Empty
                         },
-                        slot.backing_long.expiry_slot.get(),
+                        self.effective_backing_expiry_slot(slot.backing_long.expiry_slot.get())?,
                         if inspect_backing {
                             short_status
                         } else {
                             BackingBucketStatusV16::Empty
                         },
-                        slot.backing_short.expiry_slot.get(),
+                        self.effective_backing_expiry_slot(slot.backing_short.expiry_slot.get())?,
                         authenticated_slot,
                         recreditable,
                     )
@@ -13103,13 +13132,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 } else {
                     (backing_num, 0)
                 };
+            let mut residual_backing = residual_backing;
             if source_backing_num != 0 {
                 let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
-                self.add_fresh_counterparty_backing_unchecked(
-                    domain,
-                    source_backing_num,
-                    expiry_slot,
-                )?;
+                if expiry_slot > self.header.current_slot.get() {
+                    self.add_fresh_counterparty_backing_unchecked(
+                        domain,
+                        source_backing_num,
+                        expiry_slot,
+                    )?;
+                } else {
+                    // Past the resolved backing horizon new backing would lapse
+                    // on creation; route it where that expiry would send it.
+                    residual_backing = backing;
+                }
             }
             self.credit_post_snapshot_residual_not_atomic(residual_backing)?;
         }
