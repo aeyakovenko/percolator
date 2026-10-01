@@ -4952,6 +4952,111 @@ fn v16_resolved_impaired_source_accepts_prospective_terminal_loss() {
 }
 
 #[test]
+fn v16_resolved_zero_conversion_coclaimants_on_empty_bucket_both_close() {
+    // Issue #220: the loser settles before either winner has attributed its
+    // claim, so its loss funds junior residual and the winners' source domain
+    // keeps an Empty bucket. Two zero-conversion claimants must not block each
+    // other's resolved close forever.
+    const Q: u128 = 1_000 * POS_SCALE;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.max_price_move_bps_per_slot = 500;
+    cfg.max_accrual_dt_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+
+    let mut winner_a_header = account_fixture(1, 60);
+    let mut winner_b_header = account_fixture(1, 61);
+    let mut loser_header = account_fixture(1, 62);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut winner_a = PortfolioV16ViewMut::new(&mut winner_a_header);
+    let mut winner_b = PortfolioV16ViewMut::new(&mut winner_b_header);
+    let mut loser = PortfolioV16ViewMut::new(&mut loser_header);
+    market.deposit_not_atomic(&mut winner_a, 1_000_000).unwrap();
+    market.deposit_not_atomic(&mut winner_b, 1_000_000).unwrap();
+    market.deposit_not_atomic(&mut loser, 2_000_000).unwrap();
+    for winner in [&mut winner_a, &mut winner_b] {
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                winner,
+                &mut loser,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    market
+        .set_asset_raw_oracle_target_not_atomic(0, 105)
+        .unwrap();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+        .unwrap();
+    market.resolve_market_not_atomic(4).unwrap();
+
+    let mut loser_payout = None;
+    for _ in 0..16 {
+        match market.close_resolved_account_not_atomic(&mut loser, 0) {
+            Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly) => {}
+            Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) => {
+                loser_payout = Some(payout);
+                break;
+            }
+            Err(e) => panic!("loser close failed: {e:?}"),
+        }
+    }
+    let loser_payout = loser_payout.expect("loser must close first");
+    assert!(loser_payout < 2_000_000);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Empty,
+        "loser settled before winners attributed claims: no source backing"
+    );
+
+    // Both winners now attribute zero-conversion claims to the Empty domain.
+    let mut payouts = [None, None];
+    for _ in 0..32 {
+        for (i, winner) in [&mut winner_a, &mut winner_b].into_iter().enumerate() {
+            if payouts[i].is_some() {
+                continue;
+            }
+            match market.close_resolved_account_not_atomic(winner, 0) {
+                Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly) => {}
+                Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) => {
+                    payouts[i] = Some(payout)
+                }
+                Err(e) => panic!("winner {i} resolved close must progress, got {e:?}"),
+            }
+        }
+        if payouts.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    let [Some(a), Some(b)] = payouts else {
+        panic!("both zero-conversion co-claimants must close: {payouts:?}");
+    };
+    // The loser's 10_000 loss reaches the winners exactly once through the
+    // junior pool: each is paid its full face, nothing is minted or stranded.
+    assert_eq!((a, b, loser_payout), (1_005_000, 1_005_000, 1_990_000));
+    assert_eq!(market.header.vault.get(), 0);
+    market.validate_shape().unwrap();
+    winner_a.validate_with_market(&market.as_view()).unwrap();
+    winner_b.validate_with_market(&market.as_view()).unwrap();
+    loser.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
 fn v16_resolved_close_normalizes_prospective_lapsed_source_before_settlement() {
     const Q: u128 = 1_000 * POS_SCALE;
     let (market_id, _, _) = ids();

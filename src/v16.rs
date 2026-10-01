@@ -19212,6 +19212,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if retiring_source.source_claim_impaired_num.get() != 0 {
             return Ok(true);
         }
+        let asset = self.asset_state(asset_index)?;
+        // In Resolved mode the only path that can fund this domain is a
+        // loss-side leg crystallizing its K/F loss into backing. An Empty
+        // bucket never expires, so once no loss-side leg or obligation remains
+        // the domain can receive no further backing: every zero-conversion
+        // claim is final and may retire independently. Requiring the other
+        // claimants' remainder to be zero here would deadlock co-claimants.
+        let loss_side_counts = match loss_side {
+            SideV16::Long => (
+                asset.stored_pos_count_long,
+                asset.stale_account_count_long,
+                asset.pending_obligation_count_long,
+            ),
+            SideV16::Short => (
+                asset.stored_pos_count_short,
+                asset.stale_account_count_short,
+                asset.pending_obligation_count_short,
+            ),
+        };
+        if bucket.status == BackingBucketStatusV16::Empty
+            && decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+            && loss_side_counts == (0, 0, 0)
+        {
+            return Ok(true);
+        }
         let source = self.source_credit_for_domain(domain)?;
         let remaining_claim_num = source
             .positive_claim_bound_num
@@ -19220,7 +19245,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if remaining_claim_num != 0 {
             return Ok(false);
         }
-        let asset = self.asset_state(asset_index)?;
         let creditor_counts = match opposite_side(loss_side) {
             SideV16::Long => (
                 asset.stored_pos_count_long,
