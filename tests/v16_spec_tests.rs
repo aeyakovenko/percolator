@@ -9482,3 +9482,256 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+// ---- resolved Fresh-backing surplus withdrawal (percolator-prog#451) ----
+
+fn resolved_ledger_with_shortfall(
+    snapshot_residual: u128,
+    claim_atoms: u128,
+) -> ResolvedPayoutLedgerV16Account {
+    let den = claim_atoms * BOUND_SCALE;
+    ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+        snapshot_residual,
+        terminal_claim_exact_receipts_num: den,
+        terminal_claim_bound_unreceipted_num: 0,
+        current_payout_rate_num: (snapshot_residual * BOUND_SCALE).min(den),
+        current_payout_rate_den: den,
+        snapshot_slot: 1,
+        payout_halted: false,
+        finalized: false,
+    })
+}
+
+// Resolved market: 100 atoms of Fresh backing in domain 1 (expiry 10) and a junior pool
+// of 4 residual atoms against 10 atoms of exact receipt face (rate 4/10).
+fn resolved_backing_surplus_fixture() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100, 10)
+            .unwrap();
+        market.resolve_market_not_atomic(1).unwrap();
+    }
+    header.vault = V16PodU128::new(104);
+    header.payout_snapshot_captured = 1;
+    header.payout_snapshot = V16PodU128::new(4);
+    header.resolved_payout_ledger = resolved_ledger_with_shortfall(4, 10);
+    (header, markets)
+}
+
+#[test]
+fn v16_resolved_backing_surplus_keeps_exact_junior_need() {
+    let (mut header, mut markets) = resolved_backing_surplus_fixture();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    // Six forfeited atoms take the common rate from 4/10 to full; the other 94 are surplus.
+    assert_eq!(market.resolved_counterparty_backing_surplus(1), Ok(94));
+    // The opposite domain holds no backing.
+    assert_eq!(market.resolved_counterparty_backing_surplus(0), Ok(0));
+    assert_eq!(
+        market.withdraw_resolved_counterparty_backing_surplus_not_atomic(1, 95),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(market.header.vault.get(), 104);
+    market
+        .withdraw_resolved_counterparty_backing_surplus_not_atomic(1, 94)
+        .unwrap();
+    assert_eq!(market.header.vault.get(), 10);
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .backing_short
+            .fresh_unliened_backing_num
+            .get(),
+        6 * BOUND_SCALE
+    );
+    assert_eq!(market.resolved_counterparty_backing_surplus(1), Ok(0));
+    assert_eq!(
+        market.withdraw_resolved_counterparty_backing_surplus_not_atomic(1, 1),
+        Err(V16Error::LockActive)
+    );
+    market.validate_shape().unwrap();
+
+    // Expiry of the kept reserve alone brings every receipt to full face: claimants get
+    // exactly what the whole 100-atom bucket would have given them.
+    market.advance_resolved_slot_not_atomic(10).unwrap();
+    market
+        .expire_source_backing_bucket_not_atomic(1, 10)
+        .unwrap();
+    let ledger = market
+        .header
+        .resolved_payout_ledger
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(ledger.snapshot_residual, 10);
+    assert_eq!(
+        ledger.current_payout_rate_num,
+        ledger.current_payout_rate_den
+    );
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_resolved_backing_surplus_reserve_matches_whole_bucket_expiry() {
+    for (residual, claim_atoms) in [
+        (4u128, 10u128),
+        (0, 1),
+        (9, 10),
+        (10, 10),
+        (50, 10),
+        (0, 100),
+        (0, 101),
+    ] {
+        let mut outcomes = Vec::new();
+        for withdraw_surplus in [false, true] {
+            let (mut header, mut markets) = market_fixture(1, 100);
+            {
+                let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+                market
+                    .deposit_fresh_counterparty_backing_not_atomic(1, 100, 10)
+                    .unwrap();
+                market.resolve_market_not_atomic(1).unwrap();
+            }
+            header.vault = V16PodU128::new(100 + residual);
+            header.payout_snapshot_captured = 1;
+            header.payout_snapshot = V16PodU128::new(residual);
+            header.resolved_payout_ledger = resolved_ledger_with_shortfall(residual, claim_atoms);
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let surplus = market.resolved_counterparty_backing_surplus(1).unwrap();
+            let need = (claim_atoms.saturating_sub(residual)).min(100);
+            assert_eq!(
+                surplus,
+                100 - need,
+                "residual={residual} claims={claim_atoms}"
+            );
+            if withdraw_surplus && surplus != 0 {
+                market
+                    .withdraw_resolved_counterparty_backing_surplus_not_atomic(1, surplus)
+                    .unwrap();
+            }
+            market.advance_resolved_slot_not_atomic(10).unwrap();
+            if surplus != 100 || !withdraw_surplus {
+                market
+                    .expire_source_backing_bucket_not_atomic(1, 10)
+                    .unwrap();
+            }
+            let ledger = market
+                .header
+                .resolved_payout_ledger
+                .try_to_runtime()
+                .unwrap();
+            // Every face's floor payout at the post-expiry rate.
+            let payouts = (1..=claim_atoms)
+                .map(|face| face * ledger.current_payout_rate_num / ledger.current_payout_rate_den)
+                .collect::<Vec<_>>();
+            outcomes.push(payouts);
+            market.validate_shape().unwrap();
+        }
+        assert_eq!(
+            outcomes[0], outcomes[1],
+            "residual={residual} claims={claim_atoms}"
+        );
+    }
+}
+
+#[test]
+fn v16_resolved_backing_surplus_rejects_live_halted_and_unready_pools() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100, 10)
+            .unwrap();
+        assert_eq!(
+            market.resolved_counterparty_backing_surplus(1),
+            Err(V16Error::LockActive)
+        );
+        market.resolve_market_not_atomic(1).unwrap();
+        // Before capture, a payout-ready pool with no claims needs nothing.
+        assert_eq!(market.resolved_counterparty_backing_surplus(1), Ok(100));
+    }
+    // Before capture, an unready pool (negative PnL still unsettled) is not final.
+    header.negative_pnl_account_count = V16PodU64::new(1);
+    {
+        let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert_eq!(
+            market.resolved_counterparty_backing_surplus(1),
+            Err(V16Error::LockActive)
+        );
+    }
+    header.negative_pnl_account_count = V16PodU64::new(0);
+    // Before capture, a ready pool reserves what capture would need now.
+    header.pnl_pos_bound_tot_num = V16PodU128::new(3 * BOUND_SCALE);
+    {
+        let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        assert_eq!(market.resolved_counterparty_backing_surplus(1), Ok(97));
+    }
+    header.pnl_pos_bound_tot_num = V16PodU128::new(0);
+    header.vault = V16PodU128::new(104);
+    header.payout_snapshot_captured = 1;
+    header.resolved_payout_ledger = resolved_ledger_with_shortfall(4, 10);
+    let mut ledger = header.resolved_payout_ledger.try_to_runtime().unwrap();
+    ledger.payout_halted = true;
+    header.resolved_payout_ledger = ResolvedPayoutLedgerV16Account::from_runtime(&ledger);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.withdraw_resolved_counterparty_backing_surplus_not_atomic(1, 1),
+        Err(V16Error::RecoveryRequired)
+    );
+    // An expired bucket has no surplus to withdraw.
+    market.header.resolved_payout_ledger = resolved_ledger_with_shortfall(4, 10);
+    market.advance_resolved_slot_not_atomic(10).unwrap();
+    assert_eq!(market.resolved_counterparty_backing_surplus(1), Ok(0));
+}
+
+#[cfg(feature = "fuzz")]
+#[test]
+fn v16_resolved_backing_surplus_reserves_domain_source_claims() {
+    let (mut header, mut markets) = resolved_backing_surplus_fixture();
+    header.pnl_pos_bound_tot_num = V16PodU128::new(20 * BOUND_SCALE);
+    header.pnl_pos_bound_tot = V16PodU128::new(20);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .add_source_positive_claim_bound_not_atomic(1, 20 * BOUND_SCALE, 20 * BOUND_SCALE)
+        .unwrap();
+    // 6 atoms of junior need plus 20 atoms of still-attributed source claims.
+    assert_eq!(market.resolved_counterparty_backing_surplus(1), Ok(74));
+    assert_eq!(
+        market.withdraw_resolved_counterparty_backing_surplus_not_atomic(1, 75),
+        Err(V16Error::LockActive)
+    );
+    market
+        .withdraw_resolved_counterparty_backing_surplus_not_atomic(1, 74)
+        .unwrap();
+    assert_eq!(
+        market.markets[0]
+            .engine
+            .source_credit_short
+            .credit_rate_num
+            .get(),
+        CREDIT_RATE_SCALE
+    );
+}
+
+#[cfg(feature = "fuzz")]
+#[test]
+fn v16_resolved_junior_backing_need_is_minimal_exhaustively() {
+    for residual in 0u128..=12 {
+        for claim_num in (0u128..=12).flat_map(|atoms| {
+            [0, 1, BOUND_SCALE / 2, BOUND_SCALE - 1].map(|tail| atoms * BOUND_SCALE + tail)
+        }) {
+            let need = percolator::v16::kani_resolved_junior_backing_need_num(residual, claim_num)
+                .unwrap();
+            assert_eq!(need % BOUND_SCALE, 0);
+            let need_atoms = need / BOUND_SCALE;
+            let full = |released: u128| (residual + released) * BOUND_SCALE >= claim_num;
+            assert!(full(need_atoms), "insufficient: r={residual} c={claim_num}");
+            if need_atoms != 0 {
+                assert!(
+                    !full(need_atoms - 1),
+                    "not minimal: r={residual} c={claim_num}"
+                );
+            }
+        }
+    }
+}
