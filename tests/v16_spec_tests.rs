@@ -5407,7 +5407,8 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         .unwrap();
     // The unliened face is the same leg's unrealized gain: it is netted one for one (#457) and
     // the short-loser backing that supported it moves to the long-loss domain, which the
-    // reversal loss is owed to, instead of being consumed into the junior pool.
+    // reversal loss is owed to: it is consumed from the twin with the usual provider-receivable
+    // bookkeeping and re-enters as loss-domain principal instead of junior pool.
     let unliened_face_netted = 5_000 - lien_effective;
     let principal_loss = 5_250 - 5_000;
     let long_loss_domain_backing_after = market.markets[0]
@@ -5461,8 +5462,9 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         assert_eq!(backing_after_reversal.valid_liened_backing_num, 0);
         assert_eq!(
             backing_after_reversal.consumed_liened_backing_num,
-            backing_before_reversal.consumed_liened_backing_num,
-            "the netted face moves its backing instead of consuming it"
+            backing_before_reversal.consumed_liened_backing_num
+                + unliened_face_netted * BOUND_SCALE,
+            "the netted face's backing is consumed exactly once (provider receivable kept)"
         );
         assert_eq!(
             long_loss_domain_backing_after,

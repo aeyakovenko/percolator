@@ -12818,11 +12818,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// would make the loser's settlement order decide how much of the face burns.
     ///
     /// The twin backing that supported the cancelled face at the twin's current
-    /// rate moves, atom for atom, to `loss_domain`: the cancelled loss is owed to
-    /// the loss-domain winners, and it is the twin losers' booked payment that
-    /// funds it. The transfer is floor(face * rate), so the twin's remaining
-    /// claimants never see a lower rate, and it moves only unliened Fresh
-    /// counterparty principal (no vault, capital, or insurance movement). Any
+    /// rate is consumed exactly as ordinary support would be (same spent /
+    /// provider-receivable bookkeeping) and re-enters, atom for atom, as fresh
+    /// principal of `loss_domain`: the cancelled loss is owed to the loss-domain
+    /// winners, and it is the twin losers' booked payment that funds it. The
+    /// amount is floor(face * rate), so the twin's remaining claimants never see
+    /// a lower rate, and only unliened Fresh counterparty principal moves (no
+    /// vault, capital, or insurance movement). Any
     /// remaining loss falls through to the ordinary support-and-burn path.
     /// Returns the loss amount netted.
     fn net_same_leg_reversal_against_twin_face_not_atomic(
@@ -12869,17 +12871,25 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account.compact_source_domains();
 
         if transfer_num != 0 {
-            let (twin_bucket, twin_source) = V16Core::prepare_counterparty_backing_withdraw_delta(
-                self.backing_bucket_for_domain(twin_domain)?,
-                self.source_credit_for_domain(twin_domain)?,
+            // The twin side is booked exactly as the pre-#457 support consumption
+            // was (spent / provider_receivable / consumed lockstep), so backing
+            // providers keep the same receivable attribution. The consumed atoms
+            // re-enter as fresh principal of the loss domain instead of the junior
+            // pool. A loss bucket that is already Fresh keeps its expiry; an
+            // Empty/Expired one inherits the twin bucket's expiry, so the moved
+            // principal never outlives the commitment it came from and a provider
+            // top-up at that expiry still merges.
+            let twin_expiry = self.backing_bucket_for_domain(twin_domain)?.expiry_slot;
+            let loss_bucket = self.backing_bucket_for_domain(loss_domain)?;
+            let expiry_slot = if loss_bucket.status == BackingBucketStatusV16::Fresh {
+                loss_bucket.expiry_slot
+            } else {
+                twin_expiry
+            };
+            self.create_and_consume_source_credit_from_counterparty_core_not_atomic(
+                twin_domain,
                 transfer_num,
             )?;
-            self.set_backing_bucket_for_domain(twin_domain, twin_bucket)?;
-            self.set_source_credit_for_domain(twin_domain, twin_source)?;
-            self.recompute_source_credit_domain_after_mutation(twin_domain)?;
-            self.reservation_encumbrance_proof_for_domain(twin_domain)?
-                .validate()?;
-            let expiry_slot = self.fresh_counterparty_backing_expiry_slot(loss_domain)?;
             self.add_fresh_counterparty_backing_unchecked(loss_domain, transfer_num, expiry_slot)?;
         }
 

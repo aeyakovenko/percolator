@@ -1387,8 +1387,13 @@ T's stored credit rate would make the outcome depend on whether T's losers
 were settled before the reversal. Together with the cancelled face, T's
 counterparty backing that supported it moves to `L`:
 `floor(n * BOUND_SCALE * rate_T)` bound units of unliened Fresh principal
-(capped by T's unliened bucket principal), as a pure reclassification between
-the two domains' `counterparty_backing_principal` (`V`, `C_tot`, `I` flat). The
+(capped by T's unliened bucket principal). T books it exactly as ordinary
+support consumption (spent / provider-receivable / consumed lockstep, so
+provider attribution is unchanged) and it re-enters as fresh principal of `L`
+rather than the junior pool (`V`, `C_tot`, `I` flat). A Fresh `L` bucket keeps
+its expiry; an Empty/Expired one inherits T's bucket expiry, so the moved
+principal never outlives its source commitment and a provider top-up at that
+expiry still merges. The
 transfer is skipped (netting still applies) when either side of the asset has
 a pending domain-loss barrier, T's bucket is stale, or L's bucket cannot accept
 fresh principal; skipping only raises T's rate. Because the transfer is at or
