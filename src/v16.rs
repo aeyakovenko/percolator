@@ -12810,6 +12810,142 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    /// Same-leg reversal netting (#457). A newly observed negative K/F delta on a
+    /// leg whose loss books into `loss_domain = (asset, side)` first cancels, one
+    /// for one, the account's unliened positive face sourced from the twin domain
+    /// `(asset, opposite(side))` -- the unrealized gain of that same leg, which was
+    /// never paid out. Pricing that give-back at the twin's stored credit rate
+    /// would make the loser's settlement order decide how much of the face burns.
+    ///
+    /// The twin backing that supported the cancelled face at the twin's current
+    /// rate moves, atom for atom, to `loss_domain`: the cancelled loss is owed to
+    /// the loss-domain winners, and it is the twin losers' booked payment that
+    /// funds it. The transfer is floor(face * rate), so the twin's remaining
+    /// claimants never see a lower rate, and it moves only unliened Fresh
+    /// counterparty principal (no vault, capital, or insurance movement). Any
+    /// remaining loss falls through to the ordinary support-and-burn path.
+    /// Returns the loss amount netted.
+    fn net_same_leg_reversal_against_twin_face_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        loss_domain: usize,
+        loss_abs: u128,
+    ) -> V16Result<u128> {
+        if loss_abs == 0 || decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+            return Ok(0);
+        }
+        let old_pnl = account.header.pnl.get();
+        if old_pnl <= 0 {
+            return Ok(0);
+        }
+        let (asset_index, loss_side) = self.domain_asset_side(loss_domain)?;
+        let twin_domain = self.insurance_domain_index(asset_index, opposite_side(loss_side))?;
+        let Some(slot) = account.source_domain_slot(twin_domain)? else {
+            return Ok(0);
+        };
+        let unliened_num = Self::source_claim_unliened_num(&account.as_view(), twin_domain)?;
+        let netted = loss_abs
+            .min(old_pnl as u128)
+            .min(V16Core::amount_from_bound_num(unliened_num)?);
+        if netted == 0 {
+            return Ok(0);
+        }
+        let netted_num = V16Core::bound_num_from_amount(netted)?;
+
+        // Backing that supported the cancelled face at the twin's current rate.
+        let transfer_num = self.twin_reversal_backing_transfer_num(
+            asset_index,
+            twin_domain,
+            loss_domain,
+            netted_num,
+        )?;
+
+        self.decrement_account_source_claim_for_domain_not_atomic(
+            account,
+            slot,
+            twin_domain,
+            netted_num,
+        )?;
+        account.compact_source_domains();
+
+        if transfer_num != 0 {
+            let (twin_bucket, twin_source) = V16Core::prepare_counterparty_backing_withdraw_delta(
+                self.backing_bucket_for_domain(twin_domain)?,
+                self.source_credit_for_domain(twin_domain)?,
+                transfer_num,
+            )?;
+            self.set_backing_bucket_for_domain(twin_domain, twin_bucket)?;
+            self.set_source_credit_for_domain(twin_domain, twin_source)?;
+            self.recompute_source_credit_domain_after_mutation(twin_domain)?;
+            self.reservation_encumbrance_proof_for_domain(twin_domain)?
+                .validate()?;
+            let expiry_slot = self.fresh_counterparty_backing_expiry_slot(loss_domain)?;
+            self.add_fresh_counterparty_backing_unchecked(loss_domain, transfer_num, expiry_slot)?;
+        }
+
+        let netted_i128 = i128::try_from(netted).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let new_pnl = old_pnl
+            .checked_sub(netted_i128)
+            .ok_or(V16Error::CounterUnderflow)?;
+        account.header.reserved_pnl = V16PodU128::new(
+            account
+                .header
+                .reserved_pnl
+                .get()
+                .min(new_pnl.max(0) as u128),
+        );
+        self.set_account_pnl_after_source_claim_burn(account, new_pnl, netted_num)?;
+        Ok(netted)
+    }
+
+    /// Twin backing (BOUND_SCALE units) that moves with a same-leg reversal of
+    /// `face_num`: floor(face_num * twin_rate), limited to unliened Fresh
+    /// counterparty principal. Zero when either side of the asset has an active
+    /// close barrier, when the twin backing is stale, or when the loss domain's
+    /// bucket cannot accept fresh principal; the cancelled face is then netted
+    /// without moving backing, which only raises the twin's rate (never lowers it).
+    fn twin_reversal_backing_transfer_num(
+        &self,
+        asset_index: usize,
+        twin_domain: usize,
+        loss_domain: usize,
+        face_num: u128,
+    ) -> V16Result<u128> {
+        if self.has_pending_domain_loss_barrier(asset_index, SideV16::Long)?
+            || self.has_pending_domain_loss_barrier(asset_index, SideV16::Short)?
+        {
+            return Ok(0);
+        }
+        let now = self.header.current_slot.get();
+        let twin_bucket = self.backing_bucket_for_domain(twin_domain)?;
+        if twin_bucket.status != BackingBucketStatusV16::Fresh
+            || twin_bucket.expiry_slot <= now
+            || twin_bucket.fresh_unliened_backing_num == 0
+        {
+            return Ok(0);
+        }
+        let loss_bucket = self.backing_bucket_for_domain(loss_domain)?;
+        let loss_bucket_accepts = match loss_bucket.status {
+            BackingBucketStatusV16::Empty | BackingBucketStatusV16::Expired => true,
+            BackingBucketStatusV16::Fresh => loss_bucket.expiry_slot > now,
+            _ => false,
+        };
+        if !loss_bucket_accepts {
+            return Ok(0);
+        }
+        self.validate_source_domain_ledger_current(twin_domain)?;
+        let twin_source = self.source_credit_for_domain(twin_domain)?;
+        let rate = V16Core::expected_source_credit_rate_num_for_state(twin_source)?;
+        let at_rate = U256::from_u128(face_num)
+            .checked_mul(U256::from_u128(rate))
+            .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(at_rate
+            .min(twin_bucket.fresh_unliened_backing_num)
+            .min(twin_source.fresh_reserved_backing_num))
+    }
+
     fn apply_haircut_bounded_close_loss_to_pnl(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -13362,7 +13498,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.apply_signed_kf_delta_to_pnl(account, prepared.net, Some(source_domain))?;
             } else {
                 let negative_before = account.header.pnl.get().min(0).unsigned_abs();
-                self.apply_signed_kf_delta_to_pnl(account, prepared.net, None)?;
+                let loss_abs = prepared.net.unsigned_abs();
+                let netted = self.net_same_leg_reversal_against_twin_face_not_atomic(
+                    account,
+                    source_domain,
+                    loss_abs,
+                )?;
+                let remaining_loss = loss_abs
+                    .checked_sub(netted)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                if remaining_loss != 0 {
+                    let remaining_i128 =
+                        i128::try_from(remaining_loss).map_err(|_| V16Error::ArithmeticOverflow)?;
+                    self.apply_signed_kf_delta_to_pnl(account, -remaining_i128, None)?;
+                }
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
                 self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
                     account,
