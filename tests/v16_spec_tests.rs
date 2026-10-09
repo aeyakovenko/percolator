@@ -167,14 +167,14 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
     let scaled = (ADL_ONE * 3 / 4) as i128;
     assert_eq!(asset.k_long, ADL_ONE as i128);
     assert_eq!(asset.k_short, -scaled);
+    // #458: funding is A-scaled from the exact `rate * price` numerator (no whole-price-
+    // unit pre-floor): 10_000e-9 * 1_000_001 = 10.00001 price units per unit.
+    let funding_num = FUNDING_COUNTER_RATE_E9 * (FUNDING_COUNTER_PRICE + 1) as i128;
     assert_eq!(
         asset.f_long_num,
-        -(FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * ADL_ONE as i128)
+        -(funding_num * (ADL_ONE / 1_000_000_000) as i128)
     );
-    assert_eq!(
-        asset.f_short_num,
-        FUNDING_COUNTER_ATOMS_PER_SLOT as i128 * scaled
-    );
+    assert_eq!(asset.f_short_num, funding_num * scaled / 1_000_000_000);
 
     let total_value = |long: &PortfolioAccountV16Account,
                        short: &PortfolioAccountV16Account|
@@ -199,7 +199,11 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
             )
             .unwrap();
     }
-    assert_eq!(total_value(&long_header, &short_header), value_before);
+    // #458: sub-unit funding (10.00001 price units per unit) settles exactly up to
+    // per-side flooring: the payer pays the ceiling and the receiver gets the floor,
+    // so the pair may lose at most one atom per side to conservative dust.
+    let value_after = total_value(&long_header, &short_header);
+    assert!(value_after <= value_before && value_before - value_after <= 2);
 
     let reduced_asset = markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(reduced_asset.oi_eff_long_q, 6 * POS_SCALE);
@@ -233,10 +237,12 @@ fn v16_quantity_adl_price_and_funding_accrual_remain_zero_sum() {
         market.full_account_refresh_not_atomic(&mut long).unwrap();
         market.full_account_refresh_not_atomic(&mut short).unwrap();
     }
-    assert_eq!(
-        total_value(&long_header, &short_header),
-        value_before_continuation,
-        "future price/funding accrual must remain zero-sum after the partial ADL reduction"
+    let value_after_continuation = total_value(&long_header, &short_header);
+    assert!(
+        value_after_continuation <= value_before_continuation
+            && value_before_continuation - value_after_continuation <= 2,
+        "future price/funding accrual must remain zero-sum (up to conservative sub-atom \
+         funding dust) after the partial ADL reduction"
     );
 }
 
@@ -616,12 +622,19 @@ fn v16_canonical_accrual_path_scales_indices_after_quantity_adl() {
     let asset = markets[0].engine.asset.try_to_runtime().unwrap();
     let a_short = ADL_ONE * 3 / 4;
     let price_delta = i128::from(step.effective_price - INITIAL_PRICE);
-    let funding_index_delta = FUNDING_COUNTER_ATOMS_PER_SLOT as i128;
+    // #458: exact `rate * price` numerator, A-scaled and floored once per side.
+    let funding_num = step.funding_rate_e9 * i128::from(step.effective_price);
     assert_eq!(asset.a_short, a_short);
     assert_eq!(asset.k_long, price_delta * ADL_ONE as i128);
     assert_eq!(asset.k_short, -(price_delta * a_short as i128));
-    assert_eq!(asset.f_long_num, -(funding_index_delta * ADL_ONE as i128));
-    assert_eq!(asset.f_short_num, funding_index_delta * a_short as i128);
+    assert_eq!(
+        asset.f_long_num,
+        (-funding_num * ADL_ONE as i128).div_euclid(1_000_000_000)
+    );
+    assert_eq!(
+        asset.f_short_num,
+        (funding_num * a_short as i128).div_euclid(1_000_000_000)
+    );
 }
 
 fn account_fixture(market_slots: u32, account_seed: u8) -> PortfolioAccountV16Account {
@@ -1366,6 +1379,283 @@ fn v16_funding_counters_record_long_pays_short_once_on_refresh() {
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
+}
+
+// #458: at a low price `rate * price < FUNDING_DEN`, so flooring the funding index to
+// whole price units on every accrual charged 0 (positive rate) or 1 price unit (negative
+// rate) per call. With 1,000 units at 30,000 (e6) and the cap at 111 e9/slot the intended
+// transfer is 3.33 atoms per slot; a per-slot crank moved 1,000 atoms per slot.
+const LOW_PRICE: u64 = 30_000;
+const LOW_PRICE_CAP_E9: u64 = 111;
+const LOW_PRICE_UNITS: u128 = 1_000;
+const LOW_PRICE_DEPOSIT: u128 = 2_000_000_000;
+
+fn low_price_funding_fixture(
+    cap_e9: u64,
+    long_seed: u8,
+    short_seed: u8,
+) -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.max_accrual_dt_slots = 10;
+    cfg.min_funding_lifetime_slots = 10;
+    cfg.max_abs_funding_e9_per_slot = cap_e9;
+    cfg.max_price_move_bps_per_slot = 100;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, LOW_PRICE, 1)
+        .unwrap();
+    let mut long_account = account_fixture(1, long_seed);
+    let mut short_account = account_fixture(1, short_seed);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_account);
+        let mut short = PortfolioV16ViewMut::new(&mut short_account);
+        market
+            .deposit_not_atomic(&mut long, LOW_PRICE_DEPOSIT)
+            .unwrap();
+        market
+            .deposit_not_atomic(&mut short, LOW_PRICE_DEPOSIT)
+            .unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(LOW_PRICE_UNITS * POS_SCALE),
+                    exec_price: LOW_PRICE,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    (header, markets, long_account, short_account)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LowPriceCadence {
+    /// Accrue and settle both accounts every slot (permissionless crank every slot).
+    PerSlotSettle,
+    /// Accrue every slot, settle once at the end.
+    PerSlotAccrueOnce,
+    /// Accrue in maximal `max_accrual_dt_slots` segments, settle once at the end.
+    Batched,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LowPriceFundingOutcome {
+    long_funding: (u128, u128, u128, u128),
+    short_funding: (u128, u128, u128, u128),
+    long_value: i128,
+    short_value: i128,
+}
+
+fn run_low_price_funding(
+    rate_e9: i128,
+    slots: u64,
+    cadence: LowPriceCadence,
+) -> LowPriceFundingOutcome {
+    let (mut header, mut markets, mut long_account, mut short_account) =
+        low_price_funding_fixture(LOW_PRICE_CAP_E9, 150, 151);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_account);
+    let mut short = PortfolioV16ViewMut::new(&mut short_account);
+    let start = market.markets[0].engine.asset.slot_last.get();
+    let end = start + slots;
+    let mut now = start;
+    while now < end {
+        let step = match cadence {
+            LowPriceCadence::Batched => (end - now).min(10),
+            _ => 1,
+        };
+        now += step;
+        let outcome = market
+            .accrue_asset_to_not_atomic(0, now, LOW_PRICE, rate_e9, true)
+            .unwrap();
+        assert_eq!(outcome.dt, step);
+        if cadence == LowPriceCadence::PerSlotSettle {
+            market.full_account_refresh_not_atomic(&mut long).unwrap();
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+        }
+    }
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+    let value = |a: &PortfolioV16ViewMut<'_>| a.header.capital.get() as i128 + a.header.pnl.get();
+    let outcome = LowPriceFundingOutcome {
+        long_funding: funding_counter_tuple(long.header),
+        short_funding: funding_counter_tuple(short.header),
+        long_value: value(&long),
+        short_value: value(&short),
+    };
+    // A carried sub-atom funding remainder must not make a settled leg look stale:
+    // closing at the same slot succeeds without another accrual.
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: -signed_q(LOW_PRICE_UNITS * POS_SCALE),
+                exec_price: LOW_PRICE,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(long.header.active_bitmap, short.header.active_bitmap);
+    assert_eq!(value(&long), outcome.long_value);
+    assert_eq!(value(&short), outcome.short_value);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+    outcome
+}
+
+fn assert_low_price_funding_is_exact(rate_e9: i128, slots: u64) {
+    // Exact transfer in atoms (as a fraction over FUNDING_DEN).
+    let exact_num = rate_e9.unsigned_abs() * slots as u128 * LOW_PRICE as u128 * LOW_PRICE_UNITS;
+    let den = 1_000_000_000u128;
+    let paid = exact_num.div_ceil(den);
+    let received = exact_num / den;
+    let cap_num = LOW_PRICE_CAP_E9 as u128 * slots as u128 * LOW_PRICE as u128 * LOW_PRICE_UNITS;
+    assert!(
+        paid <= cap_num.div_ceil(den),
+        "payer exceeds the configured cap"
+    );
+    assert!(
+        received <= cap_num / den,
+        "receiver exceeds the configured cap"
+    );
+
+    let accrue_once = run_low_price_funding(rate_e9, slots, LowPriceCadence::PerSlotAccrueOnce);
+    let batched = run_low_price_funding(rate_e9, slots, LowPriceCadence::Batched);
+    assert_eq!(
+        accrue_once, batched,
+        "funding must be invariant to accrual cadence"
+    );
+    // Settling every slot is bounded by this harness's source-backing lifetime
+    // (`full_account_refresh_not_atomic` does not expire backing), as in the
+    // wrapper repro's slots 2..=10.
+    let per_slot = if slots <= 9 {
+        let per_slot = run_low_price_funding(rate_e9, slots, LowPriceCadence::PerSlotSettle);
+        assert_eq!(
+            per_slot, batched,
+            "funding must be invariant to settlement cadence"
+        );
+        per_slot
+    } else {
+        batched
+    };
+
+    let (long_expected, short_expected) = if rate_e9 > 0 {
+        ((paid, 0, 0, 0), (0, 0, 0, received))
+    } else {
+        ((0, received, 0, 0), (0, 0, paid, 0))
+    };
+    assert_eq!(per_slot.long_funding, long_expected);
+    assert_eq!(per_slot.short_funding, short_expected);
+    let deposit = LOW_PRICE_DEPOSIT as i128;
+    if rate_e9 > 0 {
+        assert_eq!(per_slot.long_value, deposit - paid as i128);
+        assert_eq!(per_slot.short_value, deposit + received as i128);
+    } else {
+        assert_eq!(per_slot.long_value, deposit + received as i128);
+        assert_eq!(per_slot.short_value, deposit - paid as i128);
+    }
+    // Conservative: never pays out more than it collects; the dust is < 1 atom.
+    assert!(paid >= received && paid - received <= 1);
+}
+
+#[test]
+fn v16_low_price_positive_funding_accrues_exact_amount_at_every_cadence() {
+    // Before #458 the long paid 0 here (intended ~163).
+    assert_low_price_funding_is_exact(LOW_PRICE_CAP_E9 as i128, 49);
+    assert_low_price_funding_is_exact(LOW_PRICE_CAP_E9 as i128, 9);
+    assert_low_price_funding_is_exact(1, 49);
+}
+
+#[test]
+fn v16_low_price_negative_funding_respects_the_configured_cap_at_every_cadence() {
+    // Before #458 one negative slot moved 1,000 atoms (intended 3.33), 9 slots 9,000.
+    assert_low_price_funding_is_exact(-(LOW_PRICE_CAP_E9 as i128), 1);
+    assert_low_price_funding_is_exact(-(LOW_PRICE_CAP_E9 as i128), 9);
+    assert_low_price_funding_is_exact(-(LOW_PRICE_CAP_E9 as i128), 49);
+    assert_low_price_funding_is_exact(-1, 49);
+}
+
+#[test]
+fn v16_low_price_moving_path_funding_is_settlement_partition_invariant() {
+    // Same scenario as `v16_canonical_accrual_path_matches_every_complete_transaction_partition`
+    // at $0.03: a price-moving canonical path with alternating funding, settled after every
+    // slot versus once at the end, must leave identical account values and funding flows.
+    let (target, steps) = canonical_up_path(LOW_PRICE, 10);
+    let run = |settle_every_slot: bool| {
+        let (mut header, mut markets, mut long_account, mut short_account) =
+            low_price_funding_fixture(10_000, 152, 153);
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_account);
+        let mut short = PortfolioV16ViewMut::new(&mut short_account);
+        for (index, step) in steps.iter().enumerate() {
+            let now_slot = u64::try_from(index + 2).unwrap();
+            market
+                .accrue_asset_path_to_not_atomic(
+                    0,
+                    now_slot,
+                    target,
+                    core::slice::from_ref(step),
+                    true,
+                )
+                .unwrap();
+            if settle_every_slot {
+                market.full_account_refresh_not_atomic(&mut long).unwrap();
+                market.full_account_refresh_not_atomic(&mut short).unwrap();
+            }
+        }
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market.validate_shape().unwrap();
+        let value =
+            |a: &PortfolioV16ViewMut<'_>| a.header.capital.get() as i128 + a.header.pnl.get();
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        let net =
+            |t: (u128, u128, u128, u128)| (t.0 as i128 - t.1 as i128, t.2 as i128 - t.3 as i128);
+        (
+            net(funding_counter_tuple(long.header)),
+            net(funding_counter_tuple(short.header)),
+            value(&long),
+            value(&short),
+            asset.f_long_num,
+            asset.f_short_num,
+        )
+    };
+    let fragmented = run(true);
+    let delayed = run(false);
+    assert_eq!(fragmented, delayed);
+    // Exact per-step funding: sum(rate_i * price_i) * units / FUNDING_DEN.
+    let net_num: i128 = steps
+        .iter()
+        .map(|s| s.funding_rate_e9 * s.effective_price as i128)
+        .sum::<i128>()
+        * LOW_PRICE_UNITS as i128;
+    assert!(net_num > 0, "the path must have net long-pays funding");
+    let long_paid_net = fragmented.0 .0;
+    let short_received_net = -fragmented.1 .1;
+    let exact_floor = net_num / 1_000_000_000;
+    assert!(long_paid_net >= exact_floor && long_paid_net <= exact_floor + 1);
+    assert!(short_received_net <= exact_floor + 1 && short_received_net >= exact_floor - 1);
+    assert!(
+        long_paid_net >= short_received_net,
+        "funding must stay conservative"
+    );
 }
 
 #[test]
@@ -9481,4 +9771,55 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         AutoCrankPlanV16::CloseResolved,
         false,
     );
+}
+
+#[test]
+fn v16_low_price_funding_remainder_is_not_revalued_by_a_resize() {
+    // A settled leg carries its sub-atom funding remainder as `f_now - f_snap`. Growing
+    // the basis must drop that remainder rather than re-value it at the larger size.
+    let (mut header, mut markets, mut long_account, mut short_account) =
+        low_price_funding_fixture(LOW_PRICE_CAP_E9, 154, 155);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_account);
+    let mut short = PortfolioV16ViewMut::new(&mut short_account);
+    let now = market.markets[0].engine.asset.slot_last.get() + 1;
+    market
+        .accrue_asset_to_not_atomic(0, now, LOW_PRICE, -(LOW_PRICE_CAP_E9 as i128), true)
+        .unwrap();
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    let long_leg = long.header.legs[0].try_to_runtime().unwrap();
+    let f_long = market.markets[0].engine.asset.f_long_num.get();
+    assert!(
+        long_leg.f_snap < f_long,
+        "the receiving leg must carry a remainder"
+    );
+    assert_eq!(funding_counter_tuple(long.header), (0, 3, 0, 0));
+    assert_eq!(funding_counter_tuple(short.header), (0, 0, 4, 0));
+
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(9 * LOW_PRICE_UNITS * POS_SCALE),
+                exec_price: LOW_PRICE,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    let long_leg = long.header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(
+        long_leg.basis_pos_q,
+        (10 * LOW_PRICE_UNITS * POS_SCALE) as i128
+    );
+    assert_eq!(long_leg.f_snap, f_long);
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    market.full_account_refresh_not_atomic(&mut short).unwrap();
+    assert_eq!(funding_counter_tuple(long.header), (0, 3, 0, 0));
+    assert_eq!(funding_counter_tuple(short.header), (0, 0, 4, 0));
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
 }
