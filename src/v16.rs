@@ -1137,10 +1137,18 @@ impl V16Core {
         Ok((asset, epoch))
     }
 
+    /// `funding_num = funding_rate_e9 * dt * effective_price` is the per-unit funding
+    /// transfer in units of `1 / FUNDING_DEN` price units. It is scaled into the
+    /// A-weighted F index WITHOUT first flooring to whole price units: the index
+    /// already carries `A >= MIN_A_SIDE` sub-unit precision, so a low-price market
+    /// accrues the exact transfer instead of 0 (positive rate) or -1 (negative rate)
+    /// whole price units per call (#458). Each side's delta is floored, so the paying
+    /// side's index falls by at least the exact amount and the receiving side's index
+    /// rises by at most it (conservative; cross-side dust is < 1 F unit per accrual).
     #[inline]
     pub(crate) fn kernel_adl_scaled_accrual_index_deltas(
         price_delta: i128,
-        funding_index_delta: i128,
+        funding_num: i128,
         a_long: u128,
         a_short: u128,
     ) -> V16Result<(i128, i128, i128, i128)> {
@@ -1150,10 +1158,28 @@ impl V16Core {
         let k_short = checked_i128_mul(price_delta, a_short)?
             .checked_neg()
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let f_long = checked_i128_mul(funding_index_delta, a_long)?
-            .checked_neg()
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let f_short = checked_i128_mul(funding_index_delta, a_short)?;
+        let funding_den = FUNDING_DEN as i128;
+        let (f_long, f_short) = if funding_num % funding_den == 0 {
+            // Whole price units: exact, identical to the floored quotient below.
+            let units = funding_num / funding_den;
+            (
+                checked_i128_mul(units, a_long)?
+                    .checked_neg()
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+                checked_i128_mul(units, a_short)?,
+            )
+        } else {
+            let f_long_num = checked_i128_mul(funding_num, a_long)?
+                .checked_neg()
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            (
+                floor_div_signed_conservative_i128(f_long_num, FUNDING_DEN),
+                floor_div_signed_conservative_i128(
+                    checked_i128_mul(funding_num, a_short)?,
+                    FUNDING_DEN,
+                ),
+            )
+        };
         Ok((k_long, k_short, f_long, f_short))
     }
 
@@ -7060,6 +7086,9 @@ const ACCOUNT_KF_SETTLEMENT_KEY_MAX: u64 = (1u64 << 38) - 1;
 struct AccountKfSettlementPreparedV16 {
     k_now: i128,
     f_now: i128,
+    // F snapshot after settlement: advanced only by the F-index distance actually
+    // paid, so the sub-atom remainder stays in `f_now - f_snap_next` (#458).
+    f_snap_next: i128,
     f_delta: i128,
     net: i128,
 }
@@ -13219,7 +13248,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     fn leg_kf_delta_components_for_settlement_from_asset(
         asset: AssetStateV16,
         leg: PortfolioLegV16,
-    ) -> V16Result<(i128, i128, i128, i128, i128)> {
+    ) -> V16Result<(i128, i128, i128, i128, i128, i128)> {
         let (k_now, f_now) = Self::kf_target_for_leg_from_asset(asset, leg)?;
         let den = leg
             .a_basis
@@ -13257,7 +13286,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_add(f_delta)
             .ok_or(V16Error::ArithmeticOverflow)?;
         validate_non_min_i128(net)?;
-        Ok((k_now, f_now, k_delta, f_delta, net))
+        let f_snap_next = f_snap_after_settlement(
+            leg.basis_pos_q.unsigned_abs(),
+            leg.a_basis,
+            leg.f_snap,
+            f_now,
+            f_delta,
+        )?;
+        Ok((k_now, f_now, k_delta, f_delta, net, f_snap_next))
     }
 
     #[cfg(kani)]
@@ -13266,7 +13302,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         asset: AssetStateV16,
         leg: PortfolioLegV16,
     ) -> V16Result<(i128, i128, i128)> {
-        let (k_now, f_now, _k_delta, _f_delta, net) =
+        let (k_now, f_now, _k_delta, _f_delta, net, _f_snap_next) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
         Ok((k_now, f_now, net))
     }
@@ -13311,7 +13347,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.begin_full_drain_reset_inner(asset_index, leg.side)?;
             asset = self.asset_state(asset_index)?;
         }
-        let (k_now, f_now, _k_delta, f_delta, net) =
+        let (k_now, f_now, _k_delta, f_delta, net, f_snap_next) =
             Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
         let source_side = if net > 0 {
             opposite_side(leg.side)
@@ -13325,6 +13361,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             AccountKfSettlementPreparedV16 {
                 k_now,
                 f_now,
+                f_snap_next,
                 f_delta,
                 net,
             },
@@ -13377,7 +13414,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             V16Core::kernel_settle_kf_stale_cohort(asset, leg.side, leg.kf_epoch_snap)?;
         asset = settled_asset;
         leg.k_snap = prepared.k_now;
-        leg.f_snap = prepared.f_now;
+        leg.f_snap = prepared.f_snap_next;
         leg.kf_epoch_snap = kf_epoch_snap;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
@@ -14335,19 +14372,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         let price_delta = effective_price as i128 - old.effective_price as i128;
-        let funding_index_delta = if activity.funding_active {
-            let n = funding_rate_e9
+        let funding_num = if activity.funding_active {
+            funding_rate_e9
                 .checked_mul(segment_dt as i128)
                 .and_then(|v| v.checked_mul(effective_price as i128))
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            floor_div_signed_conservative_i128(n, FUNDING_DEN)
+                .ok_or(V16Error::ArithmeticOverflow)?
         } else {
             0
         };
         let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
             V16Core::kernel_adl_scaled_accrual_index_deltas(
                 price_delta,
-                funding_index_delta,
+                funding_num,
                 old.a_long,
                 old.a_short,
             )?;
@@ -14514,19 +14550,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
 
             let price_delta = step.effective_price as i128 - asset.effective_price as i128;
-            let funding_index_delta = if activity.funding_active {
-                let n = step
-                    .funding_rate_e9
+            let funding_num = if activity.funding_active {
+                step.funding_rate_e9
                     .checked_mul(step.effective_price as i128)
-                    .ok_or(V16Error::ArithmeticOverflow)?;
-                floor_div_signed_conservative_i128(n, FUNDING_DEN)
+                    .ok_or(V16Error::ArithmeticOverflow)?
             } else {
                 0
             };
             let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
                 V16Core::kernel_adl_scaled_accrual_index_deltas(
                     price_delta,
-                    funding_index_delta,
+                    funding_num,
                     asset.a_long,
                     asset.a_short,
                 )?;
@@ -16295,11 +16329,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (k_target, f_target) = self.kf_target_for_leg(asset_index, leg)?;
         if !Self::leg_kf_epoch_is_current(asset, leg)
             || k_target != leg.k_snap
-            || f_target != leg.f_snap
+            || !leg_f_snap_is_settled(leg, f_target)?
             || self.b_target_for_leg(asset_index, leg)? != leg.b_snap
         {
             return Err(V16Error::Stale);
         }
+        // Retention zeroes the basis; drop the sub-atom funding remainder with it.
+        let mut leg = leg;
+        leg.f_snap = f_target;
         let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
         let (leg, asset) =
             V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
@@ -16385,7 +16422,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg)?;
         if !Self::leg_kf_epoch_is_current(asset, leg)
             || k_target != leg.k_snap
-            || f_target != leg.f_snap
+            || !leg_f_snap_is_settled(leg, f_target)?
         {
             return Err(V16Error::Stale);
         }
@@ -16466,7 +16503,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         validate_basis_or_zero(lookup.next_q)?;
         let existing_slot = lookup.existing_slot;
         let current_leg = if let Some(existing_slot) = existing_slot {
-            let leg = account.header.legs[existing_slot].try_to_runtime()?;
+            let mut leg = account.header.legs[existing_slot].try_to_runtime()?;
             if !leg.active || leg.asset_index as usize != asset_index {
                 return Err(V16Error::HiddenLeg);
             }
@@ -16474,9 +16511,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg)?;
             if !Self::leg_kf_epoch_is_current(asset, leg)
                 || k_target != leg.k_snap
-                || f_target != leg.f_snap
+                || !leg_f_snap_is_settled(leg, f_target)?
             {
                 return Err(V16Error::Stale);
+            }
+            if leg.f_snap != f_target {
+                // The basis is about to change: drop the sub-atom funding remainder
+                // (never a debt, see `f_snap_after_settlement`) so it cannot be
+                // re-valued at a different basis.
+                leg.f_snap = f_target;
+                account.header.legs[existing_slot] = PortfolioLegV16Account::from_runtime(&leg);
             }
             leg
         } else {
@@ -19583,7 +19627,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg)?;
                 if !Self::leg_kf_epoch_is_current(asset, leg)
                     || k_target != leg.k_snap
-                    || f_target != leg.f_snap
+                    || !leg_f_snap_is_settled(leg, f_target)?
                 {
                     return Ok(());
                 }
@@ -19948,43 +19992,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok((0, 0, 0, 0));
         };
         let mut leg = account.header.legs[leg_slot].try_to_runtime()?;
-        let (k_now, f_now) = self.kf_target_for_leg(asset_index, leg)?;
-        let den = leg
-            .a_basis
-            .checked_mul(POS_SCALE)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let k_delta = scaled_adl_delta_fast(
-            leg.basis_pos_q.unsigned_abs(),
-            leg.a_basis,
-            leg.k_snap,
-            k_now,
-        )
-        .unwrap_or_else(|| {
-            wide_signed_mul_div_floor_from_k_pair(
-                leg.basis_pos_q.unsigned_abs(),
-                leg.k_snap,
-                k_now,
-                den,
-            )
-        });
-        let f_delta = scaled_adl_delta_fast(
-            leg.basis_pos_q.unsigned_abs(),
-            leg.a_basis,
-            leg.f_snap,
-            f_now,
-        )
-        .unwrap_or_else(|| {
-            wide_signed_mul_div_floor_from_k_pair(
-                leg.basis_pos_q.unsigned_abs(),
-                leg.f_snap,
-                f_now,
-                den,
-            )
-        });
-        let net = k_delta
-            .checked_add(f_delta)
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        validate_non_min_i128(net)?;
+        self.validate_configured_asset_index(asset_index)?;
+        let (k_now, _f_now, _k_delta, f_delta, net, f_snap_next) =
+            Self::leg_kf_delta_components_for_settlement_from_asset(
+                self.asset_state(asset_index)?,
+                leg,
+            )?;
 
         let mut loss_settled = 0u128;
         let mut support_consumed = 0u128;
@@ -20004,7 +20017,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (asset, kf_epoch_snap) =
             V16Core::kernel_settle_kf_stale_cohort(asset, leg.side, leg.kf_epoch_snap)?;
         leg.k_snap = k_now;
-        leg.f_snap = f_now;
+        leg.f_snap = f_snap_next;
         leg.kf_epoch_snap = kf_epoch_snap;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
@@ -20085,7 +20098,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() == 0
             && Self::leg_kf_epoch_is_current(asset, leg)
             && k_target == leg.k_snap
-            && f_target == leg.f_snap
+            && leg_f_snap_is_settled(leg, f_target)?
             && b_target <= leg.b_snap
             && !account
                 .header
@@ -21213,12 +21226,117 @@ fn scaled_adl_delta_fast(abs_basis_q: u128, a_basis: u128, then: i128, now: i128
     let adl_one_i = i128::try_from(ADL_ONE).ok()?;
     let delta = now.checked_sub(then)?;
     if delta % adl_one_i != 0 {
-        return None;
+        // Sub-unit F deltas (#458): exact floor in i128 when the product fits.
+        let basis_i = i128::try_from(abs_basis_q).ok()?;
+        let numerator = delta.checked_mul(basis_i)?;
+        let den = ADL_ONE.checked_mul(POS_SCALE)?;
+        return Some(floor_div_signed_conservative_i128(numerator, den));
     }
     let scaled_delta = delta / adl_one_i;
     let basis_i = i128::try_from(abs_basis_q).ok()?;
     let numerator = scaled_delta.checked_mul(basis_i)?;
     Some(floor_div_signed_conservative_i128(numerator, POS_SCALE))
+}
+
+/// F snapshot after settling `f_delta = floor(abs_basis * (f_now - f_snap) / den)` with
+/// `den = a_basis * POS_SCALE` (#458). The snapshot advances only by
+/// `ceil(f_delta * den / abs_basis)`, the smallest F distance whose value covers the
+/// settled amount, so the unpaid sub-atom value stays in `f_now - f_snap_next`
+/// instead of being floored away on every settlement. Consequences:
+/// - `0 <= f_now - f_snap_next` and `abs_basis * (f_now - f_snap_next) < den`, i.e. the
+///   carried remainder is worth less than one atom and is never a debt (for a
+///   negative `f_delta` the payer has paid the ceiling and the remainder is its
+///   sub-atom credit);
+/// - total settled funding is invariant to settlement cadence (exact whenever
+///   `abs_basis` divides `den`, otherwise within `abs_basis / den` atoms per
+///   settlement, always rounded against the account).
+fn f_snap_after_settlement(
+    abs_basis: u128,
+    a_basis: u128,
+    f_snap: i128,
+    f_now: i128,
+    f_delta: i128,
+) -> V16Result<i128> {
+    if abs_basis == 0 || f_snap == f_now {
+        return Ok(f_now);
+    }
+    let den = a_basis
+        .checked_mul(POS_SCALE)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    let abs_delta = f_delta.unsigned_abs();
+    let (q, r) = match abs_delta.checked_mul(den) {
+        Some(p) => (p / abs_basis, p % abs_basis),
+        None => {
+            let (q, r) = mul_div_floor_u256_with_rem(
+                U256::from_u128(abs_delta),
+                U256::from_u128(den),
+                U256::from_u128(abs_basis),
+            );
+            (
+                q.try_into_u128().ok_or(V16Error::ArithmeticOverflow)?,
+                r.try_into_u128().ok_or(V16Error::ArithmeticOverflow)?,
+            )
+        }
+    };
+    // Signed ceil of f_delta * den / abs_basis.
+    let step = if f_delta >= 0 {
+        let mag = if r != 0 {
+            q.checked_add(1).ok_or(V16Error::ArithmeticOverflow)?
+        } else {
+            q
+        };
+        i128::try_from(mag).map_err(|_| V16Error::ArithmeticOverflow)?
+    } else {
+        i128::try_from(q)
+            .map_err(|_| V16Error::ArithmeticOverflow)?
+            .checked_neg()
+            .ok_or(V16Error::ArithmeticOverflow)?
+    };
+    let next = f_snap
+        .checked_add(step)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    if next > f_now || !f_snap_residual_is_sub_atom(abs_basis, a_basis, next, f_now)? {
+        return Err(V16Error::ArithmeticOverflow);
+    }
+    Ok(next)
+}
+
+/// A leg's F snapshot is settled when settling it again would move no atom: either
+/// it equals the target, or it trails the target by a nonnegative sub-atom
+/// remainder left by `f_snap_after_settlement` (#458). Zero-basis legs carry no
+/// remainder, so they must match exactly.
+fn f_snap_residual_is_sub_atom(
+    abs_basis: u128,
+    a_basis: u128,
+    f_snap: i128,
+    f_target: i128,
+) -> V16Result<bool> {
+    if f_snap == f_target {
+        return Ok(true);
+    }
+    if abs_basis == 0 || f_snap > f_target {
+        return Ok(false);
+    }
+    let gap = f_target
+        .checked_sub(f_snap)
+        .ok_or(V16Error::ArithmeticOverflow)?
+        .unsigned_abs();
+    let den = a_basis
+        .checked_mul(POS_SCALE)
+        .ok_or(V16Error::ArithmeticOverflow)?;
+    Ok(match gap.checked_mul(abs_basis) {
+        Some(value) => value < den,
+        None => false,
+    })
+}
+
+fn leg_f_snap_is_settled(leg: PortfolioLegV16, f_target: i128) -> V16Result<bool> {
+    f_snap_residual_is_sub_atom(
+        leg.basis_pos_q.unsigned_abs(),
+        leg.a_basis,
+        leg.f_snap,
+        f_target,
+    )
 }
 
 // Non-production Kani proof harnesses (contract + closure layers) live in

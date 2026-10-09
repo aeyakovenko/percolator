@@ -277,9 +277,11 @@ fn proof_v16_scaled_adl_delta_fast_matches_aligned_reference_and_fails_closed() 
     let now = delta_units_raw as i128 * ADL_ONE as i128 + unaligned_extra_raw as i128;
     let got = kani_scaled_adl_delta_fast(abs_basis_q, a_basis, then, now);
 
+    // #458: an unaligned (sub-unit) F delta also takes the exact i128 fast path; with
+    // whole-unit bases the extra `1 / ADL_ONE` price unit floors away.
     let expected = if abs_units_raw == 0 {
         Some(0)
-    } else if !a_basis_is_adl_one || unaligned_extra_raw != 0 {
+    } else if !a_basis_is_adl_one {
         None
     } else {
         Some(delta_units_raw as i128 * abs_units_raw as i128)
@@ -290,7 +292,7 @@ fn proof_v16_scaled_adl_delta_fast_matches_aligned_reference_and_fails_closed() 
         "scaled ADL fast path covers aligned negative settlement"
     );
     kani::cover!(
-        abs_units_raw > 0 && (!a_basis_is_adl_one || unaligned_extra_raw != 0),
+        abs_units_raw > 0 && !a_basis_is_adl_one,
         "scaled ADL fast path covers fail-closed non-fast-path input"
     );
     assert_eq!(got, expected);

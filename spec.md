@@ -1362,6 +1362,20 @@ KF_pnl_delta = exact signed-floor A/K/F settlement
 net_pnl_delta = KF_pnl_delta - B_loss
 ```
 
+Funding accrual and F settlement carry sub-unit value (#458). Per accrued segment,
+`funding_num = funding_rate_e9 * dt * effective_price` (units of `1/FUNDING_DEN` price
+unit) is NOT floored to whole price units; each side's index moves by
+`floor(-funding_num * A_long / FUNDING_DEN)` and `floor(funding_num * A_short / FUNDING_DEN)`,
+so the payer's index falls by at least and the receiver's rises by at most the exact
+A-scaled transfer. F settlement of a leg pays `f_delta = floor(|basis| * (F_target - f_snap)
+/ (a_basis * POS_SCALE))` and advances `f_snap` only by `ceil(f_delta * a_basis * POS_SCALE /
+|basis|)`; the unpaid remainder `0 <= F_target - f_snap` is worth less than one atom, is
+never a debt, and is carried to the next settlement, so settled funding is invariant to
+crank and settlement cadence (exact when `|basis|` divides `a_basis * POS_SCALE`, otherwise
+within `|basis| / (a_basis * POS_SCALE)` atom per settlement, rounded against the account).
+A leg whose F snapshot trails its target by such a remainder is F-settled; every
+transition that changes the leg's basis first drops the remainder (`f_snap = F_target`).
+
 When a negative `net_pnl_delta` is applied to existing positive face `P`, source
 support first consumes `S` effective atoms and burns `F` face. The uncovered
 tail is `R = abs(net_pnl_delta) - S`, and settlement MUST set

@@ -51,9 +51,9 @@ use percolator::v16::{
     kani_eq_portfolio_account_v16_account,
 };
 use percolator::{
-    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS, MAX_OI_SIDE_Q,
-    MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL, MIN_A_SIDE, POS_SCALE,
-    SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, FUNDING_DEN, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
+    MAX_OI_SIDE_Q, MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL,
+    MIN_A_SIDE, POS_SCALE, SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
@@ -1580,7 +1580,13 @@ fn proof_v16_adl_scaled_accrual_kernel_matches_every_valid_factor() {
     let a_short = u128::from(a_short_raw);
     let price_delta = i128::from(price_delta_raw);
     let funding_delta = i128::from(funding_delta_raw);
-    let result = kani_adl_scaled_accrual_index_deltas(price_delta, funding_delta, a_long, a_short);
+    // Whole price units of funding: the kernel takes the FUNDING_DEN-scaled numerator.
+    let result = kani_adl_scaled_accrual_index_deltas(
+        price_delta,
+        funding_delta * FUNDING_DEN as i128,
+        a_long,
+        a_short,
+    );
     assert!(result.is_ok());
     let (k_long, k_short, f_long, f_short) = result.unwrap();
 
@@ -1603,6 +1609,48 @@ fn proof_v16_adl_scaled_accrual_kernel_matches_every_valid_factor() {
     assert_eq!(f_short, funding_delta * i128::from(a_short_raw));
 }
 
+// #458: sub-price-unit funding (`|rate * dt * price| < FUNDING_DEN`) is not floored to
+// whole price units before A-scaling. Each side's index delta is the exact A-scaled
+// transfer floored once: the payer's index falls by at least the exact amount, the
+// receiver's rises by at most it, each within one F unit, so the cross-side value
+// mismatch is below one F unit per accrual and never favours either side.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_sub_unit_funding_accrual_is_exact_and_conservative() {
+    // Tractable domain: every ADL factor quantum `MIN_A_SIDE..=ADL_ONE` step and a
+    // symbolic sub-unit numerator (|funding_num| <= 128 < FUNDING_DEN); wider symbolic
+    // 128-bit divisions are intractable for CBMC.
+    let a_long_units: u8 = kani::any();
+    let a_short_units: u8 = kani::any();
+    let funding_num_raw: i8 = kani::any();
+    kani::assume((1..=10).contains(&a_long_units));
+    kani::assume((1..=10).contains(&a_short_units));
+    assert_eq!(ADL_ONE, 10 * MIN_A_SIDE);
+    let funding_num = i128::from(funding_num_raw);
+    let a_long = i128::from(a_long_units) * MIN_A_SIDE as i128;
+    let a_short = i128::from(a_short_units) * MIN_A_SIDE as i128;
+    let (k_long, k_short, f_long, f_short) =
+        kani_adl_scaled_accrual_index_deltas(0, funding_num, a_long as u128, a_short as u128)
+            .unwrap();
+    kani::cover!(
+        funding_num > 0 && f_short > 0,
+        "positive sub-unit funding accrues"
+    );
+    kani::cover!(
+        funding_num < 0 && f_long > 0,
+        "negative sub-unit funding accrues"
+    );
+    assert_eq!(k_long, 0);
+    assert_eq!(k_short, 0);
+    let den = FUNDING_DEN as i128;
+    // f * den <= exact < (f + 1) * den for each side (floor of the exact quotient).
+    let exact_long = -funding_num * a_long;
+    let exact_short = funding_num * a_short;
+    assert!(f_long * den <= exact_long && exact_long < (f_long + 1) * den);
+    assert!(f_short * den <= exact_short && exact_short < (f_short + 1) * den);
+}
+
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
@@ -1621,7 +1669,7 @@ fn proof_v16_adl_scaled_accrual_is_cross_side_zero_sum_at_every_factor_quantum()
     let a_short = u128::from(a_short_units) * MIN_A_SIDE;
     let (k_long, k_short, f_long, f_short) = kani_adl_scaled_accrual_index_deltas(
         i128::from(price_delta_raw),
-        i128::from(funding_delta_raw),
+        i128::from(funding_delta_raw) * FUNDING_DEN as i128,
         a_long,
         a_short,
     )
@@ -1704,9 +1752,13 @@ fn proof_v16_adl_kf_settlement_is_account_partition_invariant_and_zero_sum() {
     let a_short = u128::from(a_short_units) * a_quantum;
     let price_units = i128::from(price_units_raw);
     let funding_units = i128::from(funding_units_raw);
-    let (k_long, k_short, f_long, f_short) =
-        kani_adl_scaled_accrual_index_deltas(4 * price_units, 4 * funding_units, a_long, a_short)
-            .unwrap();
+    let (k_long, k_short, f_long, f_short) = kani_adl_scaled_accrual_index_deltas(
+        4 * price_units,
+        4 * funding_units * FUNDING_DEN as i128,
+        a_long,
+        a_short,
+    )
+    .unwrap();
 
     let (mut header, mut markets) = one_market_only_fixture();
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
