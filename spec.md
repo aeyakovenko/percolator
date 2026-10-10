@@ -1399,7 +1399,16 @@ a pending domain-loss barrier, T's bucket is stale, or L's bucket cannot accept
 fresh principal; skipping only raises T's rate. Because the transfer is at or
 below T's rate, no remaining T claimant's rate falls, no account is credited
 more than its position's PnL, and liened or impaired T face is never netted.
-Face in other source domains keeps the support-and-burn rule.
+After that netting, still before support-and-burn: (a) unliened face in any
+other source domain whose credit rate is exactly 1 is realized one for one, its
+counterparty backing (booked as ordinary support consumption) moving to `L`;
+(b) up to the account's unliened face in domains with credit rate below 1, the
+remaining loss is paid from free capital directly into `L` backing (`C_tot -=
+x`, `L` principal `+= x`, `V` flat) and that face is kept. Burning it instead
+would spend `x / rate` face for `x` of loss and strand the difference in the
+source domain once its losers book. Health is unchanged either way (`C - x +
+P*r` equals `C + (P - x/r)*r`). Only a loss beyond free capital, or one met by
+liened face, takes the support-and-burn path.
 
 If full B settlement is too large, partial settlement is allowed. While `B_remaining > 0`, no user-favorable action may continue.
 

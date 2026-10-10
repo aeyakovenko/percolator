@@ -9857,3 +9857,215 @@ fn v16_loss_paid_from_a_booked_gain_backs_the_counterparty_gain() {
         assert_eq!(c[1], b_alone, "B lost more than its position did");
     }
 }
+
+// ---- a cross-asset loss must not burn a partially backed gain beyond the loss ----
+// (percolator-prog#457 follow-up: the same stale-rate burn outside the same-leg case)
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CrossAssetOutcome {
+    change: [i128; 4],
+    senior_surplus: i128,
+    /// (claims, fresh backing) per (asset, loser side) domain, in atoms.
+    domains: [(u128, u128); 4],
+}
+
+/// Two assets at 1.00. X (0) is long 1,000 of asset 0 against Y1 (1, short 300) and Y2 (2, short
+/// 700), and short 1,000 of asset 1 against Z (3). Asset 0 goes to 1.10 (X gains 100 against the
+/// asset-0 short-loser domain); `mid` are the accounts refreshed there. Then asset 1 goes to 1.05
+/// (X loses 50 on its other leg); `mid2` are refreshed there. Everyone is refreshed at the end.
+fn cross_asset_burn_run(mid: &[usize], mid2: &[usize]) -> CrossAssetOutcome {
+    cross_asset_burn_run_with(mid, mid2, 0)
+}
+
+/// With `funding_rate != 0`, asset 1's loss for X comes from funding at a flat price instead.
+fn cross_asset_burn_run_with(
+    mid: &[usize],
+    mid2: &[usize],
+    funding_rate: i128,
+) -> CrossAssetOutcome {
+    const USD: u128 = 1_000_000;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 6_480_000);
+    cfg.min_nonzero_mm_req = 500;
+    cfg.min_nonzero_im_req = 600;
+    cfg.initial_margin_bps = 1_000;
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.max_price_move_bps_per_slot = 49;
+    cfg.max_accrual_dt_slots = 10;
+    cfg.min_funding_lifetime_slots = 10;
+    cfg.max_abs_funding_e9_per_slot = 10_000;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
+    let mut markets = (0..2)
+        .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
+    for i in 0..2usize {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                i as u32,
+                &mut markets[i].engine,
+                1_000_000,
+                (i + 1) as u64,
+            )
+            .unwrap();
+    }
+    let mut accts = [
+        account_fixture(2, 170),
+        account_fixture(2, 171),
+        account_fixture(2, 172),
+        account_fixture(2, 173),
+    ];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut views: Vec<PortfolioV16ViewMut<'_>> =
+        accts.iter_mut().map(PortfolioV16ViewMut::new).collect();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 1_000_000, 0, true)
+        .unwrap();
+    for (view, d) in views.iter_mut().zip([1_000u128, 1_000, 20_000, 20_000]) {
+        market.deposit_not_atomic(view, d * USD).unwrap();
+    }
+    for (asset, counterparty, size) in [(0usize, 1usize, 300i128), (0, 2, 700), (1, 3, -1_000)] {
+        let (a, b) = views.split_at_mut(1);
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut a[0],
+                &mut b[counterparty - 1],
+                TradeRequestV16 {
+                    asset_index: asset,
+                    size_q: size * POS_SCALE as i128,
+                    exec_price: 1_000_000,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    let equity = |v: &PortfolioV16ViewMut<'_>| v.header.capital.get() as i128 + v.header.pnl.get();
+    let start: Vec<i128> = views.iter().map(equity).collect();
+    let mut slot = 2u64;
+    let mut prices = [1_000_000u64; 2];
+    let mut walk = |market: &mut MarketGroupV16ViewMut<'_, u64>, asset: usize, target: u64| {
+        market
+            .set_asset_raw_oracle_target_not_atomic(asset, target)
+            .unwrap();
+        while prices[asset] != target {
+            let p = prices[asset];
+            let step = p * 49 / 10_000;
+            prices[asset] = if target > p {
+                (p + step).min(target)
+            } else {
+                (p - step).max(target)
+            };
+            slot += 1;
+            for a in 0..2 {
+                market
+                    .accrue_asset_to_not_atomic(a, slot, prices[a], 0, true)
+                    .unwrap();
+            }
+        }
+    };
+    walk(&mut market, 0, 1_100_000);
+    for &a in mid {
+        market
+            .full_account_refresh_not_atomic(&mut views[a])
+            .unwrap();
+    }
+    if funding_rate == 0 {
+        walk(&mut market, 1, 1_050_000);
+    } else {
+        for _ in 0..500 {
+            slot += 10;
+            for a in 0..2 {
+                let rate = if a == 1 { funding_rate } else { 0 };
+                market
+                    .accrue_asset_to_not_atomic(a, slot, prices[a], rate, true)
+                    .unwrap();
+            }
+        }
+    }
+    for &a in mid2 {
+        market
+            .full_account_refresh_not_atomic(&mut views[a])
+            .unwrap();
+    }
+    for a in [0, 1, 2, 3] {
+        market
+            .full_account_refresh_not_atomic(&mut views[a])
+            .unwrap();
+    }
+    market.validate_shape().unwrap();
+    let mut change = [0i128; 4];
+    for a in 0..4 {
+        change[a] = equity(&views[a]) - start[a];
+    }
+    let dom = |c: &SourceCreditStateV16Account| {
+        (
+            c.positive_claim_bound_num.get() / BOUND_SCALE,
+            c.fresh_reserved_backing_num.get() / BOUND_SCALE,
+        )
+    };
+    let e0 = &market.markets[0].engine;
+    let e1 = &market.markets[1].engine;
+    CrossAssetOutcome {
+        change,
+        senior_surplus: market.header.vault.get() as i128
+            - market.header.c_tot.get() as i128
+            - market.header.insurance.get() as i128
+            - market.header.pnl_pos_tot.get() as i128,
+        domains: [
+            dom(&e0.source_credit_long),
+            dom(&e0.source_credit_short),
+            dom(&e1.source_credit_long),
+            dom(&e1.source_credit_short),
+        ],
+    }
+}
+
+#[test]
+fn v16_cross_asset_loss_does_not_burn_a_partially_backed_gain_beyond_the_loss() {
+    // X: +100 on asset 0, -50 on asset 1. Y1 -30, Y2 -70, Z +50.
+    let expected = [50_000_000i128, -30_000_000, -70_000_000, 50_000_000];
+    let baseline = cross_asset_burn_run(&[], &[]);
+    println!("baseline {baseline:?}");
+    assert_eq!(baseline.change, expected);
+    for (mid, mid2) in [
+        (&[1usize, 0][..], &[0usize][..]),
+        (&[0][..], &[0][..]),
+        (&[1, 0][..], &[3, 0][..]),
+        (&[2, 0][..], &[0][..]),
+        (&[1, 2, 0][..], &[0][..]),
+    ] {
+        let out = cross_asset_burn_run(mid, mid2);
+        println!("mid {mid:?} mid2 {mid2:?}: {out:?}");
+        assert_eq!(out.change, expected, "mid {mid:?} mid2 {mid2:?}: {out:?}");
+        assert!((0..=1).contains(&out.senior_surplus), "{out:?}");
+    }
+}
+
+#[test]
+fn v16_cross_asset_funding_loss_does_not_burn_a_partially_backed_gain() {
+    for funding_rate in [10_000i128, -10_000] {
+        let baseline = cross_asset_burn_run_with(&[], &[], funding_rate);
+        println!("funding {funding_rate} baseline {baseline:?}");
+        assert_eq!(
+            baseline.change[0..3],
+            [
+                100_000_000 + baseline.change[0] - 100_000_000,
+                -30_000_000,
+                -70_000_000
+            ]
+        );
+        for (mid, mid2) in [
+            (&[1usize, 0][..], &[0usize][..]),
+            (&[0][..], &[0][..]),
+            (&[1, 0][..], &[3, 0][..]),
+            (&[1, 2, 0][..], &[0][..]),
+        ] {
+            let out = cross_asset_burn_run_with(mid, mid2, funding_rate);
+            println!("funding {funding_rate} mid {mid:?} mid2 {mid2:?}: {out:?}");
+            assert_eq!(
+                out.change, baseline.change,
+                "mid {mid:?} mid2 {mid2:?}: {out:?}"
+            );
+            assert!(out.senior_surplus <= baseline.senior_surplus + 1, "{out:?}");
+        }
+    }
+}
