@@ -5383,6 +5383,11 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         .try_to_runtime()
         .unwrap();
     let insurance_before_reversal = market.header.insurance.get();
+    let long_loss_domain_backing_before = market.markets[0]
+        .engine
+        .source_credit_long
+        .fresh_reserved_backing_num
+        .get();
 
     market
         .set_asset_raw_oracle_target_not_atomic(0, 100)
@@ -5400,8 +5405,17 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         .backing_short
         .try_to_runtime()
         .unwrap();
-    let unliened_support_consumed = 5_000 - lien_effective;
+    // The unliened face is the same leg's unrealized gain: it is netted one for one (#457) and
+    // the short-loser backing that supported it moves to the long-loss domain, which the
+    // reversal loss is owed to: it is consumed from the twin with the usual provider-receivable
+    // bookkeeping and re-enters as loss-domain principal instead of junior pool.
+    let unliened_face_netted = 5_000 - lien_effective;
     let principal_loss = 5_250 - 5_000;
+    let long_loss_domain_backing_after = market.markets[0]
+        .engine
+        .source_credit_long
+        .fresh_reserved_backing_num
+        .get();
     assert_eq!(long.header.pnl.get(), 0);
     assert_eq!(
         long.header.capital.get(),
@@ -5424,22 +5438,22 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         assert_eq!(source_after_reversal.valid_liened_insurance_num, 0);
         assert_eq!(
             reservation_after_reversal.consumed_insurance_num,
-            reservation_before_reversal.consumed_insurance_num
-                + unliened_support_consumed * BOUND_SCALE,
-            "only realizable unliened support consumes insurance"
+            reservation_before_reversal.consumed_insurance_num,
+            "netting the same leg's unrealized gain spends no insurance"
         );
-        assert_eq!(
-            market.header.insurance.get() + unliened_support_consumed,
-            insurance_before_reversal,
-            "the fused burn spends each insurance-backed support atom exactly once"
-        );
+        assert_eq!(market.header.insurance.get(), insurance_before_reversal);
         assert_eq!(backing_after_reversal, backing_before_reversal);
+        assert_eq!(
+            long_loss_domain_backing_after,
+            long_loss_domain_backing_before + principal_loss * BOUND_SCALE,
+            "with no counterparty principal in the twin, only the principal loss is booked"
+        );
     } else {
         assert_eq!(
             backing_after_reversal.fresh_unliened_backing_num,
             backing_before_reversal
                 .fresh_unliened_backing_num
-                .checked_sub(unliened_support_consumed * BOUND_SCALE)
+                .checked_sub(unliened_face_netted * BOUND_SCALE)
                 .unwrap()
                 .checked_add(lien_before.source_lien_counterparty_backing_num.get())
                 .unwrap(),
@@ -5449,8 +5463,13 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
         assert_eq!(
             backing_after_reversal.consumed_liened_backing_num,
             backing_before_reversal.consumed_liened_backing_num
-                + unliened_support_consumed * BOUND_SCALE,
-            "only realizable unliened support offsets the reversal loss"
+                + unliened_face_netted * BOUND_SCALE,
+            "the netted face's backing is consumed exactly once (provider receivable kept)"
+        );
+        assert_eq!(
+            long_loss_domain_backing_after,
+            long_loss_domain_backing_before + (unliened_face_netted + principal_loss) * BOUND_SCALE,
+            "the reversal loss is booked in full for the side it is owed to"
         );
         assert_eq!(market.header.insurance.get(), insurance_before_reversal);
     }
@@ -9481,4 +9500,572 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         AutoCrankPlanV16::CloseResolved,
         false,
     );
+}
+
+// ---- a winner's gain must not be burned on reversal because a loser was not settled yet ----
+// (percolator-prog#457, case 1)
+
+const REVERSAL_P0: u64 = 1_000_000;
+const REVERSAL_PEAK: u64 = 1_140_000;
+const REVERSAL_END: u64 = 855_000;
+const REVERSAL_USD: u128 = 1_000_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReversalOutcome {
+    /// Each account's change in capital + pnl.
+    change: [i128; 4],
+    /// Actor 0's final (capital, pnl).
+    end0: (u128, i128),
+    /// (claims, fresh backing) of the long-loser and short-loser source domains, in atoms.
+    long_domain: (u128, u128),
+    short_domain: (u128, u128),
+    /// vault - c_tot - insurance - pnl_pos_tot.
+    senior_surplus: i128,
+}
+
+/// Actor 0 long 4,500 on 1,000; actor 1 long 2,000; actor 2 short 1,500; the maker (index 3) is
+/// the other side of all three (net short 5,000). Price 1.00 -> 1.14 -> 0.855. `at_peak` are the
+/// accounts refreshed at 1.14; everyone is refreshed at the end in `end_order`.
+fn gain_reversal_run_with(
+    deposits: [u128; 4],
+    at_peak: &[usize],
+    end_order: [usize; 4],
+) -> ReversalOutcome {
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 6_480_000);
+    cfg.min_nonzero_mm_req = 500;
+    cfg.min_nonzero_im_req = 600;
+    cfg.initial_margin_bps = 1_000;
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.max_price_move_bps_per_slot = 49;
+    cfg.max_accrual_dt_slots = 10;
+    cfg.min_funding_lifetime_slots = 10;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, REVERSAL_P0, 1)
+        .unwrap();
+    let mut accts = [
+        account_fixture(1, 150),
+        account_fixture(1, 151),
+        account_fixture(1, 152),
+        account_fixture(1, 153),
+    ];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut views: Vec<PortfolioV16ViewMut<'_>> =
+        accts.iter_mut().map(PortfolioV16ViewMut::new).collect();
+    for (view, d) in views.iter_mut().zip(deposits) {
+        market.deposit_not_atomic(view, d * REVERSAL_USD).unwrap();
+    }
+    // The short trades first so the maker's gross exposure never exceeds its final 5,000.
+    for (taker, size) in [(2usize, -1_500i128), (0, 4_500), (1, 2_000)] {
+        let (a, b) = views.split_at_mut(3);
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut a[taker],
+                &mut b[0],
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: size * POS_SCALE as i128,
+                    exec_price: REVERSAL_P0,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    let equity = |v: &PortfolioV16ViewMut<'_>| v.header.capital.get() as i128 + v.header.pnl.get();
+    let start: Vec<i128> = views.iter().map(equity).collect();
+
+    let mut slot = 1u64;
+    let mut price = REVERSAL_P0;
+    // Walk the effective price one slot at a time, within the per-slot move cap.
+    let mut walk = |market: &mut MarketGroupV16ViewMut<'_, u64>, target: u64| {
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, target)
+            .unwrap();
+        while price != target {
+            let step = price * 49 / 10_000;
+            price = if target > price {
+                (price + step).min(target)
+            } else {
+                (price - step).max(target)
+            };
+            slot += 1;
+            market
+                .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+                .unwrap();
+        }
+    };
+    walk(&mut market, REVERSAL_PEAK);
+    for &a in at_peak {
+        market
+            .full_account_refresh_not_atomic(&mut views[a])
+            .unwrap();
+    }
+    walk(&mut market, REVERSAL_END);
+    for a in end_order {
+        market
+            .full_account_refresh_not_atomic(&mut views[a])
+            .unwrap();
+    }
+    market.validate_shape().unwrap();
+    for view in &views {
+        view.validate_with_market(&market.as_view()).unwrap();
+    }
+    let mut change = [0i128; 4];
+    for a in 0..4 {
+        change[a] = equity(&views[a]) - start[a];
+    }
+    let engine = &market.markets[0].engine;
+    let domain = |c: &SourceCreditStateV16Account| {
+        (
+            c.positive_claim_bound_num.get() / BOUND_SCALE,
+            c.fresh_reserved_backing_num.get() / BOUND_SCALE,
+        )
+    };
+    ReversalOutcome {
+        change,
+        end0: (views[0].header.capital.get(), views[0].header.pnl.get()),
+        long_domain: domain(&engine.source_credit_long),
+        short_domain: domain(&engine.source_credit_short),
+        senior_surplus: market.header.vault.get() as i128
+            - market.header.c_tot.get() as i128
+            - market.header.insurance.get() as i128
+            - market.header.pnl_pos_tot.get() as i128,
+    }
+}
+
+fn gain_reversal_run(at_peak: &[usize]) -> ([i128; 4], (u128, i128)) {
+    let out = gain_reversal_run_with([1_000, 1_000, 1_000, 20_000], at_peak, [0, 3, 1, 2]);
+    (out.change, out.end0)
+}
+
+#[test]
+fn v16_gain_reversal_does_not_burn_gain_when_only_winners_were_settled_at_the_peak() {
+    // Actor 0's position alone loses 4,500 x (0.855 - 1.00) = 652.50.
+    let plain = -652_500_000i128;
+    let (nobody, _) = gain_reversal_run(&[]);
+    let (everyone, _) = gain_reversal_run(&[3, 2, 0, 1]);
+    let (winners_only, end) = gain_reversal_run(&[0, 1, 2]);
+    println!("nobody       {nobody:?}");
+    println!("everyone     {everyone:?}");
+    println!("winners only {winners_only:?} actor 0 ends {end:?}");
+    assert_eq!(nobody[0], plain);
+    assert_eq!(everyone[0], plain);
+    assert_eq!(nobody.iter().sum::<i128>(), 0);
+    assert_eq!(
+        winners_only[0], plain,
+        "actor 0 lost more than its position did"
+    );
+    assert_eq!(
+        winners_only, nobody,
+        "outcome depends on who was settled at the peak"
+    );
+    assert_eq!(end, (347_500_000, 0));
+}
+
+/// Every subset of the four accounts refreshed at the peak, under two end orders, gives the
+/// same balances, the market's positive PnL equals the junior pool, and the asset's two source
+/// domains together hold exactly the backing for their claims. When every long winner was settled
+/// at the peak, or no short loser was, the reversal also leaves each domain individually backed:
+/// what the shorts booked against the longs' gains moves with the cancelled face to the domain
+/// the longs' reversal loss is owed to, instead of being stranded in the short-loser domain or
+/// the junior pool. (A short loser settled at the peak whose long counterparties were not keeps
+/// its booked backing in the short-loser domain after it turns into a winner; that is a separate,
+/// pre-existing gain-side path this test only bounds by the per-asset total.)
+#[test]
+fn v16_gain_reversal_is_independent_of_who_was_settled_at_the_peak() {
+    let expected = [-652_500_000i128, -290_000_000, 217_500_000, 725_000_000];
+    for mask in 0u32..16 {
+        let at_peak: Vec<usize> = (0..4).filter(|a| mask & (1 << a) != 0).collect();
+        for end_order in [[0, 3, 1, 2], [3, 2, 1, 0]] {
+            let out = gain_reversal_run_with([1_000, 1_000, 1_000, 20_000], &at_peak, end_order);
+            assert_eq!(
+                out.change, expected,
+                "peak {at_peak:?} end {end_order:?}: {out:?}"
+            );
+            assert_eq!(out.end0, (347_500_000, 0), "peak {at_peak:?}: {out:?}");
+            assert!(
+                (0..=1).contains(&out.senior_surplus),
+                "vault - c_tot - insurance must equal pnl_pos_tot to within rounding: {out:?}"
+            );
+            // Only the shorts hold gains at the end, all against the long-loser domain.
+            assert_eq!(out.short_domain.0, 0, "{out:?}");
+            let claims = out.long_domain.0 + out.short_domain.0;
+            let backing = out.long_domain.1 + out.short_domain.1;
+            assert!(
+                backing <= claims && backing + 1 >= claims,
+                "the asset's domains must hold exactly the backing for their claims: {out:?}"
+            );
+            let all_longs = mask & 0b0011 == 0b0011;
+            let no_shorts = mask & 0b1100 == 0;
+            if all_longs || no_shorts {
+                assert_eq!(out.short_domain, (0, 0), "stranded in the twin: {out:?}");
+                assert!(out.long_domain.1 + 1 >= out.long_domain.0, "{out:?}");
+            }
+        }
+    }
+}
+
+/// A loser that is bankrupt at the peak (the maker, 550 of capital against a 700 loss). Whatever
+/// subset is settled at the peak, the reversing winner never ends better than its position, the
+/// market never owes more positive PnL than it holds (`vault - c_tot - insurance >=
+/// pnl_pos_tot`), and the total never rises.
+#[test]
+fn v16_gain_reversal_with_a_bankrupt_peak_loser_never_pays_the_settler() {
+    let plain0 = -652_500_000i128;
+    let plain1 = -290_000_000i128;
+    for mask in 0u32..16 {
+        let at_peak: Vec<usize> = (0..4).filter(|a| mask & (1 << a) != 0).collect();
+        let out = gain_reversal_run_with([1_000, 1_000, 1_000, 550], &at_peak, [0, 3, 1, 2]);
+        println!("peak {at_peak:?}: {out:?}");
+        assert!(
+            out.change[0] <= plain0,
+            "actor 0 gained from the reversal: {out:?}"
+        );
+        assert!(
+            out.change[1] <= plain1,
+            "actor 1 gained from the reversal: {out:?}"
+        );
+        assert!(
+            out.senior_surplus >= 0,
+            "positive PnL exceeds the junior pool: {out:?}"
+        );
+        assert!(
+            out.change.iter().sum::<i128>() <= 0,
+            "value was created: {out:?}"
+        );
+    }
+}
+
+// ---- a loss paid out of a booked gain is not counted as backing for the other side's gain ----
+
+/// A short 802, then B long 1,153; the maker (index 2) is the other side of both. Every account
+/// is refreshed at every price, in `order`. Returns each account's change in capital + pnl
+/// (A, B, maker).
+fn giveback_run(order: [usize; 3]) -> [i128; 3] {
+    const USD: u128 = 1_000_000;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 6_480_000);
+    cfg.min_nonzero_mm_req = 500;
+    cfg.min_nonzero_im_req = 600;
+    cfg.initial_margin_bps = 1_000;
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.max_price_move_bps_per_slot = 49;
+    cfg.max_accrual_dt_slots = 10;
+    cfg.min_funding_lifetime_slots = 10;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 1_000_000, 1)
+        .unwrap();
+    let mut accts = [
+        account_fixture(1, 160),
+        account_fixture(1, 161),
+        account_fixture(1, 162),
+    ];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut views: Vec<PortfolioV16ViewMut<'_>> =
+        accts.iter_mut().map(PortfolioV16ViewMut::new).collect();
+    for (view, d) in views.iter_mut().zip([1_000u128, 1_000, 20_000]) {
+        market.deposit_not_atomic(view, d * USD).unwrap();
+    }
+    let equity = |v: &PortfolioV16ViewMut<'_>| v.header.capital.get() as i128 + v.header.pnl.get();
+    let start: Vec<i128> = views.iter().map(equity).collect();
+    let mut slot = 1u64;
+    let mut price = 1_000_000u64;
+    macro_rules! walk {
+        ($target:expr) => {{
+            let target: u64 = $target;
+            market
+                .set_asset_raw_oracle_target_not_atomic(0, target)
+                .unwrap();
+            while price != target {
+                let step = (price * 49 / 10_000).max(1);
+                price = if target > price {
+                    (price + step).min(target)
+                } else {
+                    price.saturating_sub(step).max(target)
+                };
+                slot += 1;
+                market
+                    .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+                    .unwrap();
+            }
+            for a in order {
+                market
+                    .full_account_refresh_not_atomic(&mut views[a])
+                    .unwrap();
+            }
+        }};
+    }
+    macro_rules! trade {
+        ($taker:expr, $size:expr) => {{
+            let (a, b) = views.split_at_mut(2);
+            market
+                .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                    &mut a[$taker],
+                    &mut b[0],
+                    TradeRequestV16 {
+                        asset_index: 0,
+                        size_q: $size * POS_SCALE as i128,
+                        exec_price: price,
+                        fee_bps: 0,
+                    },
+                )
+                .unwrap();
+        }};
+    }
+    trade!(0, -802i128);
+    walk!(992_001); // A wins 6.415198
+    trade!(1, 1_153i128);
+    walk!(995_473); // A gives 2.784544 back, B gains 4.003216
+    walk!(990_694); // B's position alone is now at 1,153 x (0.990694 - 0.992001) = -1.506971
+    let mut change = [0i128; 3];
+    for a in 0..3 {
+        change[a] = equity(&views[a]) - start[a];
+    }
+    change
+}
+
+#[test]
+fn v16_loss_paid_from_a_booked_gain_backs_the_counterparty_gain() {
+    let b_alone = 1_153i128 * (990_694 - 992_001);
+    let runs: Vec<[i128; 3]> = [
+        [2usize, 0, 1],
+        [0, 1, 2],
+        [1, 0, 2],
+        [2, 1, 0],
+        [0, 2, 1],
+        [1, 2, 0],
+    ]
+    .into_iter()
+    .map(|order| {
+        let c = giveback_run(order);
+        println!(
+            "refresh order {order:?}: A {} B {} maker {} sum {}",
+            c[0],
+            c[1],
+            c[2],
+            c.iter().sum::<i128>()
+        );
+        c
+    })
+    .collect();
+    for c in runs {
+        assert_eq!(c.iter().sum::<i128>(), 0, "value reached no account");
+        assert_eq!(c[1], b_alone, "B lost more than its position did");
+    }
+}
+
+// ---- a cross-asset loss must not burn a partially backed gain beyond the loss ----
+// (percolator-prog#457 follow-up: the same stale-rate burn outside the same-leg case)
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CrossAssetOutcome {
+    change: [i128; 4],
+    senior_surplus: i128,
+    /// (claims, fresh backing) per (asset, loser side) domain, in atoms.
+    domains: [(u128, u128); 4],
+}
+
+/// Two assets at 1.00. X (0) is long 1,000 of asset 0 against Y1 (1, short 300) and Y2 (2, short
+/// 700), and short 1,000 of asset 1 against Z (3). Asset 0 goes to 1.10 (X gains 100 against the
+/// asset-0 short-loser domain); `mid` are the accounts refreshed there. Then asset 1 goes to 1.05
+/// (X loses 50 on its other leg); `mid2` are refreshed there. Everyone is refreshed at the end.
+fn cross_asset_burn_run(mid: &[usize], mid2: &[usize]) -> CrossAssetOutcome {
+    cross_asset_burn_run_with(mid, mid2, 0)
+}
+
+/// With `funding_rate != 0`, asset 1's loss for X comes from funding at a flat price instead.
+fn cross_asset_burn_run_with(
+    mid: &[usize],
+    mid2: &[usize],
+    funding_rate: i128,
+) -> CrossAssetOutcome {
+    const USD: u128 = 1_000_000;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 6_480_000);
+    cfg.min_nonzero_mm_req = 500;
+    cfg.min_nonzero_im_req = 600;
+    cfg.initial_margin_bps = 1_000;
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.max_price_move_bps_per_slot = 49;
+    cfg.max_accrual_dt_slots = 10;
+    cfg.min_funding_lifetime_slots = 10;
+    cfg.max_abs_funding_e9_per_slot = 10_000;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
+    let mut markets = (0..2)
+        .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
+    for i in 0..2usize {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                i as u32,
+                &mut markets[i].engine,
+                1_000_000,
+                (i + 1) as u64,
+            )
+            .unwrap();
+    }
+    let mut accts = [
+        account_fixture(2, 170),
+        account_fixture(2, 171),
+        account_fixture(2, 172),
+        account_fixture(2, 173),
+    ];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut views: Vec<PortfolioV16ViewMut<'_>> =
+        accts.iter_mut().map(PortfolioV16ViewMut::new).collect();
+    market
+        .accrue_asset_to_not_atomic(0, 2, 1_000_000, 0, true)
+        .unwrap();
+    for (view, d) in views.iter_mut().zip([1_000u128, 1_000, 20_000, 20_000]) {
+        market.deposit_not_atomic(view, d * USD).unwrap();
+    }
+    for (asset, counterparty, size) in [(0usize, 1usize, 300i128), (0, 2, 700), (1, 3, -1_000)] {
+        let (a, b) = views.split_at_mut(1);
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut a[0],
+                &mut b[counterparty - 1],
+                TradeRequestV16 {
+                    asset_index: asset,
+                    size_q: size * POS_SCALE as i128,
+                    exec_price: 1_000_000,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    let equity = |v: &PortfolioV16ViewMut<'_>| v.header.capital.get() as i128 + v.header.pnl.get();
+    let start: Vec<i128> = views.iter().map(equity).collect();
+    let mut slot = 2u64;
+    let mut prices = [1_000_000u64; 2];
+    let mut walk = |market: &mut MarketGroupV16ViewMut<'_, u64>, asset: usize, target: u64| {
+        market
+            .set_asset_raw_oracle_target_not_atomic(asset, target)
+            .unwrap();
+        while prices[asset] != target {
+            let p = prices[asset];
+            let step = p * 49 / 10_000;
+            prices[asset] = if target > p {
+                (p + step).min(target)
+            } else {
+                (p - step).max(target)
+            };
+            slot += 1;
+            for a in 0..2 {
+                market
+                    .accrue_asset_to_not_atomic(a, slot, prices[a], 0, true)
+                    .unwrap();
+            }
+        }
+    };
+    walk(&mut market, 0, 1_100_000);
+    for &a in mid {
+        market
+            .full_account_refresh_not_atomic(&mut views[a])
+            .unwrap();
+    }
+    if funding_rate == 0 {
+        walk(&mut market, 1, 1_050_000);
+    } else {
+        for _ in 0..500 {
+            slot += 10;
+            for a in 0..2 {
+                let rate = if a == 1 { funding_rate } else { 0 };
+                market
+                    .accrue_asset_to_not_atomic(a, slot, prices[a], rate, true)
+                    .unwrap();
+            }
+        }
+    }
+    for &a in mid2 {
+        market
+            .full_account_refresh_not_atomic(&mut views[a])
+            .unwrap();
+    }
+    for a in [0, 1, 2, 3] {
+        market
+            .full_account_refresh_not_atomic(&mut views[a])
+            .unwrap();
+    }
+    market.validate_shape().unwrap();
+    let mut change = [0i128; 4];
+    for a in 0..4 {
+        change[a] = equity(&views[a]) - start[a];
+    }
+    let dom = |c: &SourceCreditStateV16Account| {
+        (
+            c.positive_claim_bound_num.get() / BOUND_SCALE,
+            c.fresh_reserved_backing_num.get() / BOUND_SCALE,
+        )
+    };
+    let e0 = &market.markets[0].engine;
+    let e1 = &market.markets[1].engine;
+    CrossAssetOutcome {
+        change,
+        senior_surplus: market.header.vault.get() as i128
+            - market.header.c_tot.get() as i128
+            - market.header.insurance.get() as i128
+            - market.header.pnl_pos_tot.get() as i128,
+        domains: [
+            dom(&e0.source_credit_long),
+            dom(&e0.source_credit_short),
+            dom(&e1.source_credit_long),
+            dom(&e1.source_credit_short),
+        ],
+    }
+}
+
+#[test]
+fn v16_cross_asset_loss_does_not_burn_a_partially_backed_gain_beyond_the_loss() {
+    // X: +100 on asset 0, -50 on asset 1. Y1 -30, Y2 -70, Z +50.
+    let expected = [50_000_000i128, -30_000_000, -70_000_000, 50_000_000];
+    let baseline = cross_asset_burn_run(&[], &[]);
+    println!("baseline {baseline:?}");
+    assert_eq!(baseline.change, expected);
+    for (mid, mid2) in [
+        (&[1usize, 0][..], &[0usize][..]),
+        (&[0][..], &[0][..]),
+        (&[1, 0][..], &[3, 0][..]),
+        (&[2, 0][..], &[0][..]),
+        (&[1, 2, 0][..], &[0][..]),
+    ] {
+        let out = cross_asset_burn_run(mid, mid2);
+        println!("mid {mid:?} mid2 {mid2:?}: {out:?}");
+        assert_eq!(out.change, expected, "mid {mid:?} mid2 {mid2:?}: {out:?}");
+        assert!((0..=1).contains(&out.senior_surplus), "{out:?}");
+    }
+}
+
+#[test]
+fn v16_cross_asset_funding_loss_does_not_burn_a_partially_backed_gain() {
+    for funding_rate in [10_000i128, -10_000] {
+        let baseline = cross_asset_burn_run_with(&[], &[], funding_rate);
+        println!("funding {funding_rate} baseline {baseline:?}");
+        assert_eq!(
+            baseline.change[0..3],
+            [
+                100_000_000 + baseline.change[0] - 100_000_000,
+                -30_000_000,
+                -70_000_000
+            ]
+        );
+        for (mid, mid2) in [
+            (&[1usize, 0][..], &[0usize][..]),
+            (&[0][..], &[0][..]),
+            (&[1, 0][..], &[3, 0][..]),
+            (&[1, 2, 0][..], &[0][..]),
+        ] {
+            let out = cross_asset_burn_run_with(mid, mid2, funding_rate);
+            println!("funding {funding_rate} mid {mid:?} mid2 {mid2:?}: {out:?}");
+            assert_eq!(
+                out.change, baseline.change,
+                "mid {mid:?} mid2 {mid2:?}: {out:?}"
+            );
+            assert!(out.senior_surplus <= baseline.senior_surplus + 1, "{out:?}");
+        }
+    }
 }

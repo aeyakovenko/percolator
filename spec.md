@@ -1375,6 +1375,41 @@ source-domain order, then settles nonnegative deltas. This rule MUST NOT
 aggregate losses across source domains or assign backing to a last-touched
 domain.
 
+Same-leg reversal netting (Live). Before the support-and-burn rule above, a
+newly observed negative K/F delta on a leg whose loss books into domain
+`L = (asset, side)` MUST first cancel, one for one, the account's unliened
+positive face in the twin domain `T = (asset, opposite(side))` -- the unrealized
+gain of that same leg, which was never paid out. The netted amount is
+`n = min(loss, positive face, unliened T claim)`; the account's T claim, T's
+claim bound and `PNL` all fall by exactly `n`, and only `loss - n` continues
+through support-and-burn and capital reservation. Pricing this give-back at
+T's stored credit rate would make the outcome depend on whether T's losers
+were settled before the reversal. Together with the cancelled face, T's
+counterparty backing that supported it moves to `L`:
+`floor(n * BOUND_SCALE * rate_T)` bound units of unliened Fresh principal
+(capped by T's unliened bucket principal). T books it exactly as ordinary
+support consumption (spent / provider-receivable / consumed lockstep, so
+provider attribution is unchanged) and it re-enters as fresh principal of `L`
+rather than the junior pool (`V`, `C_tot`, `I` flat). A Fresh `L` bucket keeps
+its expiry; an Empty/Expired one inherits T's bucket expiry, so the moved
+principal never outlives its source commitment and a provider top-up at that
+expiry still merges. The
+transfer is skipped (netting still applies) when either side of the asset has
+a pending domain-loss barrier, T's bucket is stale, or L's bucket cannot accept
+fresh principal; skipping only raises T's rate. Because the transfer is at or
+below T's rate, no remaining T claimant's rate falls, no account is credited
+more than its position's PnL, and liened or impaired T face is never netted.
+After that netting, still before support-and-burn: (a) unliened face in any
+other source domain whose credit rate is exactly 1 is realized one for one, its
+counterparty backing (booked as ordinary support consumption) moving to `L`;
+(b) up to the account's unliened face in domains with credit rate below 1, the
+remaining loss is paid from free capital directly into `L` backing (`C_tot -=
+x`, `L` principal `+= x`, `V` flat) and that face is kept. Burning it instead
+would spend `x / rate` face for `x` of loss and strand the difference in the
+source domain once its losers book. Health is unchanged either way (`C - x +
+P*r` equals `C + (P - x/r)*r`). Only a loss beyond free capital, or one met by
+liened face, takes the support-and-burn path.
+
 If full B settlement is too large, partial settlement is allowed. While `B_remaining > 0`, no user-favorable action may continue.
 
 -------------------------------------------------------------------------------
