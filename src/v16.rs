@@ -4991,6 +4991,16 @@ impl Default for AssetStateV16 {
     }
 }
 
+/// Accumulator for one K/F loss's at-par netting pass (#457).
+struct ParNettingBatchV16 {
+    face_left: u128,
+    loss_left: u128,
+    netted: u128,
+    netted_num: u128,
+    transfer_num: u128,
+    expiry_slot: u64,
+}
+
 #[repr(C)]
 #[cfg_attr(
     all(kani, any(feature = "contracts", feature = "closure")),
@@ -9108,6 +9118,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(source)
     }
 
+    /// Stored credit rate only (no decode or rate recomputation): for bounded
+    /// per-slot scans; the full state is validated wherever it is mutated.
+    fn stored_source_credit_rate_num(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        Ok(match side {
+            SideV16::Long => slot.source_credit_long.credit_rate_num.get(),
+            SideV16::Short => slot.source_credit_short.credit_rate_num.get(),
+        })
+    }
+
     fn source_credit_for_domain_shape(&self, domain: usize) -> V16Result<SourceCreditStateV16> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let slot = self.markets[asset_index].engine_slot();
@@ -12838,52 +12859,117 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         loss_domain: usize,
         loss_abs: u128,
     ) -> V16Result<u128> {
-        if loss_abs == 0 || decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+        // Bounded work (max shape: every leg of a full-source account): flat-face
+        // accounts exit before any scan; otherwise one pass over the account's
+        // source slots reads each slot's unliened face and the domain's stored
+        // (shape-validated) credit rate. Each netted domain costs one fused
+        // consume-and-burn (the same primitive ordinary support uses); the
+        // loss-domain credit, the PnL write and the source-array compaction are
+        // done once per loss.
+        let start_pnl = account.header.pnl.get();
+        if loss_abs == 0
+            || start_pnl <= 0
+            || decode_market_mode(self.header.mode)? != MarketModeV16::Live
+        {
             return Ok(0);
         }
         let (asset_index, loss_side) = self.domain_asset_side(loss_domain)?;
         let twin_domain = self.insurance_domain_index(asset_index, opposite_side(loss_side))?;
-        let mut remaining = loss_abs;
-        remaining -= self.net_face_in_domain_at_par_not_atomic(
-            account,
-            twin_domain,
-            loss_domain,
-            remaining,
-            false,
-        )?;
-
-        let mut domains = [usize::MAX; PORTFOLIO_SOURCE_DOMAIN_CAP];
-        let mut count = 0usize;
-        let mut slot = 0usize;
-        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = account.header.source_domains[slot];
-            if source.has_default_sparse_tag() && !source.is_occupied() {
+        let loss_side_open = !self.has_pending_domain_loss_barrier(asset_index, SideV16::Long)?
+            && !self.has_pending_domain_loss_barrier(asset_index, SideV16::Short)?
+            && self.loss_bucket_accepts_fresh(loss_domain)?;
+        let mut end = 0usize;
+        let mut twin_slot = None;
+        while end < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = account.header.source_domains[end];
+            if source.is_sparse_tail_default() {
                 break;
             }
-            if source.is_occupied() {
-                let d = source.domain.get() as usize;
-                if d != twin_domain {
-                    domains[count] = d;
-                    count += 1;
+            if source.is_occupied() && source.domain.get() as usize == twin_domain {
+                twin_slot = Some(end);
+            }
+            end += 1;
+        }
+        let mut batch = ParNettingBatchV16 {
+            face_left: start_pnl as u128,
+            loss_left: loss_abs,
+            netted: 0,
+            netted_num: 0,
+            transfer_num: 0,
+            expiry_slot: u64::MAX,
+        };
+        if let Some(slot) = twin_slot {
+            self.net_slot_face_at_par_not_atomic(
+                account,
+                slot,
+                loss_domain,
+                loss_side_open,
+                false,
+                &mut batch,
+            )?;
+        }
+        let mut partially_backed_num = 0u128;
+        let mut slot = 0usize;
+        while slot < end && batch.loss_left != 0 && batch.face_left != 0 {
+            let source = account.header.source_domains[slot];
+            if source.is_occupied() && Some(slot) != twin_slot {
+                let unliened_num = Self::slot_unliened_claim_num(source)?;
+                if unliened_num != 0 {
+                    let d = source.domain.get() as usize;
+                    if self.stored_source_credit_rate_num(d)? == CREDIT_RATE_SCALE {
+                        self.net_slot_face_at_par_not_atomic(
+                            account,
+                            slot,
+                            loss_domain,
+                            loss_side_open,
+                            true,
+                            &mut batch,
+                        )?;
+                    } else {
+                        partially_backed_num = partially_backed_num
+                            .checked_add(unliened_num)
+                            .ok_or(V16Error::ArithmeticOverflow)?;
+                    }
                 }
             }
             slot += 1;
         }
-        let mut i = 0usize;
-        while i < count && remaining != 0 {
-            remaining -= self.net_face_in_domain_at_par_not_atomic(
-                account,
-                domains[i],
-                loss_domain,
-                remaining,
-                true,
-            )?;
-            i += 1;
+        if batch.netted != 0 {
+            account.compact_source_domains();
+            if batch.transfer_num != 0 {
+                let expiry_slot = if self.backing_bucket_for_domain(loss_domain)?.status
+                    == BackingBucketStatusV16::Fresh
+                {
+                    self.backing_bucket_for_domain(loss_domain)?.expiry_slot
+                } else {
+                    batch.expiry_slot
+                };
+                self.add_fresh_counterparty_backing_unchecked(
+                    loss_domain,
+                    batch.transfer_num,
+                    expiry_slot,
+                )?;
+            }
+            let netted_i128 =
+                i128::try_from(batch.netted).map_err(|_| V16Error::ArithmeticOverflow)?;
+            let new_pnl = start_pnl
+                .checked_sub(netted_i128)
+                .ok_or(V16Error::CounterUnderflow)?;
+            account.header.reserved_pnl = V16PodU128::new(
+                account
+                    .header
+                    .reserved_pnl
+                    .get()
+                    .min(new_pnl.max(0) as u128),
+            );
+            self.set_account_pnl_after_source_claim_burn(account, new_pnl, batch.netted_num)?;
         }
 
-        if remaining != 0 && account.header.pnl.get() > 0 {
-            let partially_backed = self.unliened_partially_backed_face(account)?;
-            let to_capital = remaining.min(partially_backed);
+        let mut remaining = batch.loss_left;
+        if remaining != 0 && batch.face_left != 0 && loss_side_open {
+            let to_capital = remaining
+                .min(V16Core::amount_from_bound_num(partially_backed_num)?)
+                .min(batch.face_left);
             if to_capital != 0 {
                 remaining -= self.pay_kf_loss_from_free_capital_not_atomic(
                     account,
@@ -12897,46 +12983,83 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::CounterUnderflow)
     }
 
-    /// Cancels up to `max_loss` of the account's unliened positive face in
-    /// `face_domain` one for one against a loss owed to `loss_domain`, moving
-    /// floor(face * rate) of `face_domain` counterparty backing to `loss_domain`.
-    /// The twin side is booked exactly as ordinary support consumption (spent /
-    /// provider receivable / consumed lockstep), so provider attribution is
-    /// unchanged; the consumed atoms re-enter as fresh `loss_domain` principal
-    /// instead of the junior pool. The amount never exceeds the domain's rate, so
-    /// its remaining claimants never see a lower rate. With `require_full_backing`
-    /// (a domain other than the leg's twin) only face whose backing can move in
-    /// full at rate 1 is netted. Returns the loss amount netted.
-    fn net_face_in_domain_at_par_not_atomic(
+    fn slot_unliened_claim_num(source: PortfolioSourceDomainV16Account) -> V16Result<u128> {
+        source
+            .source_claim_bound_num
+            .get()
+            .checked_sub(
+                source
+                    .source_claim_liened_num
+                    .get()
+                    .checked_add(source.source_claim_impaired_num.get())
+                    .ok_or(V16Error::ArithmeticOverflow)?,
+            )
+            .ok_or(V16Error::CounterUnderflow)
+    }
+
+    /// Cancels the unliened positive face at source slot `slot` one for one
+    /// against the batch's remaining loss, consuming floor(face * rate) of that
+    /// domain's counterparty backing in the same fused consume-and-burn step
+    /// ordinary support uses (spent / provider receivable / consumed lockstep,
+    /// so provider attribution is unchanged). The consumed atoms are added to
+    /// the batch for one later credit to the loss domain (instead of the junior
+    /// pool). The amount never exceeds the domain's rate, so its remaining
+    /// claimants never see a lower rate. With `require_full_backing` (a domain
+    /// other than the leg's twin) only face whose backing moves in full at rate
+    /// 1 is netted; with backing that cannot move, the twin's face is cancelled
+    /// without a move, which only raises the twin's rate. The account PnL and
+    /// the source-array compaction are left to the caller.
+    fn net_slot_face_at_par_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-        face_domain: usize,
+        slot: usize,
         loss_domain: usize,
-        max_loss: u128,
+        loss_side_open: bool,
         require_full_backing: bool,
-    ) -> V16Result<u128> {
-        let old_pnl = account.header.pnl.get();
-        if max_loss == 0 || old_pnl <= 0 || face_domain == loss_domain {
-            return Ok(0);
+        batch: &mut ParNettingBatchV16,
+    ) -> V16Result<()> {
+        let source = account.header.source_domains[slot];
+        let face_domain = source.domain.get() as usize;
+        if face_domain == loss_domain {
+            return Ok(());
         }
-        let Some(slot) = account.source_domain_slot(face_domain)? else {
-            return Ok(0);
-        };
-        let unliened_num = Self::source_claim_unliened_num(&account.as_view(), face_domain)?;
-        let mut netted = max_loss
-            .min(old_pnl as u128)
+        let unliened_num = Self::slot_unliened_claim_num(source)?;
+        let mut netted = batch
+            .loss_left
+            .min(batch.face_left)
             .min(V16Core::amount_from_bound_num(unliened_num)?);
         if netted == 0 {
-            return Ok(0);
+            return Ok(());
         }
-        let (rate, movable_num) = self.par_netting_backing_terms(face_domain, loss_domain)?;
+        let now = self.header.current_slot.get();
+        let bucket = self.backing_bucket_for_domain(face_domain)?;
+        let credit = self.source_credit_for_domain(face_domain)?;
+        let bucket_fresh =
+            bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot > now;
+        let rate = if bucket.status == BackingBucketStatusV16::Fresh && !bucket_fresh {
+            0
+        } else {
+            credit.credit_rate_num
+        };
+        let (face_asset, _) = self.domain_asset_side(face_domain)?;
+        let movable_num = if loss_side_open
+            && bucket_fresh
+            && !self.has_pending_domain_loss_barrier(face_asset, SideV16::Long)?
+            && !self.has_pending_domain_loss_barrier(face_asset, SideV16::Short)?
+        {
+            bucket
+                .fresh_unliened_backing_num
+                .min(credit.fresh_reserved_backing_num)
+        } else {
+            0
+        };
         if require_full_backing {
             if rate != CREDIT_RATE_SCALE {
-                return Ok(0);
+                return Ok(());
             }
             netted = netted.min(V16Core::amount_from_bound_num(movable_num)?);
             if netted == 0 {
-                return Ok(0);
+                return Ok(());
             }
         }
         let netted_num = V16Core::bound_num_from_amount(netted)?;
@@ -12947,79 +13070,41 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .ok_or(V16Error::ArithmeticOverflow)?;
         let transfer_num = at_rate.min(movable_num);
         if require_full_backing && transfer_num != netted_num {
-            return Ok(0);
+            return Ok(());
         }
-
-        self.decrement_account_source_claim_for_domain_not_atomic(
-            account,
-            slot,
-            face_domain,
-            netted_num,
-        )?;
-        account.compact_source_domains();
 
         if transfer_num != 0 {
-            let expiry_slot = self.moved_backing_expiry_slot(face_domain, loss_domain)?;
-            self.create_and_consume_source_credit_from_counterparty_core_not_atomic(
+            self.create_and_consume_source_credit_from_counterparty_parts_not_atomic(
                 face_domain,
+                bucket,
+                credit,
+                self.insurance_reservation_for_domain(face_domain)?,
                 transfer_num,
+                netted_num,
             )?;
-            self.add_fresh_counterparty_backing_unchecked(loss_domain, transfer_num, expiry_slot)?;
-        }
-
-        let netted_i128 = i128::try_from(netted).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let new_pnl = old_pnl
-            .checked_sub(netted_i128)
-            .ok_or(V16Error::CounterUnderflow)?;
-        account.header.reserved_pnl = V16PodU128::new(
-            account
-                .header
-                .reserved_pnl
-                .get()
-                .min(new_pnl.max(0) as u128),
-        );
-        self.set_account_pnl_after_source_claim_burn(account, new_pnl, netted_num)?;
-        Ok(netted)
-    }
-
-    /// (current credit rate, movable counterparty backing in BOUND_SCALE units)
-    /// of `face_domain` for a move into `loss_domain`. Movable backing is zero
-    /// when either asset has an active close barrier, the face domain's backing
-    /// is stale, or the loss bucket cannot accept fresh principal.
-    fn par_netting_backing_terms(
-        &self,
-        face_domain: usize,
-        loss_domain: usize,
-    ) -> V16Result<(u128, u128)> {
-        let (face_asset, _) = self.domain_asset_side(face_domain)?;
-        let (loss_asset, _) = self.domain_asset_side(loss_domain)?;
-        let now = self.header.current_slot.get();
-        let face_bucket = self.backing_bucket_for_domain(face_domain)?;
-        let face_bucket_fresh =
-            face_bucket.status == BackingBucketStatusV16::Fresh && face_bucket.expiry_slot > now;
-        let rate = if face_bucket.status == BackingBucketStatusV16::Fresh && !face_bucket_fresh {
-            // Stale backing contributes nothing.
-            0
+            account.header.source_domains[slot].source_claim_bound_num = V16PodU128::new(
+                source
+                    .source_claim_bound_num
+                    .get()
+                    .checked_sub(netted_num)
+                    .ok_or(V16Error::CounterUnderflow)?,
+            );
+            account.reset_source_domain_slot_if_empty(slot);
+            batch.expiry_slot = batch.expiry_slot.min(bucket.expiry_slot);
         } else {
-            self.validate_source_domain_ledger_current(face_domain)?;
-            V16Core::expected_source_credit_rate_num_for_state(
-                self.source_credit_for_domain(face_domain)?,
-            )?
-        };
-        let barrier = self.has_pending_domain_loss_barrier(face_asset, SideV16::Long)?
-            || self.has_pending_domain_loss_barrier(face_asset, SideV16::Short)?
-            || self.has_pending_domain_loss_barrier(loss_asset, SideV16::Long)?
-            || self.has_pending_domain_loss_barrier(loss_asset, SideV16::Short)?;
-        if barrier || !face_bucket_fresh || !self.loss_bucket_accepts_fresh(loss_domain)? {
-            return Ok((rate, 0));
+            self.decrement_account_source_claim_for_domain_not_atomic(
+                account,
+                slot,
+                face_domain,
+                netted_num,
+            )?;
         }
-        let face_source = self.source_credit_for_domain(face_domain)?;
-        Ok((
-            rate,
-            face_bucket
-                .fresh_unliened_backing_num
-                .min(face_source.fresh_reserved_backing_num),
-        ))
+        batch.netted += netted;
+        batch.netted_num += netted_num;
+        batch.transfer_num += transfer_num;
+        batch.loss_left -= netted;
+        batch.face_left -= netted;
+        Ok(())
     }
 
     fn loss_bucket_accepts_fresh(&self, loss_domain: usize) -> V16Result<bool> {
@@ -13029,44 +13114,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             BackingBucketStatusV16::Fresh => bucket.expiry_slot > self.header.current_slot.get(),
             _ => false,
         })
-    }
-
-    /// A Fresh loss bucket keeps its expiry; an Empty/Expired one inherits the
-    /// source bucket's expiry, so moved principal never outlives the commitment
-    /// it came from and a provider top-up at that expiry still merges.
-    fn moved_backing_expiry_slot(&self, face_domain: usize, loss_domain: usize) -> V16Result<u64> {
-        let loss_bucket = self.backing_bucket_for_domain(loss_domain)?;
-        if loss_bucket.status == BackingBucketStatusV16::Fresh {
-            return Ok(loss_bucket.expiry_slot);
-        }
-        Ok(self.backing_bucket_for_domain(face_domain)?.expiry_slot)
-    }
-
-    /// Unliened positive face (atoms) the account holds in source domains whose
-    /// credit rate is below 1 -- the face the support-and-burn path would burn
-    /// at more than one unit per unit of loss.
-    fn unliened_partially_backed_face(&self, account: &PortfolioV16ViewMut<'_>) -> V16Result<u128> {
-        let mut total_num = 0u128;
-        let mut slot = 0usize;
-        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = account.header.source_domains[slot];
-            if source.has_default_sparse_tag() && !source.is_occupied() {
-                break;
-            }
-            if source.is_occupied() {
-                let d = source.domain.get() as usize;
-                let rate = V16Core::expected_source_credit_rate_num_for_state(
-                    self.source_credit_for_domain(d)?,
-                )?;
-                if rate < CREDIT_RATE_SCALE {
-                    total_num = total_num
-                        .checked_add(Self::source_claim_unliened_num(&account.as_view(), d)?)
-                        .ok_or(V16Error::ArithmeticOverflow)?;
-                }
-            }
-            slot += 1;
-        }
-        Ok(V16Core::amount_from_bound_num(total_num)?.min(account.header.pnl.get().max(0) as u128))
     }
 
     /// Pays up to `loss` from the account's capital straight into `loss_domain`
