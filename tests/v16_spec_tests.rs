@@ -9482,3 +9482,152 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+/// Issue #289 (forfeit path): a bankrupt short is liquidated and domain
+/// insurance funds the loser's deficit into the junior pool. The winning long
+/// keeps its dead leg into the reset and forfeits the unsettled gain through
+/// Recovery instead of realizing it, so no provider receivable is ever created.
+/// Once every claimant is gone, the insurance it had been funded by must be
+/// recredited to the paying insurance domain rather than left as claim-free
+/// residue for terminal retirement to burn. Only the insurance spend is
+/// restored; the loser's own forfeited capital is not reclassified.
+#[test]
+fn v16_issue289_forfeited_bankruptcy_claim_recredits_paired_insurance_at_terminal() {
+    const PRICE: u64 = 100;
+    const FINAL_PRICE: u64 = 130;
+    const CAPITAL: u128 = 10_000_000;
+    const INSURANCE_PER_SIDE: u128 = 100_000_000;
+    const SIZE_Q: u128 = 1_000_000 * POS_SCALE;
+
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.initial_margin_bps = 1_000;
+    cfg.max_price_move_bps_per_slot = 500;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, PRICE, 1)
+        .unwrap();
+    let mut long_header = account_fixture(1, 241);
+    let mut short_header = account_fixture(1, 242);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market
+        .deposit_domain_insurance_not_atomic(0, INSURANCE_PER_SIDE)
+        .unwrap();
+    market
+        .deposit_domain_insurance_not_atomic(1, INSURANCE_PER_SIDE)
+        .unwrap();
+    market.deposit_not_atomic(&mut long, CAPITAL).unwrap();
+    market.deposit_not_atomic(&mut short, CAPITAL).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(SIZE_Q),
+                exec_price: PRICE,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    let mut slot = 1u64;
+    let mut price = PRICE;
+    while price < FINAL_PRICE {
+        slot += 1;
+        price = (price + 5).min(FINAL_PRICE);
+        market
+            .accrue_asset_to_not_atomic(0, slot, price, 0, true)
+            .unwrap();
+    }
+    market.markets[0].engine.asset.raw_oracle_target_price = V16PodU64::new(FINAL_PRICE);
+    let liq = market
+        .liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 0 })
+        .expect("the bankrupt short must be liquidatable");
+    // Short lost 30M on 10M capital: insurance on the winner-side domain funds 20M.
+    assert_eq!(liq.insurance_used, 20_000_000);
+    assert_eq!(
+        market.header.insurance.get(),
+        2 * INSURANCE_PER_SIDE - 20_000_000
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        20_000_000
+    );
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.mode_long, SideModeV16::ResetPending);
+    assert_eq!(asset.oi_eff_long_q, 0);
+    assert_eq!(asset.stored_pos_count_long, 1);
+    assert_eq!(long.header.pnl.get(), 0);
+
+    let forfeit = market
+        .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+        .expect("the winner's dead Recovery leg must be forfeitable");
+    assert!(forfeit.detached);
+    assert_eq!(forfeit.positive_pnl_forfeited, 30_000_000);
+    market
+        .finalize_side_reset_not_atomic(0, SideV16::Long)
+        .unwrap();
+    market
+        .finalize_side_reset_not_atomic(0, SideV16::Short)
+        .unwrap();
+    market.resolve_market_not_atomic(slot + 1).unwrap();
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut long, 0),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: CAPITAL })
+    );
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut short, 0),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 })
+    );
+
+    // Terminal: no claimant, no provider receivable, 20M insurance + 10M forfeited
+    // loser capital sit as claim-free residual.
+    assert_eq!(market.header.c_tot.get(), 0);
+    assert_eq!(market.header.pnl_pos_tot.get(), 0);
+    assert_eq!(market.header.vault.get(), 2 * INSURANCE_PER_SIDE + CAPITAL);
+    for source in [
+        market.markets[0].engine.source_credit_long,
+        market.markets[0].engine.source_credit_short,
+    ] {
+        assert_eq!(source.provider_receivable_num.get(), 0);
+    }
+
+    assert_eq!(
+        market.recredit_terminal_claim_free_residual_for_asset_not_atomic(0),
+        Ok(20_000_000),
+        "forfeited bankruptcy funding must return to the paying insurance domain"
+    );
+    assert_eq!(market.header.insurance.get(), 2 * INSURANCE_PER_SIDE);
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        2 * INSURANCE_PER_SIDE
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_long.get(),
+        0
+    );
+    assert_eq!(
+        market.markets[0].engine.insurance_domain_spent_short.get(),
+        0
+    );
+    // Only the insurance spend is restored; the remaining claim-free residual
+    // (the loser's forfeited capital) is not reclassified as insurance.
+    assert_eq!(
+        market.header.vault.get() - market.header.insurance.get(),
+        CAPITAL
+    );
+    // Idempotent: the spend and residual were both consumed by the first call.
+    assert_eq!(
+        market.recredit_terminal_claim_free_residual_for_asset_not_atomic(0),
+        Ok(0)
+    );
+    assert_eq!(market.header.insurance.get(), 2 * INSURANCE_PER_SIDE);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
