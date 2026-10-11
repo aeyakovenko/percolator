@@ -19992,9 +19992,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut positive_pnl_forfeited = 0u128;
         if net < 0 {
             loss_settled = net.unsigned_abs();
+            let negative_before = account.header.pnl.get().min(0).unsigned_abs();
             let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
             support_consumed = support.support_consumed;
             junior_face_burned = support.junior_face_burned;
+            // Same as ordinary K/F settlement: the capital-covered part of a
+            // newly realized K/F loss backs the opposite side's claims sourced
+            // from this leg's domain. Without it a forfeit-first ordering leaves
+            // those claims under-backed and the paid loss as unattributed
+            // residual (prog#450).
+            let negative_after = account.header.pnl.get().min(0).unsigned_abs();
+            let loss_domain = self.insurance_domain_index(asset_index, leg.side)?;
+            self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
+                account,
+                loss_domain,
+                negative_before,
+                negative_after,
+            )?;
         } else {
             positive_pnl_forfeited = net as u128;
         }

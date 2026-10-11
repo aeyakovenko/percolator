@@ -1537,6 +1537,85 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
     );
 }
 
+/// prog#450: a Recovery forfeit that settles the payer's unsettled funding
+/// loss must credit that loss to the payer-side source domain exactly like an
+/// ordinary K/F settlement. Otherwise the receiver's funding claim (sourced
+/// from that domain) is left under-backed, its credit rate drops below par,
+/// and the receiver is paid less than in the settle-first ordering.
+fn recovery_forfeit_funding_order_outcome(
+    forfeit_payer_first: bool,
+) -> (SourceCreditStateV16, u128, u128, u128) {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 140);
+    let mut short_header = account_fixture(1, 141);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_one_lot_pair(&mut market, &mut long, &mut short);
+    market
+        .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
+        .unwrap();
+    market.force_asset_recovery_not_atomic(0, 2).unwrap();
+    if forfeit_payer_first {
+        market
+            .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+    } else {
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market
+            .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+            .unwrap();
+    }
+    assert_eq!(
+        funding_counter_tuple(long.header),
+        (FUNDING_COUNTER_ATOMS_PER_SLOT, 0, 0, 0)
+    );
+    assert_eq!(
+        funding_counter_tuple(short.header),
+        (0, 0, 0, FUNDING_COUNTER_ATOMS_PER_SLOT)
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    let short_pnl = short.header.pnl.get().max(0) as u128;
+    let long_capital = long.header.capital.get();
+    let residual_vault =
+        market.header.vault.get() - market.header.c_tot.get() - market.header.insurance.get();
+    (source, short_pnl, long_capital, residual_vault)
+}
+
+#[test]
+fn v16_recovery_forfeit_credits_unsettled_funding_loss_to_payer_source_domain() {
+    let (control_source, control_claim, control_capital, control_residual) =
+        recovery_forfeit_funding_order_outcome(false);
+    let (forfeit_source, forfeit_claim, forfeit_capital, forfeit_residual) =
+        recovery_forfeit_funding_order_outcome(true);
+    // Same economic transfer in both orderings.
+    assert_eq!(control_claim, FUNDING_COUNTER_ATOMS_PER_SLOT);
+    assert_eq!(forfeit_claim, control_claim);
+    assert_eq!(forfeit_capital, control_capital);
+    assert_eq!(forfeit_residual, control_residual);
+    // Settle-first control: the payer's funding loss fully backs the claim.
+    assert_eq!(control_source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(
+        control_source.fresh_reserved_backing_num,
+        FUNDING_COUNTER_ATOMS_PER_SLOT * BOUND_SCALE
+    );
+    // Forfeit-first must not strand the paid loss as unattributed residual.
+    assert_eq!(
+        forfeit_source.fresh_reserved_backing_num, control_source.fresh_reserved_backing_num,
+        "forfeit-first payer loss was not credited to the payer source domain: {forfeit_source:?}"
+    );
+    assert_eq!(forfeit_source.credit_rate_num, CREDIT_RATE_SCALE);
+}
+
 #[test]
 fn v16_funding_counters_ignore_inactive_accounts_when_market_funding_moves() {
     let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
