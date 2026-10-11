@@ -1386,8 +1386,9 @@ through support-and-burn and capital reservation. Pricing this give-back at
 T's stored credit rate would make the outcome depend on whether T's losers
 were settled before the reversal. Together with the cancelled face, T's
 counterparty backing that supported it moves to `L`:
-`floor(n * BOUND_SCALE * rate_T)` bound units of unliened Fresh principal
-(capped by T's unliened bucket principal). T books it exactly as ordinary
+`n * available_T / claims_T`, computed in one step and rounded UP to a whole
+atom toward `L` (never more than `n`; capped by T's unliened bucket principal),
+so `L` is never left a fractional atom short while the remainder strands in T. T books it exactly as ordinary
 support consumption (spent / provider-receivable / consumed lockstep, so
 provider attribution is unchanged) and it re-enters as fresh principal of `L`
 rather than the junior pool (`V`, `C_tot`, `I` flat). A Fresh `L` bucket keeps
@@ -1402,9 +1403,10 @@ more than its position's PnL, and liened or impaired T face is never netted.
 After that netting, still before support-and-burn: (a) unliened face in any
 other source domain whose credit rate is exactly 1 is realized one for one, its
 counterparty backing (booked as ordinary support consumption) moving to `L`;
-(b) up to the account's unliened face in domains with credit rate below 1, the
-remaining loss is paid from free capital directly into `L` backing (`C_tot -=
-x`, `L` principal `+= x`, `V` flat) and that face is kept. Burning it instead
+(b) if the account holds unliened face in a domain with credit rate below 1,
+the whole remaining loss is paid from free capital directly into `L` backing
+(`C_tot -= x`, `L` principal `+= x`, `V` flat) and that face is kept -- it is
+never burned afterwards by the same loss. Burning it instead
 would spend `x / rate` face for `x` of loss and strand the difference in the
 source domain once its losers book. Health is unchanged either way (`C - x +
 P*r` equals `C + (P - x/r)*r`). Only a loss beyond free capital, or one met by

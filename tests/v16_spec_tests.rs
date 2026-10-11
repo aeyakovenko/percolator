@@ -9701,7 +9701,14 @@ fn v16_gain_reversal_is_independent_of_who_was_settled_at_the_peak() {
             let no_shorts = mask & 0b1100 == 0;
             if all_longs || no_shorts {
                 assert_eq!(out.short_domain, (0, 0), "stranded in the twin: {out:?}");
-                assert!(out.long_domain.1 + 1 >= out.long_domain.0, "{out:?}");
+            }
+            // The moved backing is rounded toward the domain it is owed to: a
+            // claimant domain is never left an atom short of its claims.
+            if all_longs || no_shorts || (mask & 0b1000 == 0 && mask & 0b0011 != 0) {
+                assert!(
+                    out.long_domain.1 >= out.long_domain.0,
+                    "an atom short: {out:?}"
+                );
             }
         }
     }
@@ -9877,11 +9884,21 @@ fn cross_asset_burn_run(mid: &[usize], mid2: &[usize]) -> CrossAssetOutcome {
     cross_asset_burn_run_with(mid, mid2, 0)
 }
 
-/// With `funding_rate != 0`, asset 1's loss for X comes from funding at a flat price instead.
 fn cross_asset_burn_run_with(
     mid: &[usize],
     mid2: &[usize],
     funding_rate: i128,
+) -> CrossAssetOutcome {
+    cross_asset_burn_run_to(mid, mid2, funding_rate, 1_050_000)
+}
+
+/// With `funding_rate != 0`, asset 1's loss for X comes from funding at a flat price instead;
+/// otherwise asset 1 walks to `asset1_target`.
+fn cross_asset_burn_run_to(
+    mid: &[usize],
+    mid2: &[usize],
+    funding_rate: i128,
+    asset1_target: u64,
 ) -> CrossAssetOutcome {
     const USD: u128 = 1_000_000;
     let (market_id, _, _) = ids();
@@ -9969,7 +9986,7 @@ fn cross_asset_burn_run_with(
             .unwrap();
     }
     if funding_rate == 0 {
-        walk(&mut market, 1, 1_050_000);
+        walk(&mut market, 1, asset1_target);
     } else {
         for _ in 0..500 {
             slot += 10;
@@ -10066,6 +10083,29 @@ fn v16_cross_asset_funding_loss_does_not_burn_a_partially_backed_gain() {
                 "mid {mid:?} mid2 {mid2:?}: {out:?}"
             );
             assert!(out.senior_surplus <= baseline.senior_surplus + 1, "{out:?}");
+        }
+    }
+}
+
+/// The asset-1 loss (150) exceeds X's partially backed face (100). Free capital pays all of it
+/// into the loss domain and the face is kept; nothing is then burned at the stale rate on top.
+#[test]
+fn v16_cross_asset_loss_beyond_partially_backed_face_is_paid_once() {
+    let expected = [-50_000_000i128, -30_000_000, -70_000_000, 150_000_000];
+    let baseline = cross_asset_burn_run_to(&[], &[], 0, 1_150_000);
+    assert_eq!(baseline.change, expected, "{baseline:?}");
+    for (mid, mid2) in [
+        (&[1usize, 0][..], &[0usize][..]),
+        (&[0][..], &[0][..]),
+        (&[1, 0][..], &[3, 0][..]),
+        (&[1, 2, 0][..], &[0][..]),
+    ] {
+        let out = cross_asset_burn_run_to(mid, mid2, 0, 1_150_000);
+        println!("mid {mid:?} mid2 {mid2:?}: {out:?}");
+        assert_eq!(out.change, expected, "mid {mid:?} mid2 {mid2:?}: {out:?}");
+        assert!((0..=1).contains(&out.senior_surplus), "{out:?}");
+        for (claims, backing) in out.domains {
+            assert!(backing >= claims, "a claimant domain is short: {out:?}");
         }
     }
 }

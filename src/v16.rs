@@ -12846,10 +12846,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///    `loss_domain`;
     /// 2. fully backed face (rate 1) in any other source domain is realized one
     ///    for one, its backing moving to `loss_domain`;
-    /// 3. up to the account's unliened face in partially backed (rate < 1)
-    ///    domains, the rest is paid from free capital into `loss_domain`, keeping
-    ///    that face (worth face * rate in health either way) instead of burning
-    ///    face / rate of it. Liened face keeps the ordinary unwind-and-burn path.
+    /// 3. if the account holds unliened face in a partially backed (rate < 1)
+    ///    domain, the whole rest is paid from free capital into `loss_domain`,
+    ///    keeping that face (worth face * rate in health either way) instead of
+    ///    burning face / rate of it. Liened face keeps the ordinary
+    ///    unwind-and-burn path.
     ///
     /// Whatever remains (capital exhausted) takes the ordinary path. Returns the
     /// loss amount settled here.
@@ -12967,9 +12968,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         let mut remaining = batch.loss_left;
         if remaining != 0 && batch.face_left != 0 && loss_side_open {
-            let to_capital = remaining
-                .min(V16Core::amount_from_bound_num(partially_backed_num)?)
-                .min(batch.face_left);
+            // Kept face is never burned afterwards: when any of it is partially
+            // backed, free capital pays the whole remaining loss (not capped at
+            // the face); only a loss beyond free capital reaches support-and-burn.
+            let to_capital = if partially_backed_num != 0 {
+                remaining
+            } else {
+                0
+            };
             if to_capital != 0 {
                 remaining -= self.pay_kf_loss_from_free_capital_not_atomic(
                     account,
@@ -13063,12 +13069,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         let netted_num = V16Core::bound_num_from_amount(netted)?;
-        let at_rate = U256::from_u128(netted_num)
-            .checked_mul(U256::from_u128(rate))
-            .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-            .and_then(|v| v.try_into_u128())
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let transfer_num = at_rate.min(movable_num);
+        // Backing that supported the cancelled face: netted * available /
+        // claims, computed in one step (no floored rate) and rounded up to a
+        // whole atom, toward the domain the loss is owed to, so that claimant
+        // domain is never left a fractional atom short while the remainder is
+        // stranded in this one.
+        let owed_num = if rate == 0 || movable_num == 0 {
+            0
+        } else if rate == CREDIT_RATE_SCALE {
+            netted_num
+        } else {
+            let available = V16Core::available_backing_num_for_source_credit_state(credit)?;
+            let claims = credit.positive_claim_bound_num;
+            if claims == 0 {
+                netted_num
+            } else {
+                let atoms = checked_mul_div_ceil_u256(
+                    U256::from_u128(netted_num),
+                    U256::from_u128(available),
+                    U256::from_u128(claims)
+                        .checked_mul(U256::from_u128(BOUND_SCALE))
+                        .ok_or(V16Error::ArithmeticOverflow)?,
+                )
+                .and_then(|v| v.try_into_u128())
+                .ok_or(V16Error::ArithmeticOverflow)?;
+                V16Core::bound_num_from_amount(atoms)?.min(netted_num)
+            }
+        };
+        let transfer_num = owed_num.min(movable_num);
         if require_full_backing && transfer_num != netted_num {
             return Ok(());
         }
