@@ -1537,6 +1537,202 @@ fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryForfeitFundingOrder {
+    /// Payer and receiver settle, then the payer forfeits its settled leg.
+    SettleFirst,
+    /// Receiver settles (claim not yet backed), then the payer forfeits.
+    ReceiverThenForfeit,
+    /// Payer forfeits before the receiver has any claim.
+    ForfeitThenReceiver,
+    /// Payer forfeits, then the receiver forfeits its own unsettled gain.
+    BothForfeit,
+}
+
+struct RecoveryForfeitFundingOutcome {
+    source: SourceCreditStateV16,
+    payouts: [u128; 2],
+    vault_after: u128,
+    restartable: bool,
+}
+
+fn drain_resolved_pair<'a>(
+    market: &mut MarketGroupV16ViewMut<'_, u64>,
+    long: &mut PortfolioV16ViewMut<'a>,
+    short: &mut PortfolioV16ViewMut<'a>,
+) -> [u128; 2] {
+    let mut paid = [0u128; 2];
+    let mut closed = [false; 2];
+    for _ in 0..32 {
+        for (index, account) in [&mut *long, &mut *short].into_iter().enumerate() {
+            if closed[index] {
+                continue;
+            }
+            match market.close_resolved_account_not_atomic(account, 0) {
+                Ok(ResolvedCloseOutcomeV16::Closed { payout }) => {
+                    paid[index] += payout;
+                    closed[index] = true;
+                }
+                Ok(ResolvedCloseOutcomeV16::ProgressOnly) => {}
+                Err(error) => panic!("resolved close of account {index} failed: {error:?}"),
+            }
+        }
+        if closed == [true; 2] {
+            break;
+        }
+    }
+    assert_eq!(closed, [true; 2], "resolved pair did not close");
+    for (index, account) in [&mut *long, &mut *short].into_iter().enumerate() {
+        if let Ok(topup) = market.claim_resolved_payout_topup_not_atomic(account) {
+            paid[index] += topup;
+        }
+    }
+    paid
+}
+
+/// prog#450: a Recovery forfeit that settles the payer's unsettled funding
+/// loss must not leave the receiver's claim under-backed relative to the
+/// settle-first ordering, and must not turn a loss nobody claims into
+/// ownerless (provider-withdrawable, restart-blocking) source backing.
+fn recovery_forfeit_funding_order_outcome(
+    order: RecoveryForfeitFundingOrder,
+) -> RecoveryForfeitFundingOutcome {
+    let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 140);
+    let mut short_header = account_fixture(1, 141);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    open_one_lot_pair(&mut market, &mut long, &mut short);
+    market
+        .accrue_asset_to_not_atomic(0, 2, FUNDING_COUNTER_PRICE, FUNDING_COUNTER_RATE_E9, true)
+        .unwrap();
+    market.force_asset_recovery_not_atomic(0, 2).unwrap();
+    match order {
+        RecoveryForfeitFundingOrder::SettleFirst => {
+            market.full_account_refresh_not_atomic(&mut long).unwrap();
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+            market
+                .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                .unwrap();
+        }
+        RecoveryForfeitFundingOrder::ReceiverThenForfeit => {
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+            market
+                .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                .unwrap();
+        }
+        RecoveryForfeitFundingOrder::ForfeitThenReceiver => {
+            market
+                .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                .unwrap();
+            market.full_account_refresh_not_atomic(&mut short).unwrap();
+        }
+        RecoveryForfeitFundingOrder::BothForfeit => {
+            market
+                .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                .unwrap();
+            market
+                .forfeit_recovery_leg_not_atomic(&mut short, 0, u128::MAX)
+                .unwrap();
+            // The payer's loss weight was retained while its creditor still held
+            // a leg; with the creditor gone the retained obligation detaches.
+            if !active_bitmap_is_empty(long.header.active_bitmap.map(V16PodU64::get)) {
+                market
+                    .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
+                    .unwrap();
+            }
+            assert!(active_bitmap_is_empty(
+                long.header.active_bitmap.map(V16PodU64::get)
+            ));
+        }
+    }
+    assert_eq!(
+        funding_counter_tuple(long.header),
+        (FUNDING_COUNTER_ATOMS_PER_SLOT, 0, 0, 0)
+    );
+    assert_eq!(
+        long.header.capital.get(),
+        10_000_000 - FUNDING_COUNTER_ATOMS_PER_SLOT
+    );
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    let restartable = order == RecoveryForfeitFundingOrder::BothForfeit && {
+        let mut header_copy = market.header.clone();
+        let mut markets_copy = market.markets.to_vec();
+        let mut copy = MarketGroupV16ViewMut::new(&mut header_copy, &mut markets_copy);
+        copy.restart_empty_asset_preserving_insurance_budget_not_atomic(0, FUNDING_COUNTER_PRICE, 3)
+            .map_err(|e| eprintln!("restart error: {e:?}"))
+            .is_ok()
+    };
+
+    let resolved_slot = market.header.current_slot.get();
+    market.resolve_market_not_atomic(resolved_slot).unwrap();
+    let payouts = drain_resolved_pair(&mut market, &mut long, &mut short);
+    RecoveryForfeitFundingOutcome {
+        source,
+        payouts,
+        vault_after: market.header.vault.get(),
+        restartable,
+    }
+}
+
+#[test]
+fn v16_recovery_forfeit_credits_unsettled_funding_loss_to_payer_source_domain() {
+    use RecoveryForfeitFundingOrder::*;
+    let control = recovery_forfeit_funding_order_outcome(SettleFirst);
+    assert_eq!(control.source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(
+        control.source.fresh_reserved_backing_num,
+        FUNDING_COUNTER_ATOMS_PER_SLOT * BOUND_SCALE
+    );
+    let expected_payouts = [
+        10_000_000 - FUNDING_COUNTER_ATOMS_PER_SLOT,
+        10_000_000 + FUNDING_COUNTER_ATOMS_PER_SLOT,
+    ];
+    assert_eq!(control.payouts, expected_payouts);
+    assert_eq!(control.vault_after, 0);
+
+    // The receiver's existing claim must be backed by the forfeit-settled loss.
+    let receiver_first = recovery_forfeit_funding_order_outcome(ReceiverThenForfeit);
+    assert_eq!(
+        receiver_first.source.fresh_reserved_backing_num, control.source.fresh_reserved_backing_num,
+        "forfeit loss left the receiver's claim under-backed: {:?}",
+        receiver_first.source
+    );
+    assert_eq!(receiver_first.source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(receiver_first.payouts, expected_payouts);
+    assert_eq!(receiver_first.vault_after, 0);
+
+    // A later receiver is still paid in full from the unassigned residual.
+    let forfeit_first = recovery_forfeit_funding_order_outcome(ForfeitThenReceiver);
+    assert_eq!(forfeit_first.payouts, expected_payouts);
+    assert_eq!(forfeit_first.vault_after, 0);
+
+    // Nobody claims the loss: it must not become ownerless source backing that
+    // blocks restarting the emptied asset.
+    let both = recovery_forfeit_funding_order_outcome(BothForfeit);
+    assert_eq!(
+        both.source.fresh_reserved_backing_num, 0,
+        "{:?}",
+        both.source
+    );
+    assert!(
+        both.restartable,
+        "forfeit-created backing blocked asset restart"
+    );
+    assert_eq!(
+        both.payouts,
+        [10_000_000 - FUNDING_COUNTER_ATOMS_PER_SLOT, 10_000_000]
+    );
+}
+
 #[test]
 fn v16_funding_counters_ignore_inactive_accounts_when_market_funding_moves() {
     let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);

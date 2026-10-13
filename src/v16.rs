@@ -19992,9 +19992,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut positive_pnl_forfeited = 0u128;
         if net < 0 {
             loss_settled = net.unsigned_abs();
+            let negative_before = account.header.pnl.get().min(0).unsigned_abs();
             let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
             support_consumed = support.support_consumed;
             junior_face_burned = support.junior_face_burned;
+            // prog#450: the capital-covered part of a newly realized forfeit
+            // loss backs the opposite side's claims on this leg's domain, as in
+            // ordinary K/F settlement -- but only up to what those claims can
+            // own: the domain's current support gap plus the provider receivable
+            // its backing already advanced to them. A forfeit has no matched
+            // receiver of its own (the opposite side may itself have forfeited
+            // or been paid), so any excess stays unassigned residual instead of
+            // becoming ownerless provider-withdrawable backing.
+            let negative_after = account.header.pnl.get().min(0).unsigned_abs();
+            let loss_domain = self.insurance_domain_index(asset_index, leg.side)?;
+            let owned_atoms = self.forfeit_loss_backing_capacity_atoms(loss_domain)?;
+            let new_loss = negative_after.saturating_sub(negative_before);
+            let reserved_after = negative_before
+                .checked_add(new_loss.min(owned_atoms))
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
+                account,
+                loss_domain,
+                negative_before,
+                reserved_after,
+            )?;
         } else {
             positive_pnl_forfeited = net as u128;
         }
@@ -20019,6 +20041,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             support_consumed,
             junior_face_burned,
         ))
+    }
+
+    /// Whole atoms of new loss-created backing that existing claimants of
+    /// `domain` own: unbacked claim bound plus the provider receivable already
+    /// advanced against this domain (refilled first by a backing add).
+    fn forfeit_loss_backing_capacity_atoms(&self, domain: usize) -> V16Result<u128> {
+        let source = self.source_credit_for_domain(domain)?;
+        let support_gap_num = source.positive_claim_bound_num.saturating_sub(
+            V16Core::available_backing_num_for_source_credit_state(source)?,
+        );
+        let owned_num = support_gap_num
+            .checked_add(source.provider_receivable_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(owned_num / BOUND_SCALE)
     }
 
     fn leg_has_exhausted_effective_oi(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
