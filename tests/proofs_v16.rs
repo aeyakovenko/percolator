@@ -10737,6 +10737,84 @@ fn proof_v16_two_resolved_receipts_are_order_independent_when_snapshot_funded() 
     }
 }
 
+// Gross entitlements at the common rate sum to at most the snapshot residual and
+// never exceed a face, even with an overstated unreceipted bound; with exact
+// bounds only floor residue remains. released = 0 is the production recompute.
+// Faces <= 16 and slack <= 4 are for solver time, not u128 range.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_payout_rate_never_pays_more_than_snapshot_residual() {
+    let a_raw: u8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let c_raw: u8 = kani::any();
+    let slack_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    kani::assume(a_raw <= 16);
+    kani::assume(b_raw <= 16);
+    kani::assume(c_raw <= 16);
+    kani::assume(slack_raw <= 4);
+
+    let a = a_raw as u128;
+    let b = b_raw as u128;
+    let c = c_raw as u128;
+    let slack = slack_raw as u128;
+    let residual = residual_raw as u128;
+    let (ledger, _) = MarketGroupV16ViewMut::<u64>::kani_kernel_credit_post_snapshot_residual(
+        ResolvedPayoutLedgerV16 {
+            snapshot_residual: residual,
+            terminal_claim_exact_receipts_num: (a + b) * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: (c + slack) * BOUND_SCALE,
+            snapshot_slot: 1,
+            ..ResolvedPayoutLedgerV16::EMPTY
+        },
+        residual,
+        0,
+    )
+    .unwrap();
+    let gross = |face: u128| {
+        MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+            resolved_payout_receipt_for_proof(face, 0),
+            ledger,
+        )
+        .unwrap()
+    };
+    let gross_a = gross(a);
+    let gross_b = gross(b);
+    let gross_c = gross(c);
+    let total_face = a + b + c;
+    let paid = gross_a + gross_b + gross_c;
+
+    kani::cover!(
+        slack == 0 && residual < total_face && paid < residual,
+        "haircut snapshot leaves floor residue"
+    );
+    kani::cover!(
+        slack == 0 && residual > total_face && total_face > 0,
+        "funded snapshot pays every face and leaves surplus"
+    );
+    kani::cover!(
+        slack > 0 && c > 0 && gross_c < c && residual >= total_face,
+        "overstated unreceipted bound lowers the common rate"
+    );
+    kani::cover!(
+        a > 0 && b > 0 && c > 0 && gross_a != gross_b,
+        "three distinct claimants share one rate"
+    );
+    assert!(ledger.current_payout_rate_num <= ledger.current_payout_rate_den);
+    assert!(gross_a <= a);
+    assert!(gross_b <= b);
+    assert!(gross_c <= c);
+    assert!(paid <= residual);
+    if slack == 0 {
+        if residual >= total_face {
+            assert_eq!((gross_a, gross_b, gross_c), (a, b, c));
+        } else {
+            assert!(residual - paid < 3);
+        }
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
