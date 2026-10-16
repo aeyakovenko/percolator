@@ -8394,12 +8394,26 @@ impl MarketGroupV16HeaderAccount {
         }
         match previous_asset.lifecycle {
             AssetLifecycleV16::Disabled => {
-                if previous_asset.market_id != 0 {
+                // A canonical disabled slot may carry the MAX_VAULT_TVL sentinel, which
+                // insurance_domain_budget_remaining_total does not count. Any other budget
+                // is counted there, and the rebuild below would drop it.
+                if previous_asset.market_id != 0
+                    || !matches!(slot.insurance_domain_budget_long.get(), 0 | MAX_VAULT_TVL)
+                    || !matches!(slot.insurance_domain_budget_short.get(), 0 | MAX_VAULT_TVL)
+                {
                     return Err(V16Error::LockActive);
                 }
             }
             AssetLifecycleV16::Retired => {
-                if previous_asset.market_id == 0 || previous_asset.retired_slot == 0 {
+                // Retirement keeps an unspent domain budget on the slot and
+                // insurance_domain_budget_remaining_total still counts it. The
+                // rebuild below would drop it, so reuse waits until it is
+                // withdrawn; the restart path carries it over instead.
+                if previous_asset.market_id == 0
+                    || previous_asset.retired_slot == 0
+                    || slot.insurance_domain_budget_long.get() != 0
+                    || slot.insurance_domain_budget_short.get() != 0
+                {
                     return Err(V16Error::LockActive);
                 }
                 let elapsed = now_slot
