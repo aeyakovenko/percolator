@@ -10481,6 +10481,95 @@ fn proof_v16_resolved_receipt_claimable_is_rate_monotone_and_overpaid_fails_clos
     }
 }
 
+// Two top-ups, one before and one after a post-snapshot release raises the
+// common rate, pay exactly one top-up at the final rate. The bounds (face and
+// other claims <= 16, residual and release <= 32) are for solver time, not
+// u128 range.
+#[kani::proof]
+#[kani::unwind(16)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_split_topups_pay_exactly_one_topup_at_final_rate() {
+    let face_raw: u8 = kani::any();
+    let other_raw: u8 = kani::any();
+    let residual_raw: u8 = kani::any();
+    let released_raw: u8 = kani::any();
+    kani::assume((1..=16).contains(&face_raw));
+    kani::assume(other_raw <= 16);
+    kani::assume(residual_raw <= 32);
+    kani::assume(released_raw <= 32);
+
+    let face = face_raw as u128;
+    let other = other_raw as u128;
+    let residual = residual_raw as u128;
+    let released = released_raw as u128;
+    let (before, legacy) = MarketGroupV16ViewMut::<u64>::kani_kernel_credit_post_snapshot_residual(
+        ResolvedPayoutLedgerV16 {
+            snapshot_residual: residual,
+            terminal_claim_exact_receipts_num: face * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: other * BOUND_SCALE,
+            snapshot_slot: 1,
+            ..ResolvedPayoutLedgerV16::EMPTY
+        },
+        residual,
+        0,
+    )
+    .unwrap();
+    let (after, legacy_after) =
+        MarketGroupV16ViewMut::<u64>::kani_kernel_credit_post_snapshot_residual(
+            before, legacy, released,
+        )
+        .unwrap();
+    let receipt = resolved_payout_receipt_for_proof(face, 0);
+
+    let first = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        receipt, before,
+    )
+    .unwrap();
+    let receipt_1 = kani_apply_resolved_payout_receipt_payment(receipt, first).unwrap();
+    let second = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        receipt_1, after,
+    )
+    .unwrap();
+    let receipt_2 = kani_apply_resolved_payout_receipt_payment(receipt_1, second).unwrap();
+    let replay = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        receipt_2, after,
+    )
+    .unwrap();
+    let single = MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+        receipt, after,
+    )
+    .unwrap();
+
+    kani::cover!(
+        first > 0 && second > 0,
+        "both top-ups pay across a strict rate rise"
+    );
+    kani::cover!(
+        first == 0 && second > 0,
+        "a receipt worth nothing at the old rate is paid after the rise"
+    );
+    kani::cover!(
+        released > 0 && first == face,
+        "a release past full funding pays no second top-up"
+    );
+    kani::cover!(receipt_2.finalized, "split top-ups finalize the receipt");
+    assert_eq!(legacy_after, residual + released);
+    assert_eq!(
+        after.current_payout_rate_den,
+        before.current_payout_rate_den
+    );
+    assert!(after.current_payout_rate_num >= before.current_payout_rate_num);
+    assert_eq!(first + second, single);
+    assert_eq!(receipt_2.paid_effective, single);
+    assert!(single <= face);
+    assert_eq!(receipt_2.finalized, single == face);
+    assert_eq!(replay, 0);
+    assert_eq!(
+        kani_apply_resolved_payout_receipt_payment(receipt_2, replay),
+        Ok(receipt_2)
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
