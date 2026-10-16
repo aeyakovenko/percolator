@@ -1,13 +1,18 @@
 #![cfg(feature = "fuzz")]
 
-use percolator::{
-    EngineAssetSlotV16Account, LiquidationRequestV16, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodU128, MAX_VAULT_TVL,
+use percolator::v16::{
+    kani_available_backing_num_for_source_credit_state,
+    kani_expected_source_credit_rate_num_for_state,
 };
-use percolator::{BOUND_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
+use percolator::{
+    BackingBucketStatusV16, BackingBucketV16, EngineAssetSlotV16Account, LiquidationRequestV16,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioV16View, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, SourceCreditStateV16, TradeRequestV16, V16Config, V16Error,
+    V16PodU128, MAX_VAULT_TVL,
+};
+use percolator::{BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
 use proptest::prelude::*;
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
@@ -626,5 +631,103 @@ proptest! {
                 amount_seed,
             );
         }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    /// Expiry at slots around the boundary never raises available backing or the credit rate.
+    #[test]
+    fn v16_fuzz_backing_expiry_never_raises_available_backing_or_credit_rate(
+        unliened in prop_oneof![1 => Just(0u128), 4 => 0u128..=1_000_000_000u128],
+        liened in prop_oneof![1 => Just(0u128), 4 => 0u128..=1_000_000_000u128],
+        impaired in prop_oneof![1 => Just(0u128), 4 => 0u128..=1_000_000_000u128],
+        receivable in 0u128..=1_000_000_000u128,
+        spent_extra in 0u128..=1_000_000_000u128,
+        insurance_reserved in 0u128..=1_000_000_000u128,
+        insurance_valid_pct in 0u128..=100u128,
+        insurance_impaired_pct in 0u128..=100u128,
+        claim in prop_oneof![1 => Just(0u128), 4 => 0u128..=4_000_000_000u128],
+        exact_pct in 0u128..=100u128,
+        expiry_slot in 1u64..u64::MAX,
+        slot_case in 0u8..=3u8,
+        any_slot in any::<u64>(),
+    ) {
+        let insurance_valid = insurance_reserved * insurance_valid_pct / 100;
+        let insurance_impaired =
+            (insurance_reserved - insurance_valid) * insurance_impaired_pct / 100;
+        let free_insurance = insurance_reserved - insurance_valid - insurance_impaired;
+        let now_slot = match slot_case {
+            0 => expiry_slot - 1,
+            1 => expiry_slot,
+            2 => expiry_slot + 1,
+            _ => any_slot,
+        };
+        let bucket = BackingBucketV16 {
+            market_id: 1,
+            fresh_unliened_backing_num: unliened * BOUND_SCALE,
+            valid_liened_backing_num: liened * BOUND_SCALE,
+            consumed_liened_backing_num: receivable * BOUND_SCALE,
+            impaired_liened_backing_num: impaired * BOUND_SCALE,
+            expiry_slot,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        };
+        let source = SourceCreditStateV16 {
+            positive_claim_bound_num: claim * BOUND_SCALE,
+            exact_positive_claim_num: claim * exact_pct / 100 * BOUND_SCALE,
+            fresh_reserved_backing_num: (unliened + liened) * BOUND_SCALE,
+            spent_backing_num: (receivable + spent_extra) * BOUND_SCALE,
+            provider_receivable_num: receivable * BOUND_SCALE,
+            valid_liened_backing_num: liened * BOUND_SCALE,
+            impaired_liened_backing_num: impaired * BOUND_SCALE,
+            insurance_credit_reserved_num: insurance_reserved * BOUND_SCALE,
+            valid_liened_insurance_num: insurance_valid * BOUND_SCALE,
+            impaired_liened_insurance_num: insurance_impaired * BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: 1,
+        };
+        let available_before = kani_available_backing_num_for_source_credit_state(source).unwrap();
+        prop_assert_eq!(available_before, (unliened + free_insurance) * BOUND_SCALE);
+        let rate_before = kani_expected_source_credit_rate_num_for_state(source).unwrap();
+        let result = MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+            bucket, source, now_slot,
+        );
+        if now_slot < expiry_slot {
+            prop_assert_eq!(result, Err(V16Error::Stale));
+            return Ok(());
+        }
+        let (bucket_after, source_after) = result.unwrap();
+        prop_assert_eq!(
+            kani_available_backing_num_for_source_credit_state(source_after).unwrap(),
+            available_before - unliened * BOUND_SCALE
+        );
+        prop_assert!(
+            kani_expected_source_credit_rate_num_for_state(source_after).unwrap() <= rate_before
+        );
+        prop_assert_eq!(
+            bucket_after,
+            BackingBucketV16 {
+                fresh_unliened_backing_num: 0,
+                valid_liened_backing_num: 0,
+                impaired_liened_backing_num: (impaired + liened) * BOUND_SCALE,
+                status: if impaired + liened == 0 {
+                    BackingBucketStatusV16::Expired
+                } else {
+                    BackingBucketStatusV16::Impaired
+                },
+                ..bucket
+            }
+        );
+        prop_assert_eq!(
+            source_after,
+            SourceCreditStateV16 {
+                fresh_reserved_backing_num: 0,
+                valid_liened_backing_num: 0,
+                impaired_liened_backing_num: (impaired + liened) * BOUND_SCALE,
+                ..source
+            }
+        );
     }
 }
