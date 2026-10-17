@@ -9482,3 +9482,217 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+fn lapsing_counterparty_backing_fixture(
+    now_slot: u64,
+) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 251);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, 100).unwrap();
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(0, 5, 10)
+            .unwrap();
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut account, 0, 2)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, now_slot, 100, 0, true)
+            .unwrap();
+    }
+    (header, markets)
+}
+
+#[test]
+fn v16_backing_withdraw_rejects_lapsed_fresh_bucket_without_mutation() {
+    for now_slot in [10, 11, 1_000] {
+        let (mut header, mut markets) = lapsing_counterparty_backing_fixture(now_slot);
+        let bucket = markets[0].engine.backing_long.try_to_runtime().unwrap();
+        assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+        assert_eq!(bucket.expiry_slot, 10);
+        assert_eq!(header.current_slot.get(), now_slot);
+        let header_before = header;
+        let slot_before = markets[0].engine;
+
+        let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+            .withdraw_fresh_counterparty_backing_not_atomic(0, 3);
+
+        assert_eq!(result, Err(V16Error::Stale), "now_slot={now_slot}");
+        assert_eq!(header, header_before, "now_slot={now_slot}");
+        assert_eq!(markets[0].engine, slot_before, "now_slot={now_slot}");
+    }
+}
+
+#[test]
+fn v16_backing_withdraw_after_expiry_keeps_forfeited_principal() {
+    let (mut header, mut markets) = lapsing_counterparty_backing_fixture(10);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let earnings_before = market.header.backing_provider_earnings_total.get();
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        5 * BOUND_SCALE
+    );
+
+    market
+        .expire_source_backing_bucket_not_atomic(0, 10)
+        .unwrap();
+
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
+    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+    let source = market.markets[0].engine.source_credit_long;
+    assert_eq!(source.fresh_reserved_backing_num.get(), 0);
+    assert_eq!(source.credit_rate_num.get(), 0);
+    // The 5 forfeited atoms stay in the vault outside every senior class, so
+    // the junior residual grows by exactly the lapsed principal.
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before
+    );
+
+    let header_before = *market.header;
+    let slot_before = market.markets[0].engine;
+    assert_eq!(
+        market.withdraw_fresh_counterparty_backing_not_atomic(0, 3),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(*market.header, header_before);
+    assert_eq!(market.markets[0].engine, slot_before);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_backing_withdraw_before_expiry_still_releases_principal() {
+    let (mut header, mut markets) = lapsing_counterparty_backing_fixture(9);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+
+    market
+        .withdraw_fresh_counterparty_backing_not_atomic(0, 3)
+        .unwrap();
+
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+    assert_eq!(bucket.expiry_slot, 10);
+    assert_eq!(bucket.fresh_unliened_backing_num, 2 * BOUND_SCALE);
+    let source = market.markets[0].engine.source_credit_long;
+    assert_eq!(source.fresh_reserved_backing_num.get(), 2 * BOUND_SCALE);
+    assert_eq!(source.credit_rate_num.get(), CREDIT_RATE_SCALE);
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        2 * BOUND_SCALE
+    );
+    assert_eq!(market.header.vault.get(), vault_before - 3);
+    market.validate_shape().unwrap();
+}
+
+fn lapsed_backing_haircut_receipt_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 252);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(0, 6, 10)
+            .unwrap();
+        market.resolve_market_not_atomic(1).unwrap();
+        market.advance_resolved_slot_not_atomic(20).unwrap();
+    }
+    // Ledger and receipt are built directly (as
+    // v16_resolved_payout_topup_finishes_receipt_without_overpaying does): the
+    // snapshot held one junior atom for a face-4 claim, already paid at 1/4.
+    // A real capture sets payout_snapshot equal to snapshot_residual
+    // (src/v16.rs initialize_resolved_payout_ledger_if_needed), so mirror it.
+    header.payout_snapshot_captured = 1;
+    header.payout_snapshot = V16PodU128::new(1);
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: 1,
+            terminal_claim_exact_receipts_num: 4 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: BOUND_SCALE,
+            current_payout_rate_den: 4 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        });
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 4 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 4,
+            paid_effective: 1,
+            finalized: false,
+        });
+    (header, markets, account_header)
+}
+
+#[test]
+fn v16_lapsed_backing_cannot_be_withdrawn_from_under_a_haircut_receipt() {
+    for withdraw_first in [false, true] {
+        let (mut header, mut markets, mut account_header) =
+            lapsed_backing_haircut_receipt_fixture();
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.validate_shape().unwrap();
+        account.validate_with_market(&market.as_view()).unwrap();
+
+        let withdrawal =
+            withdraw_first.then(|| market.withdraw_fresh_counterparty_backing_not_atomic(0, 6));
+        let expiry = market.expire_source_backing_bucket_not_atomic(0, 20);
+        let topup = market.claim_resolved_payout_topup_not_atomic(&mut account);
+        let receipt = account
+            .header
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap();
+
+        assert_eq!(topup, Ok(3), "withdraw_first={withdraw_first}");
+        assert_eq!(receipt.paid_effective, 4, "withdraw_first={withdraw_first}");
+        assert!(receipt.finalized, "withdraw_first={withdraw_first}");
+        assert_eq!(
+            withdrawal,
+            withdraw_first.then_some(Err(V16Error::Stale)),
+            "withdraw_first={withdraw_first}"
+        );
+        assert_eq!(expiry, Ok(()), "withdraw_first={withdraw_first}");
+        assert_eq!(
+            market
+                .header
+                .resolved_payout_ledger
+                .try_to_runtime()
+                .unwrap()
+                .snapshot_residual,
+            7,
+            "withdraw_first={withdraw_first}"
+        );
+        assert_eq!(
+            market.header.vault.get(),
+            3,
+            "withdraw_first={withdraw_first}"
+        );
+        market.validate_shape().unwrap();
+        account.validate_with_market(&market.as_view()).unwrap();
+    }
+}
