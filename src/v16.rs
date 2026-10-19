@@ -13112,16 +13112,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // lands in this domain during refresh or liquidation is not rejected.
                 let bucket = self.backing_bucket_for_domain(domain)?;
                 let now = self.header.current_slot.get();
-                if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= now {
+                let impaired = if bucket.status == BackingBucketStatusV16::Fresh
+                    && bucket.expiry_slot <= now
+                {
                     self.expire_source_backing_bucket_not_atomic(domain, now)?;
-                }
+                    self.backing_bucket_for_domain(domain)?.status
+                        == BackingBucketStatusV16::Impaired
+                } else {
+                    bucket.status == BackingBucketStatusV16::Impaired
+                };
                 // An Impaired bucket (a lapsed one that still carries liens) cannot take new
                 // backing. As in Resolved mode, the loss then stays as junior support: the
                 // capital debit above is already proven, and the value remains in the vault
                 // outside the senior stack instead of reverting the refresh or liquidation.
-                if self.backing_bucket_for_domain(domain)?.status
-                    != BackingBucketStatusV16::Impaired
-                {
+                if !impaired {
                     let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
                     self.add_fresh_counterparty_backing_unchecked(
                         domain,
@@ -13410,22 +13414,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Reconcile an open account's counterparty liens against the bucket state they reference
     /// (spec: "Individual liens referencing an impaired bucket become impaired by bucket status
-    /// and settle later through bounded cranks"). Bounded by `PORTFOLIO_SOURCE_DOMAIN_CAP`; each
-    /// step is O(1). See `reconcile_account_impaired_counterparty_lien_at_slot_not_atomic`.
+    /// and settle later through bounded cranks"). Bounded by `PORTFOLIO_SOURCE_DOMAIN_CAP`; a
+    /// slot without a counterparty lien, or whose bucket is still current, costs only a few
+    /// field reads. See `reconcile_account_impaired_counterparty_lien_at_slot_not_atomic`.
     fn reconcile_account_impaired_counterparty_liens_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<()> {
-        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
+        if self.header.mode != MarketModeV16::Live as u8 {
             return Ok(());
         }
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
-            let source = account.header.source_domains[slot];
+            let source = &account.header.source_domains[slot];
             if source.has_default_sparse_tag() && !source.is_occupied() {
                 break;
             }
-            self.reconcile_account_impaired_counterparty_lien_at_slot_not_atomic(account, slot)?;
+            if source.source_lien_counterparty_backing_num.get() != 0 {
+                self.reconcile_account_impaired_counterparty_lien_at_slot_not_atomic(
+                    account, slot,
+                )?;
+            }
             slot += 1;
         }
         Ok(())
@@ -13451,22 +13460,39 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if slot >= PORTFOLIO_SOURCE_DOMAIN_CAP {
             return Err(V16Error::InvalidLeg);
         }
-        if decode_market_mode(self.header.mode)? != MarketModeV16::Live {
-            return Ok(());
-        }
-        let source = account.header.source_domains[slot];
+        let source = &account.header.source_domains[slot];
         let counterparty_backing = source.source_lien_counterparty_backing_num.get();
-        if !source.is_occupied() || counterparty_backing == 0 {
+        if counterparty_backing == 0
+            || !source.is_occupied()
+            || self.header.mode != MarketModeV16::Live as u8
+        {
             return Ok(());
         }
         let domain = source.domain.get() as usize;
-        self.domain_asset_side(domain)?;
         let now_slot = self.header.current_slot.get();
-        let mut bucket = self.backing_bucket_for_domain(domain)?;
-        if bucket.status == BackingBucketStatusV16::Fresh && bucket.expiry_slot <= now_slot {
-            self.expire_source_backing_bucket_not_atomic(domain, now_slot)?;
-            bucket = self.backing_bucket_for_domain(domain)?;
+        // Read only the two raw bucket fields on the common (current-bucket) path; a full
+        // bucket decode per source slot is measurable at maximum portfolio shape.
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let (raw_status, raw_expiry) = {
+            let engine = self.markets[asset_index].engine_slot();
+            let bucket = match side {
+                SideV16::Long => &engine.backing_long,
+                SideV16::Short => &engine.backing_short,
+            };
+            (bucket.status, bucket.expiry_slot.get())
+        };
+        let lapsed_fresh = raw_status
+            == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+            && raw_expiry <= now_slot;
+        if !lapsed_fresh
+            && raw_status != encode_backing_bucket_status(BackingBucketStatusV16::Impaired)
+        {
+            return Ok(());
         }
+        if lapsed_fresh {
+            self.expire_source_backing_bucket_not_atomic(domain, now_slot)?;
+        }
+        let bucket = self.backing_bucket_for_domain(domain)?;
         if bucket.status != BackingBucketStatusV16::Impaired {
             return Ok(());
         }
