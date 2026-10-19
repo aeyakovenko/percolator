@@ -9162,6 +9162,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    /// Raw `(status, expiry_slot)` of a domain's backing bucket without a full decode; for
+    /// hot-path gating only (any transition re-reads the decoded bucket).
+    fn backing_bucket_raw_status_expiry_for_domain(&self, domain: usize) -> V16Result<(u8, u64)> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        let bucket = match side {
+            SideV16::Long => &slot.backing_long,
+            SideV16::Short => &slot.backing_short,
+        };
+        Ok((bucket.status, bucket.expiry_slot.get()))
+    }
+
     fn set_backing_bucket_for_domain(
         &mut self,
         domain: usize,
@@ -13110,16 +13122,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 // A lapsed bucket still marked Fresh cannot take backing at a new expiry.
                 // Normalize it first, exactly as the expiry crank would, so a loss that
                 // lands in this domain during refresh or liquidation is not rejected.
-                let bucket = self.backing_bucket_for_domain(domain)?;
+                let (raw_status, raw_expiry) =
+                    self.backing_bucket_raw_status_expiry_for_domain(domain)?;
                 let now = self.header.current_slot.get();
-                let impaired = if bucket.status == BackingBucketStatusV16::Fresh
-                    && bucket.expiry_slot <= now
+                let impaired_raw = encode_backing_bucket_status(BackingBucketStatusV16::Impaired);
+                let impaired = if raw_status
+                    == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+                    && raw_expiry <= now
                 {
                     self.expire_source_backing_bucket_not_atomic(domain, now)?;
-                    self.backing_bucket_for_domain(domain)?.status
-                        == BackingBucketStatusV16::Impaired
+                    self.backing_bucket_raw_status_expiry_for_domain(domain)?.0 == impaired_raw
                 } else {
-                    bucket.status == BackingBucketStatusV16::Impaired
+                    raw_status == impaired_raw
                 };
                 // An Impaired bucket (a lapsed one that still carries liens) cannot take new
                 // backing. As in Resolved mode, the loss then stays as junior support: the
@@ -13472,15 +13486,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let now_slot = self.header.current_slot.get();
         // Read only the two raw bucket fields on the common (current-bucket) path; a full
         // bucket decode per source slot is measurable at maximum portfolio shape.
-        let (asset_index, side) = self.domain_asset_side(domain)?;
-        let (raw_status, raw_expiry) = {
-            let engine = self.markets[asset_index].engine_slot();
-            let bucket = match side {
-                SideV16::Long => &engine.backing_long,
-                SideV16::Short => &engine.backing_short,
-            };
-            (bucket.status, bucket.expiry_slot.get())
-        };
+        let (raw_status, raw_expiry) = self.backing_bucket_raw_status_expiry_for_domain(domain)?;
         let lapsed_fresh = raw_status
             == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
             && raw_expiry <= now_slot;
