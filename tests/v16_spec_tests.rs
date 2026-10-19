@@ -9482,3 +9482,57 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
         false,
     );
 }
+
+// ---- a loss landing on lapsed backing must not revert refresh ----
+
+#[test]
+fn lapsed_backing_bucket_does_not_block_loss_reservation() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 251);
+    let mut short_header = account_fixture(1, 252);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    // Both of the asset's source domains carry short-lived provider backing.
+    market.deposit_fresh_counterparty_backing_not_atomic(0, 100, 5).unwrap();
+    market.deposit_fresh_counterparty_backing_not_atomic(1, 100, 5).unwrap();
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    market.deposit_not_atomic(&mut long, 1_000).unwrap();
+    market.deposit_not_atomic(&mut short, 1_000).unwrap();
+    market
+        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            &mut long,
+            &mut short,
+            TradeRequestV16 {
+                asset_index: 0,
+                size_q: signed_q(POS_SCALE),
+                exec_price: 100,
+                fee_bps: 0,
+            },
+        )
+        .unwrap();
+    // The buckets lapse (no one runs the expiry crank), then the long takes a loss.
+    let mut price = 100u64;
+    for slot in 2..=10 {
+        price -= 1;
+        market.set_asset_raw_oracle_target_not_atomic(0, price).unwrap();
+        market.accrue_asset_to_not_atomic(0, slot, price, 0, true).unwrap();
+    }
+    for domain in 0..2 {
+        let bucket = if domain == 0 {
+            market.markets[0].engine.backing_long.try_to_runtime().unwrap()
+        } else {
+            market.markets[0].engine.backing_short.try_to_runtime().unwrap()
+        };
+        assert_eq!(bucket.status, BackingBucketStatusV16::Fresh, "setup: bucket still marked Fresh");
+        assert!(bucket.expiry_slot <= market.header.current_slot.get(), "setup: bucket lapsed");
+    }
+    market
+        .full_account_refresh_not_atomic(&mut long)
+        .expect("a loss booked into a lapsed backing domain must not revert the refresh");
+    market
+        .full_account_refresh_not_atomic(&mut short)
+        .expect("the winning side refreshes too");
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    short.validate_with_market(&market.as_view()).unwrap();
+}
