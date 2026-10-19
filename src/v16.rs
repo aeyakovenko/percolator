@@ -13030,10 +13030,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(());
         }
         let unliened_num = Self::slot_unliened_claim_num(source)?;
+        // Whole atoms only, rounded DOWN: a slot can hold a fractional claim
+        // (a partial-rate burn elsewhere), and `face_left` spans every domain, so
+        // rounding up could net past what this slot holds. The fraction stays
+        // for the ordinary support-and-burn path.
         let mut netted = batch
             .loss_left
             .min(batch.face_left)
-            .min(V16Core::amount_from_bound_num(unliened_num)?);
+            .min(unliened_num / BOUND_SCALE);
         if netted == 0 {
             return Ok(());
         }
@@ -13063,7 +13067,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if rate != CREDIT_RATE_SCALE {
                 return Ok(());
             }
-            netted = netted.min(V16Core::amount_from_bound_num(movable_num)?);
+            netted = netted.min(movable_num / BOUND_SCALE);
             if netted == 0 {
                 return Ok(());
             }

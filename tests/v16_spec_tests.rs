@@ -10109,3 +10109,153 @@ fn v16_cross_asset_loss_beyond_partially_backed_face_is_paid_once() {
         }
     }
 }
+
+// ---- netting must not round a fractional source claim up past what the slot holds ----
+// (percolator-prog#457 follow-up, PR #226 deployer report)
+
+/// Three assets at 1.00. X (0) is long 1,000 of asset 0 against Y0 (1), long 1,000 of asset 1
+/// against Y1 (2, 300) and Y2 (3, 700), and short 1,000 of asset 2 against Z (4); X has 300 of
+/// capital. Assets 0 and 1 go to 1.10 with only Y1 and X refreshed: X holds 100 of face in the
+/// asset-0 short-loser domain at rate 0 and 100 in the asset-1 one at rate 0.3. Asset 2 then goes
+/// to 1.307: free capital pays 300 and the last 7 takes the support-and-burn path, burning 23.33
+/// face from the asset-1 claim and the 0.67 remainder from the asset-0 claim, so both source claims
+/// are fractional. Asset 0 then falls to 0.99, a 110 reversal of X's asset-0 leg that is netted
+/// against its 99.33 asset-0 claim.
+fn fractional_claim_netting_run() -> Result<CrossAssetOutcome, V16Error> {
+    const USD: u128 = 1_000_000;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(3, 3, 0, 6_480_000);
+    cfg.min_nonzero_mm_req = 500;
+    cfg.min_nonzero_im_req = 600;
+    cfg.initial_margin_bps = 1_000;
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.max_price_move_bps_per_slot = 49;
+    cfg.max_accrual_dt_slots = 10;
+    cfg.min_funding_lifetime_slots = 10;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 3, 0).unwrap();
+    let mut markets = (0..3)
+        .map(|i| Market::new(i as u64, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
+    for i in 0..3usize {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                i as u32,
+                &mut markets[i].engine,
+                1_000_000,
+                (i + 1) as u64,
+            )
+            .unwrap();
+    }
+    let mut accts = [
+        account_fixture(3, 180),
+        account_fixture(3, 181),
+        account_fixture(3, 182),
+        account_fixture(3, 183),
+        account_fixture(3, 184),
+    ];
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    for a in 0..2 {
+        market
+            .accrue_asset_to_not_atomic(a, 3, 1_000_000, 0, true)
+            .unwrap();
+    }
+    let mut views: Vec<PortfolioV16ViewMut<'_>> =
+        accts.iter_mut().map(PortfolioV16ViewMut::new).collect();
+    for (view, d) in views
+        .iter_mut()
+        .zip([300u128, 20_000, 20_000, 20_000, 20_000])
+    {
+        market.deposit_not_atomic(view, d * USD).unwrap();
+    }
+    for (asset, counterparty, size) in [
+        (0usize, 1usize, 1_000i128),
+        (1, 2, 300),
+        (1, 3, 700),
+        (2, 4, -1_000),
+    ] {
+        let (a, b) = views.split_at_mut(1);
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut a[0],
+                &mut b[counterparty - 1],
+                TradeRequestV16 {
+                    asset_index: asset,
+                    size_q: size * POS_SCALE as i128,
+                    exec_price: 1_000_000,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+    }
+    let equity = |v: &PortfolioV16ViewMut<'_>| v.header.capital.get() as i128 + v.header.pnl.get();
+    let start: Vec<i128> = views.iter().map(equity).collect();
+    let mut slot = 3u64;
+    let mut prices = [1_000_000u64; 3];
+    let mut walk = |market: &mut MarketGroupV16ViewMut<'_, u64>, targets: [Option<u64>; 3]| {
+        for (asset, target) in targets.iter().enumerate() {
+            if let Some(target) = target {
+                market
+                    .set_asset_raw_oracle_target_not_atomic(asset, *target)
+                    .unwrap();
+            }
+        }
+        while (0..3).any(|a| targets[a].is_some_and(|t| t != prices[a])) {
+            for a in 0..3 {
+                if let Some(target) = targets[a] {
+                    let p = prices[a];
+                    let step = p * 49 / 10_000;
+                    prices[a] = if target > p {
+                        (p + step).min(target)
+                    } else {
+                        p.saturating_sub(step).max(target)
+                    };
+                }
+            }
+            slot += 1;
+            for a in 0..3 {
+                market
+                    .accrue_asset_to_not_atomic(a, slot, prices[a], 0, true)
+                    .unwrap();
+            }
+        }
+    };
+    walk(&mut market, [Some(1_100_000), Some(1_100_000), None]);
+    market.full_account_refresh_not_atomic(&mut views[2])?;
+    market.full_account_refresh_not_atomic(&mut views[0])?;
+    walk(&mut market, [None, None, Some(1_307_000)]);
+    market.full_account_refresh_not_atomic(&mut views[0])?;
+    let fractional = views[0].header.source_domains[..2]
+        .iter()
+        .filter(|s| s.source_claim_bound_num.get() % BOUND_SCALE != 0)
+        .count();
+    assert_eq!(fractional, 2, "fixture must hold fractional source claims");
+    walk(&mut market, [Some(990_000), None, None]);
+    market.full_account_refresh_not_atomic(&mut views[0])?;
+    for a in 0..5 {
+        market.full_account_refresh_not_atomic(&mut views[a])?;
+    }
+    market.validate_shape()?;
+    for view in &views {
+        view.validate_with_market(&market.as_view())?;
+    }
+    let mut change = [0i128; 4];
+    for a in 0..4 {
+        change[a] = equity(&views[a]) - start[a];
+    }
+    Ok(CrossAssetOutcome {
+        change,
+        senior_surplus: market.header.vault.get() as i128
+            - market.header.c_tot.get() as i128
+            - market.header.insurance.get() as i128
+            - market.header.pnl_pos_tot.get() as i128,
+        domains: [(0, 0); 4],
+    })
+}
+
+#[test]
+fn v16_netting_never_rounds_a_fractional_source_claim_past_its_slot() {
+    let out = fractional_claim_netting_run()
+        .expect("an account holding fractional source claims must stay refreshable");
+    println!("{out:?}");
+    assert!(out.senior_surplus >= 0, "{out:?}");
+}
