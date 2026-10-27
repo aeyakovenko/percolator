@@ -340,6 +340,73 @@ mod rate_differential {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    /// Top-ups taken across up to four post-snapshot releases sum to one top-up at
+    /// the final rate, never exceed face, and a replay at the final rate pays zero.
+    /// The Kani version is
+    /// `proof_v16_resolved_split_topups_pay_exactly_one_topup_at_final_rate`.
+    #[test]
+    fn resolved_split_topups_pay_exactly_one_topup_at_final_rate(
+        face in 1u128..=1_000_000_000u128,
+        other in 0u128..=1_000_000_000u128,
+        residual in prop_oneof![1 => Just(0u128), 4 => 0u128..=2_000_000_000u128],
+        releases in proptest::collection::vec(0u128..=500_000_000u128, 1..=4),
+    ) {
+        let (mut ledger, mut legacy) =
+            MarketGroupV16ViewMut::<u64>::kani_kernel_credit_post_snapshot_residual(
+                ResolvedPayoutLedgerV16 {
+                    snapshot_residual: residual,
+                    terminal_claim_exact_receipts_num: face * BOUND_SCALE,
+                    terminal_claim_bound_unreceipted_num: other * BOUND_SCALE,
+                    snapshot_slot: 1,
+                    ..ResolvedPayoutLedgerV16::EMPTY
+                },
+                residual,
+                0,
+            )
+            .unwrap();
+        let untouched = ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: face * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: face,
+            paid_effective: 0,
+            finalized: false,
+        };
+        let claimable = |receipt, ledger| {
+            MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+                receipt, ledger,
+            )
+            .unwrap()
+        };
+        let first = claimable(untouched, ledger);
+        let mut receipt = kani_apply_resolved_payout_receipt_payment(untouched, first).unwrap();
+        let mut cumulative = first;
+        let mut pool = residual;
+        for released in releases {
+            pool += released;
+            (ledger, legacy) =
+                MarketGroupV16ViewMut::<u64>::kani_kernel_credit_post_snapshot_residual(
+                    ledger, legacy, released,
+                )
+                .unwrap();
+            let topup = claimable(receipt, ledger);
+            receipt = kani_apply_resolved_payout_receipt_payment(receipt, topup).unwrap();
+            cumulative += topup;
+            prop_assert!(cumulative <= face);
+        }
+        let single = claimable(untouched, ledger);
+        prop_assert_eq!(legacy, pool);
+        prop_assert_eq!(single, face * pool.min(face + other) / (face + other));
+        prop_assert_eq!(cumulative, single);
+        prop_assert_eq!(receipt.paid_effective, single);
+        prop_assert_eq!(receipt.finalized, single == face);
+        prop_assert_eq!(claimable(receipt, ledger), 0);
+    }
+}
+
 /// Spec #1 (support weight 1.0 is a constant, not an assumption): pinned at
 /// compile time — every Active asset's support weight is exactly 1.0.
 #[test]
@@ -539,6 +606,65 @@ proptest! {
             let num = abs * s;
             prop_assert!(w * a >= num);
             prop_assert!(w == 0 || (w - 1) * a < num);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    /// The common resolved payout rate never pays more than the snapshot residual
+    /// or any face, and exact bounds leave under one atom of floor residue per
+    /// claimant. The Kani version is
+    /// `proof_v16_resolved_payout_rate_never_pays_more_than_snapshot_residual`.
+    #[test]
+    fn resolved_payout_rate_never_pays_more_than_snapshot_residual(
+        faces in proptest::collection::vec(0u128..=1_000_000_000u128, 1..=6),
+        receipted in 0usize..=6,
+        slack in prop_oneof![Just(0u128), 1u128..=1_000_000_000u128],
+        residual in 0u128..=10_000_000_000u128,
+    ) {
+        let receipted = receipted.min(faces.len());
+        let exact: u128 = faces[..receipted].iter().sum();
+        let unreceipted = faces[receipted..].iter().sum::<u128>() + slack;
+        let (ledger, _) = MarketGroupV16ViewMut::<u64>::kani_kernel_credit_post_snapshot_residual(
+            ResolvedPayoutLedgerV16 {
+                snapshot_residual: residual,
+                terminal_claim_exact_receipts_num: exact * BOUND_SCALE,
+                terminal_claim_bound_unreceipted_num: unreceipted * BOUND_SCALE,
+                snapshot_slot: 1,
+                ..ResolvedPayoutLedgerV16::EMPTY
+            },
+            residual,
+            0,
+        )
+        .unwrap();
+        let mut paid = 0u128;
+        for &face in &faces {
+            let gross =
+                MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+                    ResolvedPayoutReceiptV16 {
+                        present: true,
+                        prior_bound_contribution_num: face * BOUND_SCALE,
+                        live_released_face_at_receipt: 0,
+                        terminal_positive_claim_face: face,
+                        paid_effective: 0,
+                        finalized: face == 0,
+                    },
+                    ledger,
+                )
+                .unwrap();
+            prop_assert!(gross <= face);
+            paid += gross;
+        }
+        let total_face: u128 = faces.iter().sum();
+        prop_assert!(paid <= residual);
+        if slack == 0 {
+            if residual >= total_face {
+                prop_assert_eq!(paid, total_face);
+            } else {
+                prop_assert!(residual - paid < faces.len() as u128);
+            }
         }
     }
 }

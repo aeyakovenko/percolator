@@ -16,7 +16,7 @@ use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
     PortfolioAccountV16Account, PortfolioLegV16, PortfolioLegV16Account, PortfolioV16ViewMut,
     ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, SideV16,
-    SourceCreditStateV16, SourceCreditStateV16Account, V16Config, V16PodI128, V16PodU128,
+    SourceCreditStateV16, SourceCreditStateV16Account, V16Config, V16Error, V16PodI128, V16PodU128,
     V16PodU32, V16PodU64, ADL_ONE, CREDIT_RATE_SCALE, POS_SCALE,
 };
 use proptest::prelude::*;
@@ -1034,6 +1034,91 @@ proptest! {
                 market.header.c_tot.get() + market.header.insurance.get()
                     <= market.header.vault.get(),
                 "senior stack exceeded vault"
+            );
+        }
+    }
+}
+
+fn lapsing_backing_market(now_slot: u64) -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id(), cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    header.current_slot = V16PodU64::new(now_slot);
+    (header, markets)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+
+    /// Principal withdrawal fails closed once a Fresh bucket reaches its expiry
+    /// slot, and succeeds with exact deltas before it. A lapsed bucket's
+    /// principal is forfeited to the junior pool by expiry, so the provider must
+    /// not be able to pull it out from under that forfeiture first.
+    #[test]
+    fn backing_withdraw_fails_closed_on_lapsed_bucket(
+        backing in 1u128..=1_000_000_000u128,
+        withdraw_pct in 1u128..=100u128,
+        claim_pct in prop_oneof![1 => Just(0u128), 4 => 0u128..=100u128],
+        expiry_slot in 2u64..u64::MAX,
+        slot_case in 0u8..=3u8,
+        any_slot in 1u64..=u64::MAX,
+    ) {
+        let withdraw = (backing * withdraw_pct / 100).max(1);
+        let claim = (backing - withdraw) * claim_pct / 100;
+        let now_slot = match slot_case {
+            0 => expiry_slot - 1,
+            1 => expiry_slot,
+            2 => expiry_slot + 1,
+            _ => any_slot,
+        };
+        let (mut header, mut markets) = lapsing_backing_market(now_slot);
+        let bucket_market_id = markets[0].engine.asset.market_id.get();
+        header.vault = V16PodU128::new(backing);
+        header.pnl_pos_tot = V16PodU128::new(claim);
+        header.pnl_pos_bound_tot = V16PodU128::new(claim);
+        header.pnl_pos_bound_tot_num = V16PodU128::new(claim * BOUND_SCALE);
+        header.source_claim_bound_total_num = V16PodU128::new(claim * BOUND_SCALE);
+        header.source_fresh_backing_total_num = V16PodU128::new(backing * BOUND_SCALE);
+        markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id: bucket_market_id,
+            fresh_unliened_backing_num: backing * BOUND_SCALE,
+            expiry_slot,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+        markets[0].engine.source_credit_long =
+            SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+                positive_claim_bound_num: claim * BOUND_SCALE,
+                exact_positive_claim_num: claim * BOUND_SCALE,
+                fresh_reserved_backing_num: backing * BOUND_SCALE,
+                credit_rate_num: CREDIT_RATE_SCALE,
+                ..SourceCreditStateV16::EMPTY
+            });
+        let header_before = header;
+        let slot_before = markets[0].engine;
+
+        let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+            .withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
+
+        if now_slot >= expiry_slot {
+            prop_assert_eq!(result, Err(V16Error::Stale));
+            prop_assert_eq!(header, header_before);
+            prop_assert_eq!(markets[0].engine, slot_before);
+        } else {
+            let remaining_num = (backing - withdraw) * BOUND_SCALE;
+            prop_assert_eq!(result, Ok(()));
+            prop_assert_eq!(header.vault.get(), backing - withdraw);
+            prop_assert_eq!(header.source_fresh_backing_total_num.get(), remaining_num);
+            prop_assert_eq!(
+                markets[0].engine.backing_long.fresh_unliened_backing_num.get(),
+                remaining_num
+            );
+            prop_assert_eq!(
+                markets[0].engine.source_credit_long.credit_rate_num.get(),
+                CREDIT_RATE_SCALE
             );
         }
     }
