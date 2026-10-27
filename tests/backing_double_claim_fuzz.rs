@@ -431,7 +431,17 @@ proptest! {
         insurance_before in 0u128..=1_000_000u128,
     ) {
         let insurance_budget = insurance_before + insurance_spent;
-        let expected_recredit = claim.min(insurance_spent).min(claim_free_residual);
+        // Stage 1 (#195): receivable-backed overlap. Stage 2 (#289): any paired
+        // spend still held as claim-free residual once every claimant is gone.
+        // The sum is capped by the domain's spend and the claim-free residual.
+        let overlap = claim.min(insurance_spent).min(claim_free_residual);
+        let unconsumed =
+            (insurance_spent - overlap).min(claim_free_residual - overlap);
+        let expected_recredit = overlap + unconsumed;
+        prop_assert_eq!(
+            expected_recredit,
+            insurance_spent.min(claim_free_residual)
+        );
         let (mut header, mut markets, mut account_header) =
             resolved_market_with_backed_winner(claim, claim, claim_free_residual);
         header.insurance = V16PodU128::new(insurance_before);

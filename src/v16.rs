@@ -967,6 +967,20 @@ impl V16Core {
             .min(claim_free_residual_remaining)
     }
 
+    /// Terminal recredit of insurance spend that no claimant consumed. Once the
+    /// terminal gate has extinguished every portfolio, PnL claim, source claim,
+    /// and payout receipt, claim-free residual has no trader owner. Insurance
+    /// that a bankruptcy moved into the junior pool (for example to fund a
+    /// winner who later forfeited the claim through Recovery) is restored to
+    /// the insurance domain that paid it, never beyond that domain's
+    /// outstanding spend and never beyond the remaining claim-free residual.
+    fn terminal_claim_free_unconsumed_spend_recredit(
+        domain_insurance_spent_remaining: u128,
+        claim_free_residual_remaining: u128,
+    ) -> u128 {
+        domain_insurance_spent_remaining.min(claim_free_residual_remaining)
+    }
+
     fn kernel_terminal_slab_asset_step(
         long_status: BackingBucketStatusV16,
         long_expiry_slot: u64,
@@ -12021,8 +12035,51 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             insurance_spent,
             *claim_free_residual_remaining,
         );
+        self.apply_terminal_insurance_recredit_not_atomic(
+            insurance_domain,
+            insurance_spent,
+            recredit,
+            claim_free_residual_remaining,
+        )
+    }
+
+    /// Second terminal stage: after the provider-receivable overlap, restores
+    /// any remaining insurance-domain spend that is still sitting in claim-free
+    /// residual. This covers bankruptcy insurance whose funded claim was
+    /// forfeited (Recovery forfeit/reset) rather than realized, which never
+    /// creates a provider receivable. Bounded by the domain's outstanding spend
+    /// and the remaining claim-free residual, and decrements both, so repeated
+    /// calls cannot recredit the same atoms twice.
+    fn recredit_terminal_claim_free_unconsumed_spend_for_domain_not_atomic(
+        &mut self,
+        insurance_domain: usize,
+        claim_free_residual_remaining: &mut u128,
+    ) -> V16Result<u128> {
+        let (_, insurance_spent) = self.domain_insurance_budget_spent(insurance_domain)?;
+        let recredit = V16Core::terminal_claim_free_unconsumed_spend_recredit(
+            insurance_spent,
+            *claim_free_residual_remaining,
+        );
+        self.apply_terminal_insurance_recredit_not_atomic(
+            insurance_domain,
+            insurance_spent,
+            recredit,
+            claim_free_residual_remaining,
+        )
+    }
+
+    fn apply_terminal_insurance_recredit_not_atomic(
+        &mut self,
+        insurance_domain: usize,
+        insurance_spent: u128,
+        recredit: u128,
+        claim_free_residual_remaining: &mut u128,
+    ) -> V16Result<u128> {
         if recredit == 0 {
             return Ok(0);
+        }
+        if recredit > insurance_spent || recredit > *claim_free_residual_remaining {
+            return Err(V16Error::CounterUnderflow);
         }
 
         let vault_before = self.header.vault.get();
@@ -12087,8 +12144,36 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot.insurance_domain_spent_long.get(),
             residual_after_long,
         );
+        let residual_after_overlap = residual_after_long
+            .checked_sub(short_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        // Second stage mirrors `recredit_terminal_claim_free_residual_for_asset_core_not_atomic`:
+        // unconsumed spend on the short insurance domain, then the long one.
+        let short_spent_remaining = slot
+            .insurance_domain_spent_short
+            .get()
+            .checked_sub(long_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let short_unconsumed = V16Core::terminal_claim_free_unconsumed_spend_recredit(
+            short_spent_remaining,
+            residual_after_overlap,
+        );
+        let residual_after_short = residual_after_overlap
+            .checked_sub(short_unconsumed)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let long_spent_remaining = slot
+            .insurance_domain_spent_long
+            .get()
+            .checked_sub(short_source_recredit)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let long_unconsumed = V16Core::terminal_claim_free_unconsumed_spend_recredit(
+            long_spent_remaining,
+            residual_after_short,
+        );
         long_source_recredit
             .checked_add(short_source_recredit)
+            .and_then(|value| value.checked_add(short_unconsumed))
+            .and_then(|value| value.checked_add(long_unconsumed))
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
@@ -12112,8 +12197,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Restores one asset's claim-free terminal residual that is also backed by
     /// both an outstanding counterparty-provider receivable and historical
-    /// insurance spend on the paired side. The final materialized-portfolio gate
-    /// makes the residual unowned by traders before any reclassification occurs.
+    /// insurance spend on the paired side, then any remaining insurance-domain
+    /// spend still held as claim-free residual (e.g. a bankruptcy-funded claim
+    /// that was forfeited instead of realized). The final materialized-portfolio
+    /// gate makes the residual unowned by traders before any reclassification
+    /// occurs.
     ///
     /// This operation is intentionally asset-local: wrapper callers can make
     /// bounded progress even when the market account contains thousands of
@@ -12132,6 +12220,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let recredited = self
                 .recredit_terminal_claim_free_overlap_for_source_domain_not_atomic(
                     source_domain,
+                    &mut claim_free_residual_remaining,
+                )?;
+            recredited_total = recredited_total
+                .checked_add(recredited)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        }
+        // Forfeited (never realized) claims leave no provider receivable, so the
+        // overlap above cannot see insurance they had been funded by. With every
+        // claimant gone, restore the remaining paired spend up to the residual
+        // instead of leaving it for terminal retirement to burn.
+        for insurance_side in [SideV16::Short, SideV16::Long] {
+            if claim_free_residual_remaining == 0 {
+                break;
+            }
+            let insurance_domain = self.insurance_domain_index(asset_index, insurance_side)?;
+            let recredited = self
+                .recredit_terminal_claim_free_unconsumed_spend_for_domain_not_atomic(
+                    insurance_domain,
                     &mut claim_free_residual_remaining,
                 )?;
             recredited_total = recredited_total
