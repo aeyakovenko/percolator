@@ -8798,7 +8798,11 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             || asset.kf_epoch_short > asset.slot_last
             || asset.oi_eff_long_q > crate::MAX_OI_SIDE_Q
             || asset.oi_eff_short_q > crate::MAX_OI_SIDE_Q
-            || (mode == MarketModeV16::Live && asset.oi_eff_long_q != asset.oi_eff_short_q)
+            // Recovery forfeits exit one side at a time: a cleared leg and a retained
+            // zero-basis obligation both remove effective OI from their own side only.
+            || (mode == MarketModeV16::Live
+                && asset.lifecycle != AssetLifecycleV16::Recovery
+                && asset.oi_eff_long_q != asset.oi_eff_short_q)
             || asset.stale_account_count_long > asset.stored_pos_count_long
             || asset.stale_account_count_short > asset.stored_pos_count_short
             || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
