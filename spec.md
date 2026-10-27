@@ -949,13 +949,18 @@ For every Active/DrainOnly/Recovery asset side:
 0 < A_side <= ADL_ONE
 if side is Normal and has current-epoch stored positions: A_side >= MIN_A_SIDE
 0 <= OI_eff_side <= MAX_OI_SIDE_Q_PER_ASSET
-if Live: OI_eff_long == OI_eff_short
+if Live and asset is not Recovery: OI_eff_long == OI_eff_short
 if OI_eff_side > 0 and side is not ResetPending: loss_weight_sum_side > 0
 if loss_weight_sum_side == 0: residual may clear only via fully backed protocol-owned explicit loss
 0 <= loss_weight_sum_side <= SOCIAL_LOSS_DEN
 social_loss_remainder_side_num < SOCIAL_LOSS_DEN
 social_loss_dust_side_num < SOCIAL_LOSS_DEN
 ```
+
+A Recovery forfeit removes the forfeited leg's effective OI from its own side
+only, whether it clears the leg or, while opposite real positions remain, keeps
+it as a zero-basis pending obligation. The Live equality above therefore
+excludes Recovery assets.
 
 When a side reset or leg clear combines two valid sub-atom social-loss carries,
 the sum is normalized modulo `SOCIAL_LOSS_DEN`. Crossing the denominator adds
