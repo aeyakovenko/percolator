@@ -13142,6 +13142,195 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
     }
 }
 
+// Every counterparty lien and backing step (create, terminal release, consume,
+// impaired retirement, expiry, top-up, withdrawal) moves the bucket and source
+// aggregate in lockstep, so the coupling validate_source_domain_ledger_parts
+// enforces is inductive. Fields are full-width u128 bounded only by the coupling.
+#[kani::proof]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_lien_lifecycle_preserves_bucket_source_coupling() {
+    let op: u8 = kani::any();
+    let status_raw: u8 = kani::any();
+    let unliened: u128 = kani::any();
+    let valid: u128 = kani::any();
+    let consumed: u128 = kani::any();
+    let impaired: u128 = kani::any();
+    let amount: u128 = kani::any();
+    let current_slot: u64 = kani::any();
+    let topup_expiry: u64 = kani::any();
+    kani::assume(op <= 6);
+    kani::assume(status_raw <= 3);
+    let fresh_reserved = unliened.checked_add(valid);
+    kani::assume(fresh_reserved.is_some());
+
+    let bucket = BackingBucketV16 {
+        market_id: kani::any(),
+        fresh_unliened_backing_num: unliened,
+        valid_liened_backing_num: valid,
+        consumed_liened_backing_num: consumed,
+        impaired_liened_backing_num: impaired,
+        utilization_fee_earnings: kani::any(),
+        expiry_slot: kani::any(),
+        status: match status_raw {
+            0 => BackingBucketStatusV16::Empty,
+            1 => BackingBucketStatusV16::Fresh,
+            2 => BackingBucketStatusV16::Expired,
+            _ => BackingBucketStatusV16::Impaired,
+        },
+    };
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        fresh_reserved_backing_num: fresh_reserved.unwrap(),
+        spent_backing_num: kani::any(),
+        provider_receivable_num: consumed,
+        valid_liened_backing_num: valid,
+        impaired_liened_backing_num: impaired,
+        insurance_credit_reserved_num: kani::any(),
+        valid_liened_insurance_num: kani::any(),
+        impaired_liened_insurance_num: kani::any(),
+        credit_rate_num: kani::any(),
+        credit_epoch: kani::any(),
+    };
+    let result = match op {
+        0 => MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            bucket,
+            source,
+            current_slot,
+            amount,
+        ),
+        1 => MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_release_delta(
+            bucket, source, amount,
+        ),
+        2 => MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_consume_delta(
+            bucket, source, amount,
+        ),
+        3 => {
+            MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_impaired_lien_retirement_delta(
+                bucket, source, amount,
+            )
+        }
+        4 => MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+            bucket,
+            source,
+            current_slot,
+        ),
+        5 => MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_add_delta(
+            bucket,
+            source,
+            amount,
+            current_slot,
+            topup_expiry,
+        ),
+        _ => MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_withdraw_delta(
+            bucket, source, amount,
+        ),
+    };
+
+    kani::cover!(
+        op == 0 && amount > 0 && result.is_ok(),
+        "lien coupling covers create"
+    );
+    kani::cover!(
+        op == 1 && amount > 0 && result.is_ok(),
+        "lien coupling covers terminal release"
+    );
+    kani::cover!(
+        op == 2 && amount > 0 && result.is_ok(),
+        "lien coupling covers consume"
+    );
+    kani::cover!(
+        op == 3 && amount > 0 && result.is_ok(),
+        "lien coupling covers impaired retirement"
+    );
+    kani::cover!(
+        op == 4 && unliened > 0 && valid > 0 && result.is_ok(),
+        "lien coupling covers expiry of mixed backing"
+    );
+    kani::cover!(
+        op == 5 && consumed > 0 && amount > 0 && result.is_ok(),
+        "lien coupling covers a top-up that refills receivable"
+    );
+    kani::cover!(
+        op == 6 && amount > 0 && result.is_ok(),
+        "lien coupling covers principal withdrawal"
+    );
+    let (bucket_after, source_after) = match result {
+        Ok(pair) => pair,
+        Err(_) => return,
+    };
+    assert_eq!(
+        Some(source_after.fresh_reserved_backing_num),
+        bucket_after
+            .fresh_unliened_backing_num
+            .checked_add(bucket_after.valid_liened_backing_num)
+    );
+    assert_eq!(
+        source_after.valid_liened_backing_num,
+        bucket_after.valid_liened_backing_num
+    );
+    assert_eq!(
+        source_after.impaired_liened_backing_num,
+        bucket_after.impaired_liened_backing_num
+    );
+    assert_eq!(
+        source_after.provider_receivable_num,
+        bucket_after.consumed_liened_backing_num
+    );
+    let classes = |b: BackingBucketV16| {
+        (
+            b.fresh_unliened_backing_num,
+            b.valid_liened_backing_num,
+            b.consumed_liened_backing_num,
+            b.impaired_liened_backing_num,
+        )
+    };
+    let expected = match op {
+        0 => (unliened - amount, valid + amount, consumed, impaired),
+        1 => (unliened + amount, valid - amount, consumed, impaired),
+        2 => (unliened, valid - amount, consumed + amount, impaired),
+        3 => (unliened, valid, consumed, impaired - amount),
+        4 => (0, 0, consumed, impaired + valid),
+        5 => (
+            unliened + amount,
+            valid,
+            consumed - amount.min(consumed),
+            impaired,
+        ),
+        _ => (unliened - amount, valid, consumed, impaired),
+    };
+    assert_eq!(classes(bucket_after), expected);
+    assert!(source_after.spent_backing_num >= source.spent_backing_num);
+    assert_eq!(bucket_after.market_id, bucket.market_id);
+    assert_eq!(
+        bucket_after.utilization_fee_earnings,
+        bucket.utilization_fee_earnings
+    );
+    assert_eq!(
+        source_after.positive_claim_bound_num,
+        source.positive_claim_bound_num
+    );
+    assert_eq!(
+        source_after.exact_positive_claim_num,
+        source.exact_positive_claim_num
+    );
+    assert_eq!(
+        source_after.insurance_credit_reserved_num,
+        source.insurance_credit_reserved_num
+    );
+    assert_eq!(
+        source_after.valid_liened_insurance_num,
+        source.valid_liened_insurance_num
+    );
+    assert_eq!(
+        source_after.impaired_liened_insurance_num,
+        source.impaired_liened_insurance_num
+    );
+    assert_eq!(source_after.credit_rate_num, source.credit_rate_num);
+    assert_eq!(source_after.credit_epoch, source.credit_epoch);
+}
+
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]

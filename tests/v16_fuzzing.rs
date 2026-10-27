@@ -1,13 +1,14 @@
 #![cfg(feature = "fuzz")]
 
 use percolator::{
-    EngineAssetSlotV16Account, LiquidationRequestV16, Market, MarketGroupV16HeaderAccount,
-    MarketGroupV16ViewMut, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
-    PermissionlessRecoveryReasonV16, PortfolioAccountV16Account, PortfolioLegV16, PortfolioV16View,
-    PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodU128, MAX_VAULT_TVL,
+    BackingBucketStatusV16, BackingBucketV16, EngineAssetSlotV16Account, LiquidationRequestV16,
+    Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PermissionlessCrankActionV16,
+    PermissionlessCrankRequestV16, PermissionlessRecoveryReasonV16, PortfolioAccountV16Account,
+    PortfolioLegV16, PortfolioV16View, PortfolioV16ViewMut, ProvenanceHeaderV16,
+    ProvenanceHeaderV16Account, SourceCreditStateV16, TradeRequestV16, V16Config, V16Error,
+    V16PodU128, MAX_VAULT_TVL,
 };
-use percolator::{BOUND_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
+use percolator::{BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
 use proptest::prelude::*;
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
@@ -341,6 +342,122 @@ fn v16_source_claim_burn_crosses_a_just_emptied_sparse_slot() {
     assert_eq!(account.header.pnl.get(), 0);
     assert_eq!(source_claim_num(account.header, 1), 0);
     assert_eq!(source_claim_num(account.header, 3), 0);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+
+    /// Up to 24 random lien and backing steps keep the bucket and source aggregate coupled.
+    #[test]
+    fn v16_fuzz_counterparty_lien_lifecycle_preserves_bucket_source_coupling(
+        funded in 1u128..=1_000_000u128,
+        steps in prop::collection::vec((0u8..=6u8, 0u128..=100u128, 0u64..=2u64), 1..=24),
+    ) {
+        type Group = MarketGroupV16ViewMut<'static, u64>;
+        let coupled = |bucket: &BackingBucketV16, source: &SourceCreditStateV16| {
+            source.fresh_reserved_backing_num
+                == bucket.fresh_unliened_backing_num + bucket.valid_liened_backing_num
+                && source.valid_liened_backing_num == bucket.valid_liened_backing_num
+                && source.impaired_liened_backing_num == bucket.impaired_liened_backing_num
+                && source.provider_receivable_num == bucket.consumed_liened_backing_num
+        };
+        let classes = |bucket: &BackingBucketV16| {
+            (
+                bucket.fresh_unliened_backing_num,
+                bucket.valid_liened_backing_num,
+                bucket.consumed_liened_backing_num,
+                bucket.impaired_liened_backing_num,
+            )
+        };
+        let mut slot = 1u64;
+        let mut bucket = BackingBucketV16 {
+            market_id: 1,
+            fresh_unliened_backing_num: funded * BOUND_SCALE,
+            expiry_slot: 12,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        };
+        let mut source = SourceCreditStateV16 {
+            positive_claim_bound_num: 7 * BOUND_SCALE,
+            exact_positive_claim_num: 7 * BOUND_SCALE,
+            fresh_reserved_backing_num: funded * BOUND_SCALE,
+            insurance_credit_reserved_num: 3 * BOUND_SCALE,
+            valid_liened_insurance_num: BOUND_SCALE,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            credit_epoch: 4,
+            ..SourceCreditStateV16::EMPTY
+        };
+        for (op, pct, advance) in steps {
+            slot += advance;
+            // Size each step against the pool it draws on, so most steps are accepted.
+            let pool = match op {
+                0 | 6 => bucket.fresh_unliened_backing_num,
+                1 | 2 => bucket.valid_liened_backing_num,
+                3 => bucket.impaired_liened_backing_num,
+                _ => (pct + 1) * 1_000 * BOUND_SCALE,
+            };
+            let amount = pool / BOUND_SCALE * pct / 100 * BOUND_SCALE;
+            // A Fresh bucket takes a top-up only at its own expiry slot.
+            let topup_expiry = if bucket.status == BackingBucketStatusV16::Fresh {
+                bucket.expiry_slot
+            } else {
+                slot + 12
+            };
+            let (u, v, c, i) = classes(&bucket);
+            let result = match op {
+                0 => {
+                    Group::kani_prepare_counterparty_lien_create_delta(bucket, source, slot, amount)
+                }
+                1 => Group::kani_prepare_counterparty_lien_terminal_release_delta(
+                    bucket, source, amount,
+                ),
+                2 => Group::kani_prepare_counterparty_lien_consume_delta(bucket, source, amount),
+                3 => Group::kani_prepare_counterparty_impaired_lien_retirement_delta(
+                    bucket, source, amount,
+                ),
+                4 => Group::kani_prepare_counterparty_backing_expiry_delta(bucket, source, slot),
+                5 => Group::kani_prepare_counterparty_backing_add_delta(
+                    bucket,
+                    source,
+                    amount,
+                    slot,
+                    topup_expiry,
+                ),
+                _ => {
+                    Group::kani_prepare_counterparty_backing_withdraw_delta(bucket, source, amount)
+                }
+            };
+            let (bucket_after, source_after) = match result {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            };
+            let expected = match op {
+                0 => (u - amount, v + amount, c, i),
+                1 => (u + amount, v - amount, c, i),
+                2 => (u, v - amount, c + amount, i),
+                3 => (u, v, c, i - amount),
+                4 => (0, 0, c, i + v),
+                5 => (u + amount, v, c - amount.min(c), i),
+                _ => (u - amount, v, c, i),
+            };
+            prop_assert!(coupled(&bucket_after, &source_after));
+            prop_assert_eq!(classes(&bucket_after), expected);
+            prop_assert!(source_after.spent_backing_num >= source.spent_backing_num);
+            prop_assert_eq!(
+                SourceCreditStateV16 {
+                    fresh_reserved_backing_num: source.fresh_reserved_backing_num,
+                    spent_backing_num: source.spent_backing_num,
+                    provider_receivable_num: source.provider_receivable_num,
+                    valid_liened_backing_num: source.valid_liened_backing_num,
+                    impaired_liened_backing_num: source.impaired_liened_backing_num,
+                    ..source_after
+                },
+                source
+            );
+            bucket = bucket_after;
+            source = source_after;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
