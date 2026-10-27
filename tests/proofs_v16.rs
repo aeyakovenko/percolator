@@ -8213,6 +8213,84 @@ fn proof_v16_public_counterparty_backing_withdraw_rejects_underbacking_source_cl
     assert_eq!(result, Err(V16Error::LockActive));
 }
 
+// Principal in a Fresh bucket at or past its expiry slot is left for expiry to
+// forfeit: the gate refuses before the route touches a byte. The slot is
+// concrete so symbolic execution takes the refusing branch and never encodes
+// the route body behind it (the symbolic-amount success path is already proven
+// by proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state).
+// Backing, withdrawal and claim stay symbolic within the bounds below: backing
+// 1..=8, withdrawal 1..=backing, and claim 0..=backing-withdraw.
+fn public_counterparty_backing_withdraw_lapsed_is_rejected(now_slot: u64) {
+    let backing_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= backing_raw);
+    kani::assume(claim_raw <= backing_raw - withdraw_raw);
+    let backing = backing_raw as u128;
+    let withdraw = withdraw_raw as u128;
+    let claim = claim_raw as u128;
+    let backing_num = backing * BOUND_SCALE;
+    let claim_num = claim * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.current_slot = V16PodU64::new(now_slot);
+    header.vault = V16PodU128::new(backing);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let h0 = header;
+    let s0 = markets[0].engine;
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
+
+    kani::cover!(
+        claim_raw != 0,
+        "withdrawal from lapsed backing under a live claim is refused"
+    );
+    assert_eq!(result, Err(V16Error::Stale));
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+}
+
+// Expiry slot 10, current slot 10: a bucket exactly at its expiry is already lapsed.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_counterparty_backing_withdraw_rejects_lapsed_bucket_at_expiry() {
+    public_counterparty_backing_withdraw_lapsed_is_rejected(10);
+}
+
+// Expiry slot 10, current slot 11: a bucket one slot past its expiry.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_counterparty_backing_withdraw_rejects_lapsed_bucket_after_expiry() {
+    public_counterparty_backing_withdraw_lapsed_is_rejected(11);
+}
+
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
