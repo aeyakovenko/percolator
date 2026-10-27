@@ -1955,6 +1955,63 @@ impl V16Core {
         Ok(ledger)
     }
 
+    /// Fresh backing (BOUND_SCALE units, whole atoms) that resolved junior
+    /// claims can still need from a single bucket.
+    ///
+    /// Forfeited backing only raises the common rate, and every claim is paid
+    /// in full once `snapshot_residual * BOUND_SCALE >= claim_bound_num`, so
+    /// the atoms needed are `ceil(claim_bound_num / BOUND_SCALE) -
+    /// snapshot_residual`. After snapshot capture the residual never falls and
+    /// the bound never rises, so this need never grows. Any backing above it,
+    /// once expired, would go past full face into insurance recredit or
+    /// surplus, never to a claimant.
+    pub(crate) fn kernel_resolved_junior_backing_need_num(
+        snapshot_residual: u128,
+        claim_bound_num: u128,
+    ) -> V16Result<u128> {
+        claim_bound_num
+            .div_ceil(BOUND_SCALE)
+            .saturating_sub(snapshot_residual)
+            .checked_mul(BOUND_SCALE)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// Whether some future public transition could still pay `receipt` another atom.
+    /// Claim refinement can raise the common rate while unreceipted bound remains. Otherwise
+    /// the rate can only rise through Fresh backing expiring into post-snapshot residual,
+    /// which releases whole atoms, at most the remaining Fresh backing rounded up to an
+    /// atom. The best case credits all of it at once. A receipt whose floor payout at that
+    /// best-case rate does not exceed what it was already paid holds only unrecoverable
+    /// shortfall.
+    pub(crate) fn kernel_resolved_receipt_can_still_gain(
+        ledger: ResolvedPayoutLedgerV16,
+        source_fresh_backing_total_num: u128,
+        receipt: ResolvedPayoutReceiptV16,
+    ) -> V16Result<bool> {
+        if ledger.terminal_claim_bound_unreceipted_num != 0 {
+            return Ok(true);
+        }
+        if ledger.current_payout_rate_num == ledger.current_payout_rate_den {
+            return Ok(false);
+        }
+        let releasable_num = source_fresh_backing_total_num
+            .checked_add(BOUND_SCALE - 1)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            / BOUND_SCALE
+            * BOUND_SCALE;
+        let best_rate_num = ledger
+            .current_payout_rate_num
+            .checked_add(releasable_num)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .min(ledger.current_payout_rate_den);
+        let best_gross = wide_mul_div_floor_u128(
+            receipt.terminal_positive_claim_face,
+            best_rate_num,
+            ledger.current_payout_rate_den,
+        );
+        Ok(best_gross > receipt.paid_effective)
+    }
+
     /// Credit residual released after terminal snapshot capture into both
     /// persisted snapshots and immediately raise the common payout rate.
     pub(crate) fn kernel_credit_post_snapshot_residual(
@@ -9171,13 +9228,45 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Lifetime granted to engine-created counterparty backing, and the bounded
+    /// post-resolution wait for any provider backing (#219).
+    fn backing_freshness_horizon_slots(&self) -> u64 {
+        let config = &self.header.config;
+        config
+            .max_accrual_dt_slots
+            .get()
+            .max(config.h_max.get())
+            .max(config.max_bankrupt_close_lifetime_slots.get())
+            .max(1)
+    }
+
+    /// Resolved markets bound every backing lifetime at
+    /// `resolved_slot + backing_freshness_horizon_slots`. A provider-chosen far
+    /// expiry must not keep underfunded resolved receipts or terminal wind-down
+    /// waiting forever; past the deadline the bucket lapses with natural-expiry
+    /// semantics. Live markets and expiries already inside the horizon are
+    /// unchanged.
+    fn effective_backing_expiry_slot(&self, expiry_slot: u64) -> V16Result<u64> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
+            return Ok(expiry_slot);
+        }
+        let deadline = self
+            .header
+            .resolved_slot
+            .get()
+            .saturating_add(self.backing_freshness_horizon_slots());
+        Ok(expiry_slot.min(deadline))
+    }
+
     fn backing_bucket_for_domain(&self, domain: usize) -> V16Result<BackingBucketV16> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let slot = self.markets[asset_index].engine_slot();
-        match side {
+        let mut bucket = match side {
             SideV16::Long => slot.backing_long.try_to_runtime(),
             SideV16::Short => slot.backing_short.try_to_runtime(),
-        }
+        }?;
+        bucket.expiry_slot = self.effective_backing_expiry_slot(bucket.expiry_slot)?;
+        Ok(bucket)
     }
 
     /// Raw `(status, expiry_slot)` of a domain's backing bucket without a full decode; for
@@ -9189,7 +9278,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             SideV16::Long => &slot.backing_long,
             SideV16::Short => &slot.backing_short,
         };
-        Ok((bucket.status, bucket.expiry_slot.get()))
+        Ok((
+            bucket.status,
+            self.effective_backing_expiry_slot(bucket.expiry_slot.get())?,
+        ))
     }
 
     fn set_backing_bucket_for_domain(
@@ -9347,17 +9439,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Ok(bucket.expiry_slot);
         }
-        let config = self.header.config.try_to_runtime_shape()?;
-        let freshness_horizon = config
-            .max_accrual_dt_slots
-            .max(config.h_max)
-            .max(config.max_bankrupt_close_lifetime_slots)
-            .max(1);
-        self.header
+        self.header.config.try_to_runtime_shape()?;
+        let expiry_slot = self
+            .header
             .current_slot
             .get()
-            .checked_add(freshness_horizon)
-            .ok_or(V16Error::CounterOverflow)
+            .checked_add(self.backing_freshness_horizon_slots())
+            .ok_or(V16Error::CounterOverflow)?;
+        self.effective_backing_expiry_slot(expiry_slot)
     }
 
     fn add_fresh_counterparty_backing_unchecked(
@@ -9481,6 +9570,82 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()
     }
 
+    /// Resolved junior payout pool as `(residual, claim_bound_num)`, if it is final enough to
+    /// bound what forfeited backing can still add to claims.
+    ///
+    /// After capture this is the ledger: its residual only grows through post-snapshot credit
+    /// and its bound only shrinks through receipts and refinement. Before capture it is the
+    /// value capture would record now. That is used only when the market is payout-ready
+    /// (no stored positions, stale accounts, negative PnL, or loss barriers, so no claim can
+    /// grow) and no source claim remains (so no realization can reprice the residual first).
+    fn resolved_junior_payout_pool(&self) -> V16Result<(u128, u128)> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
+            return Err(V16Error::LockActive);
+        }
+        if decode_bool(self.header.payout_snapshot_captured)? {
+            let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
+            if ledger.payout_halted {
+                return Err(V16Error::RecoveryRequired);
+            }
+            let claim_bound_num = ledger
+                .terminal_claim_exact_receipts_num
+                .checked_add(ledger.terminal_claim_bound_unreceipted_num)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            return Ok((ledger.snapshot_residual, claim_bound_num));
+        }
+        if !self.resolved_positive_payout_ready()?
+            || self.header.source_claim_bound_total_num.get() != 0
+        {
+            return Err(V16Error::LockActive);
+        }
+        Ok((self.residual(), self.header.pnl_pos_bound_tot_num.get()))
+    }
+
+    /// Whole quote atoms of a domain's Fresh backing that no resolved claim can need.
+    ///
+    /// The bucket keeps two reserves. One covers every source claim still attributed to the
+    /// domain at full face, since terminal realization draws on counterparty backing first.
+    /// The other is the junior payout need: the backing that, once forfeited, raises the
+    /// common payout rate to full. Each bucket keeps the whole junior need by itself, so the
+    /// rule does not depend on other buckets or on the order providers exit. Claimants get
+    /// the same payout from the kept reserve as from the whole bucket, because expiry of the
+    /// reserve already brings every receipt to full face. Everything above it is surplus.
+    pub fn resolved_counterparty_backing_surplus(&self, domain: usize) -> V16Result<u128> {
+        self.domain_asset_side(domain)?;
+        let (residual, claim_bound_num) = self.resolved_junior_payout_pool()?;
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.expiry_slot <= self.header.current_slot.get()
+        {
+            return Ok(0);
+        }
+        let reserve_num =
+            V16Core::kernel_resolved_junior_backing_need_num(residual, claim_bound_num)?
+                .checked_add(
+                    self.source_credit_for_domain(domain)?
+                        .positive_claim_bound_num,
+                )
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(bucket
+            .fresh_unliened_backing_num
+            .saturating_sub(reserve_num)
+            / BOUND_SCALE)
+    }
+
+    /// Withdraws resolved Fresh backing surplus without waiting for portfolios to close.
+    /// The amount must fit within `resolved_counterparty_backing_surplus`. The ordinary
+    /// withdrawal checks (unliened principal, full credit rate) still apply.
+    pub fn withdraw_resolved_counterparty_backing_surplus_not_atomic(
+        &mut self,
+        domain: usize,
+        amount: u128,
+    ) -> V16Result<()> {
+        if amount > self.resolved_counterparty_backing_surplus(domain)? {
+            return Err(V16Error::LockActive);
+        }
+        self.withdraw_fresh_counterparty_backing_not_atomic(domain, amount)
+    }
+
     pub fn expire_source_backing_bucket_not_atomic(
         &mut self,
         domain: usize,
@@ -9584,7 +9749,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             (short_domain, &slot.backing_short),
         ] {
             if decode_backing_bucket_status(bucket.status)? == BackingBucketStatusV16::Fresh
-                && bucket.expiry_slot.get() <= now_slot
+                && self.effective_backing_expiry_slot(bucket.expiry_slot.get())? <= now_slot
             {
                 return Ok(Some(domain));
             }
@@ -11955,13 +12120,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         } else {
                             BackingBucketStatusV16::Empty
                         },
-                        slot.backing_long.expiry_slot.get(),
+                        self.effective_backing_expiry_slot(slot.backing_long.expiry_slot.get())?,
                         if inspect_backing {
                             short_status
                         } else {
                             BackingBucketStatusV16::Empty
                         },
-                        slot.backing_short.expiry_slot.get(),
+                        self.effective_backing_expiry_slot(slot.backing_short.expiry_slot.get())?,
                         authenticated_slot,
                         recreditable,
                     )
@@ -13147,6 +13312,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 } else {
                     (backing_num, 0)
                 };
+            let mut residual_backing = residual_backing;
             if source_backing_num != 0 {
                 // A lapsed bucket still marked Fresh cannot take backing at a new expiry.
                 // Normalize it first, exactly as the expiry crank would, so a loss that
@@ -13164,17 +13330,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 } else {
                     raw_status == impaired_raw
                 };
-                // An Impaired bucket (a lapsed one that still carries liens) cannot take new
-                // backing. As in Resolved mode, the loss then stays as junior support: the
-                // capital debit above is already proven, and the value remains in the vault
-                // outside the senior stack instead of reverting the refresh or liquidation.
-                if !impaired {
-                    let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
+                // An Impaired bucket cannot take new backing, and past the resolved backing
+                // horizon new backing would lapse on creation; either way the loss stays as
+                // junior support instead of reverting the refresh or liquidation.
+                let expiry_slot = if impaired {
+                    None
+                } else {
+                    Some(self.fresh_counterparty_backing_expiry_slot(domain)?)
+                };
+                if let Some(expiry_slot) = expiry_slot.filter(|expiry| *expiry > now) {
                     self.add_fresh_counterparty_backing_unchecked(
                         domain,
                         source_backing_num,
                         expiry_slot,
                     )?;
+                } else {
+                    residual_backing = backing;
                 }
             }
             self.credit_post_snapshot_residual_not_atomic(residual_backing)?;
@@ -15471,7 +15642,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let receipt = account.header.resolved_payout_receipt.try_to_runtime()?;
                 if receipt.present
                     && !receipt.finalized
-                    && !self.resolved_payout_rate_is_terminal()?
+                    && self.resolved_receipt_can_still_gain(receipt)?
                 {
                     if let Some(observation) = work.observations.first() {
                         if let Some(domain) = self.first_lapsed_source_backing_for_asset_at_slot(
@@ -19238,15 +19409,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
-    fn resolved_payout_rate_is_terminal(&self) -> V16Result<bool> {
-        let ledger = self.header.resolved_payout_ledger.try_to_runtime()?;
-        Ok(ledger.terminal_claim_bound_unreceipted_num == 0
-            && (ledger.current_payout_rate_num == ledger.current_payout_rate_den
-                || self.header.source_fresh_backing_total_num.get() == 0))
+    /// Whether some future public transition could still pay this receipt another atom.
+    /// Claim refinement can raise the common rate without bound while unreceipted bound
+    /// remains. Otherwise the rate can only rise through Fresh backing expiring into
+    /// post-snapshot residual, so the best case credits all of it at once. A receipt whose
+    /// floor payout at that best-case rate does not exceed what it was already paid holds
+    /// only unrecoverable shortfall; waiting for dust backing to expire cannot pay it.
+    fn resolved_receipt_can_still_gain(&self, receipt: ResolvedPayoutReceiptV16) -> V16Result<bool> {
+        V16Core::kernel_resolved_receipt_can_still_gain(
+            self.header.resolved_payout_ledger.try_to_runtime()?,
+            self.header.source_fresh_backing_total_num.get(),
+            receipt,
+        )
     }
 
     // Clear a paid haircut receipt only when neither claim refinement nor future
-    // backing expiry can raise its rate. Otherwise the shortfall is still claimable.
+    // backing expiry can raise its payout. Otherwise the shortfall is still claimable.
     fn clear_fully_diluted_resolved_receipt_if_terminal(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -19255,7 +19433,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if !receipt.present || receipt.finalized {
             return Ok(());
         }
-        if !self.resolved_payout_rate_is_terminal()? {
+        if self.resolved_receipt_can_still_gain(receipt)? {
             return Ok(());
         }
         if !self.resolved_positive_payout_ready()? {
@@ -19416,6 +19594,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if retiring_source.source_claim_impaired_num.get() != 0 {
             return Ok(true);
         }
+        let asset = self.asset_state(asset_index)?;
+        // In Resolved mode the only path that can fund this domain is a
+        // loss-side leg crystallizing its K/F loss into backing. An Empty
+        // bucket never expires, so once no loss-side leg or obligation remains
+        // the domain can receive no further backing: every zero-conversion
+        // claim is final and may retire independently. Requiring the other
+        // claimants' remainder to be zero here would deadlock co-claimants.
+        let loss_side_counts = match loss_side {
+            SideV16::Long => (
+                asset.stored_pos_count_long,
+                asset.stale_account_count_long,
+                asset.pending_obligation_count_long,
+            ),
+            SideV16::Short => (
+                asset.stored_pos_count_short,
+                asset.stale_account_count_short,
+                asset.pending_obligation_count_short,
+            ),
+        };
+        if bucket.status == BackingBucketStatusV16::Empty
+            && decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+            && loss_side_counts == (0, 0, 0)
+        {
+            return Ok(true);
+        }
         let source = self.source_credit_for_domain(domain)?;
         let remaining_claim_num = source
             .positive_claim_bound_num
@@ -19424,7 +19627,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if remaining_claim_num != 0 {
             return Ok(false);
         }
-        let asset = self.asset_state(asset_index)?;
         let creditor_counts = match opposite_side(loss_side) {
             SideV16::Long => (
                 asset.stored_pos_count_long,
@@ -20196,9 +20398,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut positive_pnl_forfeited = 0u128;
         if net < 0 {
             loss_settled = net.unsigned_abs();
+            let negative_before = account.header.pnl.get().min(0).unsigned_abs();
             let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
             support_consumed = support.support_consumed;
             junior_face_burned = support.junior_face_burned;
+            // prog#450: the capital-covered part of a newly realized forfeit
+            // loss backs the opposite side's claims on this leg's domain, as in
+            // ordinary K/F settlement -- but only up to what those claims can
+            // own: the domain's current support gap plus the provider receivable
+            // its backing already advanced to them. A forfeit has no matched
+            // receiver of its own (the opposite side may itself have forfeited
+            // or been paid), so any excess stays unassigned residual instead of
+            // becoming ownerless provider-withdrawable backing.
+            let negative_after = account.header.pnl.get().min(0).unsigned_abs();
+            let loss_domain = self.insurance_domain_index(asset_index, leg.side)?;
+            let owned_atoms = self.forfeit_loss_backing_capacity_atoms(loss_domain)?;
+            let new_loss = negative_after.saturating_sub(negative_before);
+            let reserved_after = negative_before
+                .checked_add(new_loss.min(owned_atoms))
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
+                account,
+                loss_domain,
+                negative_before,
+                reserved_after,
+            )?;
         } else {
             positive_pnl_forfeited = net as u128;
         }
@@ -20223,6 +20447,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             support_consumed,
             junior_face_burned,
         ))
+    }
+
+    /// Whole atoms of new loss-created backing that existing claimants of
+    /// `domain` own: unbacked claim bound plus the provider receivable already
+    /// advanced against this domain (refilled first by a backing add).
+    fn forfeit_loss_backing_capacity_atoms(&self, domain: usize) -> V16Result<u128> {
+        let source = self.source_credit_for_domain(domain)?;
+        let support_gap_num = source.positive_claim_bound_num.saturating_sub(
+            V16Core::available_backing_num_for_source_credit_state(source)?,
+        );
+        let owned_num = support_gap_num
+            .checked_add(source.provider_receivable_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(owned_num / BOUND_SCALE)
     }
 
     fn leg_has_exhausted_effective_oi(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
