@@ -8394,12 +8394,26 @@ impl MarketGroupV16HeaderAccount {
         }
         match previous_asset.lifecycle {
             AssetLifecycleV16::Disabled => {
-                if previous_asset.market_id != 0 {
+                // A canonical disabled slot may carry the MAX_VAULT_TVL sentinel, which
+                // insurance_domain_budget_remaining_total does not count. Any other budget
+                // is counted there, and the rebuild below would drop it.
+                if previous_asset.market_id != 0
+                    || !matches!(slot.insurance_domain_budget_long.get(), 0 | MAX_VAULT_TVL)
+                    || !matches!(slot.insurance_domain_budget_short.get(), 0 | MAX_VAULT_TVL)
+                {
                     return Err(V16Error::LockActive);
                 }
             }
             AssetLifecycleV16::Retired => {
-                if previous_asset.market_id == 0 || previous_asset.retired_slot == 0 {
+                // Retirement keeps an unspent domain budget on the slot and
+                // insurance_domain_budget_remaining_total still counts it. The
+                // rebuild below would drop it, so reuse waits until it is
+                // withdrawn; the restart path carries it over instead.
+                if previous_asset.market_id == 0
+                    || previous_asset.retired_slot == 0
+                    || slot.insurance_domain_budget_long.get() != 0
+                    || slot.insurance_domain_budget_short.get() != 0
+                {
                     return Err(V16Error::LockActive);
                 }
                 let elapsed = now_slot
@@ -8784,7 +8798,11 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             || asset.kf_epoch_short > asset.slot_last
             || asset.oi_eff_long_q > crate::MAX_OI_SIDE_Q
             || asset.oi_eff_short_q > crate::MAX_OI_SIDE_Q
-            || (mode == MarketModeV16::Live && asset.oi_eff_long_q != asset.oi_eff_short_q)
+            // Recovery forfeits exit one side at a time: a cleared leg and a retained
+            // zero-basis obligation both remove effective OI from their own side only.
+            || (mode == MarketModeV16::Live
+                && asset.lifecycle != AssetLifecycleV16::Recovery
+                && asset.oi_eff_long_q != asset.oi_eff_short_q)
             || asset.stale_account_count_long > asset.stored_pos_count_long
             || asset.stale_account_count_short > asset.stored_pos_count_short
             || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
@@ -9397,6 +9415,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// (`credit_rate_num == CREDIT_RATE_SCALE`) after the principal leaves. This
     /// prevents a backing provider from withdrawing principal that currently
     /// supports outstanding source-credit claims.
+    ///
+    /// A Fresh bucket at or past its expiry slot is rejected with `Stale`, the
+    /// same check `validate_source_domain_ledger_current` makes before a
+    /// credit-rate read: expiry forfeits lapsed principal to the junior pool, so
+    /// it cannot be withdrawn ahead of `expire_source_backing_bucket_not_atomic`.
     pub fn withdraw_fresh_counterparty_backing_not_atomic(
         &mut self,
         domain: usize,
@@ -9407,8 +9430,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidConfig);
         }
         let backing_num = V16Core::bound_num_from_amount(amount)?;
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status == BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot <= self.header.current_slot.get()
+        {
+            return Err(V16Error::Stale);
+        }
         let (bucket, source) = V16Core::prepare_counterparty_backing_withdraw_delta(
-            self.backing_bucket_for_domain(domain)?,
+            bucket,
             self.source_credit_for_domain(domain)?,
             backing_num,
         )?;

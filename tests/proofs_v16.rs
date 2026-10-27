@@ -2469,6 +2469,8 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     let c_tot_raw: u8 = kani::any();
     let insurance_raw: u8 = kani::any();
     let surplus_raw: u8 = kani::any();
+    let budget_long_raw: u8 = kani::any();
+    let budget_short_raw: u8 = kani::any();
     let price_raw: u16 = kani::any();
     kani::assume(old_market_id_raw != 0);
     kani::assume(credit_epoch_raw != 0);
@@ -2476,10 +2478,15 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     kani::assume(c_tot_raw <= 8);
     kani::assume(insurance_raw <= 8);
     kani::assume(surplus_raw <= 8);
+    kani::assume(budget_long_raw <= 8);
+    kani::assume(budget_short_raw <= 8);
     kani::assume((1..=10_000).contains(&price_raw));
     let nonempty_claim = claim_units_raw != 0;
+    let budget_long = budget_long_raw as u128;
+    let budget_short = budget_short_raw as u128;
+    let rejected = nonempty_claim || budget_long != 0 || budget_short != 0;
     let c_tot = c_tot_raw as u128;
-    let insurance = insurance_raw as u128;
+    let insurance = insurance_raw as u128 + budget_long + budget_short;
     let surplus = surplus_raw as u128;
 
     let (market_id, _, _) = ids();
@@ -2488,6 +2495,7 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     header.vault = V16PodU128::new(c_tot + insurance + surplus);
     header.c_tot = V16PodU128::new(c_tot);
     header.insurance = V16PodU128::new(insurance);
+    header.insurance_domain_budget_remaining_total = V16PodU128::new(budget_long + budget_short);
     let old_market_id = old_market_id_raw as u64;
     let new_market_id = old_market_id + 1;
     header.next_market_id = V16PodU64::new(new_market_id);
@@ -2496,6 +2504,7 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     let vault_before = header.vault;
     let c_tot_before = header.c_tot;
     let insurance_before = header.insurance;
+    let budget_total_before = header.insurance_domain_budget_remaining_total;
 
     let mut retired_asset = AssetStateV16 {
         lifecycle: AssetLifecycleV16::Retired,
@@ -2518,6 +2527,8 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
     source.positive_claim_bound_num = (claim_units_raw as u128) * BOUND_SCALE;
     let mut slot = EngineAssetSlotV16Account {
         asset: AssetStateV16Account::from_runtime(&retired_asset),
+        insurance_domain_budget_long: V16PodU128::new(budget_long),
+        insurance_domain_budget_short: V16PodU128::new(budget_short),
         source_credit_long: SourceCreditStateV16Account::from_runtime(&source),
         source_credit_short: SourceCreditStateV16Account::from_runtime(&source),
         backing_long: BackingBucketV16Account::from_runtime(&old_backing),
@@ -2542,11 +2553,23 @@ fn proof_v16_retired_slot_reactivation_accepts_only_empty_source_credit_amounts(
         nonempty_claim && claim_units_raw > 4 && credit_epoch_raw > 1,
         "retired-slot activation rejects symbolic nonempty source credit before reuse"
     );
+    kani::cover!(
+        !nonempty_claim && budget_long == 0 && budget_short > 0,
+        "retired-slot activation rejects a remaining short-side domain budget before reuse"
+    );
+    kani::cover!(
+        !nonempty_claim && budget_long > 0 && budget_short == 0,
+        "retired-slot activation rejects a remaining long-side domain budget before reuse"
+    );
     assert_eq!(header.vault, vault_before);
     assert_eq!(header.c_tot, c_tot_before);
     assert_eq!(header.insurance, insurance_before);
-    assert_eq!(result.is_ok(), !nonempty_claim);
-    if nonempty_claim {
+    assert_eq!(
+        header.insurance_domain_budget_remaining_total,
+        budget_total_before
+    );
+    assert_eq!(result.is_ok(), !rejected);
+    if rejected {
         assert_eq!(slot, slot_before);
         assert_eq!(header.next_market_id.get(), new_market_id);
     } else {
@@ -8199,6 +8222,84 @@ fn proof_v16_public_counterparty_backing_withdraw_rejects_underbacking_source_cl
         "public counterparty backing withdraw rejects nontrivial underbacking"
     );
     assert_eq!(result, Err(V16Error::LockActive));
+}
+
+// Principal in a Fresh bucket at or past its expiry slot is left for expiry to
+// forfeit: the gate refuses before the route touches a byte. The slot is
+// concrete so symbolic execution takes the refusing branch and never encodes
+// the route body behind it (the symbolic-amount success path is already proven
+// by proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state).
+// Backing, withdrawal and claim stay symbolic within the bounds below: backing
+// 1..=8, withdrawal 1..=backing, and claim 0..=backing-withdraw.
+fn public_counterparty_backing_withdraw_lapsed_is_rejected(now_slot: u64) {
+    let backing_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= backing_raw);
+    kani::assume(claim_raw <= backing_raw - withdraw_raw);
+    let backing = backing_raw as u128;
+    let withdraw = withdraw_raw as u128;
+    let claim = claim_raw as u128;
+    let backing_num = backing * BOUND_SCALE;
+    let claim_num = claim * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.current_slot = V16PodU64::new(now_slot);
+    header.vault = V16PodU128::new(backing);
+    header.pnl_pos_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot = V16PodU128::new(claim);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claim_num);
+    header.source_claim_bound_total_num = V16PodU128::new(claim_num);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: claim_num,
+            exact_positive_claim_num: claim_num,
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let h0 = header;
+    let s0 = markets[0].engine;
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
+
+    kani::cover!(
+        claim_raw != 0,
+        "withdrawal from lapsed backing under a live claim is refused"
+    );
+    assert_eq!(result, Err(V16Error::Stale));
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+}
+
+// Expiry slot 10, current slot 10: a bucket exactly at its expiry is already lapsed.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_counterparty_backing_withdraw_rejects_lapsed_bucket_at_expiry() {
+    public_counterparty_backing_withdraw_lapsed_is_rejected(10);
+}
+
+// Expiry slot 10, current slot 11: a bucket one slot past its expiry.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_counterparty_backing_withdraw_rejects_lapsed_bucket_after_expiry() {
+    public_counterparty_backing_withdraw_lapsed_is_rejected(11);
 }
 
 #[kani::proof]

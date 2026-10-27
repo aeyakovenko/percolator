@@ -21,7 +21,9 @@ use percolator::{
 use percolator::{
     AssetStateV16, MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
 };
-use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
+use percolator::{
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_VAULT_TVL, POS_SCALE, SOCIAL_LOSS_DEN,
+};
 
 const FUNDING_COUNTER_PRICE: u64 = 1_000_000;
 const FUNDING_COUNTER_RATE_E9: i128 = 10_000;
@@ -3543,6 +3545,196 @@ fn v16_retire_and_reactivate_empty_asset_after_source_credit_epoch_bump() {
         SourceCreditStateV16::EMPTY
     );
     market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_reactivate_rejects_remaining_insurance_budget_without_mutation() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.deposit_domain_insurance_not_atomic(2, 700).unwrap();
+        market.deposit_domain_insurance_not_atomic(3, 300).unwrap();
+        market.retire_empty_asset_not_atomic(1, 3).unwrap();
+    }
+    assert_eq!(markets[1].engine.insurance_domain_budget_long.get(), 700);
+    assert_eq!(markets[1].engine.insurance_domain_budget_short.get(), 300);
+    assert_eq!(header.insurance_domain_budget_remaining_total.get(), 1_000);
+    let header_before = header;
+    let slot_before = markets[1].engine;
+
+    assert_eq!(
+        header.activate_empty_market_slot_not_atomic(1, &mut markets[1], 100, 4),
+        Err(V16Error::LockActive),
+        "reactivation must not drop a remaining domain budget the header still counts"
+    );
+    assert_eq!(header, header_before);
+    assert_eq!(markets[1].engine, slot_before);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.validate_shape().unwrap();
+    market.withdraw_domain_insurance_not_atomic(2, 700).unwrap();
+    assert_eq!(
+        market
+            .header
+            .activate_empty_market_slot_not_atomic(1, &mut market.markets[1], 100, 4),
+        Err(V16Error::LockActive),
+        "the short budget still blocks reuse"
+    );
+    market.withdraw_domain_insurance_not_atomic(3, 300).unwrap();
+    market
+        .header
+        .activate_empty_market_slot_not_atomic(1, &mut market.markets[1], 100, 4)
+        .unwrap();
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        0
+    );
+    assert_eq!(market.header.insurance.get(), 0);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_activate_rejects_disabled_slot_insurance_budget_without_mutation() {
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(3, 3, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 3, 0).unwrap();
+    let mut sentinel = EngineAssetSlotV16Account::default();
+    sentinel.insurance_domain_budget_long = V16PodU128::new(MAX_VAULT_TVL);
+    sentinel.insurance_domain_budget_short = V16PodU128::new(MAX_VAULT_TVL);
+    let mut markets = vec![
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(1u64, sentinel),
+        Market::new(2u64, EngineAssetSlotV16Account::empty_for_market(0)),
+    ];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    header
+        .activate_empty_market_slot_not_atomic(1, &mut markets[1], 100, 2)
+        .expect("the uncounted MAX_VAULT_TVL sentinel does not block activation");
+    assert_eq!(markets[1].engine.insurance_domain_budget_long.get(), 0);
+    assert_eq!(markets[1].engine.insurance_domain_budget_short.get(), 0);
+
+    for domain in [4, 5] {
+        MarketGroupV16ViewMut::new(&mut header, &mut markets)
+            .deposit_domain_insurance_not_atomic(domain, 1_000)
+            .unwrap();
+        assert_eq!(header.insurance_domain_budget_remaining_total.get(), 1_000);
+        let header_before = header;
+        let slot_before = markets[2].engine;
+        assert_eq!(
+            header.activate_empty_market_slot_not_atomic(2, &mut markets[2], 100, 3),
+            Err(V16Error::LockActive),
+            "activation must not drop domain {domain}'s budget while the header counts it"
+        );
+        assert_eq!(header, header_before);
+        assert_eq!(markets[2].engine, slot_before);
+        MarketGroupV16ViewMut::new(&mut header, &mut markets)
+            .withdraw_domain_insurance_not_atomic(domain, 1_000)
+            .unwrap();
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .header
+        .activate_empty_market_slot_not_atomic(2, &mut market.markets[2], 100, 3)
+        .unwrap();
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        0
+    );
+    assert_eq!(market.header.insurance.get(), 0);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_rejected_reactivation_keeps_terminal_insurance_retirement_live() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_domain_insurance_not_atomic(2, 1_000)
+        .unwrap();
+    market.retire_empty_asset_not_atomic(1, 3).unwrap();
+    assert_eq!(
+        market
+            .header
+            .activate_empty_market_slot_not_atomic(1, &mut market.markets[1], 100, 4),
+        Err(V16Error::LockActive)
+    );
+
+    market.resolve_market_not_atomic(5).unwrap();
+    market
+        .withdraw_domain_insurance_not_atomic(2, 1_000)
+        .unwrap();
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Ok(0)
+    );
+    assert_eq!(
+        (
+            market.header.vault.get(),
+            market.header.insurance.get(),
+            market.header.insurance_domain_budget_remaining_total.get()
+        ),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn v16_restart_keeps_domain_budget_through_terminal_retirement() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_domain_insurance_not_atomic(2, 1_000)
+        .unwrap();
+    market.retire_empty_asset_not_atomic(1, 3).unwrap();
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(1, 100, 4)
+        .unwrap();
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        1_000
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        1_000
+    );
+    market.validate_shape().unwrap();
+
+    market.resolve_market_not_atomic(5).unwrap();
+    market
+        .withdraw_domain_insurance_not_atomic(2, 1_000)
+        .unwrap();
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Ok(0)
+    );
+    assert_eq!(
+        (
+            market.header.vault.get(),
+            market.header.insurance.get(),
+            market.header.insurance_domain_budget_remaining_total.get()
+        ),
+        (0, 0, 0)
+    );
 }
 
 #[test]
@@ -11041,4 +11233,218 @@ fn v16_legless_asset_after_bankrupt_liquidation_of_last_leg_resets() {
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
+}
+
+fn lapsing_counterparty_backing_fixture(
+    now_slot: u64,
+) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 251);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.deposit_not_atomic(&mut account, 100).unwrap();
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(0, 5, 10)
+            .unwrap();
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut account, 0, 2)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, now_slot, 100, 0, true)
+            .unwrap();
+    }
+    (header, markets)
+}
+
+#[test]
+fn v16_backing_withdraw_rejects_lapsed_fresh_bucket_without_mutation() {
+    for now_slot in [10, 11, 1_000] {
+        let (mut header, mut markets) = lapsing_counterparty_backing_fixture(now_slot);
+        let bucket = markets[0].engine.backing_long.try_to_runtime().unwrap();
+        assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+        assert_eq!(bucket.expiry_slot, 10);
+        assert_eq!(header.current_slot.get(), now_slot);
+        let header_before = header;
+        let slot_before = markets[0].engine;
+
+        let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+            .withdraw_fresh_counterparty_backing_not_atomic(0, 3);
+
+        assert_eq!(result, Err(V16Error::Stale), "now_slot={now_slot}");
+        assert_eq!(header, header_before, "now_slot={now_slot}");
+        assert_eq!(markets[0].engine, slot_before, "now_slot={now_slot}");
+    }
+}
+
+#[test]
+fn v16_backing_withdraw_after_expiry_keeps_forfeited_principal() {
+    let (mut header, mut markets) = lapsing_counterparty_backing_fixture(10);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+    let c_tot_before = market.header.c_tot.get();
+    let insurance_before = market.header.insurance.get();
+    let earnings_before = market.header.backing_provider_earnings_total.get();
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        5 * BOUND_SCALE
+    );
+
+    market
+        .expire_source_backing_bucket_not_atomic(0, 10)
+        .unwrap();
+
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.status, BackingBucketStatusV16::Expired);
+    assert_eq!(bucket.fresh_unliened_backing_num, 0);
+    let source = market.markets[0].engine.source_credit_long;
+    assert_eq!(source.fresh_reserved_backing_num.get(), 0);
+    assert_eq!(source.credit_rate_num.get(), 0);
+    // The 5 forfeited atoms stay in the vault outside every senior class, so
+    // the junior residual grows by exactly the lapsed principal.
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
+    assert_eq!(market.header.vault.get(), vault_before);
+    assert_eq!(market.header.c_tot.get(), c_tot_before);
+    assert_eq!(market.header.insurance.get(), insurance_before);
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        earnings_before
+    );
+
+    let header_before = *market.header;
+    let slot_before = market.markets[0].engine;
+    assert_eq!(
+        market.withdraw_fresh_counterparty_backing_not_atomic(0, 3),
+        Err(V16Error::LockActive)
+    );
+    assert_eq!(*market.header, header_before);
+    assert_eq!(market.markets[0].engine, slot_before);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_backing_withdraw_before_expiry_still_releases_principal() {
+    let (mut header, mut markets) = lapsing_counterparty_backing_fixture(9);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let vault_before = market.header.vault.get();
+
+    market
+        .withdraw_fresh_counterparty_backing_not_atomic(0, 3)
+        .unwrap();
+
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+    assert_eq!(bucket.expiry_slot, 10);
+    assert_eq!(bucket.fresh_unliened_backing_num, 2 * BOUND_SCALE);
+    let source = market.markets[0].engine.source_credit_long;
+    assert_eq!(source.fresh_reserved_backing_num.get(), 2 * BOUND_SCALE);
+    assert_eq!(source.credit_rate_num.get(), CREDIT_RATE_SCALE);
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        2 * BOUND_SCALE
+    );
+    assert_eq!(market.header.vault.get(), vault_before - 3);
+    market.validate_shape().unwrap();
+}
+
+fn lapsed_backing_haircut_receipt_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+) {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 252);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(0, 6, 10)
+            .unwrap();
+        market.resolve_market_not_atomic(1).unwrap();
+        market.advance_resolved_slot_not_atomic(20).unwrap();
+    }
+    // Ledger and receipt are built directly (as
+    // v16_resolved_payout_topup_finishes_receipt_without_overpaying does): the
+    // snapshot held one junior atom for a face-4 claim, already paid at 1/4.
+    // A real capture sets payout_snapshot equal to snapshot_residual
+    // (src/v16.rs initialize_resolved_payout_ledger_if_needed), so mirror it.
+    header.payout_snapshot_captured = 1;
+    header.payout_snapshot = V16PodU128::new(1);
+    header.resolved_payout_ledger =
+        ResolvedPayoutLedgerV16Account::from_runtime(&ResolvedPayoutLedgerV16 {
+            snapshot_residual: 1,
+            terminal_claim_exact_receipts_num: 4 * BOUND_SCALE,
+            terminal_claim_bound_unreceipted_num: 0,
+            current_payout_rate_num: BOUND_SCALE,
+            current_payout_rate_den: 4 * BOUND_SCALE,
+            snapshot_slot: 1,
+            payout_halted: false,
+            finalized: false,
+        });
+    account_header.resolved_payout_receipt =
+        ResolvedPayoutReceiptV16Account::from_runtime(&ResolvedPayoutReceiptV16 {
+            present: true,
+            prior_bound_contribution_num: 4 * BOUND_SCALE,
+            live_released_face_at_receipt: 0,
+            terminal_positive_claim_face: 4,
+            paid_effective: 1,
+            finalized: false,
+        });
+    (header, markets, account_header)
+}
+
+#[test]
+fn v16_lapsed_backing_cannot_be_withdrawn_from_under_a_haircut_receipt() {
+    for withdraw_first in [false, true] {
+        let (mut header, mut markets, mut account_header) =
+            lapsed_backing_haircut_receipt_fixture();
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.validate_shape().unwrap();
+        account.validate_with_market(&market.as_view()).unwrap();
+
+        let withdrawal =
+            withdraw_first.then(|| market.withdraw_fresh_counterparty_backing_not_atomic(0, 6));
+        let expiry = market.expire_source_backing_bucket_not_atomic(0, 20);
+        let topup = market.claim_resolved_payout_topup_not_atomic(&mut account);
+        let receipt = account
+            .header
+            .resolved_payout_receipt
+            .try_to_runtime()
+            .unwrap();
+
+        assert_eq!(topup, Ok(3), "withdraw_first={withdraw_first}");
+        assert_eq!(receipt.paid_effective, 4, "withdraw_first={withdraw_first}");
+        assert!(receipt.finalized, "withdraw_first={withdraw_first}");
+        assert_eq!(
+            withdrawal,
+            withdraw_first.then_some(Err(V16Error::Stale)),
+            "withdraw_first={withdraw_first}"
+        );
+        assert_eq!(expiry, Ok(()), "withdraw_first={withdraw_first}");
+        assert_eq!(
+            market
+                .header
+                .resolved_payout_ledger
+                .try_to_runtime()
+                .unwrap()
+                .snapshot_residual,
+            7,
+            "withdraw_first={withdraw_first}"
+        );
+        assert_eq!(
+            market.header.vault.get(),
+            3,
+            "withdraw_first={withdraw_first}"
+        );
+        market.validate_shape().unwrap();
+        account.validate_with_market(&market.as_view()).unwrap();
+    }
 }
