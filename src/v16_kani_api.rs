@@ -2581,6 +2581,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 }
 
+pub fn kani_resolved_junior_backing_need_num(
+    snapshot_residual: u128,
+    claim_bound_num: u128,
+) -> V16Result<u128> {
+    V16Core::kernel_resolved_junior_backing_need_num(snapshot_residual, claim_bound_num)
+}
+
 pub fn kani_receipt_can_still_gain(
     ledger: ResolvedPayoutLedgerV16,
     source_fresh_backing_total_num: u128,
