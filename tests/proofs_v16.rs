@@ -17338,6 +17338,121 @@ fn proof_v16_backing_expiry_kernel_rejects_every_ineligible_bucket() {
     assert_eq!(result, Err(V16Error::Stale));
 }
 
+// Expiry is a normalization, not a funding event, even when the source domain
+// also carries insurance, liens, receivable history and claims. Slots are
+// full-width. Amounts are whole atoms up to 15 each: the two credit-rate
+// divisions push u8 amounts past the 900s budget.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_backing_expiry_never_raises_available_backing_or_credit_rate() {
+    let unliened_raw: u8 = kani::any();
+    let liened_raw: u8 = kani::any();
+    let impaired_raw: u8 = kani::any();
+    let insurance_reserved_raw: u8 = kani::any();
+    let insurance_valid_raw: u8 = kani::any();
+    let insurance_impaired_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    let exact_raw: u8 = kani::any();
+    let receivable_raw: u8 = kani::any();
+    let spent_raw: u8 = kani::any();
+    let expiry_slot: u64 = kani::any();
+    let now_slot: u64 = kani::any();
+    kani::assume(
+        insurance_valid_raw as u16 + insurance_impaired_raw as u16 <= insurance_reserved_raw as u16,
+    );
+    kani::assume(unliened_raw <= 15 && liened_raw <= 15 && impaired_raw <= 15);
+    kani::assume(insurance_reserved_raw <= 15 && claim_raw <= 15);
+    kani::assume(exact_raw <= claim_raw);
+    kani::assume(receivable_raw <= spent_raw && spent_raw <= 15);
+
+    let unliened = unliened_raw as u128 * BOUND_SCALE;
+    let liened = liened_raw as u128 * BOUND_SCALE;
+    let impaired = impaired_raw as u128 * BOUND_SCALE;
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: unliened,
+        valid_liened_backing_num: liened,
+        impaired_liened_backing_num: impaired,
+        consumed_liened_backing_num: receivable_raw as u128 * BOUND_SCALE,
+        expiry_slot,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_raw as u128 * BOUND_SCALE,
+        exact_positive_claim_num: exact_raw as u128 * BOUND_SCALE,
+        fresh_reserved_backing_num: unliened + liened,
+        valid_liened_backing_num: liened,
+        impaired_liened_backing_num: impaired,
+        insurance_credit_reserved_num: insurance_reserved_raw as u128 * BOUND_SCALE,
+        valid_liened_insurance_num: insurance_valid_raw as u128 * BOUND_SCALE,
+        impaired_liened_insurance_num: insurance_impaired_raw as u128 * BOUND_SCALE,
+        credit_rate_num: CREDIT_RATE_SCALE,
+        credit_epoch: 1,
+        spent_backing_num: spent_raw as u128 * BOUND_SCALE,
+        provider_receivable_num: receivable_raw as u128 * BOUND_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let available_before = kani_available_backing_num_for_source_credit_state(source).unwrap();
+    let rate_before = kani_expected_source_credit_rate_num_for_state(source).unwrap();
+    let result = MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_expiry_delta(
+        bucket, source, now_slot,
+    );
+
+    kani::cover!(
+        expiry_slot > 0 && now_slot == expiry_slot - 1,
+        "one slot before expiry"
+    );
+    kani::cover!(now_slot == expiry_slot && unliened > 0, "exact expiry slot");
+    kani::cover!(
+        expiry_slot < u64::MAX && now_slot == expiry_slot + 1 && liened > 0,
+        "one slot after expiry"
+    );
+    kani::cover!(
+        now_slot >= expiry_slot && unliened > 0 && claim_raw > 0 && insurance_reserved_raw > 0,
+        "expiry under live claims and insurance credit"
+    );
+    if now_slot < expiry_slot {
+        assert_eq!(result, Err(V16Error::Stale));
+        return;
+    }
+    let (bucket_after, source_after) = result.unwrap();
+    let available_after = kani_available_backing_num_for_source_credit_state(source_after).unwrap();
+    let rate_after = kani_expected_source_credit_rate_num_for_state(source_after).unwrap();
+    assert_eq!(available_after, available_before - unliened);
+    assert!(rate_after <= rate_before);
+    kani::cover!(
+        rate_after < rate_before,
+        "expiry strictly lowers the credit rate"
+    );
+    kani::cover!(
+        rate_before > 0 && rate_before < CREDIT_RATE_SCALE,
+        "haircut rate before expiry"
+    );
+    kani::cover!(claim_raw == 0, "zero claim keeps the full rate");
+    assert_eq!(source_after.impaired_liened_backing_num, impaired + liened);
+    assert_eq!(bucket_after.impaired_liened_backing_num, impaired + liened);
+    assert_eq!(source_after.fresh_reserved_backing_num, 0);
+    assert_eq!(source_after.valid_liened_backing_num, 0);
+    assert_eq!(bucket_after.fresh_unliened_backing_num, 0);
+    assert_eq!(bucket_after.valid_liened_backing_num, 0);
+    assert_eq!(
+        SourceCreditStateV16 {
+            fresh_reserved_backing_num: source.fresh_reserved_backing_num,
+            valid_liened_backing_num: source.valid_liened_backing_num,
+            impaired_liened_backing_num: source.impaired_liened_backing_num,
+            ..source_after
+        },
+        source
+    );
+    if impaired + liened == 0 {
+        assert_eq!(bucket_after.status, BackingBucketStatusV16::Expired);
+    } else {
+        assert_eq!(bucket_after.status, BackingBucketStatusV16::Impaired);
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
