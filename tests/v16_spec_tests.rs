@@ -21,7 +21,9 @@ use percolator::{
 use percolator::{
     AssetStateV16, MarketModeV16, PermissionlessCrankActionV16, PermissionlessCrankRequestV16,
 };
-use percolator::{ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
+use percolator::{
+    ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, MAX_VAULT_TVL, POS_SCALE, SOCIAL_LOSS_DEN,
+};
 
 const FUNDING_COUNTER_PRICE: u64 = 1_000_000;
 const FUNDING_COUNTER_RATE_E9: i128 = 10_000;
@@ -3543,6 +3545,196 @@ fn v16_retire_and_reactivate_empty_asset_after_source_credit_epoch_bump() {
         SourceCreditStateV16::EMPTY
     );
     market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_reactivate_rejects_remaining_insurance_budget_without_mutation() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.deposit_domain_insurance_not_atomic(2, 700).unwrap();
+        market.deposit_domain_insurance_not_atomic(3, 300).unwrap();
+        market.retire_empty_asset_not_atomic(1, 3).unwrap();
+    }
+    assert_eq!(markets[1].engine.insurance_domain_budget_long.get(), 700);
+    assert_eq!(markets[1].engine.insurance_domain_budget_short.get(), 300);
+    assert_eq!(header.insurance_domain_budget_remaining_total.get(), 1_000);
+    let header_before = header;
+    let slot_before = markets[1].engine;
+
+    assert_eq!(
+        header.activate_empty_market_slot_not_atomic(1, &mut markets[1], 100, 4),
+        Err(V16Error::LockActive),
+        "reactivation must not drop a remaining domain budget the header still counts"
+    );
+    assert_eq!(header, header_before);
+    assert_eq!(markets[1].engine, slot_before);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.validate_shape().unwrap();
+    market.withdraw_domain_insurance_not_atomic(2, 700).unwrap();
+    assert_eq!(
+        market
+            .header
+            .activate_empty_market_slot_not_atomic(1, &mut market.markets[1], 100, 4),
+        Err(V16Error::LockActive),
+        "the short budget still blocks reuse"
+    );
+    market.withdraw_domain_insurance_not_atomic(3, 300).unwrap();
+    market
+        .header
+        .activate_empty_market_slot_not_atomic(1, &mut market.markets[1], 100, 4)
+        .unwrap();
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        0
+    );
+    assert_eq!(market.header.insurance.get(), 0);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_activate_rejects_disabled_slot_insurance_budget_without_mutation() {
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(3, 3, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 3, 0).unwrap();
+    let mut sentinel = EngineAssetSlotV16Account::default();
+    sentinel.insurance_domain_budget_long = V16PodU128::new(MAX_VAULT_TVL);
+    sentinel.insurance_domain_budget_short = V16PodU128::new(MAX_VAULT_TVL);
+    let mut markets = vec![
+        Market::new(0u64, EngineAssetSlotV16Account::default()),
+        Market::new(1u64, sentinel),
+        Market::new(2u64, EngineAssetSlotV16Account::empty_for_market(0)),
+    ];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    header
+        .activate_empty_market_slot_not_atomic(1, &mut markets[1], 100, 2)
+        .expect("the uncounted MAX_VAULT_TVL sentinel does not block activation");
+    assert_eq!(markets[1].engine.insurance_domain_budget_long.get(), 0);
+    assert_eq!(markets[1].engine.insurance_domain_budget_short.get(), 0);
+
+    for domain in [4, 5] {
+        MarketGroupV16ViewMut::new(&mut header, &mut markets)
+            .deposit_domain_insurance_not_atomic(domain, 1_000)
+            .unwrap();
+        assert_eq!(header.insurance_domain_budget_remaining_total.get(), 1_000);
+        let header_before = header;
+        let slot_before = markets[2].engine;
+        assert_eq!(
+            header.activate_empty_market_slot_not_atomic(2, &mut markets[2], 100, 3),
+            Err(V16Error::LockActive),
+            "activation must not drop domain {domain}'s budget while the header counts it"
+        );
+        assert_eq!(header, header_before);
+        assert_eq!(markets[2].engine, slot_before);
+        MarketGroupV16ViewMut::new(&mut header, &mut markets)
+            .withdraw_domain_insurance_not_atomic(domain, 1_000)
+            .unwrap();
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .header
+        .activate_empty_market_slot_not_atomic(2, &mut market.markets[2], 100, 3)
+        .unwrap();
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        0
+    );
+    assert_eq!(market.header.insurance.get(), 0);
+    market.validate_shape().unwrap();
+}
+
+#[test]
+fn v16_rejected_reactivation_keeps_terminal_insurance_retirement_live() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_domain_insurance_not_atomic(2, 1_000)
+        .unwrap();
+    market.retire_empty_asset_not_atomic(1, 3).unwrap();
+    assert_eq!(
+        market
+            .header
+            .activate_empty_market_slot_not_atomic(1, &mut market.markets[1], 100, 4),
+        Err(V16Error::LockActive)
+    );
+
+    market.resolve_market_not_atomic(5).unwrap();
+    market
+        .withdraw_domain_insurance_not_atomic(2, 1_000)
+        .unwrap();
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Ok(0)
+    );
+    assert_eq!(
+        (
+            market.header.vault.get(),
+            market.header.insurance.get(),
+            market.header.insurance_domain_budget_remaining_total.get()
+        ),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn v16_restart_keeps_domain_budget_through_terminal_retirement() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market
+        .deposit_domain_insurance_not_atomic(2, 1_000)
+        .unwrap();
+    market.retire_empty_asset_not_atomic(1, 3).unwrap();
+    market
+        .restart_empty_asset_preserving_insurance_budget_not_atomic(1, 100, 4)
+        .unwrap();
+    assert_eq!(
+        market.markets[1]
+            .engine
+            .asset
+            .try_to_runtime()
+            .unwrap()
+            .lifecycle,
+        AssetLifecycleV16::Active
+    );
+    assert_eq!(
+        market.markets[1].engine.insurance_domain_budget_long.get(),
+        1_000
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        1_000
+    );
+    market.validate_shape().unwrap();
+
+    market.resolve_market_not_atomic(5).unwrap();
+    market
+        .withdraw_domain_insurance_not_atomic(2, 1_000)
+        .unwrap();
+    assert_eq!(
+        market.retire_terminal_unbudgeted_insurance_not_atomic(),
+        Ok(0)
+    );
+    assert_eq!(
+        (
+            market.header.vault.get(),
+            market.header.insurance.get(),
+            market.header.insurance_domain_budget_remaining_total.get()
+        ),
+        (0, 0, 0)
+    );
 }
 
 #[test]
