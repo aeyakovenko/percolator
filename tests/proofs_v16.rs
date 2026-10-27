@@ -618,6 +618,8 @@ fn proof_v16_zero_oi_residue_reset_is_complete_independent_and_value_neutral() {
     let header_before = header;
     let slot_before = markets[0].engine;
     let asset_before = asset;
+    let legless =
+        asset_before.stored_pos_count_long == 0 && asset_before.stored_pos_count_short == 0;
     let reset_long = asset_before.oi_eff_long_q == 0
         && asset_before.stored_pos_count_long != 0
         && asset_before.pending_obligation_count_long == 0
@@ -645,6 +647,11 @@ fn proof_v16_zero_oi_residue_reset_is_complete_independent_and_value_neutral() {
     }
 
     let mut expected_asset = asset_before;
+    if legless {
+        // An asset with no stored leg first drops its unowned effective OI.
+        expected_asset.oi_eff_long_q = 0;
+        expected_asset.oi_eff_short_q = 0;
+    }
     if reset_long {
         expected_asset.k_epoch_start_long = asset_before.k_long;
         expected_asset.f_epoch_start_long_num = asset_before.f_long_num;
@@ -708,8 +715,12 @@ fn proof_v16_zero_oi_residue_reset_is_complete_independent_and_value_neutral() {
         "only the short residue side resets"
     );
     kani::cover!(
-        !reset_long && !reset_short,
+        !reset_long && !reset_short && !legless,
         "a non-residue state is a full no-op"
+    );
+    kani::cover!(
+        legless && (asset_before.oi_eff_long_q != 0 || asset_before.oi_eff_short_q != 0),
+        "a legless asset drops its unowned effective OI"
     );
     kani::cover!(
         reset_long && asset_before.mode_long == SideModeV16::DrainOnly,
