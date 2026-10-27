@@ -1164,6 +1164,8 @@ There is NO internal teardown that returns reserved backing to the loser's `C_to
 
 Across reserve→realize the loser's senior capital funds the winner's payout: `C_tot` nets zero, `counterparty_backing_principal` nets zero, `V` is flat throughout. Across impair/expiry the forfeited principal lands, atom for atom, in `junior_residual_pool` (proven: `counterparty_lien_impair`/`backing_expiry` are value-neutral on `V/C_tot/I` and raise the residual pool by exactly the forfeit). `counterparty_backing_principal` MUST NOT be counted in the junior residual pool used for haircut support or the resolved payout snapshot — atoms are in exactly one of the two classes at any time, and only forfeit/cure transitions move them from principal to pool.
 
+**Resolved surplus withdrawal.** After resolution, forfeited Fresh principal raises the common payout rate of haircut receipts, so external withdrawal must not take backing that a claim could still receive. `withdraw_resolved_counterparty_backing_surplus_not_atomic` allows a domain's provider to withdraw, at any time before expiry and regardless of open portfolios, at most `floor((fresh_unliened − reserve) / BOUND_SCALE)` atoms, where `reserve = positive_claim_bound_num(domain) + need`. Here `need = BOUND_SCALE · max(0, ceil(B / BOUND_SCALE) − R)`, with `R` the ledger's `snapshot_residual` and `B = terminal_claim_exact_receipts_num + terminal_claim_bound_unreceipted_num`. Before snapshot capture, it uses `(residual(), pnl_pos_bound_tot_num)`, only on a payout-ready market with no source claims. Otherwise the call is rejected. The ordinary withdrawal checks still apply. Because `R` never falls and `B` never rises after capture, `need` never grows. Expiry of the kept reserve alone sets the rate to full, so every claimant receives exactly what expiry of the whole bucket would have paid, and the surplus would only have reached insurance recredit or unallocated surplus. Each bucket keeps the whole `need` independently of other buckets, so the rule does not depend on provider exit order. The kept reserve stays pledged until it expires or the need falls to zero.
+
 Flow-proof obligation is keyed on the FUNDED-STOCK DEBIT, not on the destination. A transition that debits NO funded stock class (no `V`, `I`, or `C_tot` movement) — the impair/expiry forfeits AND counterparty residual cure — does not emit a `TokenValueFlowProof`: it only reclassifies `counterparty_backing_principal` into the derived closing class `junior_residual_pool` (which has no independent counter, so a flow credit to it would be double bookkeeping). These moves are proven by their `ReservationEncumbranceProof`, the lockstepped O(1) aggregate delta on `counterparty_backing_principal`, and the residual identity re-checked at the same transition (the impair/expiry witnesses assert all three; the counterparty-cure ledger advance asserts the partition equality). Every transition that DOES debit a funded stock class still requires its balanced `TokenValueFlowProof`: reserve (`C_tot` debit, transit `ExplicitBackedLoss`), realize and external withdrawal (`C_tot`/`V`), insurance cure (`I` debit, transit `CloseInsuranceSpent`), and external deposit. This is why requirement 12's "MUST … through a balanced `TokenValueFlowProof`" applies to the insurance-backed cure (it debits `I`) but not to the counterparty cure (pure reclassification): the two cure branches differ precisely in whether a funded stock class moves.
 
 Note the typing distinction that makes this legal under requirement 13's flow-proof ban: the BANNED labels are the `BackingBucket` ENCUMBRANCE counters (`fresh_unliened_backing_num`, `valid_liened_backing_num`, …), which are an encumbrance VIEW proven only by `ReservationEncumbranceProof` and never appear in a `TokenValueFlowProof`. The `counterparty_backing_principal` STOCK class and the `CloseCounterpartyCreditConsumed` / `ExplicitBackedLoss` TRANSIT classes are quote-atom value classes and DO appear in flow proofs and stock reconciliation. Backing realization therefore moves real quote value through declared value classes, while the encumbrance bookkeeping moves in lockstep through the separate reservation proof.
@@ -1393,6 +1395,43 @@ refresh first settles all newly observed negative K/F deltas in canonical
 source-domain order, then settles nonnegative deltas. This rule MUST NOT
 aggregate losses across source domains or assign backing to a last-touched
 domain.
+
+Same-leg reversal netting (Live). Before the support-and-burn rule above, a
+newly observed negative K/F delta on a leg whose loss books into domain
+`L = (asset, side)` MUST first cancel, one for one, the account's unliened
+positive face in the twin domain `T = (asset, opposite(side))` -- the unrealized
+gain of that same leg, which was never paid out. The netted amount is
+`n = min(loss, positive face, unliened T claim)`; the account's T claim, T's
+claim bound and `PNL` all fall by exactly `n`, and only `loss - n` continues
+through support-and-burn and capital reservation. Pricing this give-back at
+T's stored credit rate would make the outcome depend on whether T's losers
+were settled before the reversal. Together with the cancelled face, T's
+counterparty backing that supported it moves to `L`:
+`n * available_T / claims_T`, computed in one step and rounded UP to a whole
+atom toward `L` (never more than `n`; capped by T's unliened bucket principal),
+so `L` is never left a fractional atom short while the remainder strands in T. T books it exactly as ordinary
+support consumption (spent / provider-receivable / consumed lockstep, so
+provider attribution is unchanged) and it re-enters as fresh principal of `L`
+rather than the junior pool (`V`, `C_tot`, `I` flat). A Fresh `L` bucket keeps
+its expiry; an Empty/Expired one inherits T's bucket expiry, so the moved
+principal never outlives its source commitment and a provider top-up at that
+expiry still merges. The
+transfer is skipped (netting still applies) when either side of the asset has
+a pending domain-loss barrier, T's bucket is stale, or L's bucket cannot accept
+fresh principal; skipping only raises T's rate. Because the transfer is at or
+below T's rate, no remaining T claimant's rate falls, no account is credited
+more than its position's PnL, and liened or impaired T face is never netted.
+After that netting, still before support-and-burn: (a) unliened face in any
+other source domain whose credit rate is exactly 1 is realized one for one, its
+counterparty backing (booked as ordinary support consumption) moving to `L`;
+(b) if the account holds unliened face in a domain with credit rate below 1,
+the whole remaining loss is paid from free capital directly into `L` backing
+(`C_tot -= x`, `L` principal `+= x`, `V` flat) and that face is kept -- it is
+never burned afterwards by the same loss. Burning it instead
+would spend `x / rate` face for `x` of loss and strand the difference in the
+source domain once its losers book. Health is unchanged either way (`C - x +
+P*r` equals `C + (P - x/r)*r`). Only a loss beyond free capital, or one met by
+liened face, takes the support-and-burn path.
 
 If full B settlement is too large, partial settlement is allowed. While `B_remaining > 0`, no user-favorable action may continue.
 
