@@ -542,3 +542,62 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    /// The common resolved payout rate never pays more than the snapshot residual
+    /// or any face, and exact bounds leave under one atom of floor residue per
+    /// claimant. The Kani version is
+    /// `proof_v16_resolved_payout_rate_never_pays_more_than_snapshot_residual`.
+    #[test]
+    fn resolved_payout_rate_never_pays_more_than_snapshot_residual(
+        faces in proptest::collection::vec(0u128..=1_000_000_000u128, 1..=6),
+        receipted in 0usize..=6,
+        slack in prop_oneof![Just(0u128), 1u128..=1_000_000_000u128],
+        residual in 0u128..=10_000_000_000u128,
+    ) {
+        let receipted = receipted.min(faces.len());
+        let exact: u128 = faces[..receipted].iter().sum();
+        let unreceipted = faces[receipted..].iter().sum::<u128>() + slack;
+        let (ledger, _) = MarketGroupV16ViewMut::<u64>::kani_kernel_credit_post_snapshot_residual(
+            ResolvedPayoutLedgerV16 {
+                snapshot_residual: residual,
+                terminal_claim_exact_receipts_num: exact * BOUND_SCALE,
+                terminal_claim_bound_unreceipted_num: unreceipted * BOUND_SCALE,
+                snapshot_slot: 1,
+                ..ResolvedPayoutLedgerV16::EMPTY
+            },
+            residual,
+            0,
+        )
+        .unwrap();
+        let mut paid = 0u128;
+        for &face in &faces {
+            let gross =
+                MarketGroupV16ViewMut::<u64>::kani_resolved_receipt_claimable_against_ledger(
+                    ResolvedPayoutReceiptV16 {
+                        present: true,
+                        prior_bound_contribution_num: face * BOUND_SCALE,
+                        live_released_face_at_receipt: 0,
+                        terminal_positive_claim_face: face,
+                        paid_effective: 0,
+                        finalized: face == 0,
+                    },
+                    ledger,
+                )
+                .unwrap();
+            prop_assert!(gross <= face);
+            paid += gross;
+        }
+        let total_face: u128 = faces.iter().sum();
+        prop_assert!(paid <= residual);
+        if slack == 0 {
+            if residual >= total_face {
+                prop_assert_eq!(paid, total_face);
+            } else {
+                prop_assert!(residual - paid < faces.len() as u128);
+            }
+        }
+    }
+}
