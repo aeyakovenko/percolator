@@ -8430,12 +8430,26 @@ impl MarketGroupV16HeaderAccount {
         }
         match previous_asset.lifecycle {
             AssetLifecycleV16::Disabled => {
-                if previous_asset.market_id != 0 {
+                // A canonical disabled slot may carry the MAX_VAULT_TVL sentinel, which
+                // insurance_domain_budget_remaining_total does not count. Any other budget
+                // is counted there, and the rebuild below would drop it.
+                if previous_asset.market_id != 0
+                    || !matches!(slot.insurance_domain_budget_long.get(), 0 | MAX_VAULT_TVL)
+                    || !matches!(slot.insurance_domain_budget_short.get(), 0 | MAX_VAULT_TVL)
+                {
                     return Err(V16Error::LockActive);
                 }
             }
             AssetLifecycleV16::Retired => {
-                if previous_asset.market_id == 0 || previous_asset.retired_slot == 0 {
+                // Retirement keeps an unspent domain budget on the slot and
+                // insurance_domain_budget_remaining_total still counts it. The
+                // rebuild below would drop it, so reuse waits until it is
+                // withdrawn; the restart path carries it over instead.
+                if previous_asset.market_id == 0
+                    || previous_asset.retired_slot == 0
+                    || slot.insurance_domain_budget_long.get() != 0
+                    || slot.insurance_domain_budget_short.get() != 0
+                {
                     return Err(V16Error::LockActive);
                 }
                 let elapsed = now_slot
@@ -8820,7 +8834,11 @@ impl<'a, T> MarketGroupV16View<'a, T> {
             || asset.kf_epoch_short > asset.slot_last
             || asset.oi_eff_long_q > crate::MAX_OI_SIDE_Q
             || asset.oi_eff_short_q > crate::MAX_OI_SIDE_Q
-            || (mode == MarketModeV16::Live && asset.oi_eff_long_q != asset.oi_eff_short_q)
+            // Recovery forfeits exit one side at a time: a cleared leg and a retained
+            // zero-basis obligation both remove effective OI from their own side only.
+            || (mode == MarketModeV16::Live
+                && asset.lifecycle != AssetLifecycleV16::Recovery
+                && asset.oi_eff_long_q != asset.oi_eff_short_q)
             || asset.stale_account_count_long > asset.stored_pos_count_long
             || asset.stale_account_count_short > asset.stored_pos_count_short
             || asset.loss_weight_sum_long > SOCIAL_LOSS_DEN
@@ -9189,13 +9207,45 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Lifetime granted to engine-created counterparty backing, and the bounded
+    /// post-resolution wait for any provider backing (#219).
+    fn backing_freshness_horizon_slots(&self) -> u64 {
+        let config = &self.header.config;
+        config
+            .max_accrual_dt_slots
+            .get()
+            .max(config.h_max.get())
+            .max(config.max_bankrupt_close_lifetime_slots.get())
+            .max(1)
+    }
+
+    /// Resolved markets bound every backing lifetime at
+    /// `resolved_slot + backing_freshness_horizon_slots`. A provider-chosen far
+    /// expiry must not keep underfunded resolved receipts or terminal wind-down
+    /// waiting forever; past the deadline the bucket lapses with natural-expiry
+    /// semantics. Live markets and expiries already inside the horizon are
+    /// unchanged.
+    fn effective_backing_expiry_slot(&self, expiry_slot: u64) -> V16Result<u64> {
+        if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
+            return Ok(expiry_slot);
+        }
+        let deadline = self
+            .header
+            .resolved_slot
+            .get()
+            .saturating_add(self.backing_freshness_horizon_slots());
+        Ok(expiry_slot.min(deadline))
+    }
+
     fn backing_bucket_for_domain(&self, domain: usize) -> V16Result<BackingBucketV16> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let slot = self.markets[asset_index].engine_slot();
-        match side {
+        let mut bucket = match side {
             SideV16::Long => slot.backing_long.try_to_runtime(),
             SideV16::Short => slot.backing_short.try_to_runtime(),
-        }
+        }?;
+        bucket.expiry_slot = self.effective_backing_expiry_slot(bucket.expiry_slot)?;
+        Ok(bucket)
     }
 
     fn set_backing_bucket_for_domain(
@@ -9353,17 +9403,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Ok(bucket.expiry_slot);
         }
-        let config = self.header.config.try_to_runtime_shape()?;
-        let freshness_horizon = config
-            .max_accrual_dt_slots
-            .max(config.h_max)
-            .max(config.max_bankrupt_close_lifetime_slots)
-            .max(1);
-        self.header
+        self.header.config.try_to_runtime_shape()?;
+        let expiry_slot = self
+            .header
             .current_slot
             .get()
-            .checked_add(freshness_horizon)
-            .ok_or(V16Error::CounterOverflow)
+            .checked_add(self.backing_freshness_horizon_slots())
+            .ok_or(V16Error::CounterOverflow)?;
+        self.effective_backing_expiry_slot(expiry_slot)
     }
 
     fn add_fresh_counterparty_backing_unchecked(
@@ -9433,6 +9480,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// (`credit_rate_num == CREDIT_RATE_SCALE`) after the principal leaves. This
     /// prevents a backing provider from withdrawing principal that currently
     /// supports outstanding source-credit claims.
+    ///
+    /// A Fresh bucket at or past its expiry slot is rejected with `Stale`, the
+    /// same check `validate_source_domain_ledger_current` makes before a
+    /// credit-rate read: expiry forfeits lapsed principal to the junior pool, so
+    /// it cannot be withdrawn ahead of `expire_source_backing_bucket_not_atomic`.
     pub fn withdraw_fresh_counterparty_backing_not_atomic(
         &mut self,
         domain: usize,
@@ -9443,8 +9495,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::InvalidConfig);
         }
         let backing_num = V16Core::bound_num_from_amount(amount)?;
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status == BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot <= self.header.current_slot.get()
+        {
+            return Err(V16Error::Stale);
+        }
         let (bucket, source) = V16Core::prepare_counterparty_backing_withdraw_delta(
-            self.backing_bucket_for_domain(domain)?,
+            bucket,
             self.source_credit_for_domain(domain)?,
             backing_num,
         )?;
@@ -9579,7 +9637,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             (short_domain, &slot.backing_short),
         ] {
             if decode_backing_bucket_status(bucket.status)? == BackingBucketStatusV16::Fresh
-                && bucket.expiry_slot.get() <= now_slot
+                && self.effective_backing_expiry_slot(bucket.expiry_slot.get())? <= now_slot
             {
                 return Ok(Some(domain));
             }
@@ -11947,13 +12005,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         } else {
                             BackingBucketStatusV16::Empty
                         },
-                        slot.backing_long.expiry_slot.get(),
+                        self.effective_backing_expiry_slot(slot.backing_long.expiry_slot.get())?,
                         if inspect_backing {
                             short_status
                         } else {
                             BackingBucketStatusV16::Empty
                         },
-                        slot.backing_short.expiry_slot.get(),
+                        self.effective_backing_expiry_slot(slot.backing_short.expiry_slot.get())?,
                         authenticated_slot,
                         recreditable,
                     )
@@ -13139,13 +13197,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 } else {
                     (backing_num, 0)
                 };
+            let mut residual_backing = residual_backing;
             if source_backing_num != 0 {
                 let expiry_slot = self.fresh_counterparty_backing_expiry_slot(domain)?;
-                self.add_fresh_counterparty_backing_unchecked(
-                    domain,
-                    source_backing_num,
-                    expiry_slot,
-                )?;
+                if expiry_slot > self.header.current_slot.get() {
+                    self.add_fresh_counterparty_backing_unchecked(
+                        domain,
+                        source_backing_num,
+                        expiry_slot,
+                    )?;
+                } else {
+                    // Past the resolved backing horizon new backing would lapse
+                    // on creation; route it where that expiry would send it.
+                    residual_backing = backing;
+                }
             }
             self.credit_post_snapshot_residual_not_atomic(residual_backing)?;
         }
@@ -15208,6 +15273,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         }
                     };
                 if advanced {
+                    self.begin_zero_oi_residue_resets(asset_index)?;
                     self.validate_shape_audit_scan()?;
                     account.validate_with_market(&self.as_view())?;
                     return Ok(AutoCrankResultV16 {
@@ -16785,6 +16851,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 domain_side,
                 count.checked_sub(1).ok_or(V16Error::CounterUnderflow)?,
             )?;
+            self.begin_legless_asset_resets(asset_index)?;
         }
         account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
         account.header.health_cert.valid = 0;
@@ -17067,6 +17134,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     fn begin_zero_oi_residue_resets(&mut self, asset_index: usize) -> V16Result<()> {
+        self.drop_unowned_side_oi(asset_index)?;
         let asset = self.asset_state(asset_index)?;
         let reset_long = asset.oi_eff_long_q == 0
             && asset.pending_obligation_count_long == 0
@@ -17081,6 +17149,51 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         if reset_short {
             self.begin_full_drain_reset_inner(asset_index, SideV16::Short)?;
+        }
+        Ok(())
+    }
+
+    // Effective OI on a side with no stored leg belongs to no one: residue of the
+    // floored A index. It breaks spec.md:953 (OI with no loss weight), keeps the
+    // side from its zero-OI reset, and cannot leave through a leg clear, which
+    // refuses more than the leg's raw basis. Before resolution it is dropped only
+    // once the whole asset is legless and neither side has a pending loss
+    // barrier, so both sides reach zero together and Live OI stays equal; after
+    // resolution each legless side without a barrier drops its own. A barrier
+    // side keeps its OI because its reset would be refused.
+    fn drop_unowned_side_oi(&mut self, asset_index: usize) -> V16Result<()> {
+        let mut asset = self.asset_state(asset_index)?;
+        let resolved = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved;
+        if !resolved && (asset.stored_pos_count_long != 0 || asset.stored_pos_count_short != 0) {
+            return Ok(());
+        }
+        let barrier_long = self.has_pending_domain_loss_barrier(asset_index, SideV16::Long)?;
+        let barrier_short = self.has_pending_domain_loss_barrier(asset_index, SideV16::Short)?;
+        if !resolved && (barrier_long || barrier_short) {
+            return Ok(());
+        }
+        let drop_long =
+            asset.stored_pos_count_long == 0 && asset.oi_eff_long_q != 0 && !barrier_long;
+        let drop_short =
+            asset.stored_pos_count_short == 0 && asset.oi_eff_short_q != 0 && !barrier_short;
+        if !drop_long && !drop_short {
+            return Ok(());
+        }
+        if drop_long {
+            asset.oi_eff_long_q = 0;
+        }
+        if drop_short {
+            asset.oi_eff_short_q = 0;
+        }
+        self.set_asset_state(asset_index, asset)
+    }
+
+    // A legless asset waits on a pending loss barrier for its side resets, so a
+    // site that clears a barrier starts them once the asset has no stored leg.
+    fn begin_legless_asset_resets(&mut self, asset_index: usize) -> V16Result<()> {
+        let asset = self.asset_state(asset_index)?;
+        if asset.stored_pos_count_long == 0 && asset.stored_pos_count_short == 0 {
+            self.begin_zero_oi_residue_resets(asset_index)?;
         }
         Ok(())
     }
@@ -18897,6 +19010,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let (asset_index, side) = self.domain_asset_side(domain)?;
         self.set_pending_domain_loss_barrier_count(asset_index, side, count - 1)?;
+        self.begin_legless_asset_resets(asset_index)?;
         account.header.close_progress =
             CloseProgressLedgerV16Account::from_runtime(&CloseProgressLedgerV16 {
                 active: false,
@@ -19255,6 +19369,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if retiring_source.source_claim_impaired_num.get() != 0 {
             return Ok(true);
         }
+        let asset = self.asset_state(asset_index)?;
+        // In Resolved mode the only path that can fund this domain is a
+        // loss-side leg crystallizing its K/F loss into backing. An Empty
+        // bucket never expires, so once no loss-side leg or obligation remains
+        // the domain can receive no further backing: every zero-conversion
+        // claim is final and may retire independently. Requiring the other
+        // claimants' remainder to be zero here would deadlock co-claimants.
+        let loss_side_counts = match loss_side {
+            SideV16::Long => (
+                asset.stored_pos_count_long,
+                asset.stale_account_count_long,
+                asset.pending_obligation_count_long,
+            ),
+            SideV16::Short => (
+                asset.stored_pos_count_short,
+                asset.stale_account_count_short,
+                asset.pending_obligation_count_short,
+            ),
+        };
+        if bucket.status == BackingBucketStatusV16::Empty
+            && decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+            && loss_side_counts == (0, 0, 0)
+        {
+            return Ok(true);
+        }
         let source = self.source_credit_for_domain(domain)?;
         let remaining_claim_num = source
             .positive_claim_bound_num
@@ -19263,7 +19402,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if remaining_claim_num != 0 {
             return Ok(false);
         }
-        let asset = self.asset_state(asset_index)?;
         let creditor_counts = match opposite_side(loss_side) {
             SideV16::Long => (
                 asset.stored_pos_count_long,
@@ -20035,9 +20173,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut positive_pnl_forfeited = 0u128;
         if net < 0 {
             loss_settled = net.unsigned_abs();
+            let negative_before = account.header.pnl.get().min(0).unsigned_abs();
             let support = self.apply_haircut_bounded_close_loss_to_pnl(account, loss_settled)?;
             support_consumed = support.support_consumed;
             junior_face_burned = support.junior_face_burned;
+            // prog#450: the capital-covered part of a newly realized forfeit
+            // loss backs the opposite side's claims on this leg's domain, as in
+            // ordinary K/F settlement -- but only up to what those claims can
+            // own: the domain's current support gap plus the provider receivable
+            // its backing already advanced to them. A forfeit has no matched
+            // receiver of its own (the opposite side may itself have forfeited
+            // or been paid), so any excess stays unassigned residual instead of
+            // becoming ownerless provider-withdrawable backing.
+            let negative_after = account.header.pnl.get().min(0).unsigned_abs();
+            let loss_domain = self.insurance_domain_index(asset_index, leg.side)?;
+            let owned_atoms = self.forfeit_loss_backing_capacity_atoms(loss_domain)?;
+            let new_loss = negative_after.saturating_sub(negative_before);
+            let reserved_after = negative_before
+                .checked_add(new_loss.min(owned_atoms))
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(
+                account,
+                loss_domain,
+                negative_before,
+                reserved_after,
+            )?;
         } else {
             positive_pnl_forfeited = net as u128;
         }
@@ -20062,6 +20222,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             support_consumed,
             junior_face_burned,
         ))
+    }
+
+    /// Whole atoms of new loss-created backing that existing claimants of
+    /// `domain` own: unbacked claim bound plus the provider receivable already
+    /// advanced against this domain (refilled first by a backing add).
+    fn forfeit_loss_backing_capacity_atoms(&self, domain: usize) -> V16Result<u128> {
+        let source = self.source_credit_for_domain(domain)?;
+        let support_gap_num = source.positive_claim_bound_num.saturating_sub(
+            V16Core::available_backing_num_for_source_credit_state(source)?,
+        );
+        let owned_num = support_gap_num
+            .checked_add(source.provider_receivable_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(owned_num / BOUND_SCALE)
     }
 
     fn leg_has_exhausted_effective_oi(asset: AssetStateV16, leg: PortfolioLegV16) -> bool {
@@ -20141,6 +20315,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.retain_leg_as_pending_obligation(account, asset_index)?;
             } else {
                 self.clear_leg(account, asset_index)?;
+                self.begin_zero_oi_residue_resets(asset_index)?;
             }
             return Ok(DeadLegForfeitOutcomeV16 {
                 detached: !retain,
@@ -20290,6 +20465,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 detached = false;
             } else {
                 self.clear_leg(account, asset_index)?;
+                self.begin_zero_oi_residue_resets(asset_index)?;
             }
         }
         self.validate_shape()?;
