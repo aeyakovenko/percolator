@@ -9319,22 +9319,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // Consumed counterparty backing (spent grows by exactly the consumed amount) is
         // attributed to loser-paid backing first; once that is exhausted the provider is
         // fronting. Positive net loser backing never exceeds what the domain still holds
-        // (a withdrawal, expiry or impairment takes provider principal first).
+        // (a withdrawal, expiry or impairment takes provider principal first). Raw field
+        // access, and no work at all for a domain without loser-paid backing or fronting
+        // when nothing was consumed.
         let consumed = source
             .spent_backing_num
             .saturating_sub(old_source.spent_backing_num);
-        let net = Self::saturating_i128(self.loser_backing_net_num(domain)?, consumed, false);
-        let cap = i128::try_from(source.fresh_reserved_backing_num).unwrap_or(i128::MAX);
-        let net = if net > 0 { net.min(cap) } else { net };
         let slot = self.markets[asset_index].engine_slot_mut();
-        match side {
-            SideV16::Long => {
-                slot.source_credit_long = SourceCreditStateV16Account::from_runtime(&source);
-                slot.loser_backing_net_long_num = V16PodI128::new(net);
-            }
-            SideV16::Short => {
-                slot.source_credit_short = SourceCreditStateV16Account::from_runtime(&source);
-                slot.loser_backing_net_short_num = V16PodI128::new(net);
+        let (credit_field, net_field) = match side {
+            SideV16::Long => (
+                &mut slot.source_credit_long,
+                &mut slot.loser_backing_net_long_num,
+            ),
+            SideV16::Short => (
+                &mut slot.source_credit_short,
+                &mut slot.loser_backing_net_short_num,
+            ),
+        };
+        *credit_field = SourceCreditStateV16Account::from_runtime(&source);
+        let old_net = net_field.get();
+        if consumed != 0 || old_net > 0 {
+            let net = Self::saturating_i128(old_net, consumed, false);
+            let net = if net > 0 {
+                net.min(i128::try_from(source.fresh_reserved_backing_num).unwrap_or(i128::MAX))
+            } else {
+                net
+            };
+            if net != old_net {
+                *net_field = V16PodI128::new(net);
             }
         }
         Ok(())
@@ -9369,19 +9381,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         expiry_slot: u64,
     ) -> V16Result<()> {
         self.add_fresh_counterparty_backing_unchecked(domain, amount, expiry_slot)?;
-        let net = Self::saturating_i128(self.loser_backing_net_num(domain)?, amount, true);
-        let cap = i128::try_from(
-            self.source_credit_for_domain_shape(domain)?
-                .fresh_reserved_backing_num,
-        )
-        .unwrap_or(i128::MAX);
+        // No cap needed: fresh reserved backing grew by `amount` and the previous net was
+        // either <= the previous fresh reserved backing or negative.
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let slot = self.markets[asset_index].engine_slot_mut();
-        let net = V16PodI128::new(net.min(cap));
-        match side {
-            SideV16::Long => slot.loser_backing_net_long_num = net,
-            SideV16::Short => slot.loser_backing_net_short_num = net,
-        }
+        let field = match side {
+            SideV16::Long => &mut slot.loser_backing_net_long_num,
+            SideV16::Short => &mut slot.loser_backing_net_short_num,
+        };
+        *field = V16PodI128::new(Self::saturating_i128(field.get(), amount, true));
         Ok(())
     }
 
