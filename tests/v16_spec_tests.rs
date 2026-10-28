@@ -10898,6 +10898,183 @@ fn v16_side_oi_cap_rejects_net_increase_over_cap_via_resize() {
     );
 }
 
+/// Builds a market whose aggregate side OI is ABOVE MAX_OI_SIDE_Q, the state
+/// a pre-#225 engine could reach via an unchecked same-side resize (a
+/// clean-room repro reached 1.2e14 with cap 1e14). Master has no public path
+/// to it any more, so it is constructed by fixture writes: pair A/B opens
+/// `HALF_Q`, then the asset's side OI is temporarily lowered by `HALF_Q - 1`
+/// so pair C/D can open `HALF_Q` through the real trade path (which therefore
+/// maintains every leg, count and loss-weight field), and the hidden OI is
+/// written back. Only `oi_eff_{long,short}_q` are written directly; they end
+/// equal to the true sum of the four legs' effective quantities. The
+/// production `validate_shape` (no `audit-scan`) accepts the result; the
+/// full audit scan rejects any over-cap side, so these tests are compiled
+/// out under `audit-scan`.
+#[cfg(not(feature = "audit-scan"))]
+fn side_oi_over_cap_fixture(
+    seed: u8,
+) -> (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    [PortfolioAccountV16Account; 4],
+) {
+    const HALF_Q: u128 = 60_000_000_000_000; // 2 * HALF_Q = 1.2e14 > cap
+    const DEPOSIT: u128 = 1_000_000_000_000;
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut hdrs = [
+        account_fixture(1, seed),
+        account_fixture(1, seed + 1),
+        account_fixture(1, seed + 2),
+        account_fixture(1, seed + 3),
+    ];
+    {
+        let [ah, bh, ch, dh] = &mut hdrs;
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut a = PortfolioV16ViewMut::new(ah);
+        let mut b = PortfolioV16ViewMut::new(bh);
+        let mut c = PortfolioV16ViewMut::new(ch);
+        let mut d = PortfolioV16ViewMut::new(dh);
+        for acct in [&mut a, &mut b, &mut c, &mut d] {
+            market.deposit_not_atomic(acct, DEPOSIT).unwrap();
+        }
+        side_oi_cap_trade(&mut market, &mut a, &mut b, HALF_Q).unwrap();
+        let hidden = HALF_Q - 1;
+        let mut asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.oi_eff_long_q -= hidden;
+        asset.oi_eff_short_q -= hidden;
+        market.markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        side_oi_cap_trade(&mut market, &mut c, &mut d, HALF_Q).unwrap();
+        let mut asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.oi_eff_long_q += hidden;
+        asset.oi_eff_short_q += hidden;
+        market.markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(asset.oi_eff_long_q, 2 * HALF_Q);
+        assert_eq!(asset.oi_eff_short_q, 2 * HALF_Q);
+        assert!(asset.oi_eff_long_q > percolator::MAX_OI_SIDE_Q);
+        assert_eq!(asset.stored_pos_count_long, 2);
+        assert_eq!(asset.stored_pos_count_short, 2);
+        market.validate_shape().unwrap();
+        for acct in [&a, &b, &c, &d] {
+            acct.validate_with_market(&market.as_view()).unwrap();
+        }
+    }
+    (header, markets, hdrs)
+}
+
+/// A market already above the side-OI cap (legacy pre-#225 state) must not be
+/// frozen: a fill that SHRINKS both over-cap sides is accepted, as is an
+/// OI-neutral handoff that leaves them unchanged.
+#[cfg(not(feature = "audit-scan"))]
+#[test]
+fn v16_side_oi_cap_admits_reducing_trade_from_over_cap_state() {
+    const HALF_Q: u128 = 60_000_000_000_000;
+    let (mut header, mut markets, mut hdrs) = side_oi_over_cap_fixture(60);
+    let mut e_header = account_fixture(1, 70);
+    let [ah, bh, ch, dh] = &mut hdrs;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(ah); // long
+    let mut b = PortfolioV16ViewMut::new(bh); // short
+    let mut c = PortfolioV16ViewMut::new(ch); // long
+    let mut _d = PortfolioV16ViewMut::new(dh); // short
+    let mut e = PortfolioV16ViewMut::new(&mut e_header);
+    market
+        .deposit_not_atomic(&mut e, 1_000_000_000_000)
+        .unwrap();
+    let oi = |m: &MarketGroupV16ViewMut<'_, u64>| {
+        let asset = m.markets[0].engine.asset.try_to_runtime().unwrap();
+        (asset.oi_eff_long_q, asset.oi_eff_short_q)
+    };
+
+    // Short B buys back 1_000 from long A: both sides shrink, still over cap.
+    side_oi_cap_trade(&mut market, &mut b, &mut a, 1_000)
+        .expect("reducing fill on an over-cap market must be admitted");
+    assert_eq!(oi(&market), (2 * HALF_Q - 1_000, 2 * HALF_Q - 1_000));
+
+    // OI-neutral handoff: fresh long E buys from long C; sides unchanged.
+    side_oi_cap_trade(&mut market, &mut e, &mut c, 500)
+        .expect("OI-neutral handoff on an over-cap market must be admitted");
+    assert_eq!(oi(&market), (2 * HALF_Q - 1_000, 2 * HALF_Q - 1_000));
+
+    // Full close of the A/B pair.
+    side_oi_cap_trade(&mut market, &mut b, &mut a, HALF_Q - 1_000)
+        .expect("full close on an over-cap market must be admitted");
+    assert_eq!(oi(&market), (HALF_Q, HALF_Q));
+    market.validate_shape().unwrap();
+}
+
+/// From an over-cap state, any fill that GROWS an over-cap side is still
+/// rejected, whether by attaching a fresh leg or by same-side resize.
+#[cfg(not(feature = "audit-scan"))]
+#[test]
+fn v16_side_oi_cap_rejects_growth_from_over_cap_state() {
+    let (mut header, mut markets, mut hdrs) = side_oi_over_cap_fixture(80);
+    let mut e_header = account_fixture(1, 90);
+    let mut f_header = account_fixture(1, 91);
+    let [ah, bh, _ch, _dh] = &mut hdrs;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(ah);
+    let mut b = PortfolioV16ViewMut::new(bh);
+    let mut e = PortfolioV16ViewMut::new(&mut e_header);
+    let mut f = PortfolioV16ViewMut::new(&mut f_header);
+    market
+        .deposit_not_atomic(&mut e, 1_000_000_000_000)
+        .unwrap();
+    market
+        .deposit_not_atomic(&mut f, 1_000_000_000_000)
+        .unwrap();
+    // `_not_atomic` APIs do not roll back on Err (the program's transaction
+    // revert does), so each rejected fill is checked independently.
+    assert_eq!(
+        side_oi_cap_trade(&mut market, &mut a, &mut b, 1),
+        Err(V16Error::InvalidLeg),
+        "same-side resize growth of an over-cap side"
+    );
+    assert_eq!(
+        side_oi_cap_trade(&mut market, &mut e, &mut f, 1),
+        Err(V16Error::InvalidLeg),
+        "fresh attach growing an over-cap side"
+    );
+}
+
+/// A fill that grows a side exactly TO the cap is admitted; one unit past it
+/// is rejected (grow-only gate boundary).
+#[test]
+fn v16_side_oi_cap_growth_to_exact_cap_admitted_past_cap_rejected() {
+    const DEPOSIT: u128 = 1_000_000_000_000;
+    let (mut header, mut markets) = market_fixture(1, 1);
+    let mut a_header = account_fixture(1, 100);
+    let mut b_header = account_fixture(1, 101);
+    let mut c_header = account_fixture(1, 102);
+    let mut d_header = account_fixture(1, 103);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut a = PortfolioV16ViewMut::new(&mut a_header);
+    let mut b = PortfolioV16ViewMut::new(&mut b_header);
+    let mut c = PortfolioV16ViewMut::new(&mut c_header);
+    let mut d = PortfolioV16ViewMut::new(&mut d_header);
+    for acct in [&mut a, &mut b, &mut c, &mut d] {
+        market.deposit_not_atomic(acct, DEPOSIT).unwrap();
+    }
+    let half = percolator::MAX_OI_SIDE_Q / 2;
+    side_oi_cap_trade(&mut market, &mut a, &mut b, half).unwrap();
+    side_oi_cap_trade(
+        &mut market,
+        &mut c,
+        &mut d,
+        percolator::MAX_OI_SIDE_Q - half - 1,
+    )
+    .unwrap();
+    // cap - 1 -> cap via same-side resize: admitted.
+    side_oi_cap_trade(&mut market, &mut c, &mut d, 1).expect("growth to exactly the cap");
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(asset.oi_eff_long_q, percolator::MAX_OI_SIDE_Q);
+    assert_eq!(
+        side_oi_cap_trade(&mut market, &mut a, &mut b, 1),
+        Err(V16Error::InvalidLeg)
+    );
+    market.validate_shape().unwrap();
+}
+
 // ---- a loss landing on lapsed backing must not revert refresh ----
 
 #[test]

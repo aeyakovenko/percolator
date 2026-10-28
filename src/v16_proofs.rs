@@ -162,6 +162,16 @@ fn proof_account_kf_settlement_plan_insert_preserves_order_and_multiset() {
 // are not contract-checkable in this toolchain — their delta semantics stay
 // with the standalone suite proofs, which fix the operands concretely.
 
+// Grow-only aggregate side-OI cap: Err(InvalidLeg) iff some side ends above
+// MAX_OI_SIDE_Q AND the fill grew it (post > pre). Fully symbolic u128 inputs.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_trade_side_oi_cap_gate)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_trade_side_oi_cap_gate() {
+    let _ =
+        V16Core::kernel_trade_side_oi_cap_gate(kani::any(), kani::any(), kani::any(), kani::any());
+}
+
 #[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::prepare_counterparty_lien_consume_delta)]
 #[kani::unwind(8)]
