@@ -544,3 +544,167 @@ fn s2_expired_bucket_loss_refills_provider_receivable_only() {
     }
     assert_eq!(payouts, vec![1_005_000, 1_005_000]);
 }
+
+/// Engine mirror of the wrapper's INV-067 "late debtor source cap" scenario.
+/// Asset 0: winners 0 (face 100) and 2 (face 150) attribute claims to provider
+/// domain 1 in Live; their debtors 1 and 3 first crystallize in Resolved. Asset
+/// 1: winner 4 (face 200) is underpaid -- its debtor 5 pays only 50 and domain
+/// 3 holds 1 of backing -- so it ends as a haircut junior receipt holder. One
+/// asset-0 winner converts before the provider's expiry, the other waits past
+/// it and is demoted to junior.
+///
+/// The late debt beyond the support gap now joins the provider's domain instead
+/// of the snapshot residual, but the provider cannot take it out while junior
+/// receipts are underpaid (the resolved surplus keeps the junior need, and
+/// receipts wait for Fresh backing), so it reaches the same receipt holders
+/// when the bucket lapses. Every owner's final payout equals the residual-
+/// entitlement model exactly; only the receipt's first installment is smaller
+/// and is topped up after expiry.
+#[test]
+fn s2_late_debt_beyond_gap_still_reaches_underpaid_receipt_holders() {
+    const FACE: [u128; 6] = [100, 0, 150, 0, 200, 0];
+    const DEPOSITS: [u128; 6] = [1_000, 200, 1_000, 300, 1_000, 50];
+    const EXPIRY: u64 = 21;
+    for debtors in [[1usize, 3], [3, 1]] {
+        for offset in [-1i128, 0, 1] {
+            for converter in [0usize, 2] {
+                for landing in [EXPIRY, EXPIRY + 1] {
+                    let backing = (250 - FACE[debtors[0] - 1])
+                        .checked_add_signed(offset)
+                        .unwrap();
+                    let mut cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
+                    cfg.initial_margin_bps = 1_000;
+                    cfg.maintenance_margin_bps = 1_000;
+                    cfg.max_price_move_bps_per_slot = 500;
+                    let mut header =
+                        MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 2, 0).unwrap();
+                    let mut markets = vec![
+                        Market::new(0, EngineAssetSlotV16Account::default()),
+                        Market::new(0, EngineAssetSlotV16Account::default()),
+                    ];
+                    header
+                        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+                        .unwrap();
+                    header
+                        .activate_empty_asset_slot_not_atomic(1, &mut markets[1].engine, 100, 2)
+                        .unwrap();
+                    let mut hs: Vec<_> = (0..6).map(|i| account_fixture(100 + i as u8)).collect();
+                    let mut m = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+                    let mut a: Vec<_> = hs.iter_mut().map(PortfolioV16ViewMut::new).collect();
+                    m.accrue_asset_to_not_atomic(0, 2, 100, 0, true).unwrap();
+                    for i in 0..6 {
+                        m.deposit_not_atomic(&mut a[i], DEPOSITS[i]).unwrap();
+                    }
+                    m.deposit_fresh_counterparty_backing_not_atomic(
+                        PROVIDER_DOMAIN,
+                        backing,
+                        EXPIRY,
+                    )
+                    .unwrap();
+                    m.deposit_fresh_counterparty_backing_not_atomic(3, 1, 13)
+                        .unwrap();
+                    for w in [0usize, 2, 4] {
+                        let (l, r) = a.split_at_mut(w + 1);
+                        m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                            &mut l[w],
+                            &mut r[0],
+                            TradeRequestV16 {
+                                asset_index: usize::from(w == 4),
+                                size_q: (FACE[w] / 50 * POS_SCALE) as i128,
+                                exec_price: 100,
+                                fee_bps: 0,
+                            },
+                        )
+                        .unwrap();
+                    }
+                    for (step, mark) in (105..=150u64).step_by(5).enumerate() {
+                        let slot = 3 + step as u64;
+                        for asset in 0..2 {
+                            m.set_asset_raw_oracle_target_not_atomic(asset, mark)
+                                .unwrap();
+                            m.accrue_asset_to_not_atomic(asset, slot, mark, 0, true)
+                                .unwrap();
+                        }
+                        for actor in [5usize, 4, 0, 2] {
+                            m.full_account_refresh_not_atomic(&mut a[actor]).unwrap();
+                        }
+                    }
+                    {
+                        let (l, r) = a.split_at_mut(5);
+                        m.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                            &mut l[4],
+                            &mut r[0],
+                            TradeRequestV16 {
+                                asset_index: 1,
+                                size_q: -((FACE[4] / 50 * POS_SCALE) as i128),
+                                exec_price: 150,
+                                fee_bps: 0,
+                            },
+                        )
+                        .unwrap();
+                    }
+                    for i in [0, 2, 4] {
+                        assert_eq!(a[i].header.pnl.get(), FACE[i] as i128);
+                    }
+                    assert_eq!(a[5].header.pnl.get(), -150);
+                    m.resolve_market_not_atomic(13).unwrap();
+                    m.advance_resolved_slot_not_atomic(15).unwrap();
+
+                    let waiting = 2 - converter;
+                    let mut paid = [0u128; 6];
+                    let mut close = |m: &mut MarketGroupV16ViewMut<'_, u64>,
+                                     a: &mut PortfolioV16ViewMut<'_>,
+                                     i: usize| {
+                        if let ResolvedCloseOutcomeV16::Closed { payout } =
+                            m.close_resolved_account_not_atomic(a, 0).unwrap()
+                        {
+                            paid[i] += payout;
+                        }
+                    };
+                    close(&mut m, &mut a[debtors[0]], debtors[0]);
+                    close(&mut m, &mut a[debtors[1]], debtors[1]);
+                    // Both debts joined the funded provider domain in full.
+                    assert_eq!(fresh_atoms(&m, PROVIDER_DOMAIN), backing + 250);
+                    // Stages 3-7: bankrupt debtor, waiting winner detaches, converter
+                    // realizes at rate 1, then the asset-1 winner's junior receipt.
+                    for actor in [5, waiting, converter, 4, 4] {
+                        close(&mut m, &mut a[actor], actor);
+                    }
+                    assert_eq!(m.header.payout_snapshot_captured, 1);
+                    // Underpaid receipts pin the provider bucket: no surplus.
+                    assert_eq!(
+                        m.resolved_counterparty_backing_surplus(PROVIDER_DOMAIN)
+                            .unwrap(),
+                        0
+                    );
+                    assert_conserved(&m, false);
+                    m.advance_resolved_slot_not_atomic(landing).unwrap();
+                    close(&mut m, &mut a[waiting], waiting);
+                    close(&mut m, &mut a[waiting], waiting);
+                    for _ in 0..2 {
+                        if let Ok(p) = m.claim_resolved_payout_topup_not_atomic(&mut a[4]) {
+                            paid[4] += p;
+                        }
+                    }
+                    let den = FACE[4] + FACE[waiting];
+                    let pool = backing + DEPOSITS[5] + 1 + FACE[waiting];
+                    let junior = |i: usize| FACE[i] * pool.min(den) / den;
+                    let expected: [u128; 6] = std::array::from_fn(|i| match i {
+                        1 | 3 => DEPOSITS[i] - FACE[i - 1],
+                        5 => 0,
+                        _ if i == converter => DEPOSITS[i] + FACE[i],
+                        _ => DEPOSITS[i] + junior(i),
+                    });
+                    assert_eq!(
+                        paid, expected,
+                        "debtors={debtors:?} backing={backing} converter={converter} landing={landing}"
+                    );
+                    // Only surplus and rounding dust remain; the provider got nothing.
+                    assert_eq!(m.header.source_fresh_backing_total_num.get(), 0);
+                    assert!(m.header.vault.get() <= 2);
+                    assert_conserved(&m, false);
+                }
+            }
+        }
+    }
+}
