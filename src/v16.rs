@@ -13861,11 +13861,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             let (source_backing_num, residual_backing) =
                 if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
-                    let source = self.source_credit_for_domain(domain)?;
-                    let support_gap_num = source.positive_claim_bound_num.saturating_sub(
-                        V16Core::available_backing_num_for_source_credit_state(source)?,
-                    );
-                    let source_backing_num = backing_num.min(support_gap_num);
+                    let source_backing_num =
+                        backing_num.min(self.resolved_loss_backing_capacity_num(domain)?);
                     let residual_num = backing_num
                         .checked_sub(source_backing_num)
                         .ok_or(V16Error::CounterUnderflow)?;
@@ -13917,6 +13914,55 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Self::record_account_residual_crystallized_loss(account, backing)?;
         account.header.health_cert.valid = 0;
         Ok(())
+    }
+
+    /// Resolved mode, non-terminal domain: how much newly crystallized
+    /// capital-backed loss (BOUND_SCALE units) the loss domain's backing owns.
+    ///
+    /// Every opposite-side gain is realized against this domain, and resolved
+    /// realization waits until no stored position, stale account or negative
+    /// PnL remains, so all K/F losses are booked before any claim converts or
+    /// demotes. While the domain holds live funded backing (a Fresh, unlapsed
+    /// bucket with unliened principal or an outstanding provider receivable)
+    /// that backing is what pays those claims, present and still-unsettled
+    /// alike (resolved realization only begins after this loss is booked; see
+    /// `resolved_positive_payout_ready`). The loss therefore goes to the domain
+    /// in full, exactly as in Live mode: it refills the provider receivable
+    /// first and otherwise replaces the principal the claims will draw, so the
+    /// provider is repaid instead of the loss stranding in the junior pool
+    /// (and being retired at terminal) while the provider funds the winners.
+    ///
+    /// Without live funded backing (Empty, Expired, lapsed) only what existing
+    /// claimants own is credited: the support gap plus the
+    /// provider receivable already advanced against the domain (as for a
+    /// forfeit, `forfeit_loss_backing_capacity_atoms`). The excess stays junior
+    /// residual rather than becoming ownerless provider-withdrawable backing.
+    ///
+    /// Impaired buckets and buckets past the resolved backing horizon never get
+    /// here with backing (the caller routes them to junior residual).
+    ///
+    /// Once the payout snapshot is captured, issued receipts price against the
+    /// post-snapshot residual, so only the support gap is credited (unchanged).
+    fn resolved_loss_backing_capacity_num(&self, domain: usize) -> V16Result<u128> {
+        let source = self.source_credit_for_domain(domain)?;
+        let support_gap_num = source.positive_claim_bound_num.saturating_sub(
+            V16Core::available_backing_num_for_source_credit_state(source)?,
+        );
+        if decode_bool(self.header.payout_snapshot_captured)? {
+            return Ok(support_gap_num);
+        }
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status == BackingBucketStatusV16::Fresh
+            && bucket.expiry_slot > self.header.current_slot.get()
+            && (bucket.fresh_unliened_backing_num != 0
+                || bucket.valid_liened_backing_num != 0
+                || source.provider_receivable_num != 0)
+        {
+            return Ok(u128::MAX);
+        }
+        support_gap_num
+            .checked_add(source.provider_receivable_num)
+            .ok_or(V16Error::ArithmeticOverflow)
     }
 
     fn kf_target_for_leg(
