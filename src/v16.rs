@@ -8014,6 +8014,15 @@ pub struct EngineAssetSlotV16Account {
     pub backing_short: BackingBucketV16Account,
     pub insurance_reservation_long: InsuranceCreditReservationV16Account,
     pub insurance_reservation_short: InsuranceCreditReservationV16Account,
+    /// Per source domain (long-loser, short-loser), BOUND_SCALE-scaled: provider principal
+    /// behind the domain's fresh reserved backing `R` (deposits, less withdrawals and
+    /// forfeits, which take provider principal first; floored at 0). Consumption draws
+    /// loser-paid backing first and a loser payment first repays what the provider fronted,
+    /// so `R - P` is the unconsumed loser-paid backing (`P > R`: the provider has fronted
+    /// `P - R` not yet repaid). Only loser-paid backing may follow a cancelled same-leg
+    /// reversal face to another domain. Loser payments and consumption never write it.
+    pub provider_principal_long_num: V16PodU128,
+    pub provider_principal_short_num: V16PodU128,
 }
 
 fn asset_contributes_to_loss_stale_summary(asset: AssetStateV16) -> bool {
@@ -8084,6 +8093,8 @@ impl EngineAssetSlotV16Account {
             && self.insurance_domain_spent_short.get() == 0
             && self.pending_domain_loss_barrier_long.get() == 0
             && self.pending_domain_loss_barrier_short.get() == 0
+            && self.provider_principal_long_num.get() == 0
+            && self.provider_principal_short_num.get() == 0
             && Self::source_credit_account_is_empty_for_activation(self.source_credit_long)
             && Self::source_credit_account_is_empty_for_activation(self.source_credit_short)
             && Self::backing_bucket_account_is_empty_for_activation(self.backing_long)
@@ -8130,6 +8141,8 @@ impl EngineAssetSlotV16Account {
             insurance_reservation_short: InsuranceCreditReservationV16Account::from_runtime(
                 &InsuranceCreditReservationV16::EMPTY,
             ),
+            provider_principal_long_num: V16PodU128::default(),
+            provider_principal_short_num: V16PodU128::default(),
         }
     }
 
@@ -8646,6 +8659,8 @@ impl MarketGroupV16HeaderAccount {
             insurance_reservation_short: InsuranceCreditReservationV16Account::from_runtime(
                 &InsuranceCreditReservationV16::EMPTY,
             ),
+            provider_principal_long_num: V16PodU128::default(),
+            provider_principal_short_num: V16PodU128::default(),
         };
         self.next_market_id = V16PodU64::new(next_market_id);
         self.current_slot = V16PodU64::new(now_slot);
@@ -9329,6 +9344,75 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Fresh reserved backing that leaves a domain without being consumed (a provider
+    /// withdrawal, expiry or impairment) takes provider principal first. Called by exactly
+    /// those three paths; consumption moves backing to `spent` and leaves principal alone.
+    fn release_provider_principal_after(
+        &mut self,
+        domain: usize,
+        reserved_before: u128,
+        reserved_after: u128,
+    ) -> V16Result<()> {
+        let left = reserved_before.saturating_sub(reserved_after);
+        if left == 0 {
+            return Ok(());
+        }
+        self.adjust_provider_principal_num(domain, left, false)
+    }
+
+    #[inline(never)]
+    fn adjust_provider_principal_num(
+        &mut self,
+        domain: usize,
+        amount: u128,
+        add: bool,
+    ) -> V16Result<()> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot_mut();
+        let field = match side {
+            SideV16::Long => &mut slot.provider_principal_long_num,
+            SideV16::Short => &mut slot.provider_principal_short_num,
+        };
+        let old = field.get();
+        *field = V16PodU128::new(if add {
+            old.saturating_add(amount)
+        } else {
+            old.saturating_sub(amount)
+        });
+        Ok(())
+    }
+
+    /// Unconsumed loser-paid counterparty backing of `domain`: fresh reserved backing
+    /// beyond provider principal (see
+    /// `EngineAssetSlotV16Account::provider_principal_long_num`).
+    fn loser_paid_backing_num(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        let (reserved, principal) = match side {
+            SideV16::Long => (
+                slot.source_credit_long.fresh_reserved_backing_num.get(),
+                slot.provider_principal_long_num.get(),
+            ),
+            SideV16::Short => (
+                slot.source_credit_short.fresh_reserved_backing_num.get(),
+                slot.provider_principal_short_num.get(),
+            ),
+        };
+        Ok(reserved.saturating_sub(principal))
+    }
+
+    /// Adds counterparty backing a loser paid into `domain` (a crystallized loss, not
+    /// provider principal): provider principal is unchanged, so it first repays what the
+    /// provider fronted, then counts as loser-paid backing.
+    fn add_loser_paid_counterparty_backing_unchecked(
+        &mut self,
+        domain: usize,
+        amount: u128,
+        expiry_slot: u64,
+    ) -> V16Result<()> {
+        self.add_fresh_counterparty_backing_unchecked(domain, amount, expiry_slot)
+    }
+
     /// Lifetime granted to engine-created counterparty backing, and the bounded
     /// post-resolution wait for any provider backing (#219).
     fn backing_freshness_horizon_slots(&self) -> u64 {
@@ -9580,6 +9664,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         expiry_slot: u64,
     ) -> V16Result<()> {
         self.add_fresh_counterparty_backing_unchecked(domain, amount, expiry_slot)?;
+        self.adjust_provider_principal_num(domain, amount, true)?;
         self.validate_shape()
     }
 
@@ -9600,6 +9685,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         let backing_num = V16Core::bound_num_from_amount(amount)?;
         self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
+        self.adjust_provider_principal_num(domain, backing_num, true)?;
         self.header.vault = V16PodU128::new(
             self.header
                 .vault
@@ -9638,9 +9724,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::Stale);
         }
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_backing_withdraw_delta(
             bucket,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             backing_num,
         )?;
         let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
@@ -9665,6 +9752,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         self.header.vault = V16PodU128::new(next_vault);
         self.validate_source_domain_ledger(domain)?;
@@ -9758,13 +9850,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             0
         };
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_backing_expiry_delta(
             self.backing_bucket_for_domain(domain)?,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             now_slot,
         )?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.refresh_source_credit_domain_after_mutation(domain)?;
         if snapshot_captured {
             let released = self
@@ -10075,9 +10173,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if amount == 0 {
             return Ok(());
         }
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_lien_impair_delta(
             self.backing_bucket_for_domain(domain)?,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             amount,
         )?;
         let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
@@ -10093,6 +10192,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         Ok(())
     }
@@ -13223,8 +13327,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///
     /// 1. same-leg reversal: the account's unliened face in the twin domain
     ///    `(asset, opposite(side))` -- that leg's never-paid gain -- cancels the
-    ///    loss one for one, moving floor(face * twin_rate) of twin backing to
-    ///    `loss_domain`;
+    ///    loss one for one, moving to `loss_domain` the twin backing behind that
+    ///    face that the twin's losers paid in (their regain is owed from
+    ///    `loss_domain`); provider-fronted twin backing stays with the provider;
     /// 2. fully backed face (rate 1) in any other source domain is realized one
     ///    for one, its backing moving to `loss_domain`;
     /// 3. if the account holds unliened face in a partially backed (rate < 1)
@@ -13326,7 +13431,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 } else {
                     batch.expiry_slot
                 };
-                self.add_fresh_counterparty_backing_unchecked(
+                self.add_loser_paid_counterparty_backing_unchecked(
                     loss_domain,
                     batch.transfer_num,
                     expiry_slot,
@@ -13481,7 +13586,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 V16Core::bound_num_from_amount(atoms)?.min(netted_num)
             }
         };
-        let transfer_num = owed_num.min(movable_num);
+        // The twin face is a gain the reversal itself undoes: only the twin's losers who
+        // paid into it regain anything, against `loss_domain`, so only their payment may
+        // follow the cancelled face -- the share of it behind this face. Backing a provider
+        // fronted (no loser paid it in; that loser's debt just vanished with the reversal)
+        // stays with the provider: the face is cancelled without moving it, which only
+        // raises the twin's rate. Rounded up toward the claimant domain, never past the
+        // loser-paid backing itself.
+        let loser_cap_num = if require_full_backing || owed_num == 0 {
+            owed_num
+        } else {
+            self.twin_loser_paid_share_num(
+                face_domain,
+                netted_num,
+                credit.positive_claim_bound_num,
+            )?
+        };
+        let transfer_num = owed_num.min(movable_num).min(loser_cap_num);
         if require_full_backing && transfer_num != netted_num {
             return Ok(());
         }
@@ -13518,6 +13639,35 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         batch.loss_left -= netted;
         batch.face_left -= netted;
         Ok(())
+    }
+
+    /// Loser-paid share of the twin backing behind `netted_num` of cancelled face:
+    /// ceil(netted * min(loser_paid, claims) / claims) whole atoms, never past the
+    /// loser-paid backing itself.
+    #[inline(never)]
+    fn twin_loser_paid_share_num(
+        &self,
+        face_domain: usize,
+        netted_num: u128,
+        claims: u128,
+    ) -> V16Result<u128> {
+        let loser_num = self.loser_paid_backing_num(face_domain)?;
+        if loser_num == 0 {
+            return Ok(0);
+        }
+        if claims <= loser_num {
+            return Ok(netted_num);
+        }
+        let atoms = checked_mul_div_ceil_u256(
+            U256::from_u128(netted_num),
+            U256::from_u128(loser_num),
+            U256::from_u128(claims)
+                .checked_mul(U256::from_u128(BOUND_SCALE))
+                .ok_or(V16Error::ArithmeticOverflow)?,
+        )
+        .and_then(|v| v.try_into_u128())
+        .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(V16Core::bound_num_from_amount(atoms)?.min(loser_num))
     }
 
     fn loss_bucket_accepts_fresh(&self, loss_domain: usize) -> V16Result<bool> {
@@ -13577,7 +13727,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )?
         .validate()?;
         let expiry_slot = self.fresh_counterparty_backing_expiry_slot(loss_domain)?;
-        self.add_fresh_counterparty_backing_unchecked(loss_domain, paid_num, expiry_slot)?;
+        self.add_loser_paid_counterparty_backing_unchecked(loss_domain, paid_num, expiry_slot)?;
         Self::record_account_residual_crystallized_loss(account, paid)?;
         account.header.health_cert.valid = 0;
         Ok(paid)
@@ -13900,7 +14050,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     Some(self.fresh_counterparty_backing_expiry_slot(domain)?)
                 };
                 if let Some(expiry_slot) = expiry_slot.filter(|expiry| *expiry > now) {
-                    self.add_fresh_counterparty_backing_unchecked(
+                    self.add_loser_paid_counterparty_backing_unchecked(
                         domain,
                         source_backing_num,
                         expiry_slot,
