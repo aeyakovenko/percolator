@@ -13940,7 +13940,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let bucket = self.backing_bucket_for_domain(domain)?;
         if bucket.status == BackingBucketStatusV16::Fresh
             && bucket.expiry_slot > self.header.current_slot.get()
-            && (bucket.fresh_unliened_backing_num != 0 || source.provider_receivable_num != 0)
+            && (bucket.fresh_unliened_backing_num != 0
+                || bucket.valid_liened_backing_num != 0
+                || source.provider_receivable_num != 0)
         {
             return Ok(u128::MAX);
         }
