@@ -9318,18 +9318,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let old_source = self.source_credit_for_domain_shape(domain)?;
         self.update_source_credit_aggregate_totals(old_source, source)?;
-        // Fresh reserved backing that left without being consumed (a withdrawal, expiry
-        // or impairment; consumption moves it to `spent` one for one) takes provider
-        // principal first. Additions never touch provider principal here (a provider
-        // deposit records its own).
-        let left_unconsumed = old_source
-            .fresh_reserved_backing_num
-            .saturating_add(old_source.spent_backing_num)
-            .saturating_sub(
-                source
-                    .fresh_reserved_backing_num
-                    .saturating_add(source.spent_backing_num),
-            );
         let slot = self.markets[asset_index].engine_slot_mut();
         match side {
             SideV16::Long => {
@@ -9339,10 +9327,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 slot.source_credit_short = SourceCreditStateV16Account::from_runtime(&source)
             }
         }
-        if left_unconsumed != 0 {
-            self.adjust_provider_principal_num(domain, left_unconsumed, false)?;
-        }
         Ok(())
+    }
+
+    /// Fresh reserved backing that leaves a domain without being consumed (a provider
+    /// withdrawal, expiry or impairment) takes provider principal first. Called by exactly
+    /// those three paths; consumption moves backing to `spent` and leaves principal alone.
+    fn release_provider_principal_after(
+        &mut self,
+        domain: usize,
+        reserved_before: u128,
+        reserved_after: u128,
+    ) -> V16Result<()> {
+        let left = reserved_before.saturating_sub(reserved_after);
+        if left == 0 {
+            return Ok(());
+        }
+        self.adjust_provider_principal_num(domain, left, false)
     }
 
     #[inline(never)]
@@ -9709,9 +9710,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::Stale);
         }
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_backing_withdraw_delta(
             bucket,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             backing_num,
         )?;
         let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
@@ -9736,6 +9738,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         self.header.vault = V16PodU128::new(next_vault);
         self.validate_source_domain_ledger(domain)?;
@@ -9829,13 +9836,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         } else {
             0
         };
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_backing_expiry_delta(
             self.backing_bucket_for_domain(domain)?,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             now_slot,
         )?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.refresh_source_credit_domain_after_mutation(domain)?;
         if snapshot_captured {
             let released = self
@@ -10146,9 +10159,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if amount == 0 {
             return Ok(());
         }
+        let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_lien_impair_delta(
             self.backing_bucket_for_domain(domain)?,
-            self.source_credit_for_domain(domain)?,
+            source_before,
             amount,
         )?;
         let (source, next_risk_epoch) = V16Core::prepare_source_credit_domain_recompute_for_epoch(
@@ -10164,6 +10178,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         .validate()?;
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
+        self.release_provider_principal_after(
+            domain,
+            source_before.fresh_reserved_backing_num,
+            source.fresh_reserved_backing_num,
+        )?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         Ok(())
     }
