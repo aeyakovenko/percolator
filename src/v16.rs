@@ -2180,19 +2180,33 @@ impl V16Core {
     }
 
     /// Aggregate side-OI cap for a trade fill, evaluated on the NET post-fill
-    /// side OI (after both counterparties' legs are applied). Route- and
-    /// mutation-order-independent: an OI-neutral handoff at `cap - 1` is
-    /// admitted regardless of which account attaches first, while any fill
-    /// whose net effect leaves either side above MAX_OI_SIDE_Q is rejected.
+    /// side OI (after both counterparties' legs are applied) against the
+    /// pre-fill side OI. A fill is rejected only if it leaves a side above
+    /// MAX_OI_SIDE_Q AND made that side strictly larger. Consequences:
+    /// - route/mutation-order independent: an OI-neutral handoff at `cap - 1`
+    ///   is admitted regardless of which account attaches first;
+    /// - every growth path (attach, same-side resize, flip) is bounded;
+    /// - a fill that leaves an already over-cap side unchanged or smaller
+    ///   (e.g. a market that reached it via a pre-#225 unchecked resize) is
+    ///   never cap-blocked, so holders can always reduce and close.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<()>| match result {
-        Ok(()) => oi_long_q <= crate::MAX_OI_SIDE_Q && oi_short_q <= crate::MAX_OI_SIDE_Q,
-        Err(_) => oi_long_q > crate::MAX_OI_SIDE_Q || oi_short_q > crate::MAX_OI_SIDE_Q,
+        Ok(()) => (oi_long_after_q <= crate::MAX_OI_SIDE_Q || oi_long_after_q <= oi_long_before_q)
+            && (oi_short_after_q <= crate::MAX_OI_SIDE_Q || oi_short_after_q <= oi_short_before_q),
+        Err(e) => *e == V16Error::InvalidLeg
+            && ((oi_long_after_q > crate::MAX_OI_SIDE_Q && oi_long_after_q > oi_long_before_q)
+                || (oi_short_after_q > crate::MAX_OI_SIDE_Q && oi_short_after_q > oi_short_before_q)),
     }))]
     pub(crate) fn kernel_trade_side_oi_cap_gate(
-        oi_long_q: u128,
-        oi_short_q: u128,
+        oi_long_before_q: u128,
+        oi_short_before_q: u128,
+        oi_long_after_q: u128,
+        oi_short_after_q: u128,
     ) -> V16Result<()> {
-        if oi_long_q > crate::MAX_OI_SIDE_Q || oi_short_q > crate::MAX_OI_SIDE_Q {
+        let long_grew_over_cap =
+            oi_long_after_q > crate::MAX_OI_SIDE_Q && oi_long_after_q > oi_long_before_q;
+        let short_grew_over_cap =
+            oi_short_after_q > crate::MAX_OI_SIDE_Q && oi_short_after_q > oi_short_before_q;
+        if long_grew_over_cap || short_grew_over_cap {
             return Err(V16Error::InvalidLeg);
         }
         Ok(())
@@ -18610,6 +18624,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let fee = checked_fee_bps(fee_notional, request.fee_bps)?;
         let fee_a = self.charge_account_fee_current_not_atomic(long_account, fee)?;
         let fee_b = self.charge_account_fee_current_not_atomic(short_account, fee)?;
+        // Pre-fill side OI for the grow-only side-OI cap gate below.
+        let pre_fill_asset = self.asset_state(request.asset_index)?;
         self.begin_terminal_trade_residual_if_needed(
             long_account,
             request.asset_index,
@@ -18645,9 +18661,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             trade_preflight.short_lookup,
         )?;
         // Net post-fill side-OI cap: both legs of the fill are applied, so the
-        // closing counterparty's OI has already been detached.
+        // closing counterparty's OI has already been detached. Only a side the
+        // fill GREW may not end above the cap; reductions are never blocked.
         let post_fill_asset = self.asset_state(request.asset_index)?;
         V16Core::kernel_trade_side_oi_cap_gate(
+            pre_fill_asset.oi_eff_long_q,
+            pre_fill_asset.oi_eff_short_q,
             post_fill_asset.oi_eff_long_q,
             post_fill_asset.oi_eff_short_q,
         )?;
