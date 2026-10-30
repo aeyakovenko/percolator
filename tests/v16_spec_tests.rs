@@ -7843,6 +7843,10 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
                 .stale
         );
 
+        // F1: the crank now accrues BEFORE it refreshes, so the committed clock
+        // reaches `now_slot` before the refresh's source-expiry check runs. The
+        // lapsed bucket is therefore detected on the FIRST crank instead of the
+        // second. The final state is unchanged (the second crank is a no-op).
         let catchup = market
             .permissionless_auto_crank_not_atomic(
                 &mut account,
@@ -7853,21 +7857,15 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
                 },
             )
             .unwrap();
-        assert_eq!(
-            catchup.outcome,
-            AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
-        );
         assert_eq!(market.header.current_slot.get(), 10);
         assert_eq!(
-            market.markets[0]
-                .engine
-                .backing_short
-                .try_to_runtime()
-                .unwrap()
-                .status,
-            BackingBucketStatusV16::Fresh
+            catchup.outcome,
+            AutoCrankOutcomeV16::Progressed(
+                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain: 1 }
+            )
         );
 
+        // The second crank finds nothing left to expire and is a no-op.
         let result = market
             .permissionless_auto_crank_not_atomic(
                 &mut account,
@@ -7880,9 +7878,7 @@ fn v16_auto_crank_classifies_lapsed_source_backing_with_current_certificate() {
             .unwrap();
         assert_eq!(
             result.outcome,
-            AutoCrankOutcomeV16::Progressed(
-                PermissionlessProgressOutcomeV16::SourceBackingExpired { domain: 1 }
-            )
+            AutoCrankOutcomeV16::Progressed(PermissionlessProgressOutcomeV16::AccountCurrent)
         );
         let bucket = market.markets[0]
             .engine
@@ -13963,4 +13959,485 @@ fn v16_netting_never_rounds_a_fractional_source_claim_past_its_slot() {
     println!("{out:?}");
     assert!(out.senior_surplus >= 0, "{out:?}");
 }
+
+// REGRESSION (F1): the auto-crank's own trailing accrual must not invalidate
+// the certificate the crank's own refresh just wrote.
+//
+// `permissionless_crank_not_atomic` (Refresh arm) refreshes the account at the
+// OBSERVATION price (stamping `cert_oracle_epoch = header.oracle_epoch`) and
+// only THEN calls `accrue_asset_to_not_atomic`, which moves the mark and
+// increments `header.oracle_epoch`.
+//
+// The certificate is therefore stale the instant the crank returns, so the
+// NEXT classification -- `build_actionable_summary`, whose `liquidatable` flag
+// REQUIRES `cert_current` -- cannot select `Liquidate` on the step the crank
+// just took. In a market that keeps moving, the trailing accrual bumps the
+// epoch on EVERY step, so the certificate is never current and the
+// `Liquidate` arm is unreachable (see
+// `v16_auto_crank_reaches_liquidation_in_a_persistently_moving_market`).
+//
+// The defect only fires when the trailing accrual actually moves the mark (the
+// observation price differs from the asset's committed price) or activates
+// funding (the crank advanced the clock). Every existing auto-crank fixture
+// avoids BOTH (they pin `now_slot == asset.slot_last` (dt = 0) and an
+// observation price equal to the committed price), which is why the suite is
+// green.
+//
+// The mark moves DOWN here so the account stays underwater under either
+// settlement order (the fix settles the clear K delta at the NEW mark).
+#[test]
+fn v16_auto_crank_refresh_leaves_a_current_certificate_in_a_moving_market() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut account_header = account_fixture(1, 14);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(10);
+    header.vault = V16PodU128::new(50);
+    header.insurance = V16PodU128::new(50);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.slot_last = 10;
+    asset.oi_eff_long_q = 2 * POS_SCALE;
+    asset.oi_eff_short_q = 2 * POS_SCALE;
+    asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.loss_weight_sum_short = 2 * POS_SCALE;
+    asset.stored_pos_count_long = 2;
+    asset.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    header.resolved_payout_blocker_count = V16PodU64::new(4);
+
+    account_header.pnl = V16PodI128::new(-5);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset.market_id,
+        side: SideV16::Long,
+        basis_pos_q: signed_q(POS_SCALE),
+        a_basis: ADL_ONE,
+        k_snap: asset.k_long,
+        f_snap: asset.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    // The account starts with an INVALID certificate, so the crank's first
+    // classification selects RefreshAccount (not Liquidate) and the crank's own
+    // refresh is the step under test.
+    assert_eq!(account_header.health_cert.valid, 0);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+
+    // The keeper's observation MOVES the mark (100 -> 99) and advances the
+    // clock (10 -> 11): the two conditions that make the trailing accrual
+    // invalidate the certificate.
+    let observations = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: 99,
+        funding_rate_e9: 0,
+    }];
+    let work = AutoCrankWorkV16 {
+        now_slot: 11,
+        observations: &observations,
+        resolved_close_fee_rate_per_slot: 0,
+    };
+    let result = market
+        .permissionless_auto_crank_not_atomic(&mut account, work)
+        .expect("the crank must not error");
+    assert!(
+        matches!(result.selected, AutoCrankPlanV16::RefreshAccount { .. }),
+        "the crank's first step must be a refresh: {:?}",
+        result.selected
+    );
+
+    // The crank's own refresh must leave a CURRENT certificate.
+    let summary = market
+        .build_actionable_summary_at_slot(&account.as_view(), 11)
+        .unwrap();
+    assert!(
+        !summary.stale,
+        "the crank's own refresh left a stale certificate (oracle_epoch={} vs \
+         cert_oracle_epoch={}): the trailing accrual invalidated the certificate \
+         the refresh just wrote, so `liquidatable` (which requires a current \
+         certificate) is unreachable",
+        market.header.oracle_epoch.get(),
+        account.header.health_cert.cert_oracle_epoch.get(),
+    );
+    assert!(
+        summary.liquidatable,
+        "the underwater account must remain liquidatable after the crank's refresh",
+    );
+}
+
+// REGRESSION (F1): the permissionless crank must still CONVERGE (reach
+// NoAction) in a MOVING market.
+//
+// `v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point`
+// proves the no-DoS convergence property, but its fixture pins
+// `now_slot == asset.slot_last` (dt = 0) and an observation price equal to the
+// committed price -- so the trailing accrual never moves the mark and never
+// bumps `header.oracle_epoch`. In a moving market the trailing accrual DOES
+// bump the epoch, which invalidates the crank's own certificate, so the crank
+// needs an EXTRA refresh step before it can classify the account as
+// liquidatable.
+//
+// This test drives the SAME fixture with a moving mark (100 -> 99) and an
+// advancing clock (10 -> 11), which is the ordinary keeper case, and pins
+// that the crank still converges within the no-DoS step budget.
+#[test]
+fn v16_auto_crank_converges_in_a_moving_market() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 13);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(9);
+    header.loss_stale_active = 1;
+    header.vault = V16PodU128::new(50);
+    header.insurance = V16PodU128::new(50);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset0.slot_last = 10;
+    asset0.oi_eff_long_q = 2 * POS_SCALE;
+    asset0.oi_eff_short_q = 2 * POS_SCALE;
+    asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.stored_pos_count_long = 2;
+    asset0.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+    let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset1.slot_last = 9;
+    asset1.oi_eff_long_q = POS_SCALE;
+    asset1.oi_eff_short_q = POS_SCALE;
+    asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.stored_pos_count_long = 1;
+    asset1.stored_pos_count_short = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    header.resolved_payout_blocker_count = V16PodU64::new(6);
+
+    account_header.pnl = V16PodI128::new(-5);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset0.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset0.k_long,
+        f_snap: asset0.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset0.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset0.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset0.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    // The keeper's observation MOVES the mark (100 -> 99) and advances the
+    // clock (10 -> 11). This is the ordinary keeper case, not a corner case.
+    let obs = [AutoCrankObservationV16 {
+        asset_index: 0,
+        effective_price: 99,
+        funding_rate_e9: 0,
+    }];
+    let work = AutoCrankWorkV16 {
+        now_slot: 11,
+        observations: &obs,
+        resolved_close_fee_rate_per_slot: 0,
+    };
+
+    // Drive the engine auto-crank to a fixed point. It MUST converge (no-DoS)
+    // within a bounded number of steps, self-selecting the asset each step.
+    let mut plans = Vec::new();
+    let mut saw_refresh = false;
+    let mut saw_liquidate = false;
+    let mut steps = 0;
+    loop {
+        let summary = market.build_actionable_summary(&account.as_view()).unwrap();
+        let r = match market.permissionless_auto_crank_not_atomic(&mut account, work) {
+            Ok(r) => r,
+            Err(e) => panic!(
+                "step {steps} dispatch err {e:?}; summary={summary:?}; plans={plans:?}; bitmap={}",
+                account.header.active_bitmap[0].get()
+            ),
+        };
+        match r.selected {
+            AutoCrankPlanV16::NoAction => break,
+            AutoCrankPlanV16::RefreshAccount { .. } => saw_refresh = true,
+            AutoCrankPlanV16::Liquidate { .. } => saw_liquidate = true,
+            _ => {}
+        }
+        plans.push(r.selected);
+        steps += 1;
+        assert!(
+            steps < 12,
+            "engine auto-crank must converge (no-DoS) in a MOVING market; selected so far: {:?}",
+            plans
+        );
+    }
+
+    assert!(
+        saw_refresh,
+        "must refresh the uncertified account: {:?}",
+        plans
+    );
+    assert!(
+        saw_liquidate,
+        "must liquidate the underwater position: {:?}",
+        plans
+    );
+    assert_eq!(
+        account.header.active_bitmap[0].get(),
+        0,
+        "the position must be fully liquidated: {:?}",
+        plans
+    );
+}
+
+// REGRESSION (F1): the permissionless crank must still reach the `Liquidate`
+// arm in a PERSISTENTLY MOVING market.
+//
+// The F1 defect is an inverted pair: the refresh stamps the certificate from
+// the PRE-accrue `header.oracle_epoch`, and the trailing accrual then bumps
+// that epoch. If the mark moves on EVERY crank step, the certificate is stale
+// again immediately, so `summary.liquidatable` (which requires `cert_current`)
+// is never true and the `Liquidate` arm is unreachable.
+//
+// This test drives the crank with a DIFFERENT observation price on every step
+// (the market keeps moving), which is the ordinary keeper case in a live
+// market, and requires the crank to reach `Liquidate` within a bounded number
+// of steps.
+#[test]
+fn v16_auto_crank_reaches_liquidation_in_a_persistently_moving_market() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 13);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(9);
+    header.loss_stale_active = 1;
+    header.vault = V16PodU128::new(50);
+    header.insurance = V16PodU128::new(50);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset0.slot_last = 10;
+    asset0.oi_eff_long_q = 2 * POS_SCALE;
+    asset0.oi_eff_short_q = 2 * POS_SCALE;
+    asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.stored_pos_count_long = 2;
+    asset0.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+    let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset1.slot_last = 9;
+    asset1.oi_eff_long_q = POS_SCALE;
+    asset1.oi_eff_short_q = POS_SCALE;
+    asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.stored_pos_count_long = 1;
+    asset1.stored_pos_count_short = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    header.resolved_payout_blocker_count = V16PodU64::new(6);
+
+    account_header.pnl = V16PodI128::new(-5);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset0.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset0.k_long,
+        f_snap: asset0.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset0.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset0.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset0.epoch_long,
+        b_stale: false,
+        stale: false,
+    }));
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    // The market keeps moving: every step observes a DIFFERENT price, so the
+    // trailing accrual bumps `header.oracle_epoch` on every single step.
+    let mut plans = Vec::new();
+    let mut saw_liquidate = false;
+    let mut steps = 0u64;
+    loop {
+        let price = 100 - (steps as u64 + 1);
+        let obs = [AutoCrankObservationV16 {
+            asset_index: 0,
+            effective_price: price,
+            funding_rate_e9: 0,
+        }];
+        let work = AutoCrankWorkV16 {
+            now_slot: 10 + steps + 1,
+            observations: &obs,
+            resolved_close_fee_rate_per_slot: 0,
+        };
+        let r = match market.permissionless_auto_crank_not_atomic(&mut account, work) {
+            Ok(r) => r,
+            Err(e) => panic!("step {steps} dispatch err {e:?}; plans={plans:?}"),
+        };
+        if matches!(r.selected, AutoCrankPlanV16::Liquidate { .. }) {
+            saw_liquidate = true;
+        }
+        if matches!(r.selected, AutoCrankPlanV16::NoAction) {
+            break;
+        }
+        plans.push(r.selected);
+        steps += 1;
+        assert!(
+            steps < 12,
+            "the crank must reach the Liquidate arm even when the market keeps \
+             moving; selected so far: {:?}",
+            plans
+        );
+        // The position is gone: the crank has nothing left to accrue.
+        if account.header.active_bitmap[0].get() == 0 {
+            break;
+        }
+    }
+
+    assert!(
+        saw_liquidate,
+        "the crank must reach the Liquidate arm in a persistently moving market: {:?}",
+        plans
+    );
+    assert_eq!(
+        account.header.active_bitmap[0].get(),
+        0,
+        "the position must be fully liquidated: {:?}",
+        plans
+    );
+}
+
+// REGRESSION (F1): the owner is NOT trapped by the F1 defect.
+//
+// The F1 defect leaves the account's certificate stale after the crank's own
+// refresh, which makes the PERMISSIONLESS `Liquidate` arm unreachable in a
+// moving market. It must NOT also trap the owner's own risk-reducing exit:
+// `rebalance_reduce_position_not_atomic` re-certifies from the CURRENT
+// `header.oracle_epoch` (no trailing accrual), so the owner can always
+// unwind, even while the keeper's crank is stuck.
+//
+// This test reproduces the stuck-crank state (a persistently moving market
+// where the crank cannot reach `Liquidate`) and then proves the owner can
+// still reduce the position to flat.
+#[test]
+fn v16_owner_can_still_exit_while_the_crank_is_stuck_in_a_moving_market() {
+    let (mut header, mut markets) = market_fixture(2, 100);
+    let mut account_header = account_fixture(2, 13);
+    header.current_slot = V16PodU64::new(10);
+    header.slot_last = V16PodU64::new(9);
+    header.loss_stale_active = 1;
+    header.vault = V16PodU128::new(50);
+    header.insurance = V16PodU128::new(50);
+    header.negative_pnl_account_count = V16PodU64::new(1);
+
+    let mut asset0 = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset0.slot_last = 10;
+    asset0.oi_eff_long_q = 2 * POS_SCALE;
+    asset0.oi_eff_short_q = 2 * POS_SCALE;
+    asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.stored_pos_count_long = 2;
+    asset0.stored_pos_count_short = 2;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+    let mut asset1 = markets[1].engine.asset.try_to_runtime().unwrap();
+    asset1.slot_last = 9;
+    asset1.oi_eff_long_q = POS_SCALE;
+    asset1.oi_eff_short_q = POS_SCALE;
+    asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.stored_pos_count_long = 1;
+    asset1.stored_pos_count_short = 1;
+    markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
+    header.resolved_payout_blocker_count = V16PodU64::new(6);
+
+    account_header.pnl = V16PodI128::new(-5);
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id: asset0.market_id,
+        side: SideV16::Long,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: asset0.k_long,
+        f_snap: asset0.f_long_num,
+        kf_epoch_snap: 0,
+        epoch_snap: asset0.epoch_long,
+        loss_weight: POS_SCALE,
+        b_snap: asset0.b_long_num,
+        b_rem: 0,
+        b_epoch_snap: asset0.epoch_long,
+        b_stale: false,
+        stale: false,
+    });
+    account_header.active_bitmap[0] = V16PodU64::new(1);
+
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut account_header);
+
+    // Drive the keeper's crank in a persistently moving market. On the
+    // unfixed engine this never reaches `Liquidate`; the account is left
+    // with a stale certificate.
+    let mut steps = 0u64;
+    while steps < 3 && account.header.active_bitmap[0].get() != 0 {
+        let price = 100 - (steps as u64 + 1);
+        let obs = [AutoCrankObservationV16 {
+            asset_index: 0,
+            effective_price: price,
+            funding_rate_e9: 0,
+        }];
+        let work = AutoCrankWorkV16 {
+            now_slot: 10 + steps + 1,
+            observations: &obs,
+            resolved_close_fee_rate_per_slot: 0,
+        };
+        let _ = market.permissionless_auto_crank_not_atomic(&mut account, work);
+        steps += 1;
+    }
+
+    // The owner's risk-reducing exit must never be trapped by a stale
+    // certificate. Either the keeper's crank already liquidated the position
+    // (the fixed engine), or the owner can still reduce it (the unfixed
+    // engine, where the crank is stuck). In BOTH cases the position can
+    // always be closed -- the owner is never trapped.
+    if account.header.active_bitmap[0].get() != 0 {
+        let outcome = market
+            .rebalance_reduce_position_not_atomic(
+                &mut account,
+                RebalanceRequestV16 {
+                    asset_index: 0,
+                    reduce_q: POS_SCALE,
+                },
+            )
+            .expect("the owner must always be able to reduce a position");
+        assert_eq!(outcome.reduced_q, POS_SCALE);
+    }
+    market.validate_shape().unwrap();
+    account.validate_with_market(&market.as_view()).unwrap();
+}
+
+
 
