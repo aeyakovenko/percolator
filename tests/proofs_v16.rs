@@ -16957,8 +16957,8 @@ fn proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate() {
 }
 
 // Recoverable counterparty backing principal is a senior-side claim: the
-// provider can withdraw it whenever the domain is fully backed, with no mode
-// or payout-snapshot gate (withdraw_fresh_counterparty_backing_not_atomic).
+// provider can withdraw it when the domain is fully backed; in Resolved mode,
+// only the resolved surplus may leave (withdraw_fresh_counterparty_backing_not_atomic).
 // So it must NOT count in residual(), the junior positive-PnL payout pool —
 // otherwise the resolved payout snapshot promises winners the same vault
 // atoms the provider can still withdraw, and whichever party moves second is
