@@ -1,8 +1,8 @@
 //! Fuzz/integration coverage for the residual/backing double-claim class.
 //!
-//! Recoverable counterparty backing principal is provider-withdrawable with no
-//! mode or payout-snapshot gate, so it must never be counted in residual(), the
-//! junior payout pool. If it is, the resolved payout snapshot promises winners
+//! Recoverable counterparty backing principal must never count in residual(),
+//! the junior payout pool. Resolved withdrawals retain the backing that junior
+//! claims can still need when it expires. Otherwise the payout snapshot promises winners
 //! the same vault atoms the provider can still withdraw, and whichever party
 //! moves second is robbed or stranded. The Kani proof
 //! `proof_v16_residual_excludes_recoverable_counterparty_backing_principal`
@@ -89,8 +89,8 @@ fn winner_account(capital: u128, pnl: u128) -> PortfolioAccountV16Account {
     account_header
 }
 
-/// Close the winner, then (optionally first) withdraw the provider principal.
-/// Returns (winner_payout, vault_after_everything).
+/// Withdraw provider surplus before or after the winner closes, then expire
+/// the reserve and claim the winner's topup. Returns total payout and final vault.
 fn run_order(
     capital: u128,
     pnl: u128,
@@ -106,10 +106,15 @@ fn run_order(
     assert_eq!(account.validate_with_market(&market.as_view()), Ok(()));
 
     let vault_before = market.header.vault.get();
+    let reserve = backing.min(pnl - residual);
+    let surplus = backing - reserve;
+    assert_eq!(market.resolved_counterparty_backing_surplus(0), Ok(surplus));
     if provider_first {
-        market
-            .withdraw_fresh_counterparty_backing_not_atomic(0, backing)
-            .expect("provider principal must be withdrawable before the winner closes");
+        if surplus != 0 {
+            market
+                .withdraw_fresh_counterparty_backing_not_atomic(0, surplus)
+                .expect("provider surplus must be withdrawable before the winner closes");
+        }
     }
     let outcome = market
         .close_resolved_account_not_atomic(&mut account, 0)
@@ -117,13 +122,41 @@ fn run_order(
     let closed = matches!(outcome, ResolvedCloseOutcomeV16::Closed { .. });
     assert!(closed, "winner did not fully close");
     if !provider_first {
-        market
-            .withdraw_fresh_counterparty_backing_not_atomic(0, backing)
-            .expect("provider principal must remain withdrawable after the winner closes");
+        assert_eq!(market.resolved_counterparty_backing_surplus(0), Ok(surplus));
+        if surplus != 0 {
+            market
+                .withdraw_fresh_counterparty_backing_not_atomic(0, surplus)
+                .expect("provider surplus must remain withdrawable after the winner closes");
+        }
     }
     assert_eq!(market.validate_shape(), Ok(()));
+    // Before expiry, the initial payout uses only capital and junior residual.
+    assert_eq!(
+        vault_before - market.header.vault.get() - surplus,
+        capital + residual
+    );
+    assert_eq!(market.header.vault.get(), reserve);
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        reserve * BOUND_SCALE
+    );
+    assert_eq!(market.resolved_counterparty_backing_surplus(0), Ok(0));
+    assert_eq!(
+        market.withdraw_fresh_counterparty_backing_not_atomic(0, 1),
+        Err(V16Error::LockActive)
+    );
+    market.advance_resolved_slot_not_atomic(100).unwrap();
+    market
+        .expire_source_backing_bucket_not_atomic(0, 100)
+        .unwrap();
+    market
+        .claim_resolved_payout_topup_not_atomic(&mut account)
+        .unwrap();
+    assert_eq!(market.validate_shape(), Ok(()));
+    assert_eq!(market.header.source_fresh_backing_total_num.get(), 0);
     let vault_after = market.header.vault.get();
-    let winner_payout = vault_before - vault_after - backing;
+    let winner_payout = vault_before - vault_after - surplus;
+    assert_eq!(winner_payout + surplus + vault_after, vault_before);
     (winner_payout, vault_after)
 }
 
@@ -131,10 +164,8 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
     /// The winner's resolved payout and the provider's principal must be funded
-    /// by DISJOINT vault atoms: the winner is paid capital + haircut residual
-    /// (never the provider's backing), and the provider can recover the full
-    /// principal regardless of whether the withdrawal happens before or after
-    /// the payout snapshot is captured by the winner's close.
+    /// by disjoint vault atoms before expiry. The provider recovers surplus in
+    /// either order; reserved backing expires into the winner's junior pool.
     #[test]
     fn winner_payout_and_provider_principal_never_overlap(
         capital in 0u128..=1_000_000u128,
@@ -151,10 +182,10 @@ proptest! {
         let (payout_first, vault_first) =
             run_order(capital, pnl, residual, backing, true);
 
-        // The winner gets exactly its capital plus the honest junior residual...
-        prop_assert_eq!(payout_after, capital + residual);
+        // Expiry adds only the reserve needed to bring the winner toward full face.
+        prop_assert_eq!(payout_after, capital + pnl.min(residual + backing));
         // ...identically in both orders (the snapshot must not depend on whether
-        // the provider already recovered principal)...
+        // the provider already recovered surplus)...
         prop_assert_eq!(payout_first, payout_after);
         // ...and nothing else leaks: the vault drains to zero in both orders.
         prop_assert_eq!(vault_after, 0);

@@ -9703,6 +9703,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// (`credit_rate_num == CREDIT_RATE_SCALE`) after the principal leaves. This
     /// prevents a backing provider from withdrawing principal that currently
     /// supports outstanding source-credit claims.
+    /// In Resolved mode, the amount must also fit within the resolved surplus,
+    /// preserving the backing needed by junior payouts and source claims.
     ///
     /// A Fresh bucket at or past its expiry slot is rejected with `Stale`, the
     /// same check `validate_source_domain_ledger_current` makes before a
@@ -9723,6 +9725,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             && bucket.expiry_slot <= self.header.current_slot.get()
         {
             return Err(V16Error::Stale);
+        }
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+            && amount > self.resolved_counterparty_backing_surplus(domain)?
+        {
+            return Err(V16Error::LockActive);
         }
         let source_before = self.source_credit_for_domain(domain)?;
         let (bucket, source) = V16Core::prepare_counterparty_backing_withdraw_delta(
