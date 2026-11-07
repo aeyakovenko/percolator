@@ -1796,6 +1796,56 @@ fn v16_funding_counters_settle_before_trade_close_clears_leg() {
     );
 }
 
+/// Issue #253 (loss of funds): `book_bankruptcy_residual_chunk_internal` raises
+/// `B_side_num` without bumping an epoch or setting `b_stale`, so a winner keeps a
+/// "current" health certificate and `settle_account_for_position_action_and_refresh`
+/// skips the refresh. A same-side resize must still require B settlement before it
+/// can shrink `loss_weight`; otherwise the deferred B is charged at the shrunken
+/// weight and the other winners absorb it. Spec §8: "While `B_remaining > 0`, no
+/// user-favorable action may continue." Clear/Flip already fail closed this way.
+#[test]
+fn v16_same_side_resize_requires_b_settlement_before_shrinking_loss_weight() {
+    let (mut header, mut markets) = market_fixture(1, FUNDING_COUNTER_PRICE);
+    let mut long_header = account_fixture(1, 130);
+    let mut short_header = account_fixture(1, 131);
+
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        open_one_lot_pair(&mut market, &mut long, &mut short);
+    }
+
+    // Model exactly the state a residual booking leaves behind: B_long advanced,
+    // no epoch bump, and no leg flagged `b_stale`.
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.b_long_num = asset.b_long_num.checked_add(1).unwrap();
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+
+    let leg_before = long_header.legs[0].try_to_runtime().unwrap();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let result = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        &mut long,
+        &mut short,
+        TradeRequestV16 {
+            asset_index: 0,
+            size_q: -signed_q(POS_SCALE / 2),
+            exec_price: FUNDING_COUNTER_PRICE,
+            fee_bps: 0,
+        },
+    );
+
+    assert_eq!(result, Err(V16Error::Stale));
+    // A failed engine call must not commit partial mutation: the leg that would
+    // have been resized still carries its pre-attempt weight and basis.
+    let leg_after = long_header.legs[0].try_to_runtime().unwrap();
+    assert_eq!(leg_after.loss_weight, leg_before.loss_weight);
+    assert_eq!(leg_after.basis_pos_q, leg_before.basis_pos_q);
+    assert_eq!(leg_after.b_snap, leg_before.b_snap);
+}
+
 #[test]
 fn v16_funding_counters_record_forfeited_dead_leg_settlement() {
     let (mut header, mut markets) = funding_market_fixture(FUNDING_COUNTER_PRICE);

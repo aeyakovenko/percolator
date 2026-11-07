@@ -17659,6 +17659,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             let empty_slot = lookup.empty_slot.ok_or(V16Error::InvalidLeg)?;
             return self.attach_leg_at_slot(account, asset_index, side, new, empty_slot);
         }
+        // A same-side resize rewrites `loss_weight`, so it can only run once the
+        // deferred B delta has been settled: while `B_remaining > 0` no
+        // user-favorable action may continue (spec §8). Clear and Flip enforce
+        // this inside `clear_leg_at_slot_inner`; Resize keeps its leg, so the gate
+        // has to live here. Without it a winner can shrink its weight after a
+        // residual booking and push its share of B onto the other winners.
+        if self.b_target_for_leg(asset_index, current_leg)? != current_leg.b_snap {
+            return Err(V16Error::Stale);
+        }
         let preserve_pending_obligation_weight =
             same_side_risk_reduction_or_flat_obligation(current_effective, new_effective)
                 && self.has_pending_domain_loss_barrier(asset_index, current_leg.side)?;
