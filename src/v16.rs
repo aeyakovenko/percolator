@@ -19782,6 +19782,70 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Clears matched, value-free spent-backing history from an empty Recovery/Retired asset.
+    ///
+    /// After a matched round trip a source domain can retain `consumed == provider_receivable
+    /// <= spent` with no positions, claims, principal, liens, reservations, earnings, or
+    /// barriers left. That history is cumulative and no public transition otherwise clears it,
+    /// so it permanently blocks asset restart and retirement (issue #170). This transition is
+    /// value-neutral: it requires every live amount to be zero, moves no tokens, selects no
+    /// recipient, and only rewrites the two domains' audit counters to their empty shape. The
+    /// wrapper gates it on the asset's backing authority, whose provider history it clears.
+    pub fn canonicalize_spent_backing_history_not_atomic(
+        &mut self,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        self.validate_configured_asset_index(asset_index)?;
+        let asset = self.asset_state(asset_index)?;
+        if !matches!(
+            asset.lifecycle,
+            AssetLifecycleV16::Recovery | AssetLifecycleV16::Retired
+        ) {
+            return Err(V16Error::LockActive);
+        }
+        let mut changed = false;
+        for side in [SideV16::Long, SideV16::Short] {
+            let domain = self.insurance_domain_index(asset_index, side)?;
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            let source = self.source_credit_for_domain_shape(domain)?;
+            if bucket.consumed_liened_backing_num == 0 && source.provider_receivable_num == 0 {
+                continue;
+            }
+            let history_only = bucket.fresh_unliened_backing_num == 0
+                && bucket.valid_liened_backing_num == 0
+                && bucket.impaired_liened_backing_num == 0
+                && bucket.utilization_fee_earnings == 0
+                && bucket.market_id == asset.market_id
+                && source.provider_receivable_num == bucket.consumed_liened_backing_num
+                && source.spent_backing_num >= source.provider_receivable_num
+                && source.positive_claim_bound_num == 0
+                && source.exact_positive_claim_num == 0
+                && source.fresh_reserved_backing_num == 0
+                && source.valid_liened_backing_num == 0
+                && source.impaired_liened_backing_num == 0
+                && source.insurance_credit_reserved_num == 0
+                && source.valid_liened_insurance_num == 0
+                && source.impaired_liened_insurance_num == 0;
+            if !history_only || self.insurance_reservation_for_domain(domain)?
+                != InsuranceCreditReservationV16::EMPTY
+            {
+                return Err(V16Error::LockActive);
+            }
+            self.set_backing_bucket_for_domain(
+                domain,
+                BackingBucketV16::empty_for_market(bucket.market_id),
+            )?;
+            self.set_source_credit_for_domain(domain, SourceCreditStateV16::EMPTY)?;
+            changed = true;
+        }
+        if !changed {
+            return Err(V16Error::NonProgress);
+        }
+        // Positions and every other lifecycle obstacle must already be gone.
+        self.require_empty_asset_lifecycle_state_with_policy(asset_index, true, true, true, true)?;
+        self.validate_shape()
+    }
+
     /// Restarts an empty Recovery/Retired asset with a fresh market_id.
     ///
     /// Remaining domain insurance budgets are preserved exactly. Audit-only spent budgets,
