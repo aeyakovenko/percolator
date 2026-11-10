@@ -1,6 +1,6 @@
 # Percolator
 
-**Educational research project. Not production ready. Not audited. Do not use
+**Educational research project. Not production ready. Security audit in progress. Do not use
 with real funds.**
 
 Normative protocol spec: [`spec.md`](spec.md), v16.9.1. The spec is frozen; this
