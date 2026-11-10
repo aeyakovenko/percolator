@@ -15130,5 +15130,193 @@ fn v16_owner_can_still_exit_while_the_crank_is_stuck_in_a_moving_market() {
     account.validate_with_market(&market.as_view()).unwrap();
 }
 
+// ---- issue #207: a backing expiry restarts the terminal scan at asset 0 ----
 
+const ISSUE207_SPENT: u128 = 3;
+const ISSUE207_RECEIVABLE: u128 = 7;
+const ISSUE207_BACKING: u128 = 10;
 
+/// Resolution slot for an `assets`-slot fixture (activation uses one slot per asset), and the
+/// slot at which the live bucket expires.
+fn issue207_slots(assets: u32) -> (u64, u64) {
+    let slot = assets as u64 + 1;
+    (slot, slot + 2)
+}
+
+/// Asset 0 carries spent insurance owed back to its provider but there is no residual to recredit
+/// it, so the scan passes it and parks on `backing_asset`'s live bucket. Expiring that bucket
+/// releases residual, which makes asset 0 recreditable below the cursor the scan was called with.
+fn issue207_market(
+    assets: u32,
+    backing_asset: usize,
+) -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (slot, expiry) = issue207_slots(assets);
+    let (mut header, mut markets) = market_fixture(assets, 100);
+    let market_id = markets[0].engine.asset.market_id.get();
+    markets[0].engine.insurance_domain_budget_long = V16PodU128::new(ISSUE207_SPENT);
+    markets[0].engine.insurance_domain_spent_long = V16PodU128::new(ISSUE207_SPENT);
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            spent_backing_num: ISSUE207_RECEIVABLE * BOUND_SCALE,
+            provider_receivable_num: ISSUE207_RECEIVABLE * BOUND_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        consumed_liened_backing_num: ISSUE207_RECEIVABLE * BOUND_SCALE,
+        status: BackingBucketStatusV16::Expired,
+        ..BackingBucketV16::EMPTY
+    });
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(
+                backing_asset * 2,
+                ISSUE207_BACKING,
+                expiry,
+            )
+            .unwrap();
+        market.resolve_market_not_atomic(slot).unwrap();
+        let mut cursor = 0;
+        loop {
+            match market.advance_terminal_slab_not_atomic(slot, cursor) {
+                Ok(TerminalSlabOutcomeV16::ScanProgress { next_asset_index }) => {
+                    assert!(next_asset_index > cursor);
+                    cursor = next_asset_index;
+                }
+                Err(V16Error::LockActive) => break,
+                other => panic!("unexpected outcome before expiry: {other:?}"),
+            }
+        }
+        assert_eq!(cursor, backing_asset, "the scan parks on the live bucket");
+        assert_eq!(
+            market.advance_terminal_slab_not_atomic(expiry, backing_asset),
+            Ok(TerminalSlabOutcomeV16::BackingExpired {
+                domain: backing_asset * 2,
+            })
+        );
+        assert_eq!(market.header.vault.get(), ISSUE207_BACKING);
+    }
+    (header, markets)
+}
+
+/// Restarting at 0 after the expiry recredits asset 0's 3 atoms into its domain budget; close then
+/// waits for that budget to be withdrawn and retires only the unowed 7.
+#[test]
+fn v16_terminal_slab_restart_after_backing_expiry_recredits_the_prefix() {
+    let (_, expiry) = issue207_slots(3);
+    let (mut header, mut markets) = issue207_market(3, 2);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(expiry, 0),
+        Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+            asset_index: 0,
+            amount: ISSUE207_SPENT,
+        })
+    );
+    assert_eq!(
+        market.header.insurance_domain_budget_remaining_total.get(),
+        ISSUE207_SPENT
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(expiry, 0),
+        Err(V16Error::LockActive),
+        "close waits for the recredited budget instead of retiring it"
+    );
+    market
+        .withdraw_domain_insurance_not_atomic(0, ISSUE207_SPENT)
+        .unwrap();
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(expiry, 0),
+        Ok(TerminalSlabOutcomeV16::ReadyToClose {
+            retired: ISSUE207_BACKING - ISSUE207_SPENT,
+        })
+    );
+    assert_eq!(market.header.vault.get(), 0);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+/// A wrapper that keeps its pre-expiry cursor would retire the provider's 3 atoms. Audit builds
+/// prove the prefix clean on the last chunk and refuse. Production builds do not run this check:
+/// it is O(max_market_slots), which the bounded scan exists to avoid.
+#[cfg(feature = "audit-scan")]
+#[test]
+fn v16_terminal_slab_audit_refuses_stale_continuation_after_backing_expiry() {
+    let (_, expiry) = issue207_slots(3);
+    let (mut header, mut markets) = issue207_market(3, 2);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(expiry, 2),
+        Err(V16Error::InvalidConfig)
+    );
+    assert_eq!(market.header.vault.get(), ISSUE207_BACKING);
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+/// The full multi-chunk flow a correct wrapper drives (park on a live bucket, expire, restart,
+/// recredit, withdraw, close) never trips the audit check.
+#[test]
+fn v16_terminal_slab_multi_chunk_restart_flow_closes() {
+    const ASSETS: u32 = 300;
+    const BACKING_ASSET: usize = 280;
+    const CHUNK: usize = percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL;
+    let (_, expiry) = issue207_slots(ASSETS);
+    let (mut header, mut markets) = issue207_market(ASSETS, BACKING_ASSET);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(expiry, 0),
+        Ok(TerminalSlabOutcomeV16::InsuranceRecredited {
+            asset_index: 0,
+            amount: ISSUE207_SPENT,
+        })
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(expiry, 0),
+        Ok(TerminalSlabOutcomeV16::ScanProgress {
+            next_asset_index: CHUNK,
+        })
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(expiry, CHUNK),
+        Err(V16Error::LockActive),
+        "the last chunk waits on the recredited budget, not on the audit check"
+    );
+    market
+        .withdraw_domain_insurance_not_atomic(0, ISSUE207_SPENT)
+        .unwrap();
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(expiry, CHUNK),
+        Ok(TerminalSlabOutcomeV16::ReadyToClose {
+            retired: ISSUE207_BACKING - ISSUE207_SPENT,
+        })
+    );
+    assert_eq!(market.validate_shape(), Ok(()));
+}
+
+#[test]
+fn v16_terminal_slab_last_chunk_retires_when_prefix_has_no_recredit() {
+    // The audit check is a proof, not a rewind: a multi-chunk sweep with residual but nothing
+    // to recredit still retires from the last chunk.
+    const ASSETS: u32 = percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL as u32 + 1;
+    const RESIDUAL: u128 = 10;
+    const SLOT: u64 = ASSETS as u64 + 1;
+
+    let (mut header, mut markets) = market_fixture(ASSETS, 100);
+    header.vault = V16PodU128::new(RESIDUAL);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.resolve_market_not_atomic(SLOT).unwrap();
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(SLOT, 0),
+        Ok(TerminalSlabOutcomeV16::ScanProgress {
+            next_asset_index: percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
+        })
+    );
+    assert_eq!(
+        market.advance_terminal_slab_not_atomic(
+            SLOT,
+            percolator::TERMINAL_SLAB_SCAN_ASSETS_PER_CALL,
+        ),
+        Ok(TerminalSlabOutcomeV16::ReadyToClose { retired: RESIDUAL })
+    );
+    assert_eq!(market.header.vault.get(), 0);
+}
