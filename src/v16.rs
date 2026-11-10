@@ -2074,7 +2074,6 @@ impl V16Core {
         );
         Ok(best_gross > receipt.paid_effective)
     }
-
     /// Principal paid by a closing account itself (issue #204) lowers its close ledger's gross
     /// loss and remaining residual by the same amount, preserving
     /// `residual = gross + drift - progress`. When the residual reaches zero the domain
@@ -4268,16 +4267,6 @@ impl V16Core {
             Self::mul_div_floor_u128_or_wide(claim_num, state.credit_rate_num, CREDIT_RATE_SCALE)?;
         Ok((credited_num / BOUND_SCALE)
             .min(Self::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
-    }
-
-    fn source_credit_state_realizable_support_for_face(
-        state: SourceCreditStateV16,
-        face_claim: u128,
-    ) -> V16Result<u128> {
-        Self::source_credit_state_realizable_support_for_claim_num(
-            state,
-            Self::bound_num_from_amount(face_claim)?,
-        )
     }
 
     fn target_effective_lag_loss_penalty(
@@ -11321,7 +11310,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.burn_account_source_claim_bound_num(account, fallback_burn_num)
     }
 
-    fn source_domain_realizable_support_for_face(
+    /// Support a gain that is about to become a claim in `domain` could realize: the incoming
+    /// face at the domain's current credit rate, capped by available backing. Unlike
+    /// `source_domain_realizable_support_for_face`, this does not require the domain to already
+    /// carry registered claims. A gain arriving at an account with an outstanding loss is such
+    /// a prospective claim; treating it as unsupported whenever the domain had no other claims
+    /// burned backed gains in full and ratcheted the loss (issue #172, site 2).
+    fn source_domain_prospective_support_for_face(
         &self,
         domain: usize,
         face_claim: u128,
@@ -11330,10 +11325,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(0);
         }
         self.validate_source_domain_ledger_current(domain)?;
-        V16Core::source_credit_state_realizable_support_for_face(
-            self.source_credit_for_domain(domain)?,
-            face_claim,
-        )
+        let state = self.source_credit_for_domain(domain)?;
+        // Only fresh, unexpired counterparty backing may cure a loss here. Consuming it records
+        // the matching provider receivable; insurance-backed credit is not drawn by this path.
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        if bucket.status != BackingBucketStatusV16::Fresh
+            || bucket.expiry_slot <= self.header.current_slot.get()
+        {
+            return Ok(0);
+        }
+        let fresh_num = bucket
+            .fresh_unliened_backing_num
+            .min(V16Core::available_backing_num_for_source_credit_state(state)?);
+        // Credit on the incoming face at the domain's rate, bounded by the fresh backing it
+        // consumes one atom per atom of credit.
+        let face_limited = V16Core::mul_div_floor_u128_or_wide(
+            V16Core::bound_num_from_amount(face_claim)?,
+            state.credit_rate_num,
+            CREDIT_RATE_SCALE,
+        )? / BOUND_SCALE;
+        Ok(face_limited.min(fresh_num / BOUND_SCALE))
     }
 
     fn account_source_realizable_support(
@@ -14000,7 +14011,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let new_face_support = delta as u128;
         let (effective_available, source_support_domain) = if let Some(domain) = source_domain {
             (
-                self.source_domain_realizable_support_for_face(domain, new_face_support)?,
+                self.source_domain_prospective_support_for_face(domain, new_face_support)?,
                 Some(domain),
             )
         } else if decode_market_mode(self.header.mode)? == MarketModeV16::Live {

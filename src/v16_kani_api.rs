@@ -387,7 +387,12 @@ pub fn kani_source_credit_state_realizable_support_for_face(
     state: SourceCreditStateV16,
     face_claim: u128,
 ) -> V16Result<u128> {
-    V16Core::source_credit_state_realizable_support_for_face(state, face_claim)
+    // The production `_for_face` wrapper was removed with the prospective-support
+    // rework (issue #172); the proofs still exercise this composition directly.
+    V16Core::source_credit_state_realizable_support_for_claim_num(
+        state,
+        V16Core::bound_num_from_amount(face_claim)?,
+    )
 }
 
 pub fn kani_source_credit_state_realizable_support_for_claim_num(
