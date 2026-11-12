@@ -998,6 +998,19 @@ only, whether it clears the leg or, while opposite real positions remain, keeps
 it as a zero-basis pending obligation. The Live equality above therefore
 excludes Recovery assets.
 
+Each leg's `effective_pos_q` is rounded up while `A_side` is rounded down, so
+the effective quantities of one side's legs can sum to more than `OI_eff_side`.
+A dead-leg exit (Recovery forfeit or resolved close) therefore removes
+`min(abs(effective_pos_q), OI_eff_side)`, the leg's remaining share of the
+aggregate, and MUST NOT fail because the side carries less. Once `OI_eff_side`
+is zero, a side without pending obligations resets and its remaining legs
+detach as prior-reset obligations. A side that still carries pending
+obligations cannot reset (§9); its remaining current-epoch legs then detach, or
+convert to pending obligations, with a zero effective-OI change. Their loss
+weight is removed or retained exactly as for any other leg. No other
+transition may clear or retain a current-epoch nonzero-basis leg without
+removing at least one effective-OI atom.
+
 When a side reset or leg clear combines two valid sub-atom social-loss carries,
 the sum is normalized modulo `SOCIAL_LOSS_DEN`. Crossing the denominator adds
 one to the side-local `explicit_unallocated_loss` audit counter; that counter

@@ -3111,6 +3111,11 @@ impl V16Core {
     /// removed. Recovery exits use this while an opposite non-pending position
     /// can still crystallize a socialized loss. The zero-basis leg remains a
     /// bounded, account-local obligation until that cohort has settled.
+    ///
+    /// `retained_effective_oi_q` is the effective OI the leg still owns on its
+    /// side. It is zero only when that side has none left: per-leg effective
+    /// quantities round up while the side A index rounds down, so earlier
+    /// exits can already have consumed the whole side (issue #132).
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(PortfolioLegV16, AssetStateV16)>| match result {
         Ok((l, a)) => l.active
             && l.basis_pos_q == 0
@@ -3149,10 +3154,14 @@ impl V16Core {
         mut asset: AssetStateV16,
         retained_effective_oi_q: u128,
     ) -> V16Result<(PortfolioLegV16, AssetStateV16)> {
+        let side_effective_oi_q = match leg.side {
+            SideV16::Long => asset.oi_eff_long_q,
+            SideV16::Short => asset.oi_eff_short_q,
+        };
         if !leg.active
             || leg.basis_pos_q == 0
             || leg.loss_weight == 0
-            || retained_effective_oi_q == 0
+            || (retained_effective_oi_q == 0 && side_effective_oi_q != 0)
             || retained_effective_oi_q > leg.basis_pos_q.unsigned_abs()
         {
             return Err(V16Error::InvalidLeg);
@@ -3208,6 +3217,13 @@ impl V16Core {
     /// zero-basis obligation leg), and unless the leg predates a side reset,
     /// fold its social-loss dust and remove its OI and loss weight. Pure on
     /// (PortfolioLegV16, AssetStateV16); the clear-leg glue calls exactly this.
+    ///
+    /// A current-epoch leg with basis removes between one atom and its raw
+    /// basis of effective OI. The one exception is a side whose effective OI
+    /// is already zero: per-leg effective quantities round up while the side
+    /// A index rounds down, so earlier exits can consume the whole side and
+    /// leave this leg nothing to remove (issue #132). Such a side normally
+    /// resets first; it cannot while it still carries a pending obligation.
     #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<AssetStateV16>| match result {
         Ok(a) => {
             let prior_reset = match leg.side {
@@ -3325,10 +3341,15 @@ impl V16Core {
             }
         };
         let raw_abs_q = leg.basis_pos_q.unsigned_abs();
+        let side_effective_oi_q = match leg.side {
+            SideV16::Long => asset.oi_eff_long_q,
+            SideV16::Short => asset.oi_eff_short_q,
+        };
         let valid_effective_clear = if prior_reset_epoch || raw_abs_q == 0 {
             clear_effective_oi_q == 0
         } else {
             (1..=raw_abs_q).contains(&clear_effective_oi_q)
+                || (clear_effective_oi_q == 0 && side_effective_oi_q == 0)
         };
         if !leg.active || !valid_effective_clear {
             return Err(V16Error::InvalidLeg);
@@ -17817,12 +17838,50 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // Retention zeroes the basis; drop the sub-atom funding remainder with it.
         let mut leg = leg;
         leg.f_snap = f_target;
-        let effective_abs_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
+        let retained_effective_oi_q = Self::remaining_effective_oi_for_leg(asset, leg)?;
         let (leg, asset) =
-            V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, effective_abs_q)?;
+            V16Core::kernel_retain_leg_as_pending_obligation(leg, asset, retained_effective_oi_q)?;
         account.header.legs[leg_slot] = PortfolioLegV16Account::from_runtime(&leg);
         account.header.health_cert.valid = 0;
         self.set_asset_state(asset_index, asset)
+    }
+
+    /// Effective OI a dead-leg exit removes for `leg`: its ADL-effective
+    /// quantity, bounded by what its side still carries. Each leg's effective
+    /// quantity is rounded up while the side A index is rounded down, so the
+    /// legs of one side can add up to more than the side's effective OI. The
+    /// last legs to leave own only the remainder, possibly nothing; charging
+    /// them the full rounded-up quantity underflows the side and strands the
+    /// leg (issue #132).
+    fn remaining_effective_oi_for_leg(
+        asset: AssetStateV16,
+        leg: PortfolioLegV16,
+    ) -> V16Result<u128> {
+        let side_effective_oi_q = match leg.side {
+            SideV16::Long => asset.oi_eff_long_q,
+            SideV16::Short => asset.oi_eff_short_q,
+        };
+        Ok(V16Core::effective_abs_quantity_for_leg(asset, leg)?.min(side_effective_oi_q))
+    }
+
+    /// Detach a forfeited dead leg, removing only the effective OI it still
+    /// owns on its side (see `remaining_effective_oi_for_leg`).
+    fn clear_forfeited_leg(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        asset_index: usize,
+    ) -> V16Result<()> {
+        let leg_slot = Self::require_active_leg_slot_for_asset(&account.as_view(), asset_index)?;
+        let leg = account.header.legs[leg_slot].try_to_runtime()?;
+        let clear_effective_oi_q =
+            Self::remaining_effective_oi_for_leg(self.asset_state(asset_index)?, leg)?;
+        self.clear_leg_at_slot_inner(
+            account,
+            asset_index,
+            leg_slot,
+            false,
+            Some(clear_effective_oi_q),
+        )
     }
 
     fn retain_recovery_loss_weight_before_detach(
@@ -21284,8 +21343,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let account_effective_q = V16Core::effective_abs_quantity_for_leg(asset, leg)?;
                 let close_q = side_effective_oi_q.min(account_effective_q);
                 if close_q == 0 {
-                    // Zero-effective legs are either prior-reset residue or a
-                    // released pending-loss obligation. They own no live OI,
+                    // Legs with nothing left to remove: prior-reset residue, a
+                    // released pending-loss obligation, or a current-epoch leg
+                    // whose side effective OI earlier exits already consumed
+                    // and which could not reset because the side still carries
+                    // a pending obligation (issue #132). They own no live OI,
                     // but still have to detach so resolved close can finish.
                     self.clear_leg_at_slot_inner(account, asset_index, slot, false, Some(0))?;
                     self.begin_zero_oi_residue_resets(asset_index)?;
@@ -21851,7 +21913,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if retain {
                 self.retain_leg_as_pending_obligation(account, asset_index)?;
             } else {
-                self.clear_leg(account, asset_index)?;
+                self.clear_forfeited_leg(account, asset_index)?;
                 self.begin_zero_oi_residue_resets(asset_index)?;
             }
             return Ok(DeadLegForfeitOutcomeV16 {
@@ -22001,7 +22063,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.retain_leg_as_pending_obligation(account, asset_index)?;
                 detached = false;
             } else {
-                self.clear_leg(account, asset_index)?;
+                self.clear_forfeited_leg(account, asset_index)?;
                 self.begin_zero_oi_residue_resets(asset_index)?;
             }
         }
