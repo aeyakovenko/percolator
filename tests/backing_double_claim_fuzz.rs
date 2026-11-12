@@ -550,10 +550,13 @@ proptest! {
             status: BackingBucketStatusV16::Fresh,
             ..BackingBucketV16::EMPTY
         });
-        // Stored rate covers only un-liened backing for new credit.
+        // Stored rate: un-liened backing over the claims the lien does not cover (#250).
         let available_num = backing_num - liened_num;
-        let stored_rate =
-            (available_num * CREDIT_RATE_SCALE / claim_num).min(CREDIT_RATE_SCALE);
+        let stored_rate = if available_num == 0 {
+            0
+        } else {
+            (available_num * CREDIT_RATE_SCALE / (claim_num - liened_num)).min(CREDIT_RATE_SCALE)
+        };
         markets[0].engine.source_credit_long =
             SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
                 positive_claim_bound_num: claim_num,

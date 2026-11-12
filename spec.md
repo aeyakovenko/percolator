@@ -284,6 +284,11 @@ available_backing_num =
      - valid_liened_insurance_num
      - impaired_liened_insurance_num)
 
+unliened_claim_bound_num =
+    max(0, positive_claim_bound_num
+           - valid_liened_backing_num
+           - valid_liened_insurance_num)
+
 require available_backing_num >= 0
 require 0 <= credit_rate_num <= CREDIT_RATE_SCALE
 
@@ -291,12 +296,37 @@ if positive_claim_bound_num == 0:
     credit_rate_num = CREDIT_RATE_SCALE only if the engine proves
         no exact, bucketed, pending, unresolved, or recovery claim exists for D;
     otherwise credit_rate_num = 0
+else if available_backing_num == 0:
+    credit_rate_num = 0
+else if available_backing_num >= unliened_claim_bound_num:
+    credit_rate_num = CREDIT_RATE_SCALE
 else:
     credit_rate_num =
-        min(CREDIT_RATE_SCALE,
-            floor(available_backing_num * CREDIT_RATE_SCALE
-                  / positive_claim_bound_num))
+        floor(available_backing_num * CREDIT_RATE_SCALE
+              / unliened_claim_bound_num)
 ```
+
+`credit_rate_num` is the rate at which UN-LIENED claim face is credited, so it is the unliened backing over the claim bound that this backing is still owed to. A valid lien locks at least as much face as the backing it pledges (`required_face_num >= required_backing_num`, §2.2), and locked face is excluded from soft credit and from any further lien, so a lien's pledged backing and the same amount of claim bound leave the rate together. Leaving lien-covered face in the denominator would count a claim that its own lien already covers against the remaining backing a second time: one claimant's lien would then cut the rate of every other claimant of a fully backed domain. The haircut part of a lien created below the full rate (`face_claim_locked - backing_reserved`) stays in `unliened_claim_bound_num`, and impaired liens are not deducted (their backing is forfeited or encumbered while their face is still owed); both only lower the rate. A lien whose locked face is partially burned keeps whole atoms of backing up to the next atom above its remaining face, so locked face covers pledged backing to within one atom per lien; soft credit is floored per claimant and never exceeds `available_backing_num`.
+
+With `total_backing_num = fresh_reserved_backing_num + insurance_credit_reserved_num - impaired_liened_insurance_num`, every state MUST satisfy:
+
+```text
+// no over-credit: liens plus all soft credit on unliened face fit in the backing
+valid_liened_backing_num + valid_liened_insurance_num
+  + floor(credit_rate_num * unliened_claim_bound_num / CREDIT_RATE_SCALE)
+  <= total_backing_num
+
+// a lien cannot cut the rate of a domain whose backing covers its claims
+total_backing_num >= positive_claim_bound_num and available_backing_num > 0
+  => credit_rate_num == CREDIT_RATE_SCALE
+
+// no lien state can lift the rate above the lien-free rate
+credit_rate_num <= min(CREDIT_RATE_SCALE,
+                       floor(total_backing_num * CREDIT_RATE_SCALE
+                             / positive_claim_bound_num))
+```
+
+Creating a lien MUST NOT raise `credit_rate_num`.
 
 `fresh_reserved_backing_num` is actual account equity already locked for that source domain and still inside Fresh backing buckets. It is not an optimistic estimate. It cannot be withdrawn, pledged to another domain, used by another instance, or released without a full account refresh and source-credit recomputation. Expired, impaired, or consumed backing is not available for new credit.
 
@@ -314,7 +344,7 @@ spent_backing_num >= provider_receivable_num
 insurance_credit_reserved_num >= valid_liened_insurance_num + impaired_liened_insurance_num
 ```
 
-Any transition that changes bucket freshness, lien state, or backing consumption MUST update bucket-local and source-domain aggregates in the same atomic instruction or recompute them from bucket state. Bucket expiry, lien consumption, lien release, and lien impairment MUST NOT increase `available_backing_num`, `credit_rate_num`, or lien creation capacity unless new independently proven backing is added.
+Any transition that changes bucket freshness, lien state, or backing consumption MUST update bucket-local and source-domain aggregates in the same atomic instruction or recompute them from bucket state. Bucket expiry, lien consumption, lien release, and lien impairment MUST NOT increase `available_backing_num`, `credit_rate_num`, or lien creation capacity unless new independently proven backing is added. A lien release (the un-pledge of §2.2) returns only the lien's own pledged backing to `fresh_unliened_backing_num`, and with it the same amount of claim bound to `unliened_claim_bound_num`; that is the backing the lien itself removed, not new credit. In a domain whose backing covers its claims the rate is `CREDIT_RATE_SCALE` after the release, as it was before it whenever any backing was unliened, and a release can never lift `credit_rate_num` above the lien-free rate defined above. Bucket expiry and lien impairment remove backing while the affected face returns to `unliened_claim_bound_num`, so they can only lower `credit_rate_num`.
 
 ### 2.1 Claim bounds
 
@@ -936,6 +966,10 @@ available_backing_num =
      - valid_liened_insurance_num
      - impaired_liened_insurance_num)
 available_backing_num >= 0
+unliened_claim_bound_num =
+    max(0, positive_claim_bound_num - valid_liened_backing_num - valid_liened_insurance_num)
+credit_rate_num * unliened_claim_bound_num <= available_backing_num * CREDIT_RATE_SCALE
+lien-covered claim face is in neither term of credit_rate_num: while any backing is unliened, a valid lien never lowers the rate of a domain whose total backing covers its claims
 impaired_liened_backing_num and impaired_liened_insurance_num are not counted in available_backing_num
 insurance-backed liens satisfy the same create/consume/release/impair conservation as counterparty-backed liens
 valid_liened_insurance_num and impaired_liened_insurance_num are backed by canonical insurance reservations
@@ -1791,6 +1825,9 @@ resolved-claim, and rebalance-on-touch routes required for user exits.
 103. `account_kf_settlement_key_roundtrips_and_orders_loss_domain_slot_priority`.
 104. `whole_account_kf_settlement_is_leg_and_account_order_independent`.
 105. `lapsed_backing_in_active_leg_source_domain_expires_in_permissionless_refresh_before_first_claim` (a Fresh bucket at or past expiry in the source domain of an active leg is expired by the Live permissionless refresh of that account before the leg's favorable delta is attributed, one bucket per call after the account's existing claim domains, never before its expiry slot; the account is neither un-refreshable nor un-liquidatable while the bucket waits).
+106. `lien_and_unliened_source_support_sum_capped_by_shared_backing` (a lien holder's reserve plus every other claimant's soft credit fit in the domain backing; in a fully backed domain the lien cuts no other claimant).
+107. `lien_create_release_never_cuts_fully_backed_domain_rate` (creating a lien never raises `credit_rate_num` and leaves it full when the domain's backing covers its claims; releasing it restores the pre-lien state and rate).
+108. `counterparty_backing_withdraw_beside_lien_cannot_underback_claims` (a provider withdrawal that leaves the full rate leaves total backing >= total claims).
 -------------------------------------------------------------------------------
 15. Audit summary and intended tradeoff
 -------------------------------------------------------------------------------

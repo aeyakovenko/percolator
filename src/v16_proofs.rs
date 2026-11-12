@@ -2432,18 +2432,22 @@ fn composition_attach_value_conservation_under_axiom() {
 
 // Credit-rate arithmetic is already discharged against an independent model
 // in rounding_residue_fuzz. This abstraction preserves the exact extrema used
-// by the source-lien unwind (zero available backing => zero rate; no claim or
-// enough available backing => full rate) and over-approximates only the
-// division-bearing partial-haircut branch, which this composition never uses.
+// by the source-lien unwind (no claim => full rate; zero available backing =>
+// zero rate; available backing covering every claim that valid liens do not
+// cover => full rate) and over-approximates only the division-bearing
+// partial-haircut branch, which this composition never uses.
 #[cfg(all(kani, feature = "closure"))]
 fn axiom_source_credit_rate_extrema(state: SourceCreditStateV16) -> V16Result<u128> {
     V16Core::validate_source_credit_state_shape_static(state)?;
-    let available = V16Core::available_backing_num_for_source_credit_state(state)?;
-    if state.positive_claim_bound_num == 0 || available >= state.positive_claim_bound_num {
+    if state.positive_claim_bound_num == 0 {
         return Ok(CREDIT_RATE_SCALE);
     }
+    let available = V16Core::available_backing_num_for_source_credit_state(state)?;
     if available == 0 {
         return Ok(0);
+    }
+    if available >= V16Core::unliened_claim_bound_num_for_source_credit_state(state)? {
+        return Ok(CREDIT_RATE_SCALE);
     }
     let rate: u128 = kani::any();
     kani::assume(rate < CREDIT_RATE_SCALE);

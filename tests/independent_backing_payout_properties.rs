@@ -287,12 +287,23 @@ fn spec_available(s: &SourceCreditStateV16) -> u128 {
             - s.impaired_liened_insurance_num)
 }
 
+/// Spec §2 credit rate (#250): unliened backing over the claim bound that valid liens do
+/// not cover with their own pledged backing.
 fn spec_rate(s: &SourceCreditStateV16) -> u128 {
     if s.positive_claim_bound_num == 0 {
         return CREDIT_RATE_SCALE;
     }
-    let num = primitive_mul_div(spec_available(s), CREDIT_RATE_SCALE, s.positive_claim_bound_num);
-    num.min(CREDIT_RATE_SCALE)
+    let available = spec_available(s);
+    if available == 0 {
+        return 0;
+    }
+    let unliened_claim = s
+        .positive_claim_bound_num
+        .saturating_sub(s.valid_liened_backing_num + s.valid_liened_insurance_num);
+    if available >= unliened_claim {
+        return CREDIT_RATE_SCALE;
+    }
+    primitive_mul_div(available, CREDIT_RATE_SCALE, unliened_claim)
 }
 
 fn primitive_mul_div(a: u128, b: u128, d: u128) -> u128 {

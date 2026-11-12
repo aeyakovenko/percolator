@@ -284,11 +284,20 @@ mod rate_differential {
         let available = fresh_reserved
             .checked_sub(valid_liened)?
             .checked_add(ins_reserved.checked_sub(ins_valid.checked_add(ins_impaired)?)?)?;
+        if available == 0 {
+            return Some(0);
+        }
+        // Spec §2 (#250): the unliened backing is owed to the claim bound that valid liens
+        // do not cover with their own pledged backing.
+        let unliened_claim = claim_bound.saturating_sub(valid_liened.checked_add(ins_valid)?);
+        if available >= unliened_claim {
+            return Some(CREDIT_RATE_SCALE);
+        }
         // independent widening: 128x128/128 via u128->BigUint-free f: use
         // primitive split arithmetic (a*b/c with a,b < 2^128, c != 0) through
         // u128 chunks — here bounded inputs keep a*b within u128 range.
         let prod = available.checked_mul(CREDIT_RATE_SCALE)?;
-        Some(core::cmp::min(prod / claim_bound, CREDIT_RATE_SCALE))
+        Some(prod / unliened_claim)
     }
 
     proptest! {
