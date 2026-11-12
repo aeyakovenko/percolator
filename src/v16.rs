@@ -13619,7 +13619,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///    face that the twin's losers paid in (their regain is owed from
     ///    `loss_domain`); provider-fronted twin backing stays with the provider;
     /// 2. fully backed face (rate 1) in any other source domain is realized one
-    ///    for one, its backing moving to `loss_domain`;
+    ///    for one, its backing moving to `loss_domain`; fully backed face in
+    ///    `loss_domain` itself cancels one for one with nothing to move (#252:
+    ///    the claim on that domain and the debt to it are the same money, so
+    ///    its backing stays in place and nothing is consumed);
     /// 3. if the account holds unliened face in a partially backed (rate < 1)
     ///    domain, the whole rest is paid from free capital into `loss_domain`,
     ///    keeping that face (worth face * rate in health either way) instead of
@@ -13787,8 +13790,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// claimants never see a lower rate. With `require_full_backing` (a domain
     /// other than the leg's twin) only face whose backing moves in full at rate
     /// 1 is netted; with backing that cannot move, the twin's face is cancelled
-    /// without a move, which only raises the twin's rate. The account PnL and
-    /// the source-array compaction are left to the caller.
+    /// without a move, which only raises the twin's rate. Face held in
+    /// `loss_domain` itself has nothing to move and is cancelled by
+    /// `cancel_loss_domain_face_at_par_not_atomic`. The account PnL and the
+    /// source-array compaction are left to the caller.
     fn net_slot_face_at_par_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -13800,9 +13805,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<()> {
         let source = account.header.source_domains[slot];
         let face_domain = source.domain.get() as usize;
-        if face_domain == loss_domain {
-            return Ok(());
-        }
         let unliened_num = Self::slot_unliened_claim_num(source)?;
         // Whole atoms only, rounded DOWN: a slot can hold a fractional claim
         // (a partial-rate burn elsewhere), and `face_left` spans every domain, so
@@ -13814,6 +13816,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .min(unliened_num / BOUND_SCALE);
         if netted == 0 {
             return Ok(());
+        }
+        if face_domain == loss_domain {
+            return self.cancel_loss_domain_face_at_par_not_atomic(account, slot, netted, batch);
         }
         let now = self.header.current_slot.get();
         let bucket = self.backing_bucket_for_domain(face_domain)?;
@@ -13924,6 +13929,47 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         batch.netted += netted;
         batch.netted_num += netted_num;
         batch.transfer_num += transfer_num;
+        batch.loss_left -= netted;
+        batch.face_left -= netted;
+        Ok(())
+    }
+
+    /// Face the account holds in the loss domain itself (#252). Its claim on that
+    /// domain and its new debt to that domain are the same money: at credit rate
+    /// exactly 1 the claim is worth par, so `netted` whole atoms of the two cancel
+    /// one for one and the backing behind the cancelled face stays where it is,
+    /// where it now backs the gain this loss pays for. Nothing is consumed, so
+    /// neither the provider receivable nor the junior pool moves, and the domain's
+    /// other claimants keep rate 1 (claims fall, backing does not). No principal
+    /// moves, so this needs neither an open loss side nor movable backing.
+    ///
+    /// Below rate 1 -- or with a lapsed bucket, whose stored rate no longer
+    /// holds -- nothing is cancelled here: the caller counts the face as partially
+    /// backed (kept, the loss paid from free capital) or leaves it to the ordinary
+    /// path, exactly as before.
+    fn cancel_loss_domain_face_at_par_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        slot: usize,
+        netted: u128,
+        batch: &mut ParNettingBatchV16,
+    ) -> V16Result<()> {
+        let domain = account.header.source_domains[slot].domain.get() as usize;
+        let (raw_status, raw_expiry) = self.backing_bucket_raw_status_expiry_for_domain(domain)?;
+        if (raw_status == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+            && raw_expiry <= self.header.current_slot.get())
+            || self.stored_source_credit_rate_num(domain)? != CREDIT_RATE_SCALE
+        {
+            return Ok(());
+        }
+        let netted_num = V16Core::bound_num_from_amount(netted)?;
+        // Validates the domain's credit state, lowers the account's and the
+        // domain's claim together and recomputes the rate.
+        self.decrement_account_source_claim_for_domain_not_atomic(
+            account, slot, domain, netted_num,
+        )?;
+        batch.netted += netted;
+        batch.netted_num += netted_num;
         batch.loss_left -= netted;
         batch.face_left -= netted;
         Ok(())

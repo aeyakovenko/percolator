@@ -1480,7 +1480,19 @@ below T's rate, no remaining T claimant's rate falls, no account is credited
 more than its position's PnL, and liened or impaired T face is never netted.
 After that netting, still before support-and-burn: (a) unliened face in any
 other source domain whose credit rate is exactly 1 is realized one for one, its
-counterparty backing (booked as ordinary support consumption) moving to `L`;
+counterparty backing (booked as ordinary support consumption) moving to `L`.
+Unliened face the account holds in `L` itself at credit rate exactly 1 is the
+same case with nothing to move: the claim on `L` and the new debt to `L` are
+the same money, so `min(remaining loss, positive face, whole unliened L claim)`
+of the two cancel one for one (the account's `L` claim, `L`'s claim bound and
+`PNL` fall together) while `L`'s backing is left exactly where it is, where it
+backs the gain this loss pays for. Nothing is consumed (no spent,
+provider-receivable or consumed-lien entry) and nothing reaches the junior
+pool; `L`'s remaining claimants keep rate 1 because claims fall and backing
+does not. No principal moves, so this cancellation does not depend on a
+domain-loss barrier or on `L`'s bucket accepting fresh principal; it is skipped
+only while `L`'s bucket has lapsed without being expired (its stored rate no
+longer holds). Face in `L` below rate 1 is partially backed face under (b);
 (b) if the account holds unliened face in a domain with credit rate below 1,
 the whole remaining loss is paid from free capital directly into `L` backing
 (`C_tot -= x`, `L` principal `+= x`, `V` flat) and that face is kept -- it is
