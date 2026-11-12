@@ -3165,6 +3165,11 @@ fn proof_v16_public_restart_rejects_spent_domain_before_mutation() {
     let slack_raw: u8 = kani::any();
     let price_raw: u16 = kani::any();
     kani::assume(spent_raw > 0);
+    // Only a partially spent budget locks the restart. A fully spent one (budget == spent)
+    // has no remaining entitlement, and the restart clears it value-neutrally itself
+    // (normalize_terminal_empty_asset_history_not_atomic); that side is proven in
+    // proof_v16_public_terminal_restart_normalizes_inert_history_preserves_value.
+    kani::assume(remaining_raw > 0);
     kani::assume((1..=10_000).contains(&price_raw));
 
     let old_market_id = 1u64;
@@ -11602,10 +11607,12 @@ fn proof_v16_public_permissionless_empty_market_crank_advances_clock_without_val
     assert_eq!(outcome, PermissionlessProgressOutcomeV16::AccountCurrent);
     assert_eq!(market.header.current_slot.get(), now_slot);
     assert_eq!(market.header.slot_last.get(), expected_asset_slot);
-    assert_eq!(
-        market.header.loss_stale_active,
-        if expected_asset_slot < now_slot { 1 } else { 0 }
-    );
+    // An asset with no exposure, stored positions, obligations or loss weight has nothing
+    // that can be stale, so it does not raise the loss-stale summary even while its own
+    // clock is still behind (asset_contributes_to_loss_stale_summary).
+    assert_eq!(market.header.loss_stale_active, 0);
+    assert_eq!(asset.stale_account_count_long, 0);
+    assert_eq!(asset.stale_account_count_short, 0);
     assert_eq!(asset.slot_last, expected_asset_slot);
     assert_eq!(asset.effective_price, effective_price);
     assert_eq!(asset.fund_px_last, effective_price);
@@ -11710,15 +11717,20 @@ fn proof_v16_equity_active_accrual_with_progress_commits_one_bounded_segment() {
     assert!(outcome.price_move_active);
     assert!(!outcome.funding_active);
     assert!(outcome.equity_active);
-    assert_eq!(outcome.loss_stale_after, expected_asset_slot < now_slot);
+    // The price move changes K on both sides, which starts a new settlement cohort on each
+    // (kernel_mark_kf_stale_cohorts): every stored position is stale until its account
+    // refreshes. The asset therefore stays loss-stale even when this one segment already
+    // reaches now_slot.
+    assert_eq!(asset_after.kf_epoch_long, expected_asset_slot);
+    assert_eq!(asset_after.kf_epoch_short, expected_asset_slot);
+    assert_eq!(asset_after.stale_account_count_long, 1);
+    assert_eq!(asset_after.stale_account_count_short, 1);
+    assert!(outcome.loss_stale_after);
     assert_eq!(asset_after.slot_last, expected_asset_slot);
     assert_eq!(asset_after.effective_price, price);
     assert_eq!(market.header.current_slot.get(), now_slot);
     assert_eq!(market.header.slot_last.get(), expected_asset_slot);
-    assert_eq!(
-        market.header.loss_stale_active,
-        if expected_asset_slot < now_slot { 1 } else { 0 }
-    );
+    assert_eq!(market.header.loss_stale_active, 1);
     assert_eq!(market.header.oracle_epoch.get(), oracle_epoch_before + 1);
     assert_eq!(market.header.vault, vault_before);
     assert_eq!(market.header.c_tot, c_tot_before);
@@ -11778,6 +11790,7 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
     delayed_markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     let mut split_header = delayed_header;
     let mut split_markets = delayed_markets;
+    let blockers_before = delayed_header.resolved_payout_blocker_count.get();
 
     let delayed_outcome = {
         let mut market = MarketGroupV16ViewMut::new(&mut delayed_header, &mut delayed_markets);
@@ -11807,6 +11820,83 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
     let linear_cap = u64::try_from((100u128 * cap as u128 * 2) / 10_000).unwrap();
     assert!(second_price.abs_diff(100) <= linear_cap);
     assert_eq!(delayed_outcome.dt, 2);
+
+    // The K/F settlement-cohort bookkeeping is the one part of an accrual that depends on
+    // how the catch-up is partitioned (spec section 4, "Whenever a side's K or F target
+    // changes"): every call that changes a side's K or F starts a cohort at that call's
+    // settlement slot. A split catch-up can therefore stamp an earlier epoch, and can start
+    // a cohort the single delayed call does not (one segment moves F, the next moves it
+    // back). What must hold is the safe direction: the delayed call never leaves a net K/F
+    // change unmarked, and the split path is never less stale than the delayed one.
+    let delayed_asset = delayed_markets[0].engine.asset.try_to_runtime().unwrap();
+    let split_asset = split_markets[0].engine.asset.try_to_runtime().unwrap();
+    let long_changed =
+        delayed_asset.k_long != asset.k_long || delayed_asset.f_long_num != asset.f_long_num;
+    let short_changed =
+        delayed_asset.k_short != asset.k_short || delayed_asset.f_short_num != asset.f_short_num;
+    kani::cover!(
+        !long_changed && split_asset.stale_account_count_long == 1,
+        "canonical path proof covers a split catch-up starting a cohort the delayed call does not"
+    );
+    kani::cover!(
+        long_changed && split_asset.kf_epoch_long == 2,
+        "canonical path proof covers a split catch-up stamping the earlier settlement slot"
+    );
+    assert_eq!(
+        delayed_asset.stale_account_count_long,
+        if long_changed { 1 } else { 0 }
+    );
+    assert_eq!(
+        delayed_asset.stale_account_count_short,
+        if short_changed { 1 } else { 0 }
+    );
+    assert_eq!(
+        delayed_asset.kf_epoch_long,
+        if long_changed { 3 } else { asset.kf_epoch_long }
+    );
+    assert_eq!(
+        delayed_asset.kf_epoch_short,
+        if short_changed { 3 } else { asset.kf_epoch_short }
+    );
+    assert!(split_asset.stale_account_count_long >= delayed_asset.stale_account_count_long);
+    assert!(split_asset.stale_account_count_short >= delayed_asset.stale_account_count_short);
+    assert!(split_asset.stale_account_count_long <= split_asset.stored_pos_count_long);
+    assert!(split_asset.stale_account_count_short <= split_asset.stored_pos_count_short);
+    assert_eq!(
+        split_asset.kf_epoch_long != asset.kf_epoch_long,
+        split_asset.stale_account_count_long == 1
+    );
+    assert_eq!(
+        split_asset.kf_epoch_short != asset.kf_epoch_short,
+        split_asset.stale_account_count_short == 1
+    );
+    assert!(!long_changed || (2..=3).contains(&split_asset.kf_epoch_long));
+    assert!(!short_changed || (2..=3).contains(&split_asset.kf_epoch_short));
+    // The two header summaries derived from the cohort counts follow them on each path.
+    let delayed_stale =
+        delayed_asset.stale_account_count_long + delayed_asset.stale_account_count_short;
+    let split_stale = split_asset.stale_account_count_long + split_asset.stale_account_count_short;
+    assert_eq!(
+        delayed_header.loss_stale_active,
+        if delayed_stale != 0 { 1 } else { 0 }
+    );
+    assert_eq!(
+        split_header.loss_stale_active,
+        if split_stale != 0 { 1 } else { 0 }
+    );
+    assert_eq!(
+        delayed_header.resolved_payout_blocker_count.get(),
+        blockers_before + delayed_stale
+    );
+    assert_eq!(
+        split_header.resolved_payout_blocker_count.get(),
+        blockers_before + split_stale
+    );
+
+    // Everything else that is persisted (prices, K/F indices, remainders, slots, epochs,
+    // value and backing state) is partition invariant.
+    erase_kf_cohort_bookkeeping(&mut delayed_header, &mut delayed_markets[0].engine);
+    erase_kf_cohort_bookkeeping(&mut split_header, &mut split_markets[0].engine);
     assert!(kani_eq_market_group_v16_header_account(
         &delayed_header,
         &split_header
@@ -11815,6 +11905,21 @@ fn proof_v16_canonical_accrual_path_is_partition_invariant() {
         &delayed_markets[0].engine,
         &split_markets[0].engine
     ));
+}
+
+/// Clears the K/F settlement-cohort bookkeeping of one asset slot, and the two header
+/// summaries derived from it, so that the rest of the persisted state can be compared
+/// across accrual partitions.
+fn erase_kf_cohort_bookkeeping(
+    header: &mut MarketGroupV16HeaderAccount,
+    slot: &mut EngineAssetSlotV16Account,
+) {
+    slot.asset.kf_epoch_long = V16PodU64::new(0);
+    slot.asset.kf_epoch_short = V16PodU64::new(0);
+    slot.asset.stale_account_count_long = V16PodU64::new(0);
+    slot.asset.stale_account_count_short = V16PodU64::new(0);
+    header.loss_stale_active = 0;
+    header.resolved_payout_blocker_count = V16PodU64::new(0);
 }
 
 #[kani::proof]
