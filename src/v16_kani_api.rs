@@ -1358,6 +1358,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_book_kf_loss_support_for_source_domain_not_atomic(
+        &mut self,
+        domain: usize,
+        support: u128,
+    ) -> V16Result<()> {
+        self.book_kf_loss_support_for_source_domain_not_atomic(domain, support)
+    }
+
     #[cfg(kani)]
     pub fn kani_leg_kf_delta_for_settlement(
         &self,

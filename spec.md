@@ -1198,6 +1198,12 @@ consume - counterparty cure:    counterparty_backing_principal -= X ;
                                 support_consumed. NO funded-stock debit -> NO
                                 TokenValueFlowProof (pure reclassification, same
                                 proof family as forfeit below)
+consume - K/F loss support:     counterparty_backing_principal -= X in the source
+                                domain ; += X' <= X in the loss domain (the
+                                loss-domain booking rule of section 8) ;
+                                junior_residual_pool += X - X' ; V flat. Pure
+                                reclassification inside the class, proven by the
+                                ReservationEncumbranceProof of both domains
 consume - insurance cure:       I -= X ; junior_residual_pool += X ; V flat ;
                                 partition category: support_consumed ; funded by
                                 an insurance-stock debit -> balanced
@@ -1501,6 +1507,30 @@ would spend `x / rate` face for `x` of loss and strand the difference in the
 source domain once its losers book. Health is unchanged either way (`C - x +
 P*r` equals `C + (P - x/r)*r`). Only a loss beyond free capital, or one met by
 liened face, takes the support-and-burn path.
+
+Loss-domain booking of consumed support. A K/F loss is owed to `L` whether the
+account pays it from capital or by giving up claims. Counterparty backing that
+the support-and-burn path consumes from the account's own source claims toward
+a K/F loss -- in Live, whatever the netting above left to that path; in
+Resolved mode, where that netting does not run, every K/F loss met by positive
+face -- MUST NOT be left in the junior pool while `L` can take it. The source
+domain books it exactly as ordinary support consumption (spent /
+provider-receivable / consumed lockstep), and the consumed atoms are booked
+for `L` by the same rule that books the capital-paid part of the same loss:
+in Live all of it joins `L` as loser-paid principal (refilling `L`'s provider
+receivable first) unless `L`'s bucket is Impaired; in Resolved mode nothing is
+booked for a terminal domain (Impaired, or no claim and no creditor leg left),
+otherwise `L` takes what the resolved loss-backing capacity allows (the whole
+amount while `L`'s bucket is Fresh, unlapsed and funded; otherwise its support
+gap plus the provider receivable already advanced). Whatever that rule does
+not book stays junior residual, where consumption already put it; `V`,
+`C_tot` and `I` are flat throughout. Insurance-funded support and junior-pool
+(haircut) support are not counterparty backing and are not moved, and nothing
+is taken back out of the junior pool once the resolved payout snapshot is
+captured. Without this a provider in `L` pays the opposite side's gain from
+its principal and is never repaid, and the consumed backing is retired at
+terminal. The face burned by that path, and the rate it is burned at, are
+unchanged.
 
 If full B settlement is too large, partial settlement is allowed. While `B_remaining > 0`, no user-favorable action may continue.
 

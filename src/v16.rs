@@ -7287,6 +7287,10 @@ pub struct DeadLegForfeitOutcomeV16 {
 struct SupportLossApplicationV16 {
     support_consumed: u128,
     junior_face_burned: u128,
+    /// The part of `support_consumed` that was drawn from counterparty backing
+    /// behind the account's own source claims (not insurance credit and not the
+    /// junior pool), in atoms.
+    counterparty_support_consumed: u128,
 }
 
 const ACCOUNT_KF_SETTLEMENT_DOMAIN_MAX: u64 = u32::MAX as u64 * 2 + 1;
@@ -14076,6 +14080,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
+                counterparty_support_consumed: 0,
             });
         }
         let old_positive_face = account.header.pnl.get().max(0) as u128;
@@ -14091,9 +14096,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
+                counterparty_support_consumed: 0,
             });
         }
         let has_source_claims = Self::account_has_source_claims(&account.as_view())?;
+        let mut counterparty_support_consumed = 0u128;
         let (support_consumed, support_face_burned, preburned_source_claim_num) =
             if has_source_claims {
                 let source_support_limit = loss_abs.min(old_positive_face);
@@ -14104,6 +14111,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         true,
                         false,
                     )?;
+                counterparty_support_consumed = consumption.counterparty_credit_consumed;
                 (
                     support_consumed,
                     consumption.face_burn.min(old_positive_face),
@@ -14151,6 +14159,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(SupportLossApplicationV16 {
             support_consumed,
             junior_face_burned,
+            counterparty_support_consumed,
         })
     }
 
@@ -14165,6 +14174,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
+                counterparty_support_consumed: 0,
             });
         }
         if delta < 0 {
@@ -14190,6 +14200,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Ok(SupportLossApplicationV16 {
                 support_consumed: 0,
                 junior_face_burned: 0,
+                counterparty_support_consumed: 0,
             });
         }
 
@@ -14262,6 +14273,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(SupportLossApplicationV16 {
             support_consumed,
             junior_face_burned,
+            // A gain curing an outstanding negative PnL: which domain that older loss
+            // was owed to is no longer known, so nothing is attributed here.
+            counterparty_support_consumed: 0,
         })
     }
 
@@ -14283,9 +14297,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if backing == 0 {
             return Ok(());
         }
-        let backing_num = backing
-            .checked_mul(BOUND_SCALE)
-            .ok_or(V16Error::ArithmeticOverflow)?;
         let vault_before = self.header.vault.get();
         account.header.capital = V16PodU128::new(
             account
@@ -14316,6 +14327,64 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.vault.get(),
         )?
         .validate()?;
+        let junior = self.book_realized_kf_loss_for_source_domain_not_atomic(domain, backing)?;
+        self.credit_post_snapshot_residual_not_atomic(junior)?;
+        Self::record_account_residual_crystallized_loss(account, backing)?;
+        account.header.health_cert.valid = 0;
+        Ok(())
+    }
+
+    /// Counterparty backing that the support-and-burn path consumed from the
+    /// account's own claims to pay a K/F loss owed to `domain` (#175). The account
+    /// paid that part of its loss with realized claims instead of capital, and the
+    /// loss is owed to `domain` either way: the consumed atoms are booked for
+    /// `domain` by exactly the rule that books the capital-paid part
+    /// (`book_realized_kf_loss_for_source_domain_not_atomic`), instead of being
+    /// left in the junior residual where the opposite side's gain cannot draw on
+    /// them. Otherwise a provider in `domain` pays that gain from its principal
+    /// and is never repaid. Whatever the rule does not book stays junior residual,
+    /// where consumption already put it.
+    ///
+    /// Insurance-funded support and junior-pool support are not counterparty
+    /// backing and are not moved. Once the resolved payout snapshot is captured
+    /// the junior residual is committed to receipts, so nothing is taken back
+    /// out of it.
+    fn book_kf_loss_support_for_source_domain_not_atomic(
+        &mut self,
+        domain: usize,
+        support: u128,
+    ) -> V16Result<()> {
+        if support == 0 || decode_bool(self.header.payout_snapshot_captured)? {
+            return Ok(());
+        }
+        self.book_realized_kf_loss_for_source_domain_not_atomic(domain, support)?;
+        Ok(())
+    }
+
+    /// Books `backing` atoms of a realized K/F loss for the source domain the loss
+    /// is owed to, and returns the atoms that are left to the junior residual
+    /// instead. The caller has already taken the atoms out of where they came
+    /// from -- the account's capital, or counterparty backing consumed from the
+    /// account's own claims -- so `V`, `C_tot` and `I` do not move here; this only
+    /// decides whether the value rests in `domain`'s backing or in the junior pool.
+    ///
+    /// Live: the whole amount joins `domain`'s backing as loser-paid principal (it
+    /// refills the provider receivable first), unless the bucket is Impaired.
+    /// Resolved: nothing is booked for a terminal domain (Impaired, or no claim and
+    /// no creditor leg left); otherwise the domain takes what
+    /// `resolved_loss_backing_capacity_num` allows, and nothing once new backing
+    /// would lapse on creation.
+    fn book_realized_kf_loss_for_source_domain_not_atomic(
+        &mut self,
+        domain: usize,
+        backing: u128,
+    ) -> V16Result<u128> {
+        if backing == 0 {
+            return Ok(0);
+        }
+        let backing_num = backing
+            .checked_mul(BOUND_SCALE)
+            .ok_or(V16Error::ArithmeticOverflow)?;
         let terminal_residual = if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
         {
             let (asset_index, loss_side) = self.domain_asset_side(domain)?;
@@ -14341,63 +14410,57 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             // remaining claim or creditor leg, late debt funds terminal junior
             // claims instead of recreating ownerless source backing. Impaired
             // provider buckets likewise leave new losses as junior support.
-            self.credit_post_snapshot_residual_not_atomic(backing)?;
-        } else {
-            let (source_backing_num, residual_backing) =
-                if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
-                    let source_backing_num =
-                        backing_num.min(self.resolved_loss_backing_capacity_num(domain)?);
-                    let residual_num = backing_num
-                        .checked_sub(source_backing_num)
-                        .ok_or(V16Error::CounterUnderflow)?;
-                    (
-                        source_backing_num,
-                        V16Core::amount_from_bound_num(residual_num)?,
-                    )
-                } else {
-                    (backing_num, 0)
-                };
-            let mut residual_backing = residual_backing;
-            if source_backing_num != 0 {
-                // A lapsed bucket still marked Fresh cannot take backing at a new expiry.
-                // Normalize it first, exactly as the expiry crank would, so a loss that
-                // lands in this domain during refresh or liquidation is not rejected.
-                let (raw_status, raw_expiry) =
-                    self.backing_bucket_raw_status_expiry_for_domain(domain)?;
-                let now = self.header.current_slot.get();
-                let impaired_raw = encode_backing_bucket_status(BackingBucketStatusV16::Impaired);
-                let impaired = if raw_status
-                    == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
-                    && raw_expiry <= now
-                {
-                    self.expire_source_backing_bucket_not_atomic(domain, now)?;
-                    self.backing_bucket_raw_status_expiry_for_domain(domain)?.0 == impaired_raw
-                } else {
-                    raw_status == impaired_raw
-                };
-                // An Impaired bucket cannot take new backing, and past the resolved backing
-                // horizon new backing would lapse on creation; either way the loss stays as
-                // junior support instead of reverting the refresh or liquidation.
-                let expiry_slot = if impaired {
-                    None
-                } else {
-                    Some(self.fresh_counterparty_backing_expiry_slot(domain)?)
-                };
-                if let Some(expiry_slot) = expiry_slot.filter(|expiry| *expiry > now) {
-                    self.add_loser_paid_counterparty_backing_unchecked(
-                        domain,
-                        source_backing_num,
-                        expiry_slot,
-                    )?;
-                } else {
-                    residual_backing = backing;
-                }
-            }
-            self.credit_post_snapshot_residual_not_atomic(residual_backing)?;
+            return Ok(backing);
         }
-        Self::record_account_residual_crystallized_loss(account, backing)?;
-        account.header.health_cert.valid = 0;
-        Ok(())
+        let (source_backing_num, residual_backing) =
+            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
+                let source_backing_num =
+                    backing_num.min(self.resolved_loss_backing_capacity_num(domain)?);
+                let residual_num = backing_num
+                    .checked_sub(source_backing_num)
+                    .ok_or(V16Error::CounterUnderflow)?;
+                (
+                    source_backing_num,
+                    V16Core::amount_from_bound_num(residual_num)?,
+                )
+            } else {
+                (backing_num, 0)
+            };
+        if source_backing_num == 0 {
+            return Ok(residual_backing);
+        }
+        // A lapsed bucket still marked Fresh cannot take backing at a new expiry.
+        // Normalize it first, exactly as the expiry crank would, so a loss that
+        // lands in this domain during refresh or liquidation is not rejected.
+        let (raw_status, raw_expiry) = self.backing_bucket_raw_status_expiry_for_domain(domain)?;
+        let now = self.header.current_slot.get();
+        let impaired_raw = encode_backing_bucket_status(BackingBucketStatusV16::Impaired);
+        let impaired = if raw_status == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+            && raw_expiry <= now
+        {
+            self.expire_source_backing_bucket_not_atomic(domain, now)?;
+            self.backing_bucket_raw_status_expiry_for_domain(domain)?.0 == impaired_raw
+        } else {
+            raw_status == impaired_raw
+        };
+        // An Impaired bucket cannot take new backing, and past the resolved backing
+        // horizon new backing would lapse on creation; either way the loss stays as
+        // junior support instead of reverting the refresh or liquidation.
+        let expiry_slot = if impaired {
+            None
+        } else {
+            Some(self.fresh_counterparty_backing_expiry_slot(domain)?)
+        };
+        if let Some(expiry_slot) = expiry_slot.filter(|expiry| *expiry > now) {
+            self.add_loser_paid_counterparty_backing_unchecked(
+                domain,
+                source_backing_num,
+                expiry_slot,
+            )?;
+            Ok(residual_backing)
+        } else {
+            Ok(backing)
+        }
     }
 
     /// Resolved mode, non-terminal domain: how much newly crystallized
@@ -14713,7 +14776,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 if remaining_loss != 0 {
                     let remaining_i128 =
                         i128::try_from(remaining_loss).map_err(|_| V16Error::ArithmeticOverflow)?;
-                    self.apply_signed_kf_delta_to_pnl(account, -remaining_i128, None)?;
+                    let support =
+                        self.apply_signed_kf_delta_to_pnl(account, -remaining_i128, None)?;
+                    // Checked here so a loss that consumed no counterparty backing (the
+                    // common case: paid from capital) costs one comparison, not a call.
+                    if support.counterparty_support_consumed != 0 {
+                        self.book_kf_loss_support_for_source_domain_not_atomic(
+                            source_domain,
+                            support.counterparty_support_consumed,
+                        )?;
+                    }
                 }
                 let negative_after = account.header.pnl.get().min(0).unsigned_abs();
                 self.reserve_new_capital_backed_loss_for_source_domain_not_atomic(

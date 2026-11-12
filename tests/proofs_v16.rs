@@ -10402,6 +10402,124 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
     assert_eq!(market.kani_residual(), residual_before);
 }
 
+// Counterparty support that a K/F loss consumed from the account's own claims
+// sits in the junior residual until it is booked for the loss domain (#175).
+// In Live that booking is a pure reclassification: the vault, capital and
+// insurance do not move and the loss domain's fresh backing rises by exactly
+// the support (as loser-paid principal: provider principal, spent and
+// receivable are untouched), so the junior residual -- vault minus capital,
+// insurance and fresh backing -- falls by exactly the same amount. (Stated on
+// the stock components rather than through `kani_residual`, whose division by
+// BOUND_SCALE is costly to bit-blast.)
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_kf_loss_support_booking_is_a_pure_reclassification_into_the_loss_domain() {
+    let support_raw: u8 = kani::any();
+    kani::assume((1..=8).contains(&support_raw));
+    let support = support_raw as u128;
+    // The consumed support is in the junior residual when it is booked.
+    let capital = 3u128;
+    let junior = 8u128;
+
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    header.vault = V16PodU128::new(capital + junior);
+    header.c_tot = V16PodU128::new(capital);
+
+    let header_before = header;
+    let engine_before = markets[0].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .kani_book_kf_loss_support_for_source_domain_not_atomic(0, support)
+        .unwrap();
+
+    kani::cover!(support == 1, "smallest support is booked");
+    kani::cover!(support == junior, "the whole junior residual is booked");
+    assert_eq!(market.header.vault.get(), header_before.vault.get());
+    assert_eq!(market.header.c_tot.get(), header_before.c_tot.get());
+    assert_eq!(market.header.insurance.get(), header_before.insurance.get());
+    assert_eq!(
+        market.header.backing_provider_earnings_total.get(),
+        header_before.backing_provider_earnings_total.get()
+    );
+    // The only stock that moves: fresh counterparty backing, by exactly the support.
+    let booked_num = support * BOUND_SCALE;
+    assert_eq!(
+        market.header.source_fresh_backing_total_num.get(),
+        booked_num
+    );
+    let source = market.markets[0]
+        .engine
+        .source_credit_long
+        .try_to_runtime()
+        .unwrap();
+    let bucket = market.markets[0]
+        .engine
+        .backing_long
+        .try_to_runtime()
+        .unwrap();
+    assert_eq!(source.fresh_reserved_backing_num, booked_num);
+    assert_eq!(bucket.fresh_unliened_backing_num, booked_num);
+    assert_eq!(bucket.valid_liened_backing_num, 0);
+    assert_eq!(bucket.status, BackingBucketStatusV16::Fresh);
+    assert!(bucket.expiry_slot > market.header.current_slot.get());
+    assert_eq!(source.provider_receivable_num, 0);
+    assert_eq!(source.spent_backing_num, 0);
+    assert_eq!(source.positive_claim_bound_num, 0);
+    assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
+    assert_eq!(
+        market.markets[0].engine.provider_principal_long_num.get(),
+        0
+    );
+    // The other domain of the asset is untouched.
+    assert!(market.markets[0].engine.source_credit_short == engine_before.source_credit_short);
+    assert!(market.markets[0].engine.backing_short == engine_before.backing_short);
+}
+
+// Once the resolved payout snapshot is captured the junior residual is
+// committed to receipts: support is no longer booked out of it, and nothing
+// in the market moves.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_kf_loss_support_is_not_rebooked_after_payout_capture() {
+    let support: u128 = kani::any();
+    kani::assume(support != 0);
+
+    let (market_id, _, _) = ids();
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut view = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        view.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    header.vault = V16PodU128::new(11);
+    header.c_tot = V16PodU128::new(3);
+    header.mode = 1; // Resolved
+    header.resolved_slot = V16PodU64::new(1);
+    header.payout_snapshot_captured = 1;
+
+    let header_before = header;
+    let engine_before = markets[0].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+
+    market
+        .kani_book_kf_loss_support_for_source_domain_not_atomic(0, support)
+        .unwrap();
+
+    assert!(*market.header == header_before);
+    assert!(market.markets[0].engine == engine_before);
+}
+
 // A source domain that has already become Impaired during Resolved wind-down
 // cannot accept new recoverable provider principal. Capital consumed while a
 // pending K/F loss is crystallized must instead become terminal junior

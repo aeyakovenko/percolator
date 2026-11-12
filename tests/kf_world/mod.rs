@@ -152,6 +152,10 @@ impl World {
             provider: vec![0; assets * 2],
         };
         for (i, d) in deposits.iter().enumerate() {
+            // Every account is a materialized portfolio, as in the program: the slab cannot
+            // be retired while one of them still holds anything, an unpaid receipt included.
+            w.op(|m, a| m.register_empty_materialized_portfolio_not_atomic(&a[i].as_view()))
+                .unwrap();
             w.op(|m, a| m.deposit_not_atomic(&mut a[i], *d)).unwrap();
         }
         w
@@ -427,9 +431,17 @@ impl World {
         Ok(())
     }
 
-    /// Resolves the market as it stands, closes every account (round robin in `close_order`
-    /// until all are closed), lets each domain's provider take out all the backing the engine
-    /// lets it take, and retires the slab.
+    /// Resolves the market as it stands and winds it down the way the program does:
+    ///
+    /// 1. every account closes (round robin in `close_order` until all are closed);
+    /// 2. each domain's provider takes out all the backing the engine lets it take;
+    /// 3. time passes beyond every backing lifetime and the buckets left over are expired
+    ///    (their principal forfeits to the junior pool);
+    /// 4. accounts still holding a resolved receipt claim what it now pays;
+    /// 5. emptied portfolios are dematerialized and the slab is retired.
+    ///
+    /// Value that nobody could take stays in `vault_end` (the slab then never becomes ready
+    /// to close and `retired` is 0).
     pub fn wind_down(&mut self, close_order: &[usize]) -> WindDown {
         let n = self.accts.len();
         self.slot += 1;
@@ -454,48 +466,77 @@ impl World {
                 break;
             }
         }
+        let mut payouts: Vec<u128> = payouts
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| p.unwrap_or_else(|| panic!("account {i} did not close")))
+            .collect();
+
         let mut provider_out = vec![0u128; self.provider.len()];
         for d in 0..self.provider.len() {
             let b = self.bucket(d);
             if b.status != BackingBucketStatusV16::Fresh {
                 continue;
             }
+            // The whole bucket if the engine allows it, else its resolved surplus.
             let free = b.fresh_unliened_backing_num / BOUND_SCALE;
-            if free != 0
-                && self
-                    .op(|m, _| m.withdraw_fresh_counterparty_backing_not_atomic(d, free))
-                    .is_ok()
-            {
-                provider_out[d] = free;
-            }
-        }
-        // Past every backing lifetime, so whatever a provider could not take lapses.
-        let end_slot = resolved_slot + 2 * BACKING_LIFETIME;
-        let mut retired = None;
-        let mut start = 0usize;
-        for _ in 0..64 {
-            match self
-                .op(|m, _| m.advance_terminal_slab_not_atomic(end_slot, start))
-                .unwrap_or_else(|e| panic!("terminal slab: {e:?}"))
-            {
-                TerminalSlabOutcomeV16::ReadyToClose { retired: r } => {
-                    retired = Some(r);
+            let surplus = self
+                .op(|m, _| m.resolved_counterparty_backing_surplus(d))
+                .unwrap_or(0);
+            for amount in [free, surplus] {
+                if amount != 0
+                    && self
+                        .op(|m, _| m.withdraw_fresh_counterparty_backing_not_atomic(d, amount))
+                        .is_ok()
+                {
+                    provider_out[d] = amount;
                     break;
                 }
-                TerminalSlabOutcomeV16::ScanProgress { next_asset_index } => {
+            }
+        }
+
+        // Past every backing lifetime: what no provider took lapses into the junior pool.
+        let end_slot = resolved_slot + 2 * BACKING_LIFETIME;
+        self.op(|m, _| m.advance_resolved_slot_not_atomic(end_slot))
+            .unwrap();
+        for d in 0..self.provider.len() {
+            if self.bucket(d).status == BackingBucketStatusV16::Fresh {
+                self.op(|m, _| m.expire_source_backing_bucket_not_atomic(d, end_slot))
+                    .unwrap_or_else(|e| panic!("expiry of domain {d}: {e:?}"));
+            }
+        }
+        for i in 0..n {
+            if self.accts[i].resolved_payout_receipt.present != 0 {
+                if let Ok(paid) =
+                    self.op(|m, a| m.claim_resolved_payout_topup_not_atomic(&mut a[i]))
+                {
+                    payouts[i] += paid;
+                }
+            }
+            let _ = self
+                .op(|m, a| m.deregister_empty_materialized_portfolio_not_atomic(&a[i].as_view()));
+        }
+
+        let mut retired = 0;
+        let mut start = 0usize;
+        for _ in 0..64 {
+            match self.op(|m, _| m.advance_terminal_slab_not_atomic(end_slot, start)) {
+                Ok(TerminalSlabOutcomeV16::ReadyToClose { retired: r }) => {
+                    retired = r;
+                    break;
+                }
+                Ok(TerminalSlabOutcomeV16::ScanProgress { next_asset_index }) => {
                     start = next_asset_index
                 }
-                _ => start = 0,
+                Ok(_) => start = 0,
+                // Something is still owed to a portfolio that cannot collect it.
+                Err(_) => break,
             }
         }
         WindDown {
             provider_out,
-            payouts: payouts
-                .into_iter()
-                .enumerate()
-                .map(|(i, p)| p.unwrap_or_else(|| panic!("account {i} did not close")))
-                .collect(),
-            retired: retired.expect("terminal slab did not become ready to close"),
+            payouts,
+            retired,
             insurance: self.header.insurance.get(),
             vault_end: self.header.vault.get(),
         }
