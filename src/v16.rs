@@ -7376,6 +7376,19 @@ enum ResolvedSourcePreparationV16 {
     LienReleased,
 }
 
+/// One bounded source-realization step of a resolved close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedSourceRealizationV16 {
+    /// No source claim is left to process.
+    NoSourceClaim,
+    /// One source domain was realized, or demoted to junior face.
+    Processed,
+    /// The next claim converts to zero whole atoms at its domain's current
+    /// rate and the domain is not terminal for it. It stays attributed and
+    /// waits; nothing was mutated.
+    Waiting,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceCreditBackingSourceV16 {
     Counterparty,
@@ -20793,13 +20806,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// backing entitlement, demotes its unconverted haircut face to ordinary
     /// junior PnL, and removes exactly that source attribution. This keeps the
     /// terminal continuation bounded without changing the final value partition.
+    ///
+    /// A claim that converts to zero whole atoms is demoted only once its
+    /// domain is terminal for it (`source_domain_terminal_for_haircut_demote`).
+    /// Until then it stays attributed and the call returns `Waiting` with no
+    /// mutation, never an error: the wait belongs to this claim alone and must
+    /// not roll back close steps the same instruction already performed (#251).
     fn realize_one_source_domain_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
-    ) -> V16Result<bool> {
+    ) -> V16Result<ResolvedSourceRealizationV16> {
         if decode_bool(account.header.resolved_payout_receipt.present)? {
             // The face is already frozen into the receipt pool.
-            return Ok(false);
+            return Ok(ResolvedSourceRealizationV16::NoSourceClaim);
         }
         account.compact_source_domains();
         let mut claim_source = None;
@@ -20816,7 +20835,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             slot += 1;
         }
         let Some(source) = claim_source else {
-            return Ok(false);
+            return Ok(ResolvedSourceRealizationV16::NoSourceClaim);
         };
         let pos = account.header.pnl.get().max(0) as u128;
         let released = pos.saturating_sub(account.header.reserved_pnl.get());
@@ -20860,7 +20879,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
         if converted == 0 {
             if !self.source_domain_terminal_for_haircut_demote(source_domain, source)? {
-                return Err(V16Error::LockActive);
+                // Nothing has been mutated on this path. The caller decides
+                // whether the call still has pre-payout progress to commit.
+                return Ok(ResolvedSourceRealizationV16::Waiting);
             }
             // Zero-rate, sub-atom, or impaired source face remains a junior claim;
             // only its source-specific backing attribution is terminally removed.
@@ -20903,7 +20924,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         account.compact_source_domains();
-        Ok(true)
+        Ok(ResolvedSourceRealizationV16::Processed)
     }
 
     fn source_domain_terminal_for_haircut_demote(
@@ -21155,6 +21176,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if decode_market_mode(self.header.mode)? != MarketModeV16::Resolved {
             return Err(V16Error::LockActive);
         }
+        // Whether this call has performed a pre-payout close step by the time it
+        // reaches source realization: it released the account's last source
+        // lien, settled and detached a leg, or advanced the fee anchor. Such a
+        // step is reported as `ProgressOnly` even when the claim itself must
+        // keep waiting. Failing instead would roll the step back with it. When
+        // that step is the detach of the group's last stored leg, the rollback
+        // keeps every winner behind the payout blocker for as long as the
+        // claim waits (#251).
+        let mut pre_payout_step = false;
         if let Some(preparation) =
             self.prepare_one_source_domain_for_resolved_close_not_atomic(account)?
         {
@@ -21163,6 +21193,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             {
                 return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
             }
+            pre_payout_step = true;
         }
         if self
             .expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic(
@@ -21174,6 +21205,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.validate_with_market(&self.as_view())?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        // A leg that is active here is settled and detached before realization
+        // is reached (any other outcome returns `ProgressOnly` first).
+        pre_payout_step |=
+            !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
+        let fee_slot_before = account.header.last_fee_slot.get();
         if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
             .settle_account_side_effects_not_atomic(
                 account,
@@ -21188,6 +21224,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.resolved_slot.get(),
             fee_rate_per_slot,
         )?;
+        pre_payout_step |= account.header.last_fee_slot.get() != fee_slot_before;
         self.settle_negative_pnl_from_principal_not_atomic(account)?;
         if account.header.pnl.get() < 0 {
             self.settle_resolved_bankruptcy_negative_pnl(account)?;
@@ -21203,12 +21240,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if account.header.pnl.get() > 0 && !self.resolved_positive_payout_ready()? {
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        if self.realize_one_source_domain_for_resolved_close_not_atomic(account)?
-            && Self::account_has_source_claims(&account.as_view())?
-        {
-            self.validate_shape()?;
-            account.validate_with_market(&self.as_view())?;
-            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        match self.realize_one_source_domain_for_resolved_close_not_atomic(account)? {
+            ResolvedSourceRealizationV16::NoSourceClaim => {}
+            ResolvedSourceRealizationV16::Processed => {
+                if Self::account_has_source_claims(&account.as_view())? {
+                    self.validate_shape()?;
+                    account.validate_with_market(&self.as_view())?;
+                    return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+                }
+            }
+            ResolvedSourceRealizationV16::Waiting => {
+                // The claim stays attributed and unpaid either way. A call that
+                // changed nothing fails as before (no successful no-op); a call
+                // that performed a pre-payout step commits it.
+                if !pre_payout_step {
+                    return Err(V16Error::LockActive);
+                }
+                self.validate_shape()?;
+                account.validate_with_market(&self.as_view())?;
+                return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+            }
         }
         let mut payout_receipt = None;
         let pnl_payout = if account.header.pnl.get() > 0
