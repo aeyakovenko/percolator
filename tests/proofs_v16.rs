@@ -10059,6 +10059,208 @@ fn proof_v16_cross_account_source_support_sum_capped_by_shared_backing() {
     assert!(support_b <= b);
 }
 
+// Issue #250: the same cross-account bound with a lien outstanding. One claimant
+// has pledged `lien` atoms of the domain's backing and locked at least as much
+// face (`lien + haircut`, the haircut being the extra face a lien created below
+// the full rate locks). The lien holder is credited its pledged backing; the two
+// other claimants are credited at the stored rate. Liened backing is in neither
+// term of the rate, so (1) the lien plus both soft credits still fit in the
+// shared backing, and (2) when the backing covers every claim the lien cuts
+// nobody: both unliened claimants are credited their full face.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_lien_and_unliened_source_support_sum_capped_by_shared_backing() {
+    let lien_raw: u8 = kani::any();
+    let haircut_raw: u8 = kani::any();
+    let a_raw: u8 = kani::any();
+    let b_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    kani::assume(lien_raw <= 31 && haircut_raw <= 15);
+    kani::assume((1..=31).contains(&a_raw));
+    kani::assume((1..=31).contains(&b_raw));
+    kani::assume(backing_raw >= lien_raw && backing_raw <= 127);
+    let lien = lien_raw as u128;
+    let a = a_raw as u128;
+    let b = b_raw as u128;
+    let backing = backing_raw as u128;
+    let total = lien + haircut_raw as u128 + a + b;
+
+    let mut source_credit = SourceCreditStateV16 {
+        positive_claim_bound_num: total * BOUND_SCALE,
+        exact_positive_claim_num: total * BOUND_SCALE,
+        fresh_reserved_backing_num: backing * BOUND_SCALE,
+        valid_liened_backing_num: lien * BOUND_SCALE,
+        ..SourceCreditStateV16::EMPTY
+    };
+    source_credit.credit_rate_num =
+        kani_expected_source_credit_rate_num_for_state(source_credit).unwrap();
+
+    let support_a = kani_source_credit_state_realizable_support_for_face(source_credit, a).unwrap();
+    let support_b = kani_source_credit_state_realizable_support_for_face(source_credit, b).unwrap();
+
+    kani::cover!(
+        lien > 0 && backing < total && support_a > 0,
+        "lien beside a partially backed haircut"
+    );
+    kani::cover!(
+        lien > 0 && haircut_raw > 0 && backing >= total,
+        "sub-rate lien in a domain that has since become fully backed"
+    );
+    kani::cover!(
+        lien > 0 && backing == lien,
+        "all backing pledged leaves nothing for unliened face"
+    );
+
+    assert!(lien + support_a + support_b <= backing);
+    assert!(support_a <= a);
+    assert!(support_b <= b);
+    if backing >= total && backing > lien {
+        assert_eq!(source_credit.credit_rate_num, CREDIT_RATE_SCALE);
+        assert_eq!(support_a, a);
+        assert_eq!(support_b, b);
+    }
+}
+
+// Issue #250: pledging and un-pledging backing through the production lien
+// kernels. Creating a lien never raises the credit rate, never cuts the rate of
+// a domain whose backing covers its claims, and never lifts the rate above the
+// lien-free rate; releasing it restores the exact pre-lien rate.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_lien_create_release_never_cuts_fully_backed_domain_rate() {
+    let claim_raw: u8 = kani::any();
+    let backing_raw: u8 = kani::any();
+    let lien_raw: u8 = kani::any();
+    kani::assume((1..=63).contains(&claim_raw));
+    kani::assume(backing_raw <= 127);
+    // A lien pledges unliened backing and locks at least as much face.
+    kani::assume(lien_raw > 0 && lien_raw <= backing_raw && lien_raw <= claim_raw);
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let lien_num = lien_raw as u128 * BOUND_SCALE;
+
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: backing_num,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 100,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+    let rate_before = kani_expected_source_credit_rate_num_for_state(source).unwrap();
+
+    let (bucket_liened, source_liened) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_create_delta(
+            bucket, source, 0, lien_num,
+        )
+        .unwrap();
+    let rate_liened = kani_expected_source_credit_rate_num_for_state(source_liened).unwrap();
+
+    let (bucket_released, source_released) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_lien_terminal_release_delta(
+            bucket_liened,
+            source_liened,
+            lien_num,
+        )
+        .unwrap();
+    let rate_released = kani_expected_source_credit_rate_num_for_state(source_released).unwrap();
+
+    kani::cover!(
+        backing_raw >= claim_raw && lien_raw < backing_raw,
+        "lien on a fully backed domain"
+    );
+    kani::cover!(
+        backing_raw < claim_raw && lien_raw < backing_raw && rate_liened > 0,
+        "lien on a partially backed domain"
+    );
+    kani::cover!(rate_liened < rate_before, "lien lowers a haircut rate");
+
+    assert!(rate_liened <= rate_before);
+    if backing_raw >= claim_raw && lien_raw < backing_raw {
+        assert_eq!(rate_before, CREDIT_RATE_SCALE);
+        assert_eq!(rate_liened, CREDIT_RATE_SCALE);
+    }
+    assert_eq!(bucket_released, bucket);
+    assert_eq!(source_released, source);
+    assert_eq!(rate_released, rate_before);
+}
+
+// Issue #250: the full-rate gate on provider withdrawals, with a lien
+// outstanding. A withdrawal that leaves the domain at the full rate leaves at
+// least as much backing as there are claims (liened and unliened), and the
+// surplus above all claims is withdrawable down to the last unliened atom.
+#[kani::proof]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn proof_v16_counterparty_backing_withdraw_beside_lien_cannot_underback_claims() {
+    let backing_raw: u8 = kani::any();
+    let lien_raw: u8 = kani::any();
+    let claim_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    kani::assume(backing_raw <= 127 && claim_raw <= 127);
+    kani::assume(lien_raw <= backing_raw && lien_raw <= claim_raw);
+    kani::assume(claim_raw > 0);
+    kani::assume(withdraw_raw > 0 && withdraw_raw <= backing_raw - lien_raw);
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let lien_num = lien_raw as u128 * BOUND_SCALE;
+    let claim_num = claim_raw as u128 * BOUND_SCALE;
+    let withdraw_num = withdraw_raw as u128 * BOUND_SCALE;
+
+    let source = SourceCreditStateV16 {
+        positive_claim_bound_num: claim_num,
+        exact_positive_claim_num: claim_num,
+        fresh_reserved_backing_num: backing_num,
+        valid_liened_backing_num: lien_num,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let bucket = BackingBucketV16 {
+        market_id: 1,
+        fresh_unliened_backing_num: backing_num - lien_num,
+        valid_liened_backing_num: lien_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    };
+
+    let (_, source_after) =
+        MarketGroupV16ViewMut::<u64>::kani_prepare_counterparty_backing_withdraw_delta(
+            bucket,
+            source,
+            withdraw_num,
+        )
+        .unwrap();
+    let post_rate = kani_expected_source_credit_rate_num_for_state(source_after).unwrap();
+    let backing_after = backing_raw - withdraw_raw;
+
+    kani::cover!(
+        lien_raw > 0 && post_rate == CREDIT_RATE_SCALE,
+        "surplus withdrawal beside a lien passes the gate"
+    );
+    kani::cover!(
+        lien_raw > 0 && post_rate < CREDIT_RATE_SCALE,
+        "underbacking withdrawal beside a lien fails the gate"
+    );
+
+    assert_eq!(
+        source_after.fresh_reserved_backing_num,
+        backing_num - withdraw_num
+    );
+    assert_eq!(source_after.valid_liened_backing_num, lien_num);
+    if post_rate == CREDIT_RATE_SCALE {
+        assert!(backing_after >= claim_raw);
+    }
+    if backing_after >= claim_raw && backing_after > lien_raw {
+        assert_eq!(post_rate, CREDIT_RATE_SCALE);
+    }
+}
+
 // Global junior-bound aggregation invariant: the group-level junior claim bound
 // (`pnl_pos_bound_tot_num`) is the denominator for the non-source haircut
 // (`haircut_effective_support`) and the resolved-payout snapshot, so it must
