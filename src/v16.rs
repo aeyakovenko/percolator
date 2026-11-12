@@ -20807,11 +20807,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// junior PnL, and removes exactly that source attribution. This keeps the
     /// terminal continuation bounded without changing the final value partition.
     ///
-    /// A claim that converts to zero whole atoms is demoted only once its
-    /// domain is terminal for it (`source_domain_terminal_for_haircut_demote`).
-    /// Until then it stays attributed and the call returns `Waiting` with no
-    /// mutation, never an error: the wait belongs to this claim alone and must
-    /// not roll back close steps the same instruction already performed (#251).
+    /// A claim that converts to zero whole atoms is demoted once it is final
+    /// (`source_domain_terminal_for_haircut_demote`). Otherwise its zero comes
+    /// from backing that a co-claimant's lien still pledges: it stays
+    /// attributed and the call returns `Waiting` with no mutation, never an
+    /// error. The wait belongs to this claim alone and must not roll back close
+    /// steps the same instruction already performed (#251).
     fn realize_one_source_domain_for_resolved_close_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -20846,16 +20847,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut converted = 0u128;
         if claim_num != 0 {
             self.validate_source_domain_ledger_current(source_domain)?;
-            let rate = self
-                .source_credit_for_domain(source_domain)?
-                .credit_rate_num;
-            let credited_num = U256::from_u128(claim_num)
-                .checked_mul(U256::from_u128(rate))
-                .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
-                .and_then(|v| v.try_into_u128())
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            converted = (credited_num / BOUND_SCALE)
-                .min(self.source_credit_available_backing_num(source_domain)? / BOUND_SCALE);
+            converted = Self::source_claim_whole_atom_conversion(
+                self.source_credit_for_domain(source_domain)?,
+                claim_num,
+            )?;
             if converted != 0 {
                 let consumption = self.consume_source_domain_credit_for_effective_not_atomic(
                     source_domain,
@@ -20878,7 +20873,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         if converted == 0 {
-            if !self.source_domain_terminal_for_haircut_demote(source_domain, source)? {
+            if !self.source_domain_terminal_for_haircut_demote(source_domain, source, claim_num)? {
                 // Nothing has been mutated on this path. The caller decides
                 // whether the call still has pre-payout progress to commit.
                 return Ok(ResolvedSourceRealizationV16::Waiting);
@@ -20927,10 +20922,49 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(ResolvedSourceRealizationV16::Processed)
     }
 
+    /// Whole atoms a source claim of `claim_num` converts against `state`: its
+    /// share at `state`'s credit rate, floored, capped by the available backing.
+    fn source_claim_whole_atom_conversion(
+        state: SourceCreditStateV16,
+        claim_num: u128,
+    ) -> V16Result<u128> {
+        let credited_num = U256::from_u128(claim_num)
+            .checked_mul(U256::from_u128(state.credit_rate_num))
+            .and_then(|v| v.checked_div(U256::from_u128(CREDIT_RATE_SCALE)))
+            .and_then(|v| v.try_into_u128())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((credited_num / BOUND_SCALE)
+            .min(V16Core::available_backing_num_for_source_credit_state(state)? / BOUND_SCALE))
+    }
+
+    /// Whether a claim that converts to zero whole atoms now would still
+    /// convert to zero with every lien on the domain's backing released.
+    ///
+    /// Liens pledge backing out of the rate (`available / claims`) while their
+    /// face stays in the claims, so a claim can convert to zero only because a
+    /// co-claimant has not been closed yet. Resolved close releases every lien
+    /// before its holder realizes, so the rate with all valid liens released is
+    /// the most the domain can offer this claim.
+    fn source_claim_converts_to_zero_unpledged(
+        &self,
+        domain: usize,
+        claim_num: u128,
+    ) -> V16Result<bool> {
+        let mut unpledged = self.source_credit_for_domain(domain)?;
+        unpledged.valid_liened_backing_num = 0;
+        unpledged.valid_liened_insurance_num = 0;
+        unpledged.credit_rate_num = V16Core::expected_source_credit_rate_num_for_state(unpledged)?;
+        Ok(Self::source_claim_whole_atom_conversion(unpledged, claim_num)? == 0)
+    }
+
+    /// Whether a claim that converts to zero whole atoms may be demoted to
+    /// junior face now. `claim_num` is the part of it that was offered for
+    /// conversion.
     fn source_domain_terminal_for_haircut_demote(
         &self,
         domain: usize,
         retiring_source: PortfolioSourceDomainV16Account,
+        claim_num: u128,
     ) -> V16Result<bool> {
         let (asset_index, loss_side) = self.domain_asset_side(domain)?;
         let bucket = self.backing_bucket_for_domain(domain)?;
@@ -20965,6 +20999,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if bucket.status == BackingBucketStatusV16::Empty
             && decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
             && loss_side_counts == (0, 0, 0)
+        {
+            return Ok(true);
+        }
+        // The same finality with backing present (#251). Once the group is
+        // payout-ready no stored position, stale account, loss barrier or
+        // negative PnL is left anywhere, so no loss can still be booked into
+        // any domain: this domain's fresh backing is all it will ever hold. If
+        // the claim converts to zero even against all of it (pledged or not),
+        // its share is below one atom for good and it retires independently.
+        // Waiting on co-claimants would only let them wait on it in turn, until
+        // the bucket lapses. A claim that is zero only because backing is still
+        // pledged keeps waiting for the lien holders' releases.
+        if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+            && self.resolved_positive_payout_ready()?
+            && self.source_claim_converts_to_zero_unpledged(domain, claim_num)?
         {
             return Ok(true);
         }

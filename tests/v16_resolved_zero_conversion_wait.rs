@@ -1,18 +1,23 @@
-//! Issue #251: a zero-conversion source claim that has to keep waiting must
-//! not undo the close step that reached it.
+//! Issue #251: a resolved winner whose source claim converts to zero whole
+//! atoms must neither freeze the group nor wait for nothing.
 //!
 //! A resolved winner realizes its source claim against the domain's backing at
-//! the current credit rate, in whole atoms. A claim that converts to zero atoms
-//! on a Fresh, partially backed domain stays attributed while co-claimants
-//! remain: it can still convert backing that their liens pledge or that their
-//! floors leave behind. Before the fix that wait was an error, and the SVM
-//! rollback also undid whatever the same instruction had already done. When
-//! the waiting account held the group's last stored leg, the rollback restored
-//! the leg, so the group never became payout-ready: no winner could realize,
-//! the waiter never became the last claimant, and everything stayed frozen
-//! until the bucket lapsed at `resolved_slot + backing horizon`. By then every
-//! Fresh bucket of the group had lapsed too, so claims that were fully backed
-//! were paid at the common junior rate instead.
+//! the current credit rate, in whole atoms. Before the fix a claim that
+//! converted to zero on a Fresh, partially backed domain was an error for as
+//! long as any co-claimant remained, and the SVM rollback also undid whatever
+//! the same instruction had already done. Two things followed:
+//!
+//! - When the account held the group's last stored leg, the rollback restored
+//!   the leg, so the group never became payout-ready: no winner could realize
+//!   and everything stayed frozen until the bucket lapsed at `resolved_slot +
+//!   backing horizon`. By then every Fresh bucket of the group had lapsed too,
+//!   so claims that were fully backed were paid at the common junior rate.
+//! - Wherever every remaining claim of a domain converted to zero, they all
+//!   waited on each other until the bucket lapsed. One atom of backing in a
+//!   domain with two claimants is enough for that.
+//!
+//! After the fix a zero-conversion claim waits only for backing that a
+//! co-claimant's lien still pledges, and a wait never rolls back progress.
 //!
 //! Single-asset world (`dust_world`): longs L1, L2 lose 5 per unit, shorts W
 //! (2_000 units) and X (dust) win. L1 closes before any winner attributed a
@@ -246,6 +251,23 @@ impl World {
         }
     }
 
+    /// What keepers do continuously: expire every lapsed Fresh backing bucket.
+    fn expire_lapsed(&mut self) {
+        let now = self.header.current_slot.get();
+        for domain in 0..self.markets.len() * 2 {
+            let bucket = self.bucket(domain);
+            if bucket.status == BackingBucketStatusV16::Fresh
+                && bucket
+                    .expiry_slot
+                    .min(self.header.resolved_slot.get() + HORIZON)
+                    <= now
+            {
+                self.exec(|m, _| m.expire_source_backing_bucket_not_atomic(domain, now))
+                    .unwrap();
+            }
+        }
+    }
+
     fn settled(&self, i: usize) -> bool {
         let a = &self.accounts[i];
         a.capital.get() == 0
@@ -352,9 +374,10 @@ fn leave_dust_leg_last(w: &mut World) {
 }
 
 /// The defect. X holds the last stored leg and a claim that converts to zero
-/// whole atoms while W is still a co-claimant of the Fresh domain. X's close
-/// must commit its settlement and leg detach and report progress, so that W
-/// can be paid in the same slot and X then realizes as the last claimant.
+/// whole atoms while W is still a co-claimant of the Fresh domain. No lien
+/// pledges the domain, so the claim is final: X's close detaches the leg,
+/// retires the claim to junior face and pays X's capital in one call, and W is
+/// paid in the same slot.
 #[test]
 fn dust_claim_on_the_last_stored_leg_does_not_freeze_resolved_payouts() {
     let mut w = dust_world(UNIT / 5);
@@ -363,39 +386,34 @@ fn dust_claim_on_the_last_stored_leg_does_not_freeze_resolved_payouts() {
 
     assert_eq!(
         w.close(X),
-        Ok(ResolvedCloseOutcomeV16::ProgressOnly),
-        "the waiting claim must not undo X's settlement and leg detach"
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000_000 }),
+        "X's zero-conversion claim must not keep its leg stored"
     );
     assert!(!w.has_leg(X));
     assert_eq!(w.blockers(), 0, "the group is payout-ready");
     assert_eq!(
         w.domain(0),
-        (10_001, 5_001),
-        "X stays attributed, nothing consumed"
+        (10_000, 5_001),
+        "retired without touching the backing"
     );
-    assert_eq!(w.accounts[X].pnl.get(), 1);
+    // X's atom is junior face now, paid once the residual covers it.
+    let receipt = w.accounts[X]
+        .resolved_payout_receipt
+        .try_to_runtime()
+        .unwrap();
+    assert!(receipt.present);
+    assert_eq!(
+        (receipt.terminal_positive_claim_face, receipt.paid_effective),
+        (1, 0)
+    );
     w.assert_conserved();
 
-    // X is now parked: its claim still converts to zero and W is still a
-    // co-claimant. Nothing can change, so the call fails without a no-op commit.
-    let parked = w.clone();
-    assert_eq!(w.close(X), Err(V16Error::LockActive));
-    assert_eq!(w.header, parked.header);
-    assert_eq!(w.accounts[X], parked.accounts[X]);
-
-    // W realizes 5_000 of backing and is paid from the junior residual for the
-    // rest (one atom of that waits for X's receipt).
+    // W realizes 5_001 of backing and its other 4_999 from the junior residual.
     assert_eq!(
         w.close(W),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_009_999 })
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_010_000 })
     );
-    // X is the last claimant: the atom W's floor left behind backs it in full.
-    assert_eq!(w.domain(0), (1, 1));
-    assert_eq!(
-        w.close(X),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000_001 })
-    );
-    w.topup(W);
+    w.topup(X);
     assert_eq!(w.paid, vec![995_000, 994_999, 1_010_000, 1_000_001]);
     assert_eq!(w.header.vault.get(), 0);
     assert_eq!(
@@ -417,16 +435,16 @@ fn dust_claim_on_the_last_stored_leg_settles_through_the_public_crank() {
     assert_eq!(step.selected, AutoCrankPlanV16::CloseResolved);
     assert_eq!(
         step.outcome,
-        AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::ProgressOnly)
+        AutoCrankOutcomeV16::ResolvedClose(ResolvedCloseOutcomeV16::Closed { payout: 1_000_000 })
     );
     assert_eq!(w.blockers(), 0);
-    for i in [W, X, W] {
+    // W settles; X's second crank collects its junior atom.
+    for i in [W, X] {
         match w.crank(i) {
             Ok(_) => {}
             Err(e) => panic!("crank {i} failed: {e:?}"),
         }
     }
-    w.topup(W);
     assert_eq!(w.paid, vec![995_000, 994_999, 1_010_000, 1_000_001]);
     assert!(w.settled(W) && w.settled(X));
     assert_eq!(w.header.vault.get(), 0);
@@ -536,11 +554,17 @@ fn control_seniority_world_honest_order() {
     assert_eq!(w.header.vault.get(), 0);
 }
 
-/// Funds, not only time: with DUST holding the last stored leg nobody can
+/// Funds, not only time: with DUST holding the last stored leg nobody could
 /// realize before the backing horizon, and a lapsed bucket forfeits its
-/// backing to the common junior pool. V's fully backed 5_000 would then be
-/// shared with A's unbacked face. The adversarial close order must pay exactly
-/// what the honest order pays, in the resolved slot.
+/// backing to the common junior pool. V's fully backed 5_000 was then shared
+/// with A's unbacked face. In the adversarial close order V must be paid in
+/// full in the resolved slot.
+///
+/// The order still decides one rounding atom of domain 0. DUST's share of its
+/// backing is 0.78 of an atom. Cranked after A (`SENIORITY_HONEST`) it converts
+/// the atom A's floor left behind; retired before A, as here, it converts
+/// nothing and that atom stays in the bucket as surplus. A converts 10_199
+/// either way.
 #[test]
 fn dust_leg_last_does_not_cost_backed_winners_their_seniority() {
     let mut w = seniority_world();
@@ -557,8 +581,8 @@ fn dust_leg_last_does_not_cost_backed_winners_their_seniority() {
 
     assert_eq!(
         w.close(DUST),
-        Ok(ResolvedCloseOutcomeV16::ProgressOnly),
-        "DUST's waiting claim must not hold the group's last stored leg"
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000_000 }),
+        "DUST's zero-conversion claim must not hold the group's last stored leg"
     );
     assert_eq!(w.blockers(), 0);
     // V realizes its fully backed claim at once, whatever DUST and A do.
@@ -567,8 +591,9 @@ fn dust_leg_last_does_not_cost_backed_winners_their_seniority() {
         Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_005_000 })
     );
     w.sweep(&[DUST, A, DUST, V, LV, Z]);
-    assert_eq!(w.paid, SENIORITY_HONEST);
-    assert_eq!(w.header.vault.get(), 0);
+    assert_eq!(w.paid, vec![0, 1_010_199, 1_000_000, 1_005_000, 995_000]);
+    assert_eq!(w.domain(0), (0, 1));
+    assert_eq!(w.header.vault.get(), 1);
     assert_eq!(w.header.current_slot.get(), resolved_slot);
 }
 
@@ -592,70 +617,181 @@ fn control_lapsed_backing_pays_backed_winners_the_junior_rate() {
     assert_eq!(w.header.vault.get(), 2, "floor dust of the common rate");
 }
 
+/// A dust claim in one domain must not hold the account's claim in another.
+/// Here the fully backed winner itself carries the 0.1-unit dust short on
+/// asset 0 (accounts: Z, A, the winner, LV), and its second leg is the group's
+/// last stored one. Its dust claim on domain 0 retires in one step, and its
+/// 5_000 on domain 2 realizes in the next.
+#[test]
+fn dust_claim_in_one_domain_does_not_hold_the_accounts_other_claims() {
+    const VV: usize = 2;
+    const LL: usize = 3;
+    let mut w = two_asset_world(&[10_200, 1_000_000, 1_000_000, 1_000_000]);
+    w.trade(0, Z, A, 1_000 * UNIT);
+    w.trade(0, Z, VV, UNIT / 10);
+    w.trade(1, Z, VV, UNIT / 10);
+    w.trade(1, LL, VV, 1_000 * UNIT);
+    for asset0 in [95, 91, 87] {
+        w.mark(&[asset0, 95]);
+    }
+    let resolved_slot = w.resolve();
+    // The winner attributes both claims and detaches its asset-0 leg; then
+    // everyone else closes. Its asset-1 leg is the last stored one.
+    for i in [VV, A, LL, Z, A, LL, Z] {
+        w.close(i).unwrap();
+    }
+    assert_eq!(w.blockers(), 1);
+    assert_eq!(w.domain(0), (13_001, 10_200));
+    assert_eq!(w.domain(2), (5_000, 5_000));
+
+    // Detach, then retire the dust claim on domain 0 (0.78 of an atom).
+    assert_eq!(w.close(VV), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert_eq!(w.blockers(), 0);
+    assert_eq!(w.domain(0), (13_000, 10_200));
+    assert_eq!(w.domain(2), (5_000, 5_000));
+    // Realize domain 2 in full.
+    assert_eq!(
+        w.close(VV),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_005_000 })
+    );
+    w.sweep(&[A, VV, LL, Z]);
+    assert_eq!(w.paid, vec![0, 1_010_199, 1_005_000, 995_000]);
+    assert_eq!(w.header.current_slot.get(), resolved_slot);
+}
+
 const X2: usize = 4;
 
-/// Two zero-conversion co-claimants. After W realizes, one atom of backing is
-/// left for two 1-atom claims. Neither is demoted early: whichever went first
-/// would hand the atom to the other. They no longer hold anyone else up, even
-/// when one of them owns the last stored leg, and both settle when the bucket
-/// lapses.
+/// Two zero-conversion co-claimants, one of them on the last stored leg.
+/// Neither waits for the other or for W, in either order: a dust claim that
+/// is cranked before W retires to junior face, one that is cranked after W
+/// converts the atom W's floor left behind. Every account is paid in full in
+/// the resolved slot.
 #[test]
-fn two_dust_claims_wait_without_blocking_other_winners() {
-    let mut w = World::new(1, 5, |_| {});
-    for i in 0..5 {
+fn two_dust_claims_do_not_wait_for_each_other() {
+    for x_before_w in [false, true] {
+        let mut w = World::new(1, 5, |_| {});
+        for i in 0..5 {
+            w.deposit(i, 1_000_000);
+        }
+        // L1 long 1_200.4 (W 1_200, X 0.2, X2 0.2), L2 long 800 against W.
+        w.trade(0, L1, W, 1_200 * UNIT);
+        w.trade(0, L1, X, UNIT / 5);
+        w.trade(0, L1, X2, UNIT / 5);
+        w.trade(0, L2, W, 800 * UNIT);
+        w.mark(&[95]);
+        let resolved_slot = w.resolve();
+
+        assert_eq!(
+            w.close(L1),
+            Ok(ResolvedCloseOutcomeV16::Closed { payout: 993_998 })
+        );
+        assert_eq!(w.close(W), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+        assert_eq!(w.close(X), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+        assert_eq!(
+            w.close(L2),
+            Ok(ResolvedCloseOutcomeV16::Closed { payout: 996_000 })
+        );
+        // X2 owns the last stored leg; domain 0 holds 4_000 for 10_002 of claims.
+        assert_eq!(w.blockers(), 2);
+        assert_eq!(
+            w.close(X2),
+            Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000_000 })
+        );
+        assert_eq!(w.blockers(), 0);
+        assert_eq!(w.domain(0), (10_001, 4_000));
+
+        if x_before_w {
+            assert_eq!(
+                w.close(X),
+                Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000_000 })
+            );
+            assert_eq!(w.domain(0), (10_000, 4_000));
+            assert!(matches!(
+                w.close(W),
+                Ok(ResolvedCloseOutcomeV16::Closed { .. })
+            ));
+            assert_eq!(w.domain(0), (0, 0));
+        } else {
+            assert!(matches!(
+                w.close(W),
+                Ok(ResolvedCloseOutcomeV16::Closed { .. })
+            ));
+            assert_eq!(w.domain(0), (1, 1));
+            assert_eq!(
+                w.close(X),
+                Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000_001 })
+            );
+        }
+        w.sweep(&[X, X2, W]);
+        assert_eq!(
+            w.paid,
+            vec![993_998, 996_000, 1_010_000, 1_000_001, 1_000_001]
+        );
+        assert_eq!(w.header.vault.get(), 0);
+        assert_eq!(w.header.current_slot.get(), resolved_slot);
+    }
+}
+
+/// One atom of backing must not make a whole domain wait. The loser settles
+/// before either winner attributed its claim, so the winners' domain has an
+/// Empty bucket and their claims are junior (#220). A third party then
+/// deposits a single atom of backing: the bucket is Fresh, each 5_000 claim
+/// converts to zero, and each used to wait on the other until the bucket
+/// lapsed, with the group's last stored leg rolled back on top of it.
+#[test]
+fn a_single_atom_of_backing_does_not_make_every_claimant_wait() {
+    const L: usize = 0;
+    const W1: usize = 1;
+    const W2: usize = 2;
+    let mut w = World::new(1, 3, |_| {});
+    for i in 0..3 {
         w.deposit(i, 1_000_000);
     }
-    // L1 long 1_200.4 (W 1_200, X 0.2, X2 0.2), L2 long 800 against W.
-    w.trade(0, L1, W, 1_200 * UNIT);
-    w.trade(0, L1, X, UNIT / 5);
-    w.trade(0, L1, X2, UNIT / 5);
-    w.trade(0, L2, W, 800 * UNIT);
+    w.trade(0, L, W1, 1_000 * UNIT);
+    w.trade(0, L, W2, 1_000 * UNIT);
     w.mark(&[95]);
     let resolved_slot = w.resolve();
+    assert_eq!(
+        w.close(L),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 990_000 })
+    );
+    assert_eq!(w.close(W1), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert_eq!(w.bucket(0).status, BackingBucketStatusV16::Empty);
 
+    w.exec(|m, _| m.deposit_fresh_counterparty_backing_not_atomic(0, 1, u64::MAX))
+        .unwrap();
+    assert_eq!(w.bucket(0).status, BackingBucketStatusV16::Fresh);
     assert_eq!(
-        w.close(L1),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 993_998 })
+        w.bucket(0).expiry_slot.min(resolved_slot + HORIZON),
+        resolved_slot + HORIZON
     );
-    assert_eq!(w.close(W), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
-    assert_eq!(w.close(X), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+
+    // W2 holds the last stored leg. Its share of the atom is half an atom.
     assert_eq!(
-        w.close(L2),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 996_000 })
+        w.close(W2),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_005_000 })
     );
-    // X2 owns the last stored leg; domain 0 holds 4_000 for 10_001 of claims.
-    assert_eq!(w.blockers(), 2);
-    assert_eq!(w.close(X2), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
     assert_eq!(w.blockers(), 0);
-    assert_eq!(w.domain(0), (10_002, 4_000));
-
-    // W converts 3_999 and is paid at once; the dust claims keep waiting on
-    // the atom it left (rate 1/2 for each).
-    assert!(matches!(
-        w.close(W),
-        Ok(ResolvedCloseOutcomeV16::Closed { .. })
-    ));
-    assert_eq!(w.domain(0), (2, 1));
-    for _ in 0..3 {
-        assert_eq!(w.close(X), Err(V16Error::LockActive));
-        assert_eq!(w.close(X2), Err(V16Error::LockActive));
-    }
-    assert_eq!(w.domain(0), (2, 1), "no early demotion in either order");
-    assert!(w.paid[W] >= 1_000_000 + 3_999);
-
-    w.advance(resolved_slot + HORIZON);
-    w.sweep(&[X, X2, W]);
+    // W1 is the last claimant and converts the atom.
     assert_eq!(
-        w.paid,
-        vec![993_998, 996_000, 1_010_000, 1_000_001, 1_000_001]
+        w.close(W1),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_005_000 })
     );
-    assert_eq!(w.header.vault.get(), 0);
+    assert_eq!(w.paid, vec![990_000, 1_005_000, 1_005_000]);
+    assert_eq!(
+        w.header.vault.get(),
+        1,
+        "the depositor's atom, now junior surplus"
+    );
+    assert_eq!(w.header.current_slot.get(), resolved_slot);
+    w.assert_conserved();
 }
 
 const Y: usize = 1;
 const PX: usize = 2;
 const PH: usize = 3;
 const S: usize = 4;
+const PD: usize = 5;
 
 /// Two-asset world in which a zero-conversion claim is not dust. On asset 1,
 /// Y wins 5_000 from H, pledges all of it (and with it all of domain 2's
@@ -669,7 +805,18 @@ const S: usize = 4;
 /// then would leave all 5_000 to Y; waiting until Y has released and realized
 /// pays both pro rata, Y 1_923 and X 3_077.
 fn pledged_backing_live() -> World {
-    let mut w = two_asset_world(&[23_750, 10_200, 1_000_000, 1_000_000, 1_000_000]);
+    pledged_backing_live_with(false)
+}
+
+/// `with_dust` adds PD, short 0.125 of asset 1 against Z from 95 and owed 1.
+fn pledged_backing_live_with(with_dust: bool) -> World {
+    // Z's initial margin at 95: 14_250 for asset 0 plus 9_500 (9_502 with PD).
+    let mut deposits = vec![23_750, 10_200, 1_000_000, 1_000_000, 1_000_000];
+    if with_dust {
+        deposits[Z] = 23_752;
+        deposits.push(1_000_000);
+    }
+    let mut w = two_asset_world(&deposits);
     w.trade(1, PH, Y, 1_000 * UNIT);
     w.mark(&[95, 95]);
     for i in [PH, Y] {
@@ -686,6 +833,9 @@ fn pledged_backing_live() -> World {
     assert_eq!(w.source(2).credit_rate_num, 0);
     w.trade_at(0, Z, S, 1_500 * UNIT, 95).unwrap();
     w.trade_at(1, Z, PX, 1_000 * UNIT, 95).unwrap();
+    if with_dust {
+        w.trade_at(1, Z, PD, UNIT / 8, 95).unwrap();
+    }
     for marks in [[91, 91], [87, 87], [83, 87], [79, 87]] {
         w.mark(&marks);
     }
@@ -757,6 +907,33 @@ fn waiting_claim_on_the_last_stored_leg_keeps_its_share_of_pledged_backing() {
     assert_eq!(w.close(PX), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
     assert!(!w.has_leg(PX));
     assert_eq!(settle_pledged_backing(w), PLEDGED_PAID);
+}
+
+/// A lien only makes a claim wait if releasing it could pay that claim. PD is
+/// owed 1 atom in the same domain: even with Y's lien released its share is
+/// floor(1 * 5_000 / 13_001) = 0, so it retires at once, on the group's last
+/// stored leg, while X (share 3_076) keeps waiting for Y.
+#[test]
+fn dust_claim_does_not_wait_for_a_lien_holder() {
+    let mut w = pledged_backing_live_with(true);
+    w.resolve();
+    for i in [PX, S, Z, PH, PX, S, Z, PH] {
+        w.close(i).unwrap();
+    }
+    assert_eq!(w.blockers(), 2);
+    assert!(w.has_leg(PD));
+    assert_eq!(w.source(2).valid_liened_backing_num, 5_000 * BOUND_SCALE);
+    assert_eq!(
+        w.close(PD),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000_000 })
+    );
+    assert_eq!(w.source(2).valid_liened_backing_num, 5_000 * BOUND_SCALE);
+    // Z has 2 atoms more capital here, all of which S converts. PD's atom is
+    // junior face with no residual behind it.
+    assert_eq!(
+        settle_pledged_backing(w),
+        vec![0, 12_123, 1_003_077, 995_000, 1_023_751, 1_000_000]
+    );
 }
 
 /// The boundary of the new outcome, with no leg involved. X is already flat at
@@ -874,4 +1051,187 @@ fn waiting_lien_holder_commits_its_lien_release() {
     assert_eq!(w.domain(2), (0, 0));
     w.sweep(&[MX, Y1, Y2, MS, Z, MH]);
     assert_eq!(w.paid, vec![0, 9, 9, 1_000_006, 999_992, 1_000_062]);
+}
+
+mod every_close_order {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Position sizes in base units: dust (0.2, 0.4), small and large.
+    const SIZES: [u128; 6] = [
+        UNIT / 5,
+        2 * UNIT / 5,
+        UNIT,
+        10 * UNIT,
+        200 * UNIT,
+        1_000 * UNIT,
+    ];
+
+    #[derive(Clone, Debug)]
+    struct Plan {
+        /// One trade per short: (long account, short account, size index).
+        trades: Vec<(usize, usize, usize)>,
+        accounts: usize,
+        up: bool,
+        order: Vec<usize>,
+        /// (number of close calls before it, atoms) of a third-party backing
+        /// deposit into the winners' domain.
+        deposit: Option<(usize, u128)>,
+    }
+
+    fn plan() -> impl Strategy<Value = Plan> {
+        (1usize..=3, 1usize..=3).prop_flat_map(|(longs, shorts)| {
+            let accounts = longs + shorts;
+            (
+                proptest::collection::vec((0..longs, 0..SIZES.len()), shorts),
+                any::<bool>(),
+                Just((0..accounts).collect::<Vec<_>>()).prop_shuffle(),
+                proptest::option::of((0usize..12, prop_oneof![Just(1u128), Just(2), Just(7)])),
+            )
+                .prop_map(move |(pairs, up, order, deposit)| Plan {
+                    trades: pairs
+                        .into_iter()
+                        .enumerate()
+                        .map(|(s, (l, size))| (l, longs + s, size))
+                        .collect(),
+                    accounts,
+                    up,
+                    order,
+                    deposit,
+                })
+        })
+    }
+
+    /// Runs `plan` and returns the world after every account was swept in the
+    /// resolved slot, each account's exact K/F entitlement, the resolved slot
+    /// and the atoms the third party managed to deposit.
+    fn run(plan: &Plan) -> Result<(World, Vec<u128>, u64, u128), TestCaseError> {
+        let mut w = World::new(1, plan.accounts, |_| {});
+        for i in 0..plan.accounts {
+            w.deposit(i, 1_000_000);
+        }
+        let mut position = vec![0i128; plan.accounts];
+        for &(long, short, size) in &plan.trades {
+            w.trade(0, long, short, SIZES[size]);
+            position[long] += SIZES[size] as i128;
+            position[short] -= SIZES[size] as i128;
+        }
+        w.mark(&[if plan.up { 105 } else { 95 }]);
+        let resolved_slot = w.resolve();
+        // Winners are paid floor(5 * q), losers pay ceil(5 * q).
+        let expected: Vec<u128> = position
+            .iter()
+            .map(|&q| {
+                let wins = (q > 0) == plan.up;
+                let value = 5 * q.unsigned_abs();
+                if wins {
+                    1_000_000 + value / UNIT
+                } else {
+                    1_000_000 - value.div_ceil(UNIT)
+                }
+            })
+            .collect();
+        // Winners' claims are owed by the losing side's domain.
+        let winners_domain = if plan.up { 1 } else { 0 };
+        let mut calls = 0usize;
+        let mut deposited = 0u128;
+        for _ in 0..8 {
+            for &i in &plan.order {
+                if let Some((at, atoms)) = plan.deposit {
+                    if at == calls
+                        && w.exec(|m, _| {
+                            m.deposit_fresh_counterparty_backing_not_atomic(
+                                winners_domain,
+                                atoms,
+                                u64::MAX,
+                            )
+                        })
+                        .is_ok()
+                    {
+                        deposited = atoms;
+                    }
+                }
+                calls += 1;
+                let closed = w.close(i);
+                prop_assert!(
+                    closed.is_ok(),
+                    "close of account {} failed in the resolved slot: {:?}",
+                    i,
+                    closed
+                );
+                w.assert_conserved();
+            }
+        }
+        Ok((w, expected, resolved_slot, deposited))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// `seniority_world` under every close order. No close fails, every
+        /// account is settled in the resolved slot, nothing is minted, and V
+        /// is paid in full from its own domain whenever its claim was
+        /// attributed before LV booked. (When LV books first its payment is
+        /// junior residual from the start; that order dependence is separate
+        /// from this issue.)
+        #[test]
+        fn backed_winner_keeps_its_seniority(
+            order in Just(vec![Z, A, DUST, V, LV]).prop_shuffle(),
+        ) {
+            let mut w = seniority_world();
+            let resolved_slot = w.header.resolved_slot.get();
+            for _ in 0..8 {
+                for &i in &order {
+                    let closed = w.close(i);
+                    prop_assert!(closed.is_ok(), "close of account {} failed: {:?}", i, closed);
+                    w.assert_conserved();
+                }
+            }
+            for &i in &order {
+                w.topup(i);
+            }
+            for i in 0..5 {
+                prop_assert!(w.settled(i), "account {} not settled in the resolved slot", i);
+            }
+            prop_assert_eq!(w.header.current_slot.get(), resolved_slot);
+            let position = |i: usize| order.iter().position(|&a| a == i).unwrap();
+            if position(V) < position(LV) {
+                prop_assert_eq!(w.paid[V], 1_005_000);
+            }
+            prop_assert!(w.paid[V] <= 1_005_000);
+            prop_assert!(w.paid[A] <= 1_013_000 && w.paid[DUST] <= 1_000_001);
+            prop_assert_eq!((w.paid[Z], w.paid[LV]), (0, 995_000));
+            let total: u128 = w.paid.iter().sum();
+            prop_assert_eq!(total + w.header.vault.get(), 4_010_200);
+        }
+
+        /// Solvent single-asset worlds with dust and ordinary positions, any
+        /// close order, optionally a few atoms of third-party backing dropped
+        /// into the winners' domain mid-way. No close ever fails, every
+        /// account is settled without moving the clock, and once the backing
+        /// horizon has passed everybody has received exactly its K/F result.
+        #[test]
+        fn settles_in_the_resolved_slot_and_pays_exactly(plan in plan()) {
+            let (mut w, expected, resolved_slot, deposited) = run(&plan)?;
+            for i in 0..plan.accounts {
+                prop_assert!(w.settled(i), "account {} not settled in the resolved slot", i);
+                prop_assert!(w.paid[i] <= expected[i]);
+                // In the slot an account can be short of its entitlement only by
+                // junior face that waits for leftover backing to lapse.
+                prop_assert!(w.paid[i] >= expected[i].min(1_000_000));
+            }
+            prop_assert_eq!(w.header.current_slot.get(), resolved_slot);
+
+            w.advance(resolved_slot + HORIZON);
+            w.expire_lapsed();
+            w.sweep(&plan.order);
+            prop_assert_eq!(&w.paid, &expected);
+            let total: u128 = w.paid.iter().sum();
+            prop_assert_eq!(
+                w.header.vault.get(),
+                plan.accounts as u128 * 1_000_000 + deposited - total
+            );
+            w.assert_conserved();
+        }
+    }
 }
