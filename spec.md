@@ -451,6 +451,8 @@ Unliened backing in an expired bucket contributes zero. Liened backing in an exp
 
 The expiry/impairment transition is aggregate and bounded by bucket id. Individual liens referencing an impaired bucket become impaired by bucket status and settle later through bounded cranks. Impaired lien backing is not available for new credit and does not count toward `available_backing_num`.
 
+The credit-rate reads of a full account refresh are not limited to the source domains the account already holds claims in. A favorable K/F delta on an active leg is credited to that leg's source domain `(asset, opposing_side)`, and the same refresh then reads that domain's rate although the account did not reference the domain before. In Live, the permissionless refresh MUST therefore treat the source domain of every active leg, together with every domain the account holds claims in, as a domain it reads. If the bucket of any of them is still Fresh at or past its expiry slot, the refresh MUST apply rule 2 to it before settlement instead of failing on it, and the account MUST classify as refresh work while such a bucket exists, whether or not its certificate is otherwise current. The discovery is bounded by `N` plus the account's bounded claim set (the reference implementation expires one bucket per call and returns before valuation). It MUST NOT expire a bucket before its expiry slot and MUST NOT select a bucket outside those domains. Owner-initiated operations MAY keep failing closed on such a bucket, because one permissionless crank on the same account removes it. Without this rule an account about to receive its first claim in a lapsed domain can be neither refreshed nor liquidated through any permissionless route.
+
 The instruction MUST prove after expiry by independent recomputation from bucket state:
 ```text
 fresh_reserved_backing_num_after = sum_FreshBuckets(fresh_unliened + valid_liened)
@@ -1788,6 +1790,7 @@ resolved-claim, and rebalance-on-touch routes required for user exits.
 102. `per_class_stock_reconciliation_matches_o1_ledgers_where_available`.
 103. `account_kf_settlement_key_roundtrips_and_orders_loss_domain_slot_priority`.
 104. `whole_account_kf_settlement_is_leg_and_account_order_independent`.
+105. `lapsed_backing_in_active_leg_source_domain_expires_in_permissionless_refresh_before_first_claim` (a Fresh bucket at or past expiry in the source domain of an active leg is expired by the Live permissionless refresh of that account before the leg's favorable delta is attributed, one bucket per call after the account's existing claim domains, never before its expiry slot; the account is neither un-refreshable nor un-liquidatable while the bucket waits).
 -------------------------------------------------------------------------------
 15. Audit summary and intended tradeoff
 -------------------------------------------------------------------------------
