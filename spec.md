@@ -1536,6 +1536,32 @@ its principal and is never repaid, and the consumed backing is retired at
 terminal. The face burned by that path, and the rate it is burned at, are
 unchanged.
 
+Liened face that a Live K/F loss burns. The support-and-burn path burns liened
+face after unliened face. The counterparty backing behind burned liened face is
+reserved for the account alone and is what the account pays that part of its
+loss with, so it MUST leave with the loss: instead of being un-pledged into its
+bucket it is consumed from the lien (valid liened to consumed, with spent /
+provider-receivable / consumed in lockstep as above) and booked for `L` by the
+same rule as the paragraph above. The account-side effect is unchanged: the same
+face is burned and the lien shrinks by the same amounts. Only whole atoms are
+consumed; a fraction of an atom is un-pledged in place. The exceptions are those
+of the netting above. Face held in `L` itself moves nothing: its backing already
+sits where the loss is owed. For face in the twin domain `T` only the share its
+losers paid in follows, `burned face * loser_paid_T / claims_T`, rounded up to a
+whole atom and never more than the lien's backing or `T`'s loser-paid backing,
+so what a provider fronted stays with the provider. Nothing is consumed while
+either side of either asset has a pending domain-loss barrier, while the face's
+bucket is not Fresh and unlapsed, or while `L`'s bucket cannot accept fresh
+principal; the lien is then un-pledged in place (or retired, for an impaired
+lien) as before. Insurance-backed liens are released as before. In Resolved mode
+and on every other path that burns liened face (forfeit, conversion, close) the
+lien is un-pledged in place. Without this rule the backing stays in a domain
+that no longer has a claim on it while the opposite side's gain is unbacked, or
+is paid by a provider in `L` that is never repaid. Under the lien-aware credit
+rate (section 2) a partial lien does not lower its domain's rate, so rule (b)
+does not shield a partly liened account: every loss beyond its unliened face
+reaches liened face.
+
 If full B settlement is too large, partial settlement is allowed. While `B_remaining > 0`, no user-favorable action may continue.
 
 -------------------------------------------------------------------------------
@@ -1920,6 +1946,7 @@ resolved-claim, and rebalance-on-touch routes required for user exits.
 107. `lien_create_release_never_cuts_fully_backed_domain_rate` (creating a lien never raises `credit_rate_num` and leaves it full when the domain's backing covers its claims; releasing it restores the pre-lien state and rate).
 108. `counterparty_backing_withdraw_beside_lien_cannot_underback_claims` (a backing debit that leaves the full rate leaves total backing >= total claims; the provider gate itself keeps `available_backing_num >= positive_claim_bound_num`).
 109. `lapsed_backing_in_account_claim_domain_defers_certified_liquidation_to_refresh` (while a domain the account holds claims in has a Fresh bucket at or past expiry, a current certificate with a deficit is refresh work and not liquidation work; liquidation is reached after one expiry step per lapsed bucket the refresh reads and one recertification; a lapsed bucket in a leg's source domain without a claim of the account, on the leg's own side or on another asset does not defer liquidation).
+110. `live_kf_loss_met_by_liened_face_books_lien_backing_for_loss_domain` (in Live, the counterparty backing behind liened face that a K/F loss burns is consumed and booked for the domain the loss is owed to; twin-domain face moves only its loser-paid share and face in the loss domain moves nothing; after every account is refreshed each source domain holds exactly its claims plus provider principal).
 -------------------------------------------------------------------------------
 15. Audit summary and intended tradeoff
 -------------------------------------------------------------------------------
