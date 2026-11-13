@@ -8473,6 +8473,313 @@ fn proof_v16_lapsed_latent_favorable_backing_forces_live_refresh() {
     );
 }
 
+// Liquidation re-values the account against its roster domains and fails
+// closed on a lapsed Fresh bucket there, and it outranks the refresh that
+// expires the bucket. The selection kernels therefore turn a certified deficit
+// into refresh work while roster backing is lapsed, and into liquidation
+// otherwise. Over every signal combination of the classifier wiring:
+// (1) lapsed roster backing never dispatches liquidation and selects the
+//     refresh unless a higher class (recovery, resolved close, pending close,
+//     B settlement) owns the step, so the deferral ends after the bounded
+//     expiry steps;
+// (2) without lapsed roster backing the certified deficit is liquidated,
+//     whatever the legs' latent domains hold, so liquidation is not deferred
+//     by a bucket it does not read.
+#[kani::proof]
+fn proof_v16_lapsed_roster_backing_defers_liquidation_to_refresh() {
+    let live: bool = kani::any();
+    let cert_current: bool = kani::any();
+    let certified_deficit: bool = kani::any();
+    let open_risk: bool = kani::any();
+    let reset_obligation: bool = kani::any();
+    let released_obligation: bool = kani::any();
+    let lapsed_roster_backing: bool = kani::any();
+    let lapsed_latent_backing: bool = kani::any();
+    let flat: bool = kani::any();
+    let margin_safe: bool = kani::any();
+    let normalizable_lien: bool = kani::any();
+    let b_stale: bool = kani::any();
+    let pending_close: bool = kani::any();
+    let expired_close: bool = kani::any();
+    let resolved_winner: bool = kani::any();
+
+    // The classifier's wiring of the three refresh-related kernels.
+    let lapsed_source_backing = lapsed_roster_backing || lapsed_latent_backing;
+    let stale = MarketGroupV16ViewMut::<u64>::kani_live_account_refresh_required(
+        live,
+        cert_current,
+        reset_obligation,
+        released_obligation,
+        lapsed_source_backing,
+    );
+    let liquidatable = MarketGroupV16ViewMut::<u64>::kani_live_liquidation_required(
+        live,
+        cert_current,
+        certified_deficit,
+        open_risk,
+        reset_obligation,
+        lapsed_roster_backing,
+    );
+    let source_liens_releasable =
+        MarketGroupV16ViewMut::<u64>::kani_live_flat_source_lien_normalization_required(
+            live,
+            cert_current,
+            lapsed_source_backing,
+            flat,
+            margin_safe,
+            normalizable_lien,
+        );
+    let deficit_work = live && cert_current && certified_deficit && open_risk && !reset_obligation;
+    assert_eq!(liquidatable, deficit_work && !lapsed_roster_backing);
+
+    let plan = kani_select_auto_crank_plan(
+        ActionableSummaryV16 {
+            stale,
+            b_stale,
+            pending_close,
+            expired_close,
+            liquidatable,
+            source_liens_releasable,
+            recovery_eligible: false,
+            resolved_winner,
+        },
+        1,
+        2,
+        Some(3),
+        PermissionlessRecoveryReasonV16::ActiveBankruptCloseCannotProgress,
+    );
+    let higher_class = expired_close || resolved_winner || pending_close || b_stale;
+
+    if live && lapsed_roster_backing {
+        assert!(!liquidatable && !source_liens_releasable && stale);
+        assert!(!matches!(plan, AutoCrankPlanV16::Liquidate { .. }));
+        if !higher_class {
+            assert_eq!(
+                plan,
+                AutoCrankPlanV16::RefreshAccount {
+                    asset_index: Some(3)
+                }
+            );
+        }
+    }
+    if deficit_work && !lapsed_roster_backing {
+        assert!(liquidatable);
+        if !higher_class {
+            assert_eq!(plan, AutoCrankPlanV16::Liquidate { asset_index: 2 });
+        }
+    }
+    if !deficit_work {
+        assert!(!liquidatable);
+    }
+
+    kani::cover!(
+        deficit_work && lapsed_roster_backing && !higher_class,
+        "a certified deficit behind lapsed roster backing is refreshed first"
+    );
+    kani::cover!(
+        deficit_work && !lapsed_roster_backing && lapsed_latent_backing && !higher_class,
+        "a lapsed latent bucket alone does not defer liquidation"
+    );
+    kani::cover!(
+        deficit_work && !lapsed_source_backing && !higher_class,
+        "an ordinary certified deficit is liquidated"
+    );
+    kani::cover!(
+        live && lapsed_roster_backing
+            && b_stale
+            && !pending_close
+            && !expired_close
+            && !resolved_winner,
+        "B settlement still goes first"
+    );
+}
+
+// The same rule at the production classifier. One open leg, a current
+// certificate with a symbolic deficit, one claim either in the leg's favorable
+// domain or in its own-side domain, and symbolic buckets in both domains. The
+// account is liquidation work exactly when the deficit is nonzero and the
+// bucket of the domain holding the claim is not Fresh at or past the
+// authenticated slot; a lapsed bucket in the other domain makes it refresh work
+// only when that domain is the leg's latent one.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_lapsed_roster_backing_defers_certified_liquidation() {
+    let leg_short: bool = kani::any();
+    let claim_in_favorable_domain: bool = kani::any();
+    let deficit: u8 = kani::any();
+    let favorable_status_raw: u8 = kani::any();
+    let own_status_raw: u8 = kani::any();
+    let favorable_expiry: u64 = kani::any();
+    let own_expiry: u64 = kani::any();
+    let now_slot: u64 = kani::any();
+    kani::assume(favorable_status_raw < 4 && own_status_raw < 4);
+    kani::assume(favorable_expiry != 0 && own_expiry != 0);
+
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    kani::assume(now_slot >= header.current_slot.get());
+    let market_id = markets[0].engine.asset.market_id.get();
+    let side = if leg_short {
+        SideV16::Short
+    } else {
+        SideV16::Long
+    };
+
+    // One open unit on each side; this account owns the `side` leg.
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = POS_SCALE;
+    asset.oi_eff_short_q = POS_SCALE;
+    asset.stored_pos_count_long = 1;
+    asset.stored_pos_count_short = 1;
+    asset.loss_weight_sum_long = POS_SCALE;
+    asset.loss_weight_sum_short = POS_SCALE;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    let (side_epoch, kf_epoch) = match side {
+        SideV16::Long => (asset.epoch_long, asset.kf_epoch_long),
+        SideV16::Short => (asset.epoch_short, asset.kf_epoch_short),
+    };
+    account_header.legs[0] = PortfolioLegV16Account::from_runtime(&PortfolioLegV16 {
+        active: true,
+        asset_index: 0,
+        market_id,
+        side,
+        basis_pos_q: POS_SCALE as i128,
+        a_basis: ADL_ONE,
+        k_snap: 0,
+        f_snap: 0,
+        kf_epoch_snap: kf_epoch,
+        epoch_snap: side_epoch,
+        loss_weight: POS_SCALE,
+        b_snap: 0,
+        b_rem: 0,
+        b_epoch_snap: side_epoch,
+        b_stale: false,
+        stale: false,
+    });
+    let mut bitmap = account_header.active_bitmap.map(V16PodU64::get);
+    active_bitmap_set(&mut bitmap, 0).unwrap();
+    account_header.active_bitmap = bitmap.map(V16PodU64::new);
+    account_header.health_cert = HealthCertV16Account::from_runtime(&HealthCertV16 {
+        certified_liq_deficit: u128::from(deficit),
+        cert_oracle_epoch: header.oracle_epoch.get(),
+        cert_funding_epoch: header.funding_epoch.get(),
+        cert_risk_epoch: header.risk_epoch.get(),
+        cert_asset_set_epoch: header.asset_set_epoch.get(),
+        active_bitmap_at_cert: bitmap,
+        valid: true,
+        ..HealthCertV16::default()
+    });
+
+    // Domain 0 is (asset 0, Long), domain 1 is (asset 0, Short); a long's gains
+    // are owed by the short domain and the reverse.
+    let favorable_domain: u32 = if leg_short { 0 } else { 1 };
+    let claim_domain = if claim_in_favorable_domain {
+        favorable_domain
+    } else {
+        1 - favorable_domain
+    };
+    account_header.pnl = V16PodI128::new(1);
+    account_header.source_domains[0].domain = V16PodU32::new(claim_domain);
+    account_header.source_domains[0].source_claim_market_id = V16PodU64::new(market_id);
+    account_header.source_domains[0].source_claim_bound_num = V16PodU128::new(BOUND_SCALE);
+
+    let bucket_for = |status_raw: u8, expiry_slot: u64| match status_raw {
+        1 => BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: BOUND_SCALE,
+            expiry_slot,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        },
+        2 => BackingBucketV16 {
+            market_id,
+            expiry_slot,
+            status: BackingBucketStatusV16::Expired,
+            ..BackingBucketV16::EMPTY
+        },
+        3 => BackingBucketV16 {
+            market_id,
+            impaired_liened_backing_num: BOUND_SCALE,
+            expiry_slot,
+            status: BackingBucketStatusV16::Impaired,
+            ..BackingBucketV16::EMPTY
+        },
+        _ => BackingBucketV16::EMPTY,
+    };
+    let source_for = |bucket: BackingBucketV16, claimed: bool| SourceCreditStateV16 {
+        positive_claim_bound_num: if claimed { BOUND_SCALE } else { 0 },
+        exact_positive_claim_num: if claimed { BOUND_SCALE } else { 0 },
+        fresh_reserved_backing_num: bucket.fresh_unliened_backing_num,
+        impaired_liened_backing_num: bucket.impaired_liened_backing_num,
+        ..SourceCreditStateV16::EMPTY
+    };
+    let favorable = bucket_for(favorable_status_raw, favorable_expiry);
+    let own = bucket_for(own_status_raw, own_expiry);
+    let (long_bucket, short_bucket) = if leg_short {
+        (favorable, own)
+    } else {
+        (own, favorable)
+    };
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&long_bucket);
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&short_bucket);
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&source_for(long_bucket, claim_domain == 0));
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&source_for(short_bucket, claim_domain == 1));
+    header.source_fresh_backing_total_num = V16PodU128::new(
+        long_bucket.fresh_unliened_backing_num + short_bucket.fresh_unliened_backing_num,
+    );
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let account = PortfolioV16ViewMut::new(&mut account_header);
+    let summary = market
+        .build_actionable_summary_at_slot(&account.as_view(), now_slot)
+        .unwrap();
+
+    let favorable_lapsed =
+        favorable.status == BackingBucketStatusV16::Fresh && favorable_expiry <= now_slot;
+    let own_lapsed = own.status == BackingBucketStatusV16::Fresh && own_expiry <= now_slot;
+    let roster_lapsed = if claim_in_favorable_domain {
+        favorable_lapsed
+    } else {
+        own_lapsed
+    };
+    assert_eq!(summary.liquidatable, deficit != 0 && !roster_lapsed);
+    assert_eq!(summary.stale, roster_lapsed || favorable_lapsed);
+    assert!(!summary.source_liens_releasable && !summary.b_stale && !summary.pending_close);
+
+    kani::cover!(
+        deficit != 0 && claim_in_favorable_domain && roster_lapsed,
+        "a lapsed claim bucket in the favorable domain defers liquidation"
+    );
+    kani::cover!(
+        deficit != 0 && !claim_in_favorable_domain && roster_lapsed,
+        "a lapsed claim bucket in the own-side domain defers liquidation"
+    );
+    kani::cover!(
+        deficit != 0 && !claim_in_favorable_domain && favorable_lapsed && !roster_lapsed,
+        "a lapsed latent bucket alone leaves the deficit liquidatable"
+    );
+    kani::cover!(
+        deficit != 0 && claim_in_favorable_domain && own_lapsed && !roster_lapsed,
+        "a lapsed bucket outside the read set leaves the deficit liquidatable"
+    );
+    kani::cover!(
+        deficit != 0
+            && roster_lapsed
+            && if claim_in_favorable_domain {
+                favorable_expiry == now_slot
+            } else {
+                own_expiry == now_slot
+            },
+        "equal-slot expiry defers liquidation"
+    );
+    kani::cover!(
+        deficit == 0 && roster_lapsed,
+        "no deficit is never liquidation work"
+    );
+}
+
 #[kani::proof]
 fn proof_v16_flat_source_lien_normalization_is_total_and_fail_closed() {
     let claim_live: bool = kani::any();

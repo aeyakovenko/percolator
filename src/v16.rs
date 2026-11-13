@@ -3867,6 +3867,32 @@ impl V16Core {
         live && cert_current && !lapsed_source_backing && flat && margin_safe && normalizable_lien
     }
 
+    /// PRODUCTION KERNEL: a certified deficit is liquidation work only while the
+    /// backing behind the account's existing claims is current. Liquidation
+    /// re-values the account against its roster domains and fails closed on a
+    /// lapsed Fresh bucket there without expiring it, and it outranks the
+    /// refresh continuation that does expire it. Selecting it would therefore
+    /// leave the account un-liquidatable for as long as its certificate stayed
+    /// current. With such a bucket the refresh goes first (it is required by
+    /// `kernel_live_account_refresh_required`) and liquidation follows on the
+    /// recertified account. Lapsed backing in a leg's latent domain does not
+    /// defer liquidation: nothing is pending on a current certificate, so
+    /// liquidation does not read it.
+    fn kernel_live_liquidation_required(
+        live: bool,
+        cert_current: bool,
+        certified_deficit: bool,
+        open_risk: bool,
+        reset_obligation: bool,
+        lapsed_roster_backing: bool,
+    ) -> bool {
+        live && cert_current
+            && certified_deficit
+            && open_risk
+            && !reset_obligation
+            && !lapsed_roster_backing
+    }
+
     // Contract layer: lien release is the un-pledge relabel — valid liened
     // returns to fresh unliened atom-for-atom, fresh_reserved and all stock
     // quantities untouched; zero-amount is the identity.
@@ -10023,6 +10049,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &PortfolioV16View<'_>,
         now_slot: u64,
     ) -> V16Result<Option<usize>> {
+        let selected =
+            self.first_lapsed_roster_source_backing_for_account_at_slot(account, now_slot)?;
+        if selected.is_some() {
+            return Ok(selected);
+        }
+        self.first_lapsed_latent_source_backing_for_account_at_slot(account, now_slot)
+    }
+
+    /// First lapsed Fresh backing bucket among the domains in the account's source roster.
+    /// These are the buckets every valuation of the account reads, liquidation included:
+    /// the latent domains are read only by a refresh that has a favorable delta to credit.
+    fn first_lapsed_roster_source_backing_for_account_at_slot(
+        &self,
+        account: &PortfolioV16View<'_>,
+        now_slot: u64,
+    ) -> V16Result<Option<usize>> {
         let mut selected = None;
         let mut slot = 0usize;
         while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -10051,10 +10093,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             slot += 1;
         }
-        if selected.is_some() {
-            return Ok(selected);
-        }
-        self.first_lapsed_latent_source_backing_for_account_at_slot(account, now_slot)
+        Ok(selected)
     }
 
     /// A favorable K/F delta on an active leg is credited to that leg's source domain
@@ -16310,6 +16349,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///   pending_close    — Live, a close-progress ledger is active
     ///   expired_close    — Live, that ledger is past its max-close slot
     ///   liquidatable     — Live, current cert with nonzero certified liq deficit
+    ///                      and no lapsed backing behind an existing claim (that
+    ///                      is refresh work first)
     ///   source_liens_releasable — Live, flat, independently initial-margin safe,
     ///                      current account whose obsolete source liens can be
     ///                      returned without an oracle observation
@@ -16378,9 +16419,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let liquidatable_asset = selected_assets.2;
         let reset_obligation_asset = selected_assets.3;
         let released_obligation_asset = selected_assets.4;
-        let lapsed_source_backing = self
-            .first_lapsed_source_backing_for_account_at_slot(account, now_slot)?
+        // Same discovery order as `first_lapsed_source_backing_for_account_at_slot`, kept
+        // apart because liquidation reads the roster domains only.
+        let lapsed_roster_backing = self
+            .first_lapsed_roster_source_backing_for_account_at_slot(account, now_slot)?
             .is_some();
+        let lapsed_source_backing = lapsed_roster_backing
+            || self
+                .first_lapsed_latent_source_backing_for_account_at_slot(account, now_slot)?
+                .is_some();
         let has_open_risk = liquidatable_asset.is_some();
         // A close ledger with residual_remaining==0 is already fully booked/covered
         // (e.g. insurance absorbed the loss); only OUTSTANDING residual is real,
@@ -16407,11 +16454,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // a stale cert can still report a deficit after the position was already
         // closed, but with no active leg there is nothing to liquidate (the real
         // liquidate entrypoint requires an active leg), so the flag must be false.
-        let liquidatable = live
-            && cert_current
-            && cert.certified_liq_deficit != 0
-            && has_open_risk
-            && reset_obligation_asset.is_none();
+        // Lapsed backing behind an existing claim is expired through Refresh first
+        // for the same reason: liquidation would fail closed on it.
+        let liquidatable = V16Core::kernel_live_liquidation_required(
+            live,
+            cert_current,
+            cert.certified_liq_deficit != 0,
+            has_open_risk,
+            reset_obligation_asset.is_some(),
+            lapsed_roster_backing,
+        );
         let no_positive_equity = Self::account_no_positive_credit_equity(account)?;
         let flat = active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
         let source_lien_margin_safe =

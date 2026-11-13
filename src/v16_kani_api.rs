@@ -1164,6 +1164,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         )
     }
 
+    pub fn kani_live_liquidation_required(
+        live: bool,
+        cert_current: bool,
+        certified_deficit: bool,
+        open_risk: bool,
+        reset_obligation: bool,
+        lapsed_roster_backing: bool,
+    ) -> bool {
+        V16Core::kernel_live_liquidation_required(
+            live,
+            cert_current,
+            certified_deficit,
+            open_risk,
+            reset_obligation,
+            lapsed_roster_backing,
+        )
+    }
+
     pub fn kani_flat_source_lien_normalization(
         source_claim_liened_num: u128,
         counterparty_backing_num: u128,
