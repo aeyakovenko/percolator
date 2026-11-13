@@ -9809,10 +9809,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Withdraws unliened fresh counterparty-backing principal.
     ///
-    /// The withdrawal is allowed only if the source domain remains fully backed
-    /// (`credit_rate_num == CREDIT_RATE_SCALE`) after the principal leaves. This
-    /// prevents a backing provider from withdrawing principal that currently
-    /// supports outstanding source-credit claims.
+    /// The withdrawal is allowed only if the unliened backing left behind still
+    /// covers the domain's whole claim bound
+    /// (`available_backing_num >= positive_claim_bound_num`). This prevents a
+    /// backing provider from withdrawing principal that currently supports
+    /// outstanding source-credit claims.
+    ///
+    /// The bound deliberately includes lien-covered face, so this gate is
+    /// stricter than "the credit rate stays full" once liens exist: the
+    /// lien-aware rate (#250) is full as soon as total backing covers the
+    /// claims, while this gate also keeps unliened backing behind the face that
+    /// liens already cover. #250 changes how claims are credited, not what a
+    /// provider may take out; the watermark is the one this gate has always had.
     /// In Resolved mode, the amount must also fit within the resolved surplus,
     /// preserving the backing needed by junior payouts and source claims.
     ///
@@ -9851,7 +9859,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             source,
             self.header.risk_epoch.get(),
         )?;
-        if source.credit_rate_num != CREDIT_RATE_SCALE {
+        if V16Core::available_backing_num_for_source_credit_state(source)?
+            < source.positive_claim_bound_num
+        {
             return Err(V16Error::LockActive);
         }
         let next_vault = self

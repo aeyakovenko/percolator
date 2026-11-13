@@ -328,6 +328,8 @@ credit_rate_num <= min(CREDIT_RATE_SCALE,
 
 Creating a lien MUST NOT raise `credit_rate_num`.
 
+The provider exit gate does not follow the lien-aware rate. A withdrawal of unliened counterparty backing MUST leave `available_backing_num >= positive_claim_bound_num`: the unliened backing left behind covers the whole claim bound, lien-covered face included. With no lien outstanding this is exactly "the rate stays full". With liens it is stricter (the rate is already full once total backing covers the claims), so a provider's surplus stays in place by the pledged amount until the liens are released. The gate has always had this watermark; the rate change alters how claims are credited, not what a provider may take out.
+
 `fresh_reserved_backing_num` is actual account equity already locked for that source domain and still inside Fresh backing buckets. It is not an optimistic estimate. It cannot be withdrawn, pledged to another domain, used by another instance, or released without a full account refresh and source-credit recomputation. Expired, impaired, or consumed backing is not available for new credit.
 
 `spent_backing_num` is cumulative audit state paired with consumed liens and reduced claims. It MUST NOT be subtracted from `available_backing_num` because consumed backing is already removed from `fresh_reserved_backing_num`. Counting spent backing as both removed from fresh backing and as a live subtrahend is forbidden.
@@ -1890,7 +1892,7 @@ resolved-claim, and rebalance-on-touch routes required for user exits.
 105. `lapsed_backing_in_active_leg_source_domain_expires_in_permissionless_refresh_before_first_claim` (a Fresh bucket at or past expiry in the source domain of an active leg is expired by the Live permissionless refresh of that account before the leg's favorable delta is attributed, one bucket per call after the account's existing claim domains, never before its expiry slot; the account is neither un-refreshable nor un-liquidatable while the bucket waits).
 106. `lien_and_unliened_source_support_sum_capped_by_shared_backing` (a lien holder's reserve plus every other claimant's soft credit fit in the domain backing; in a fully backed domain the lien cuts no other claimant).
 107. `lien_create_release_never_cuts_fully_backed_domain_rate` (creating a lien never raises `credit_rate_num` and leaves it full when the domain's backing covers its claims; releasing it restores the pre-lien state and rate).
-108. `counterparty_backing_withdraw_beside_lien_cannot_underback_claims` (a provider withdrawal that leaves the full rate leaves total backing >= total claims).
+108. `counterparty_backing_withdraw_beside_lien_cannot_underback_claims` (a backing debit that leaves the full rate leaves total backing >= total claims; the provider gate itself keeps `available_backing_num >= positive_claim_bound_num`).
 -------------------------------------------------------------------------------
 15. Audit summary and intended tradeoff
 -------------------------------------------------------------------------------

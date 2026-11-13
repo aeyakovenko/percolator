@@ -10192,10 +10192,12 @@ fn proof_v16_lien_create_release_never_cuts_fully_backed_domain_rate() {
     assert_eq!(rate_released, rate_before);
 }
 
-// Issue #250: the full-rate gate on provider withdrawals, with a lien
-// outstanding. A withdrawal that leaves the domain at the full rate leaves at
-// least as much backing as there are claims (liened and unliened), and the
-// surplus above all claims is withdrawable down to the last unliened atom.
+// Issue #250: the lien-aware rate after a provider-side backing debit, with a
+// lien outstanding. A debit that leaves the domain at the full rate leaves at
+// least as much backing as there are claims (liened and unliened), and the rate
+// stays full down to the last unliened atom above the claims. The public
+// provider gate keeps master's stricter watermark (unliened backing >= the
+// whole claim bound), so every withdrawal it admits also leaves the full rate.
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -10241,11 +10243,11 @@ fn proof_v16_counterparty_backing_withdraw_beside_lien_cannot_underback_claims()
 
     kani::cover!(
         lien_raw > 0 && post_rate == CREDIT_RATE_SCALE,
-        "surplus withdrawal beside a lien passes the gate"
+        "backing debit beside a lien keeps the full rate"
     );
     kani::cover!(
         lien_raw > 0 && post_rate < CREDIT_RATE_SCALE,
-        "underbacking withdrawal beside a lien fails the gate"
+        "underbacking debit beside a lien drops below the full rate"
     );
 
     assert_eq!(

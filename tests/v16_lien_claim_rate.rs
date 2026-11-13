@@ -709,31 +709,38 @@ fn resolved_close_beside_a_flat_holders_lien_pays_the_full_backed_claim_at_once(
 }
 
 #[test]
-fn provider_can_withdraw_exactly_the_surplus_over_all_claims_beside_a_lien() {
+fn provider_withdrawal_watermark_is_unchanged_beside_a_lien() {
     let (mut w, _) = lien_and_control_worlds(1_030);
-    // A provider adds 100 on top of the 200 that L paid in: 300 of backing, 200 of claims.
+    // A provider adds 100 on top of the 200 that L paid in: 300 of backing, 200 of claims,
+    // 75 of the backing pledged by W2's lien.
     let expiry = w.bucket(GAIN_DOMAIN).expiry_slot;
     w.exec(|m, _| m.deposit_fresh_counterparty_backing_not_atomic(GAIN_DOMAIN, 100, expiry))
         .unwrap();
     assert_eq!(w.domain_atoms(GAIN_DOMAIN), (200, 300, 75));
+    assert_eq!(w.rate(GAIN_DOMAIN), CREDIT_RATE_SCALE);
     let withdraw = |w: &mut World, amount: u128| {
         w.exec(|m, _| m.withdraw_fresh_counterparty_backing_not_atomic(GAIN_DOMAIN, amount))
     };
 
-    // One atom more than the surplus would leave 199 of backing for 200 of claims.
-    assert_eq!(withdraw(&mut w, 101), Err(V16Error::LockActive));
-    // The surplus itself is the provider's: 200 of backing still covers every claim, the
-    // liened 75 by the lien and the unliened 125 by the unliened 125.
-    assert_eq!(withdraw(&mut w, 100), Ok(()));
-    assert_eq!(w.domain_atoms(GAIN_DOMAIN), (200, 200, 75));
+    // The exit gate is the one master has: the unliened backing left behind (225 - x) must
+    // cover the whole claim bound (200), lien-covered face included. The lien-aware rate
+    // would still be full after a withdrawal of the whole 100 surplus; the gate does not
+    // follow the rate.
+    assert_eq!(withdraw(&mut w, 26), Err(V16Error::LockActive));
+    assert_eq!(withdraw(&mut w, 25), Ok(()));
+    assert_eq!(w.domain_atoms(GAIN_DOMAIN), (200, 275, 75));
     assert_eq!(w.rate(GAIN_DOMAIN), CREDIT_RATE_SCALE);
     assert_eq!(withdraw(&mut w, 1), Err(V16Error::LockActive));
     w.assert_sound();
 
-    // After the lien is released the domain is still exactly fully backed.
+    // Once the lien is released its backing is unliened again and the rest of the surplus
+    // can leave; the domain ends exactly fully backed.
     w.deposit(N, 5_000);
     w.trade(N, W2, 11, 110).unwrap();
     w.crank(W2).unwrap();
+    assert_eq!(w.domain_atoms(GAIN_DOMAIN), (200, 275, 0));
+    assert_eq!(withdraw(&mut w, 76), Err(V16Error::LockActive));
+    assert_eq!(withdraw(&mut w, 75), Ok(()));
     assert_eq!(w.domain_atoms(GAIN_DOMAIN), (200, 200, 0));
     assert_eq!(w.rate(GAIN_DOMAIN), CREDIT_RATE_SCALE);
     assert_eq!(withdraw(&mut w, 1), Err(V16Error::LockActive));
