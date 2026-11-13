@@ -59,12 +59,12 @@ Source-checkable counts in this checkout:
 
 | Class | Count |
 | --- | ---: |
-| Plain Kani proofs in `tests/proofs_v16.rs` | 308 |
+| Plain Kani proofs in `tests/proofs_v16.rs` | 325 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
-| Plain Kani proofs in `src/v16_proofs.rs` | 42 |
-| Function-contract proofs in `src/v16_proofs.rs` | 61 |
-| Production `kernel_*` helpers in `src/v16.rs` | 34 |
-| Public `*_not_atomic` engine APIs in `src/v16.rs` | 59 |
+| Plain Kani proofs in `src/v16_proofs.rs` | 44 |
+| Function-contract proofs in `src/v16_proofs.rs` | 63 |
+| Production `kernel_*` helpers in `src/v16.rs` | 38 |
+| Public `*_not_atomic` engine APIs in `src/v16.rs` | 63 |
 
 Spot-check the inventory directly:
 
@@ -122,6 +122,13 @@ The `contracts` run also compiles plain proofs under a different feature set, so
 plain-proof `kani::cover!` reachability should be judged under
 `--features fuzz`. Contract obligations should be judged under
 `--features fuzz,contracts -Z function-contracts`.
+
+In the `contracts` run only the `contract_check_*` harnesses and the lib
+`composition_*`/`closure_*` harnesses are meaningful. Kani 0.66 also asserts
+every contract inside plain proofs that call a contracted function directly, and
+there the `ensures` closure sees a by-value `mut` argument after the body has
+mutated it. About forty plain proofs fail in that run for this reason alone and
+pass under `--features fuzz`.
 
 For long audits, the shell runners in `scripts/` run harnesses in isolation and
 kill stray Kani/CBMC processes between proofs:
