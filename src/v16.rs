@@ -21068,11 +21068,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// Whether a claim that converts to zero whole atoms now would still
     /// convert to zero with every lien on the domain's backing released.
     ///
-    /// Liens pledge backing out of the rate (`available / claims`) while their
-    /// face stays in the claims, so a claim can convert to zero only because a
-    /// co-claimant has not been closed yet. Resolved close releases every lien
-    /// before its holder realizes, so the rate with all valid liens released is
-    /// the most the domain can offer this claim.
+    /// A lien takes its backing out of the available backing. In a domain whose
+    /// backing does not cover its claims the rate of the unliened face falls
+    /// with it (to zero once all of the backing is pledged), so a claim can
+    /// convert to zero only because a co-claimant has not been closed yet.
+    /// Resolved close releases every lien before its holder realizes, so the
+    /// rate with all valid liens released is the most the domain can offer this
+    /// claim.
     fn source_claim_converts_to_zero_unpledged(
         &self,
         domain: usize,
