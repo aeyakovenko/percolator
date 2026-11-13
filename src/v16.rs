@@ -5244,6 +5244,20 @@ impl Default for AssetStateV16 {
     }
 }
 
+/// A Live K/F loss while it burns the account's claim face: the domain the loss
+/// is owed to and the counterparty backing its burned liens have paid so far.
+/// The settlement books `consumed_atoms` for `loss_domain` once, together with
+/// the unliened support the loss consumed, rather than once per burned slot.
+struct KfLossLienPaymentV16 {
+    loss_domain: usize,
+    /// Whether `loss_domain` can take the backing: no pending loss barrier on
+    /// its asset and a bucket that accepts fresh principal. Read at the first
+    /// liened burn and kept for the rest of the loss; nothing a lien burn does
+    /// opens a loss side that was closed.
+    loss_side_open: Option<bool>,
+    consumed_atoms: u128,
+}
+
 /// Accumulator for one K/F loss's at-par netting pass (#457).
 struct ParNettingBatchV16 {
     face_left: u128,
@@ -7313,9 +7327,10 @@ pub struct DeadLegForfeitOutcomeV16 {
 struct SupportLossApplicationV16 {
     support_consumed: u128,
     junior_face_burned: u128,
-    /// The part of `support_consumed` that was drawn from counterparty backing
-    /// behind the account's own source claims (not insurance credit and not the
-    /// junior pool), in atoms.
+    /// The counterparty backing the loss paid with, in atoms: the part of
+    /// `support_consumed` drawn from the backing behind the account's own source
+    /// claims (not insurance credit and not the junior pool) and, for a Live K/F
+    /// loss, the backing behind the liened face it burned.
     counterparty_support_consumed: u128,
 }
 
@@ -11230,19 +11245,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///
     /// The backing behind the burned face is normally un-pledged: it returns to
     /// the bucket's unliened principal (or is retired, for an impaired lien).
-    /// With `kf_loss_domain` the face is being burned to pay a Live K/F loss owed
-    /// to that domain. The lien's counterparty backing is then what the account
-    /// pays with, so it is consumed and booked for the loss domain instead (see
-    /// `kf_loss_lien_backing_to_consume_num`); un-pledging it in place would leave
-    /// it in the face's domain, which no longer has a claim on it, and leave the
-    /// gain this loss pays for unbacked.
+    /// With `kf_loss` the face is being burned to pay a Live K/F loss owed to
+    /// `kf_loss.loss_domain`. The lien's counterparty backing is then what the
+    /// account pays with, so it is consumed and added to the loss's payment (see
+    /// `kf_loss_lien_backing_to_consume_num`), which the settlement books for the
+    /// loss domain; un-pledging it in place would leave it in the face's domain,
+    /// which no longer has a claim on it, and leave the gain this loss pays for
+    /// unbacked.
     fn burn_account_source_lien_face_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         slot: usize,
         domain: usize,
         face_burn_num: u128,
-        kf_loss_domain: Option<usize>,
+        mut kf_loss: Option<&mut KfLossLienPaymentV16>,
     ) -> V16Result<()> {
         if face_burn_num == 0 {
             return Ok(());
@@ -11284,11 +11300,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             face_burn_num,
         )?;
 
-        let consumed_backing_num = match kf_loss_domain {
-            Some(loss_domain) if counterparty_backing_release != 0 => self
+        let consumed_backing_num = match kf_loss.as_deref_mut() {
+            Some(payment) if counterparty_backing_release != 0 => self
                 .kf_loss_lien_backing_to_consume_num(
                     domain,
-                    loss_domain,
+                    payment,
                     counterparty_face_burn,
                     counterparty_backing_release,
                 )?,
@@ -11384,13 +11400,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             domain,
             face_burn_num,
         )?;
-        if let Some(loss_domain) = kf_loss_domain {
-            // Consumption left the atoms in the junior residual; this books them
-            // for the domain the loss is owed to, as for unliened face (#175).
-            self.book_kf_loss_support_for_source_domain_not_atomic(
-                loss_domain,
-                consumed_backing_num / BOUND_SCALE,
-            )?;
+        if let Some(payment) = kf_loss {
+            // Consumption left the atoms in the junior residual. The settlement
+            // books them for the domain the loss is owed to, once for the whole
+            // loss, as it does for unliened support (#175).
+            payment.consumed_atoms = payment
+                .consumed_atoms
+                .checked_add(consumed_backing_num / BOUND_SCALE)
+                .ok_or(V16Error::ArithmeticOverflow)?;
         }
         Ok(())
     }
@@ -11409,30 +11426,46 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// - nothing moves out of a bucket that is not current, into a loss bucket
     ///   that cannot take fresh backing, or across a pending loss barrier on
     ///   either asset.
+    ///
+    /// Runs once per burned slot, so it reads only the two raw bucket fields of
+    /// the face domain and takes the loss side's state from `payment`, which
+    /// reads it once per loss.
     fn kf_loss_lien_backing_to_consume_num(
         &self,
         face_domain: usize,
-        loss_domain: usize,
+        payment: &mut KfLossLienPaymentV16,
         counterparty_face_burn_num: u128,
         counterparty_backing_release_num: u128,
     ) -> V16Result<u128> {
+        let loss_domain = payment.loss_domain;
         if face_domain == loss_domain {
             return Ok(0);
         }
-        let bucket = self.backing_bucket_for_domain(face_domain)?;
-        if bucket.status != BackingBucketStatusV16::Fresh
-            || bucket.expiry_slot <= self.header.current_slot.get()
+        let (raw_status, raw_expiry) =
+            self.backing_bucket_raw_status_expiry_for_domain(face_domain)?;
+        if raw_status != encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+            || raw_expiry <= self.header.current_slot.get()
         {
             return Ok(0);
         }
         let (loss_asset, loss_side) = self.domain_asset_side(loss_domain)?;
+        let loss_side_open = match payment.loss_side_open {
+            Some(open) => open,
+            None => {
+                let open = !self.has_pending_domain_loss_barrier(loss_asset, SideV16::Long)?
+                    && !self.has_pending_domain_loss_barrier(loss_asset, SideV16::Short)?
+                    && self.loss_bucket_accepts_fresh(loss_domain)?;
+                payment.loss_side_open = Some(open);
+                open
+            }
+        };
+        if !loss_side_open {
+            return Ok(0);
+        }
         let (face_asset, _) = self.domain_asset_side(face_domain)?;
-        if self.has_pending_domain_loss_barrier(loss_asset, SideV16::Long)?
-            || self.has_pending_domain_loss_barrier(loss_asset, SideV16::Short)?
-            || !self.loss_bucket_accepts_fresh(loss_domain)?
-            || (face_asset != loss_asset
-                && (self.has_pending_domain_loss_barrier(face_asset, SideV16::Long)?
-                    || self.has_pending_domain_loss_barrier(face_asset, SideV16::Short)?))
+        if face_asset != loss_asset
+            && (self.has_pending_domain_loss_barrier(face_asset, SideV16::Long)?
+                || self.has_pending_domain_loss_barrier(face_asset, SideV16::Short)?)
         {
             return Ok(0);
         }
@@ -11455,7 +11488,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         mut burn_num: u128,
-        kf_loss_domain: Option<usize>,
+        mut kf_loss: Option<&mut KfLossLienPaymentV16>,
     ) -> V16Result<()> {
         if burn_num == 0 {
             return Ok(());
@@ -11484,7 +11517,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 slot,
                 d,
                 burn_num,
-                kf_loss_domain,
+                kf_loss.as_deref_mut(),
             )?;
             burn_num = burn_num
                 .checked_sub(burned)
@@ -11504,7 +11537,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         slot: usize,
         domain: usize,
         burn_num: u128,
-        kf_loss_domain: Option<usize>,
+        kf_loss: Option<&mut KfLossLienPaymentV16>,
     ) -> V16Result<u128> {
         if burn_num == 0 {
             return Ok(0);
@@ -11542,7 +11575,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     slot,
                     domain,
                     liened_burn,
-                    kf_loss_domain,
+                    kf_loss,
                 )?;
                 remaining -= liened_burn;
             }
@@ -13581,16 +13614,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     /// `set_account_pnl_after_source_claim_burn` for a positive PnL that a Live
-    /// K/F loss owed to `kf_loss_domain` lowers: the counterparty backing behind
-    /// liened face burned here is paid to that domain.
+    /// K/F loss lowers: the counterparty backing behind liened face burned here
+    /// is added to `kf_loss`, the loss's payment to the domain it is owed to.
     fn set_account_pnl_after_kf_loss_claim_burn(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         new_pnl: i128,
         source_face_burn_num: u128,
-        kf_loss_domain: Option<usize>,
+        kf_loss: Option<&mut KfLossLienPaymentV16>,
     ) -> V16Result<()> {
-        self.set_account_pnl_inner(account, new_pnl, None, source_face_burn_num, kf_loss_domain)
+        self.set_account_pnl_inner(account, new_pnl, None, source_face_burn_num, kf_loss)
     }
 
     fn set_account_pnl_after_domain_first_source_claim_burn(
@@ -13652,7 +13685,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         new_pnl: i128,
         source_domain: Option<usize>,
         preburned_source_claim_num: u128,
-        kf_loss_domain: Option<usize>,
+        kf_loss: Option<&mut KfLossLienPaymentV16>,
     ) -> V16Result<()> {
         validate_non_min_i128(new_pnl)?;
         let old_pos = account.header.pnl.get().max(0) as u128;
@@ -13723,7 +13756,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.burn_account_source_claim_bound_num(
                 account,
                 remaining_source_claim_burn,
-                kf_loss_domain,
+                kf_loss,
             )?;
             self.header.pnl_pos_tot = V16PodU128::new(
                 self.header
@@ -14268,7 +14301,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// `kf_loss_domain`: set for a Live K/F loss, the domain it is owed to. The
     /// counterparty backing behind liened face that the loss burns is then paid
-    /// to that domain (`burn_account_source_lien_face_not_atomic`).
+    /// with instead of being un-pledged in place
+    /// (`burn_account_source_lien_face_not_atomic`): it is returned in
+    /// `counterparty_support_consumed`, which the caller books for that domain.
     fn apply_haircut_bounded_close_loss_to_pnl(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -14354,12 +14389,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 .get()
                 .min(new_pnl.max(0) as u128),
         );
+        // Built here, past the early return, so a loss with no positive face to
+        // burn (the common case: paid from capital) does not pay for it.
+        let mut lien_payment = kf_loss_domain.map(|loss_domain| KfLossLienPaymentV16 {
+            loss_domain,
+            loss_side_open: None,
+            consumed_atoms: 0,
+        });
         self.set_account_pnl_after_kf_loss_claim_burn(
             account,
             new_pnl,
             preburned_source_claim_num,
-            kf_loss_domain,
+            lien_payment.as_mut(),
         )?;
+        if let Some(payment) = lien_payment {
+            counterparty_support_consumed = counterparty_support_consumed
+                .checked_add(payment.consumed_atoms)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+        }
         Ok(SupportLossApplicationV16 {
             support_consumed,
             junior_face_burned,
@@ -14987,15 +15034,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     }
                     // In Live the backing behind liened face this loss burns is paid
                     // to the domain the loss is owed to.
-                    let kf_loss_domain = (self.header.mode == MarketModeV16::Live as u8)
-                        .then_some(source_domain);
+                    let kf_loss_domain =
+                        (self.header.mode == MarketModeV16::Live as u8).then_some(source_domain);
                     let support = self.apply_haircut_bounded_close_loss_to_pnl(
                         account,
                         remaining_loss,
                         kf_loss_domain,
                     )?;
-                    // Checked here so a loss that consumed no counterparty backing (the
-                    // common case: paid from capital) costs one comparison, not a call.
+                    // One booking for all the counterparty backing this loss paid
+                    // with: unliened support and the backing behind burned liens.
+                    // Checked here so a loss that consumed none (the common case:
+                    // paid from capital) costs one comparison, not a call.
                     if support.counterparty_support_consumed != 0 {
                         self.book_kf_loss_support_for_source_domain_not_atomic(
                             source_domain,
