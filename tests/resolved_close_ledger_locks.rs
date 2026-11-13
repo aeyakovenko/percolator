@@ -755,3 +755,342 @@ fn resolved_close_cure_unblocks_every_positive_pnl_account() {
         book.assert_settled(&payouts);
     }
 }
+
+// ---------------------------------------------------------------------------
+// A loss that arrives after the account's close was finalized.
+// ---------------------------------------------------------------------------
+
+const FIRST: usize = 0;
+const FIRST_MAKER: usize = 1;
+const SECOND_MAKER: usize = 2;
+const SECOND: usize = 3;
+
+/// Two bankruptcies on opposite sides of one asset, still Live.
+///
+/// FIRST opens 100 lots on `first_side` at 10% margin against FIRST_MAKER,
+/// SECOND opens 100 lots on the other side at 10% margin against SECOND_MAKER.
+/// Three 5% steps bankrupt FIRST, which sells out to FIRST_MAKER: its unpaid
+/// loss is left as a pending close with a barrier on SECOND's side, carried by
+/// FIRST_MAKER's obligation leg and SECOND's leg in equal parts. Six 5% steps
+/// back then bankrupt SECOND.
+fn two_bankruptcies(first_side: SideV16, b_chunk_atoms: Option<u128>) -> Book {
+    let mut book = Book::new(4, b_chunk_atoms);
+    book.deposit(FIRST, TRADER_CAPITAL);
+    book.deposit(FIRST_MAKER, MAKER_CAPITAL);
+    book.deposit(SECOND_MAKER, MAKER_CAPITAL);
+    book.deposit(SECOND, TRADER_CAPITAL);
+    match first_side {
+        SideV16::Long => {
+            book.trade(FIRST, FIRST_MAKER, OPEN_Q).unwrap();
+            book.trade(SECOND_MAKER, SECOND, OPEN_Q).unwrap();
+        }
+        SideV16::Short => {
+            book.trade(FIRST_MAKER, FIRST, OPEN_Q).unwrap();
+            book.trade(SECOND, SECOND_MAKER, OPEN_Q).unwrap();
+        }
+    }
+    for _ in 0..3 {
+        book.mark(first_side == SHORT);
+    }
+    match first_side {
+        SideV16::Long => book.trade(FIRST_MAKER, FIRST, OPEN_Q).unwrap(),
+        SideV16::Short => book.trade(FIRST, FIRST_MAKER, OPEN_Q).unwrap(),
+    }
+    for _ in 0..6 {
+        book.mark(first_side == LONG);
+    }
+    assert_eq!(book.pending_residual(FIRST), unpaid_loss(first_side));
+    assert_eq!(book.ledger(FIRST).domain_side, opposite(first_side));
+    assert!(book.leg(SECOND).active && book.leg(SECOND_MAKER).active);
+    book.assert_valid();
+    book
+}
+
+/// SECOND's loss on its own 100 lots beyond the capital it posted: the mark
+/// went three 5% steps its way and then six 5% steps against it.
+fn second_unpaid_loss(first_side: SideV16) -> u128 {
+    let mut price = PRICE as u128;
+    for step in 0..9 {
+        let down = (step < 3) == (first_side == LONG);
+        if down {
+            price -= price / 20;
+        } else {
+            price += price / 20;
+        }
+    }
+    100 * price.abs_diff(PRICE as u128) - TRADER_CAPITAL
+}
+
+/// What the two makers are paid when each bankrupt's unpaid loss is booked to
+/// the legs of its opposite side. FIRST's loss falls half on FIRST_MAKER and
+/// half on SECOND; SECOND cannot pay its half either, so that half and
+/// SECOND's own unpaid loss fall on SECOND_MAKER. Each maker's positive PnL
+/// payout rounds down by at most one atom.
+fn booked_maker_payouts(first_side: SideV16) -> [u128; 2] {
+    let half = unpaid_loss(first_side) / 2;
+    assert_eq!(2 * half, unpaid_loss(first_side));
+    [
+        MAKER_CAPITAL + TRADER_CAPITAL + half,
+        MAKER_CAPITAL + TRADER_CAPITAL - half,
+    ]
+}
+
+#[track_caller]
+fn assert_two_bankruptcies_settled(book: &mut Book, payouts: &[u128], case: &str) {
+    assert_eq!((payouts[FIRST], payouts[SECOND]), (0, 0), "{case}");
+    for maker in [FIRST_MAKER, SECOND_MAKER] {
+        assert!(
+            payouts[maker] >= MAKER_CAPITAL,
+            "{case}: maker {maker} was paid {} of its own {MAKER_CAPITAL}",
+            payouts[maker]
+        );
+    }
+    assert!(book.vault() <= 2, "{case}: vault {}", book.vault());
+    book.assert_settled(payouts);
+}
+
+fn permutations(items: &[usize]) -> Vec<Vec<usize>> {
+    if items.len() <= 1 {
+        return vec![items.to_vec()];
+    }
+    let mut out = Vec::new();
+    for (index, &first) in items.iter().enumerate() {
+        let mut rest = items.to_vec();
+        rest.remove(index);
+        for mut tail in permutations(&rest) {
+            tail.insert(0, first);
+            out.push(tail);
+        }
+    }
+    out
+}
+
+/// Control: FIRST's pending close is finished before SECOND is touched, so
+/// SECOND's one close carries both losses. This order always settled.
+#[test]
+fn control_two_bankruptcies_settle_when_the_pending_close_goes_first() {
+    for first_side in [LONG, SHORT] {
+        let case = format!("first {first_side:?}");
+        let mut book = two_bankruptcies(first_side, None);
+        book.resolve();
+        let payouts = book
+            .drain(&[FIRST, SECOND, FIRST_MAKER, SECOND_MAKER])
+            .unwrap_or_else(|e| panic!("{case}: {e}"));
+        let [first_maker, second_maker] = booked_maker_payouts(first_side);
+        assert_eq!(
+            payouts,
+            [0, first_maker - 1, second_maker - 1, 0],
+            "{case}"
+        );
+        let ledger = book.ledger(SECOND);
+        assert_eq!(
+            (ledger.close_id, ledger.b_loss_booked),
+            (
+                1,
+                second_unpaid_loss(first_side) + unpaid_loss(first_side) / 2
+            ),
+            "{case}"
+        );
+        assert_two_bankruptcies_settled(&mut book, &payouts, &case);
+    }
+}
+
+/// SECOND is closed first: its own unpaid loss is booked and its close is
+/// finalized, but its leg has to stay for FIRST's barrier. FIRST's close then
+/// books half of FIRST's loss onto that leg, which SECOND cannot pay. The next
+/// close of SECOND must book that loss as a new close.
+///
+/// Before the fix a finalized close was never reopened: SECOND stayed negative
+/// with its leg attached for good, and neither maker (1e9 of capital each)
+/// could ever be paid.
+#[test]
+fn resolved_close_reopens_a_finalized_close_for_a_later_loss() {
+    for first_side in [LONG, SHORT] {
+        let case = format!("first {first_side:?}");
+        let mut book = two_bankruptcies(first_side, None);
+        let half = unpaid_loss(first_side) / 2;
+        book.resolve();
+
+        assert_eq!(
+            book.close(SECOND),
+            Ok(ResolvedCloseOutcomeV16::ProgressOnly),
+            "{case}"
+        );
+        let ledger = book.ledger(SECOND);
+        assert!(ledger.active && ledger.finalized, "{case}: {ledger:?}");
+        assert_eq!(
+            (ledger.close_id, ledger.b_loss_booked, book.pnl(SECOND)),
+            (1, second_unpaid_loss(first_side), 0),
+            "{case}"
+        );
+        assert!(book.leg(SECOND).active, "{case}");
+
+        assert_eq!(
+            book.close(FIRST),
+            Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }),
+            "{case}"
+        );
+        assert_eq!(book.barriers(), (0, 0), "{case}");
+
+        let (vault, c_tot, insurance) = (
+            book.vault(),
+            book.header.c_tot.get(),
+            book.header.insurance.get(),
+        );
+        assert_eq!(
+            book.close(SECOND),
+            Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }),
+            "{case}"
+        );
+        let ledger = book.ledger(SECOND);
+        assert!(ledger.active && ledger.finalized, "{case}: {ledger:?}");
+        assert_eq!(
+            (
+                ledger.close_id,
+                ledger.domain_side,
+                ledger.gross_loss_at_close_start,
+                ledger.b_loss_booked,
+                ledger.residual_remaining
+            ),
+            (2, first_side, half, half, 0),
+            "{case}"
+        );
+        assert_eq!(book.pnl(SECOND), 0, "{case}");
+        assert!(!book.leg(SECOND).active, "{case}");
+        assert_eq!(book.barriers(), (0, 0), "{case}");
+        // Booking moves no value: the loss is taken from SECOND_MAKER's gain
+        // when that account settles.
+        assert_eq!(
+            (
+                book.vault(),
+                book.header.c_tot.get(),
+                book.header.insurance.get()
+            ),
+            (vault, c_tot, insurance),
+            "{case}: (vault, c_tot, insurance)"
+        );
+        book.assert_valid();
+
+        let payouts = book
+            .drain(&[SECOND, FIRST, FIRST_MAKER, SECOND_MAKER])
+            .unwrap_or_else(|e| panic!("{case}: {e}"));
+        let [first_maker, second_maker] = booked_maker_payouts(first_side);
+        assert_eq!(
+            payouts,
+            [0, first_maker - 1, second_maker - 1, 0],
+            "{case}"
+        );
+        assert_two_bankruptcies_settled(&mut book, &payouts, &case);
+    }
+}
+
+/// Whatever order the four accounts are closed in, with the residual booked
+/// in one step or in chunks, everything settles: both bankrupts leave with
+/// nothing, both makers get at least their own capital back, and all but
+/// rounding dust leaves the vault.
+///
+/// Before the fix 12 of the 24 orders ended in the lock above with unchunked
+/// booking and all 24 with chunked booking, for either side: with chunks
+/// SECOND's close finalizes while FIRST's is still booking onto its leg.
+#[test]
+fn two_bankruptcies_settle_in_every_close_order() {
+    for first_side in [LONG, SHORT] {
+        for b_chunk_atoms in [None, Some(1_000_000)] {
+            for order in permutations(&[FIRST, FIRST_MAKER, SECOND_MAKER, SECOND]) {
+                let case = format!("first {first_side:?}, chunk {b_chunk_atoms:?}, order {order:?}");
+                let mut book = two_bankruptcies(first_side, b_chunk_atoms);
+                book.resolve();
+                let payouts = book.drain(&order).unwrap_or_else(|e| panic!("{case}: {e}"));
+                assert_two_bankruptcies_settled(&mut book, &payouts, &case);
+            }
+        }
+    }
+}
+
+/// The same later loss with insurance funded for SECOND's bankruptcies: the
+/// first close is paid by insurance and finalized, and the later loss has to
+/// draw insurance through a new close as well.
+///
+/// Before the fix the draw was applied to the finalized close and failed with
+/// `LockActive` on every call.
+#[test]
+fn a_later_loss_draws_insurance_through_a_new_close() {
+    const INSURANCE: u128 = 10_000_000;
+    for first_side in [LONG, SHORT] {
+        let case = format!("first {first_side:?}");
+        let mut book = two_bankruptcies(first_side, None);
+        let half = unpaid_loss(first_side) / 2;
+        let second_unpaid = second_unpaid_loss(first_side);
+        assert!(second_unpaid + half < INSURANCE);
+        // SECOND's unpaid loss is charged to `first_side`; that domain's
+        // insurance pays first.
+        let domain = match first_side {
+            SideV16::Long => 0,
+            SideV16::Short => 1,
+        };
+        book.market(|m| m.deposit_domain_insurance_not_atomic(domain, INSURANCE))
+            .unwrap();
+        book.deposited += INSURANCE;
+        book.resolve();
+
+        assert_eq!(
+            book.close(SECOND),
+            Ok(ResolvedCloseOutcomeV16::ProgressOnly),
+            "{case}"
+        );
+        let ledger = book.ledger(SECOND);
+        assert!(ledger.active && ledger.finalized, "{case}: {ledger:?}");
+        assert_eq!(
+            (ledger.insurance_spent, ledger.b_loss_booked),
+            (second_unpaid, 0),
+            "{case}"
+        );
+        assert_eq!(
+            book.close(FIRST),
+            Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }),
+            "{case}"
+        );
+        assert_eq!(
+            book.close(SECOND),
+            Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }),
+            "{case}"
+        );
+        let ledger = book.ledger(SECOND);
+        assert_eq!(
+            (
+                ledger.close_id,
+                ledger.insurance_spent,
+                ledger.b_loss_booked
+            ),
+            (2, half, 0),
+            "{case}"
+        );
+        assert_eq!(
+            book.header.insurance.get(),
+            INSURANCE - second_unpaid - half,
+            "{case}"
+        );
+
+        let payouts = book
+            .drain(&[SECOND, FIRST, FIRST_MAKER, SECOND_MAKER])
+            .unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert_eq!((payouts[FIRST], payouts[SECOND]), (0, 0), "{case}");
+        // Insurance paid everything SECOND could not: SECOND_MAKER keeps its
+        // whole gain, FIRST_MAKER is cut only by its own half of FIRST's loss.
+        let wholes = [
+            (FIRST_MAKER, MAKER_CAPITAL + TRADER_CAPITAL + half),
+            (
+                SECOND_MAKER,
+                MAKER_CAPITAL + TRADER_CAPITAL + second_unpaid,
+            ),
+        ];
+        for (maker, whole) in wholes {
+            assert!(
+                payouts[maker] == whole || payouts[maker] + 1 == whole,
+                "{case}: maker {maker} payout {} of {whole}",
+                payouts[maker]
+            );
+        }
+        book.assert_settled(&payouts);
+    }
+}

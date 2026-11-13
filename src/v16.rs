@@ -19956,7 +19956,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
         self.header.bankruptcy_hlock_active = 1;
         let gross_residual = account.header.pnl.get().unsigned_abs();
-        if !account.header.close_progress.try_to_runtime()?.active {
+        // A finalized close is done and holds no barrier. A loss that reaches the
+        // account afterwards (the opposite side's own bankruptcy booked onto its
+        // still attached leg) is a new close, as it is in Live liquidation.
+        let ledger = account.header.close_progress.try_to_runtime()?;
+        if !ledger.active || ledger.is_finalized_inert() {
             self.begin_close_progress_ledger(
                 account,
                 asset_index,

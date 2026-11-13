@@ -1684,6 +1684,17 @@ MUST NOT pay out an account whose close still has residual pending: that
 account's barrier could never be released afterwards, and it holds every leg of
 the barrier side and every positive payout of the group.
 
+A finalized close is complete: it holds no barrier and its ledger is inert. A
+loss that reaches the account afterwards is a new close with a new `close_id`,
+in resolved close as in Live liquidation. This happens when the account's leg
+had to stay attached for a barrier on its own side and the close holding that
+barrier then books onto it. The finalized ledger MUST NOT absorb that loss and
+MUST NOT keep the new close from beginning: an account left negative under a
+finalized ledger can never detach its leg, and it holds every positive payout
+of the group. The new close begins under the usual conditions (no other close
+pending on its domain), draws domain insurance first, and books and finalizes
+like a first close.
+
 -------------------------------------------------------------------------------
 11. User operations
 -------------------------------------------------------------------------------
