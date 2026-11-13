@@ -1669,6 +1669,19 @@ Every continuation first checks owner cure-and-cancel after any cancel escrow. N
 
 Cure-and-cancel is allowed only if the account is initial-healthy after all reserves and no irreversible B booking, ADL, insurance spend, explicit loss, support consumption, pulled-forward obligation, or consumed credit lien has occurred.
 
+A close MUST NOT charge the opposite side for loss its account has paid. Loss the
+account pays itself after the close began (principal, or any credit that lowers
+its negative PnL) lowers `gross_loss_at_close_start` and the remaining residual
+together, so the partition equality above holds and no category is charged for
+it. Every continuation applies this before it books, in Live and in resolved
+close alike. A resolved close applies it also when the account owes nothing any
+more: the remaining residual is then zero, the close finalizes if it had booked
+progress and is canceled if it had none, and its domain barrier is released in
+that call, before the account's legs detach or it is paid out. A resolved close
+MUST NOT pay out an account whose close still has residual pending: that
+account's barrier could never be released afterwards, and it holds every leg of
+the barrier side and every positive payout of the group.
+
 -------------------------------------------------------------------------------
 11. User operations
 -------------------------------------------------------------------------------
