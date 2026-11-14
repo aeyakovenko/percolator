@@ -7513,6 +7513,9 @@ pub enum ResolvedCloseOutcomeV16 {
 /// One bounded step toward closing an otherwise claim-free resolved market.
 /// A successful call either performs one state transition or returns the exact
 /// terminal amount that the wrapper must remove from external custody.
+///
+/// `BackingExpired` releases the bucket's backing as claim-free residual, which can make an asset
+/// the scan already passed recreditable (issue #207): the next call must restart at asset 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalSlabOutcomeV16 {
     ScanProgress { next_asset_index: usize },
@@ -12863,7 +12866,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     }
 
     /// Advances one bounded terminal cleanup step. A nonzero scan start must be the exact
-    /// `ScanProgress` continuation persisted by the wrapper. The scan never advances past a Fresh
+    /// `ScanProgress` continuation, or the `asset_index` of `InsuranceRecredited`, persisted by the
+    /// wrapper; `BackingExpired` restarts the scan at 0. The scan never advances past a Fresh
     /// backing bucket: it expires an elapsed bucket, advances up to a still-live bucket, or returns
     /// `LockActive` when already parked on one. This makes the prefix stable across authenticated
     /// slot changes without requiring every continuation to land in one slot. The wrapper owns the
@@ -12951,6 +12955,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Ok(TerminalSlabOutcomeV16::ScanProgress {
                     next_asset_index: scan_end,
                 });
+            }
+            // #207: a continuation kept across `BackingExpired` (instead of restarting at 0) would
+            // retire past an asset the released residual made recreditable. Proving the prefix
+            // clean is O(max_market_slots), which the bounded scan exists to avoid, so it runs
+            // only in audit builds, like `validate_shape_full_audit_scan`.
+            #[cfg(any(test, kani, feature = "audit-scan"))]
+            if scan_start_asset_index != 0
+                && self.first_terminal_claim_free_recredit_asset()?.is_some()
+            {
+                return Err(V16Error::InvalidConfig);
             }
         }
 
