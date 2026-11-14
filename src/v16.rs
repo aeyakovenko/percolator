@@ -5268,6 +5268,16 @@ struct ParNettingBatchV16 {
     expiry_slot: u64,
 }
 
+/// Loser-paid backing one K/F loss owes its loss domain before support-and-burn:
+/// what the at-par netting moved out of other domains and what free capital paid.
+/// `payments` counts the separate payments in `amount_num`; all of them are booked
+/// in one ledger update.
+struct KfLossDomainCreditV16 {
+    amount_num: u128,
+    expiry_slot: u64,
+    payments: u64,
+}
+
 #[repr(C)]
 #[cfg_attr(
     all(kani, any(feature = "contracts", feature = "closure")),
@@ -9584,6 +9594,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.add_fresh_counterparty_backing_unchecked(domain, amount, expiry_slot)
     }
 
+    /// `add_loser_paid_counterparty_backing_unchecked` for `payments` payments that
+    /// reach `domain` together at one expiry, `amount` being their sum. The ledger is
+    /// read, updated and re-proven once; the stored state is the one the same
+    /// payments leave when they are added one after another, the credit and risk
+    /// epochs included (one step per payment).
+    fn add_loser_paid_counterparty_backing_payments_unchecked(
+        &mut self,
+        domain: usize,
+        amount: u128,
+        expiry_slot: u64,
+        payments: u64,
+    ) -> V16Result<()> {
+        self.add_fresh_counterparty_backing_steps_unchecked(domain, amount, expiry_slot, payments)
+    }
+
     /// Lifetime granted to engine-created counterparty backing, and the bounded
     /// post-resolution wait for any provider backing (#219).
     fn backing_freshness_horizon_slots(&self) -> u64 {
@@ -9694,6 +9719,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             source,
             self.header.risk_epoch.get(),
         )?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
+        Ok(())
+    }
+
+    /// One credit-rate recomputation standing for `epoch_steps` mutations of the
+    /// domain: the rate is a function of the final state, and the credit and risk
+    /// epochs advance once per mutation.
+    fn recompute_source_credit_domain_after_mutations(
+        &mut self,
+        domain: usize,
+        epoch_steps: u64,
+    ) -> V16Result<()> {
+        let source = self.source_credit_for_domain_shape(domain)?;
+        let (source, next_risk_epoch) =
+            V16Core::prepare_source_credit_domain_recompute_for_epoch_steps(
+                source,
+                self.header.risk_epoch.get(),
+                epoch_steps,
+            )?;
         self.set_source_credit_for_domain(domain, source)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         Ok(())
@@ -9823,6 +9868,34 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.set_backing_bucket_for_domain(domain, bucket)?;
         self.set_source_credit_for_domain(domain, source)?;
         self.recompute_source_credit_domain_after_mutation(domain)?;
+        self.reservation_encumbrance_proof_for_domain(domain)?
+            .validate()
+    }
+
+    /// `add_fresh_counterparty_backing_unchecked` for `amount`, the sum of
+    /// `epoch_steps` additions at the same expiry, in one ledger update. Additions at
+    /// one expiry compose: the provider receivable is refilled by
+    /// `min(sum, receivable)` either way, the fresh amounts add, and the bucket ends
+    /// Fresh at that expiry.
+    fn add_fresh_counterparty_backing_steps_unchecked(
+        &mut self,
+        domain: usize,
+        amount: u128,
+        expiry_slot: u64,
+        epoch_steps: u64,
+    ) -> V16Result<()> {
+        let bucket = self.backing_bucket_for_domain(domain)?;
+        let source = self.source_credit_for_domain(domain)?;
+        let (bucket, source) = V16Core::prepare_counterparty_backing_add_delta(
+            bucket,
+            source,
+            amount,
+            self.header.current_slot.get(),
+            expiry_slot,
+        )?;
+        self.set_backing_bucket_for_domain(domain, bucket)?;
+        self.set_source_credit_for_domain(domain, source)?;
+        self.recompute_source_credit_domain_after_mutations(domain, epoch_steps)?;
         self.reservation_encumbrance_proof_for_domain(domain)?
             .validate()
     }
@@ -13987,21 +14060,24 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             slot += 1;
         }
+        // What this loss pays into `loss_domain` here -- the backing behind netted
+        // face, then free capital -- is booked once, below.
+        let mut credit = KfLossDomainCreditV16 {
+            amount_num: 0,
+            expiry_slot: 0,
+            payments: 0,
+        };
         if batch.netted != 0 {
             account.compact_source_domains();
             if batch.transfer_num != 0 {
-                let expiry_slot = if self.backing_bucket_for_domain(loss_domain)?.status
-                    == BackingBucketStatusV16::Fresh
-                {
-                    self.backing_bucket_for_domain(loss_domain)?.expiry_slot
+                let bucket = self.backing_bucket_for_domain(loss_domain)?;
+                credit.expiry_slot = if bucket.status == BackingBucketStatusV16::Fresh {
+                    bucket.expiry_slot
                 } else {
                     batch.expiry_slot
                 };
-                self.add_loser_paid_counterparty_backing_unchecked(
-                    loss_domain,
-                    batch.transfer_num,
-                    expiry_slot,
-                )?;
+                credit.amount_num = batch.transfer_num;
+                credit.payments = 1;
             }
             let netted_i128 =
                 i128::try_from(batch.netted).map_err(|_| V16Error::ArithmeticOverflow)?;
@@ -14033,8 +14109,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     account,
                     loss_domain,
                     to_capital,
+                    &mut credit,
                 )?;
             }
+        }
+        if credit.payments != 0 {
+            self.add_loser_paid_counterparty_backing_payments_unchecked(
+                loss_domain,
+                credit.amount_num,
+                credit.expiry_slot,
+                credit.payments,
+            )?;
         }
         loss_abs
             .checked_sub(remaining)
@@ -14293,19 +14378,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// principal instead of burning partially backed face). Equivalent to the
     /// ordinary reserve path (capital -> loss-domain backing) without the PnL
     /// round trip: `V` flat, `C_tot -= x`, loss-domain principal `+= x`.
+    ///
+    /// The capital is debited here; the payment is added to `credit`, which the
+    /// caller books for `loss_domain` together with the backing the same loss's
+    /// netting moved there. When that netting moved something, the payment takes its
+    /// expiry: it is the expiry the bucket has once the moved backing is in it.
+    ///
+    /// Only for an open loss side, which the caller has established for this loss:
+    /// no pending domain-loss barrier on either side of the asset and a loss bucket
+    /// that accepts fresh principal. The netting between that check and this call
+    /// cannot close it: it sets no barrier and leaves the loss domain's bucket alone.
     fn pay_kf_loss_from_free_capital_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
         loss_domain: usize,
         loss: u128,
+        credit: &mut KfLossDomainCreditV16,
     ) -> V16Result<u128> {
-        let (loss_asset, _) = self.domain_asset_side(loss_domain)?;
-        if self.has_pending_domain_loss_barrier(loss_asset, SideV16::Long)?
-            || self.has_pending_domain_loss_barrier(loss_asset, SideV16::Short)?
-            || !self.loss_bucket_accepts_fresh(loss_domain)?
-        {
-            return Ok(0);
-        }
         let paid = loss.min(account.header.capital.get());
         if paid == 0 {
             return Ok(0);
@@ -14335,8 +14424,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.vault.get(),
         )?
         .validate()?;
-        let expiry_slot = self.fresh_counterparty_backing_expiry_slot(loss_domain)?;
-        self.add_loser_paid_counterparty_backing_unchecked(loss_domain, paid_num, expiry_slot)?;
+        if credit.payments == 0 {
+            credit.expiry_slot = self.fresh_counterparty_backing_expiry_slot(loss_domain)?;
+        }
+        credit.amount_num = credit
+            .amount_num
+            .checked_add(paid_num)
+            .ok_or(V16Error::CounterOverflow)?;
+        credit.payments += 1;
         Self::record_account_residual_crystallized_loss(account, paid)?;
         account.header.health_cert.valid = 0;
         Ok(paid)

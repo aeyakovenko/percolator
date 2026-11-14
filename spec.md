@@ -1512,7 +1512,12 @@ never burned afterwards by the same loss. Burning it instead
 would spend `x / rate` face for `x` of loss and strand the difference in the
 source domain once its losers book. Health is unchanged either way (`C - x +
 P*r` equals `C + (P - x/r)*r`). Only a loss beyond free capital, or one met by
-liened face, takes the support-and-burn path.
+liened face, takes the support-and-burn path. The backing that (a) and the twin
+transfer move to `L` and the capital that (b) pays into `L` are payments of one
+loss at one expiry, and MAY be booked in a single update of `L`'s ledger. The
+state it leaves MUST be the one separate bookings leave, `L`'s credit epoch and
+the risk epoch included (one step per payment), so the number of ledger updates
+is not observable.
 
 Loss-domain booking of consumed support. A K/F loss is owed to `L` whether the
 account pays it from capital or by giving up claims. Counterparty backing that
