@@ -9533,6 +9533,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Provider principal behind `domain`'s fresh reserved backing (see
+    /// `EngineAssetSlotV16Account::provider_principal_long_num`).
+    fn provider_principal_num(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot();
+        Ok(match side {
+            SideV16::Long => slot.provider_principal_long_num.get(),
+            SideV16::Short => slot.provider_principal_short_num.get(),
+        })
+    }
+
+    /// Whether a stored position on `domain`'s asset, on either side, has not
+    /// settled the asset's latest K/F change. Such a position can hold a gain
+    /// that is not registered as a claim yet.
+    fn asset_has_unsettled_kf_position(&self, domain: usize) -> V16Result<bool> {
+        let (asset_index, _) = self.domain_asset_side(domain)?;
+        let asset = &self.markets[asset_index].engine_slot().asset;
+        Ok(asset.stale_account_count_long.get() != 0 || asset.stale_account_count_short.get() != 0)
+    }
+
     /// Unconsumed loser-paid counterparty backing of `domain`: fresh reserved backing
     /// beyond provider principal (see
     /// `EngineAssetSlotV16Account::provider_principal_long_num`).
@@ -9865,6 +9885,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// In Resolved mode, the amount must also fit within the resolved surplus,
     /// preserving the backing needed by junior payouts and source claims.
     ///
+    /// In Live mode the watermark is not enough while a position on the
+    /// domain's asset has not settled the latest K/F change. It counts
+    /// registered claims only, and a gain is registered when its account is
+    /// refreshed: between the loser's refresh and the winner's, the loser's
+    /// payment is covered by no claim, yet it is owed to that gain and not to
+    /// the provider. In that window the amount is capped at the domain's
+    /// provider principal. With every position settled, backing above the
+    /// watermark is nobody else's, as before. The resolved surplus needs no
+    /// such cap: it exists only once every claim is final.
+    ///
     /// A Fresh bucket at or past its expiry slot is rejected with `Stale`, the
     /// same check `validate_source_domain_ledger_current` makes before a
     /// credit-rate read: expiry forfeits lapsed principal to the junior pool, so
@@ -9885,7 +9915,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::Stale);
         }
-        if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
+        let mode = decode_market_mode(self.header.mode)?;
+        // In Live, fresh backing beyond provider principal was paid in by the
+        // domain's losers. While a position on this asset has not settled the
+        // latest K/F change, some of it may be owed to a gain that is not
+        // registered as a claim yet, which the claim watermark below cannot see:
+        // only provider principal may leave. Once every position is settled
+        // every gain is a registered claim and the watermark is exact.
+        if mode == MarketModeV16::Live
+            && backing_num > self.provider_principal_num(domain)?
+            && self.asset_has_unsettled_kf_position(domain)?
+        {
+            return Err(V16Error::LockActive);
+        }
+        if mode == MarketModeV16::Resolved
             && amount > self.resolved_counterparty_backing_surplus(domain)?
         {
             return Err(V16Error::LockActive);
