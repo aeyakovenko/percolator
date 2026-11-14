@@ -14763,10 +14763,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ///
     /// Live: the whole amount joins `domain`'s backing as loser-paid principal (it
     /// refills the provider receivable first), unless the bucket is Impaired.
-    /// Resolved: nothing is booked for a terminal domain (Impaired, or no claim and
-    /// no creditor leg left); otherwise the domain takes what
-    /// `resolved_loss_backing_capacity_num` allows, and nothing once new backing
-    /// would lapse on creation.
+    /// Resolved: a terminal domain (Impaired, or no claim and no creditor leg left)
+    /// takes nothing, except that one that is not Impaired takes what repays its
+    /// provider (principal that was fronted and is still out, never more than the
+    /// receivable) until the payout snapshot is captured; otherwise the
+    /// domain takes what `resolved_loss_backing_capacity_num` allows, and nothing
+    /// once new backing would lapse on creation.
     fn book_realized_kf_loss_for_source_domain_not_atomic(
         &mut self,
         domain: usize,
@@ -14778,8 +14780,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let backing_num = backing
             .checked_mul(BOUND_SCALE)
             .ok_or(V16Error::ArithmeticOverflow)?;
-        let terminal_residual = if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved
-        {
+        let resolved = decode_market_mode(self.header.mode)? == MarketModeV16::Resolved;
+        // Resolved, terminal domain: what it may still take of a late loss.
+        let terminal_capacity_num = if resolved {
             let (asset_index, loss_side) = self.domain_asset_side(domain)?;
             let asset = self.asset_state(asset_index)?;
             let creditor_counts = match opposite_side(loss_side) {
@@ -14789,36 +14792,56 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     asset.stale_account_count_short,
                 ),
             };
-            self.backing_bucket_for_domain(domain)?.status == BackingBucketStatusV16::Impaired
-                || (self
-                    .source_credit_for_domain(domain)?
-                    .positive_claim_bound_num
-                    == 0
-                    && creditor_counts == (0, 0))
+            let source = self.source_credit_for_domain(domain)?;
+            if self.backing_bucket_for_domain(domain)?.status == BackingBucketStatusV16::Impaired {
+                Some(0)
+            } else if source.positive_claim_bound_num == 0 && creditor_counts == (0, 0) {
+                // A consumed credit can outlive its creditor's final leg. With no
+                // remaining claim or creditor leg, late debt funds terminal junior
+                // claims instead of recreating ownerless source backing -- except
+                // for what a provider fronted here and was not repaid: that part of
+                // the debt is owed to the provider. Once the payout snapshot is
+                // captured the junior pool is committed to receipts and nothing is
+                // booked here, as for every other domain.
+                if decode_bool(self.header.payout_snapshot_captured)? {
+                    Some(0)
+                } else {
+                    // The receivable counts every consumption that a loser has not
+                    // replaced yet, loser-paid backing included. What the provider
+                    // itself is still out is its principal less what is there.
+                    Some(
+                        source.provider_receivable_num.min(
+                            self.provider_principal_num(domain)?
+                                .saturating_sub(source.fresh_reserved_backing_num),
+                        ),
+                    )
+                }
+            } else {
+                None
+            }
         } else {
-            false
+            None
         };
-        if terminal_residual {
-            // A consumed credit can outlive its creditor's final leg. With no
-            // remaining claim or creditor leg, late debt funds terminal junior
-            // claims instead of recreating ownerless source backing. Impaired
-            // provider buckets likewise leave new losses as junior support.
+        if terminal_capacity_num == Some(0) {
+            // Impaired provider buckets likewise leave new losses as junior support.
             return Ok(backing);
         }
-        let (source_backing_num, residual_backing) =
-            if decode_market_mode(self.header.mode)? == MarketModeV16::Resolved {
-                let source_backing_num =
-                    backing_num.min(self.resolved_loss_backing_capacity_num(domain)?);
-                let residual_num = backing_num
-                    .checked_sub(source_backing_num)
-                    .ok_or(V16Error::CounterUnderflow)?;
-                (
-                    source_backing_num,
-                    V16Core::amount_from_bound_num(residual_num)?,
-                )
-            } else {
-                (backing_num, 0)
+        let (source_backing_num, residual_backing) = if resolved {
+            let capacity_num = match terminal_capacity_num {
+                Some(refill_num) => refill_num,
+                None => self.resolved_loss_backing_capacity_num(domain)?,
             };
+            let source_backing_num = backing_num.min(capacity_num);
+            let residual_num = backing_num
+                .checked_sub(source_backing_num)
+                .ok_or(V16Error::CounterUnderflow)?;
+            (
+                source_backing_num,
+                V16Core::amount_from_bound_num(residual_num)?,
+            )
+        } else {
+            (backing_num, 0)
+        };
         if source_backing_num == 0 {
             return Ok(residual_backing);
         }

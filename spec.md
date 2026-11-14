@@ -1529,8 +1529,14 @@ domain books it exactly as ordinary support consumption (spent /
 provider-receivable / consumed lockstep), and the consumed atoms are booked
 for `L` by the same rule that books the capital-paid part of the same loss:
 in Live all of it joins `L` as loser-paid principal (refilling `L`'s provider
-receivable first) unless `L`'s bucket is Impaired; in Resolved mode nothing is
-booked for a terminal domain (Impaired, or no claim and no creditor leg left),
+receivable first) unless `L`'s bucket is Impaired; in Resolved mode a terminal
+domain (Impaired, or no claim and no creditor leg left) is booked nothing,
+except that one that is not Impaired is booked what repays its provider until
+the payout snapshot is captured: `min(provider receivable, provider principal -
+fresh reserved backing)`, the principal the provider fronted and has not been
+repaid (the receivable alone also counts consumed backing that losers paid in).
+What a provider fronted is owed to it whichever of the winner and the loser
+closes first;
 otherwise `L` takes what the resolved loss-backing capacity allows (the whole
 amount while `L`'s bucket is Fresh, unlapsed and funded; otherwise its support
 gap plus the provider receivable already advanced). Whatever that rule does
