@@ -9100,6 +9100,112 @@ fn proof_v16_public_counterparty_backing_withdraw_rejects_lapsed_bucket_after_ex
     public_counterparty_backing_withdraw_lapsed_is_rejected(11);
 }
 
+// In Live, while a stored position on the asset has not settled the latest K/F
+// change, a gain may exist that is not registered as a claim yet, so the claim
+// watermark cannot protect what the domain's losers paid in. The provider exit
+// then pays out provider principal and nothing above it, and refuses before the
+// route touches a byte. Backing 1..=8, principal 0..=backing, withdrawal
+// 1..=backing, no registered claim (so nothing but this rule can refuse), and
+// the unsettled position on either side. With every position settled the same
+// withdrawals succeed whatever the principal:
+// proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_live_backing_withdraw_is_capped_at_principal_while_a_position_is_unsettled() {
+    let backing_raw: u8 = kani::any();
+    let principal_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    let unsettled_long: bool = kani::any();
+    kani::assume((1..=8).contains(&backing_raw));
+    kani::assume(principal_raw <= backing_raw);
+    kani::assume((1..=8).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= backing_raw);
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let principal_num = principal_raw as u128 * BOUND_SCALE;
+    let withdraw = withdraw_raw as u128;
+    let withdraw_num = withdraw * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(backing_raw as u128);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.provider_principal_long_num = V16PodU128::new(principal_num);
+    // One stored position that has not settled the latest K/F change.
+    if unsettled_long {
+        markets[0].engine.asset.stored_pos_count_long = V16PodU64::new(1);
+        markets[0].engine.asset.stale_account_count_long = V16PodU64::new(1);
+    } else {
+        markets[0].engine.asset.stored_pos_count_short = V16PodU64::new(1);
+        markets[0].engine.asset.stale_account_count_short = V16PodU64::new(1);
+    }
+    let h0 = header;
+    let s0 = markets[0].engine;
+    assert_eq!(
+        MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape(),
+        Ok(())
+    );
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
+
+    kani::cover!(
+        principal_raw == 0,
+        "nothing leaves loser-paid backing while a position is unsettled"
+    );
+    kani::cover!(
+        principal_raw != 0 && withdraw_raw > principal_raw && unsettled_long,
+        "a withdrawal past a nonzero principal is refused, unsettled long"
+    );
+    kani::cover!(
+        principal_raw != 0 && withdraw_raw > principal_raw && !unsettled_long,
+        "a withdrawal past a nonzero principal is refused, unsettled short"
+    );
+    kani::cover!(
+        withdraw_raw <= principal_raw && principal_raw < backing_raw,
+        "principal leaves and the loser-paid backing stays"
+    );
+    if withdraw_raw > principal_raw {
+        assert_eq!(result, Err(V16Error::LockActive));
+        assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &s0,
+            &markets[0].engine
+        ));
+        assert_eq!(
+            markets[0].engine.provider_principal_long_num.get(),
+            principal_num
+        );
+    } else {
+        assert_eq!(result, Ok(()));
+        let reserved_after = markets[0]
+            .engine
+            .source_credit_long
+            .fresh_reserved_backing_num
+            .get();
+        let principal_after = markets[0].engine.provider_principal_long_num.get();
+        assert_eq!(reserved_after, backing_num - withdraw_num);
+        assert_eq!(principal_after, principal_num - withdraw_num);
+        // What the losers paid in is exactly what it was.
+        assert_eq!(
+            reserved_after - principal_after,
+            backing_num - principal_num
+        );
+    }
+}
+
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
