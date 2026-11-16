@@ -7540,6 +7540,12 @@ enum TerminalSlabAssetStepV16 {
 }
 
 pub const TERMINAL_SLAB_SCAN_ASSETS_PER_CALL: usize = 256;
+/// Most legs whose final K/F one Resolved-mode close call settles for an account
+/// whose unsettled losses can burn through source claims it holds. Such an account
+/// with more unsettled legs than this settles them over several calls, in the order
+/// the one-call settlement uses, so that no call's work grows with the number of
+/// losing legs times the number of source claims.
+pub const RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL: usize = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
@@ -21817,6 +21823,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.validate_with_market(&self.as_view())?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
+        // Losses that can burn through the account's source claims are settled a
+        // bounded number of legs per call. The last chunk, and every account without
+        // that product in its work, is left to the ordinary settlement below.
+        if self.settle_resolved_account_kf_chunk_not_atomic(account)? {
+            self.validate_shape()?;
+            account.validate_with_market(&self.as_view())?;
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
         // A leg that is active here is settled and detached before realization
         // is reached (any other outcome returns `ProgressOnly` first).
         pre_payout_step |=
@@ -21934,6 +21948,105 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.validate_shape()?;
         account.validate_with_market(&self.as_view())?;
         Ok(ResolvedCloseOutcomeV16::Closed { payout })
+    }
+
+    /// Resolved mode. An account that holds source claims and still has a loss among
+    /// more than `RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL` unsettled legs settles that many
+    /// of them here and the call returns `true`. Otherwise this does nothing and
+    /// returns `false`, and the caller's ordinary settlement settles every leg.
+    ///
+    /// One call that settles every leg costs work for each losing leg and for each
+    /// source claim those losses burn through, and at the largest portfolio shape it
+    /// does not fit in a transaction. A close that cannot settle its legs blocks the
+    /// account and, through the payout blockers, every positive payout in the
+    /// market. Resolved mode has no health certificate that needs the legs settled
+    /// together, so such an account settles them a bounded number at a time. An
+    /// account with no claim to burn, or with no loss left to settle, has no such
+    /// product in its work and settles in one call as before.
+    ///
+    /// The legs are taken in the order `settle_account_kf_effects_not_atomic` settles
+    /// them (losses before gains, then by source domain, then by leg slot), and each
+    /// is settled by the same transition. A leg that is already settled has a zero
+    /// net there and touches no value, so leaving it out of the order changes
+    /// nothing: the chunks followed by the ordinary settlement apply exactly the
+    /// sequence of settlements the one call applies. Negative PnL the chunk leaves
+    /// is settled from principal by the ordinary settlement, after the last leg, as
+    /// in the one call.
+    fn settle_resolved_account_kf_chunk_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+    ) -> V16Result<bool> {
+        if account.header.source_domains[0].is_sparse_tail_default() {
+            return Ok(false);
+        }
+        let mut unsettled = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut unsettled_count = 0usize;
+        // A leg's net is `floor(basis * (target - snapshot) / den)` summed over K and F,
+        // so it cannot be negative unless one of the two targets is below its snapshot.
+        let mut may_lose = false;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            // This pass only decides. Anything it cannot read is left to the ordinary
+            // settlement, which reads the same state and reports it: the pass never
+            // makes a close fail that the ordinary settlement would complete.
+            let Ok(leg) = account.header.legs[slot].try_to_runtime() else {
+                return Ok(false);
+            };
+            if leg.active {
+                let Ok(asset) = self.asset_state(leg.asset_index as usize) else {
+                    return Ok(false);
+                };
+                let Ok((k_target, f_target)) = Self::kf_target_for_leg_from_asset(asset, leg)
+                else {
+                    return Ok(false);
+                };
+                if !Self::leg_kf_epoch_is_current(asset, leg)
+                    || k_target != leg.k_snap
+                    || !leg_f_snap_is_settled(leg, f_target).unwrap_or(false)
+                {
+                    unsettled[slot] = true;
+                    unsettled_count += 1;
+                    may_lose |= k_target < leg.k_snap || f_target < leg.f_snap;
+                }
+            }
+            slot += 1;
+        }
+        if unsettled_count <= RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL || !may_lose {
+            return Ok(false);
+        }
+        let mut plan = [None; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut prepared_by_slot =
+            [AccountKfSettlementPreparedV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut plan_len = 0usize;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            if unsettled[slot] {
+                let (entry, prepared) =
+                    self.prepare_account_kf_settlement_entry(account, slot, false)?;
+                prepared_by_slot[slot] = prepared;
+                plan_len = insert_account_kf_settlement_plan_entry(&mut plan, plan_len, entry)?;
+            }
+            slot += 1;
+        }
+        // Losses come first in the order: if the first entry is not one, none is.
+        let (first_phase, _, _) =
+            decode_account_kf_settlement_plan_key(plan[0].ok_or(V16Error::InvalidLeg)?)?;
+        if first_phase != 0 {
+            return Ok(false);
+        }
+        account.validate_with_market(&self.as_view())?;
+        self.reconcile_account_impaired_counterparty_liens_not_atomic(account)?;
+        let mut index = 0usize;
+        while index < RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL {
+            let entry = plan[index].ok_or(V16Error::InvalidLeg)?;
+            let leg_slot = (entry & 0xf) as usize;
+            if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+                return Err(V16Error::InvalidLeg);
+            }
+            self.apply_account_kf_settlement_entry(account, entry, prepared_by_slot[leg_slot])?;
+            index += 1;
+        }
+        Ok(true)
     }
 
     fn detach_solvent_active_legs_for_resolved_close(
