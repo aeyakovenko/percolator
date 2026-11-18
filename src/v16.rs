@@ -21458,6 +21458,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 self.source_credit_for_domain(source_domain)?,
                 claim_num,
             )?;
+            if converted != 0
+                && self.source_claim_share_is_partly_pledged(
+                    source_domain,
+                    source,
+                    claim_num,
+                    converted,
+                )?
+            {
+                // Nothing has been mutated on this path, as for a zero conversion
+                // that waits below.
+                return Ok(ResolvedSourceRealizationV16::Waiting);
+            }
             if converted != 0 {
                 let consumption = self.consume_source_domain_credit_for_effective_not_atomic(
                     source_domain,
@@ -21564,6 +21576,47 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         unpledged.valid_liened_insurance_num = 0;
         unpledged.credit_rate_num = V16Core::expected_source_credit_rate_num_for_state(unpledged)?;
         Ok(Self::source_claim_whole_atom_conversion(unpledged, claim_num)? == 0)
+    }
+
+    /// Whether a claim that converts to `converted` whole atoms now would
+    /// convert to more with every lien on the domain's backing released, in a
+    /// bucket that can still change.
+    ///
+    /// A lien takes its backing out of the available backing. In a domain whose
+    /// backing does not cover its claims, the unliened face then shares what is
+    /// left, at a lower rate than the domain's backing over its claims. Resolved
+    /// close releases every lien before its holder realizes, so that lower rate
+    /// lasts only until the lien holders have been closed. A claim realized in
+    /// between is paid from the unpledged remainder alone, and the rest of its
+    /// share goes to the lien holders when they realize: who is closed first
+    /// decides who is paid. Such a claim waits, as a zero conversion does
+    /// (`source_claim_converts_to_zero_unpledged`). A lien release always
+    /// commits, so the wait ends once every lien holder has been closed, one
+    /// call for each of its liened domains; and it ends when the bucket lapses
+    /// or is impaired, after which no release can change what the claim gets.
+    fn source_claim_share_is_partly_pledged(
+        &self,
+        domain: usize,
+        source: PortfolioSourceDomainV16Account,
+        claim_num: u128,
+        converted: u128,
+    ) -> V16Result<bool> {
+        if source.source_claim_impaired_num.get() != 0
+            || matches!(
+                self.backing_bucket_for_domain(domain)?.status,
+                BackingBucketStatusV16::Expired | BackingBucketStatusV16::Impaired
+            )
+        {
+            return Ok(false);
+        }
+        let mut unpledged = self.source_credit_for_domain(domain)?;
+        if unpledged.valid_liened_backing_num == 0 && unpledged.valid_liened_insurance_num == 0 {
+            return Ok(false);
+        }
+        unpledged.valid_liened_backing_num = 0;
+        unpledged.valid_liened_insurance_num = 0;
+        unpledged.credit_rate_num = V16Core::expected_source_credit_rate_num_for_state(unpledged)?;
+        Ok(converted < Self::source_claim_whole_atom_conversion(unpledged, claim_num)?)
     }
 
     /// Whether a claim that converts to zero whole atoms may be demoted to
