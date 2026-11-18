@@ -9560,6 +9560,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
+    /// Loser-paid backing of `domain` beyond the claims on it (fresh reserved backing
+    /// less provider principal less the claim bound), up to what the claims and the
+    /// provider of its twin domain are still owed by losers. Read when no position
+    /// on the asset is unsettled: every gain is then a registered claim, so the
+    /// first amount has no owner in `domain`, and it was paid by the side whose
+    /// claims are on the twin.
+    fn stranded_loser_backing_owed_to_twin_num(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let twin = self.insurance_domain_index(asset_index, opposite_side(side))?;
+        let source = self.source_credit_for_domain_shape(domain)?;
+        let stranded_num = source
+            .fresh_reserved_backing_num
+            .saturating_sub(self.provider_principal_num(domain)?)
+            .saturating_sub(source.positive_claim_bound_num);
+        if stranded_num == 0 {
+            return Ok(0);
+        }
+        let twin_source = self.source_credit_for_domain_shape(twin)?;
+        let twin_owed_num = twin_source
+            .positive_claim_bound_num
+            .saturating_add(self.provider_principal_num(twin)?)
+            .saturating_sub(twin_source.fresh_reserved_backing_num);
+        Ok(stranded_num.min(twin_owed_num))
+    }
+
     /// Whether a stored position on `domain`'s asset, on either side, has not
     /// settled the asset's latest K/F change. Such a position can hold a gain
     /// that is not registered as a claim yet.
@@ -10001,11 +10026,26 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // registered as a claim yet, which the claim watermark below cannot see:
         // only provider principal may leave. Once every position is settled
         // every gain is a registered claim and the watermark is exact.
-        if mode == MarketModeV16::Live
-            && backing_num > self.provider_principal_num(domain)?
-            && self.asset_has_unsettled_kf_position(domain)?
-        {
-            return Err(V16Error::LockActive);
+        if mode == MarketModeV16::Live && backing_num > self.provider_principal_num(domain)? {
+            if self.asset_has_unsettled_kf_position(domain)? {
+                return Err(V16Error::LockActive);
+            }
+            // Every position is settled, so every gain is a registered claim. What
+            // the losers paid in beyond the claims on this domain is then owed to
+            // nobody here, but it is not the provider's either while the claims
+            // on the twin domain are short of backing: it paid for a move that
+            // reversed, and the payer's regain is claimed there. That much stays.
+            let owed_to_twin_num = self.stranded_loser_backing_owed_to_twin_num(domain)?;
+            if owed_to_twin_num != 0 {
+                let source = self.source_credit_for_domain_shape(domain)?;
+                let left_beyond_claims_num = source
+                    .fresh_reserved_backing_num
+                    .saturating_sub(backing_num)
+                    .saturating_sub(source.positive_claim_bound_num);
+                if left_beyond_claims_num < owed_to_twin_num {
+                    return Err(V16Error::LockActive);
+                }
+            }
         }
         if mode == MarketModeV16::Resolved
             && amount > self.resolved_counterparty_backing_surplus(domain)?

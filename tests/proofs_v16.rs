@@ -9100,6 +9100,152 @@ fn proof_v16_public_counterparty_backing_withdraw_rejects_lapsed_bucket_after_ex
     public_counterparty_backing_withdraw_lapsed_is_rejected(11);
 }
 
+// In Live with every position settled, a domain can still hold loser-paid backing
+// beyond its claims: a payment that a reversal stranded there. The payer's regain
+// is claimed on the twin domain, which nobody else funds, so as long as the twin's
+// claims are short of backing the payment is owed there and not to the withdrawer.
+// The provider exit past principal leaves min(stranded, what the twin is owed) in
+// the domain, and refuses before the route touches a byte when it would not.
+// Backing 1..=4 with no registered claim (so the claim watermark cannot refuse),
+// principal 0..=backing, withdrawal 1..=backing, and six twin states from fully
+// backed to nothing behind three atoms of claims. A withdrawal within principal
+// always succeeds and leaves the loser-paid backing as it was.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_public_live_backing_withdraw_leaves_loser_payments_the_twin_is_owed() {
+    let backing_raw: u8 = kani::any();
+    let principal_raw: u8 = kani::any();
+    let withdraw_raw: u8 = kani::any();
+    let twin_case: u8 = kani::any();
+    kani::assume((1..=4).contains(&backing_raw));
+    kani::assume(principal_raw <= backing_raw);
+    kani::assume((1..=4).contains(&withdraw_raw));
+    kani::assume(withdraw_raw <= backing_raw);
+    kani::assume(twin_case < 6);
+    // (claims on the twin, backing it holds, its stored credit rate)
+    let (twin_claim_raw, twin_backing_raw, twin_rate): (u8, u8, u128) = match twin_case {
+        0 => (0, 0, CREDIT_RATE_SCALE),
+        1 => (1, 0, 0),
+        2 => (2, 0, 0),
+        3 => (2, 1, CREDIT_RATE_SCALE / 2),
+        4 => (2, 2, CREDIT_RATE_SCALE),
+        _ => (3, 0, 0),
+    };
+    let backing_num = backing_raw as u128 * BOUND_SCALE;
+    let principal_num = principal_raw as u128 * BOUND_SCALE;
+    let withdraw = withdraw_raw as u128;
+    let withdraw_num = withdraw * BOUND_SCALE;
+    let twin_claim_num = twin_claim_raw as u128 * BOUND_SCALE;
+    let twin_backing_num = twin_backing_raw as u128 * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.vault = V16PodU128::new(backing_raw as u128 + twin_claim_raw as u128);
+    header.source_fresh_backing_total_num = V16PodU128::new(backing_num + twin_backing_num);
+    header.source_claim_bound_total_num = V16PodU128::new(twin_claim_num);
+    header.pnl_pos_tot = V16PodU128::new(twin_claim_raw as u128);
+    header.pnl_pos_bound_tot = V16PodU128::new(twin_claim_raw as u128);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(twin_claim_num);
+    markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: backing_num,
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    markets[0].engine.source_credit_long =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            fresh_reserved_backing_num: backing_num,
+            credit_rate_num: CREDIT_RATE_SCALE,
+            ..SourceCreditStateV16::EMPTY
+        });
+    markets[0].engine.provider_principal_long_num = V16PodU128::new(principal_num);
+    if twin_backing_raw != 0 {
+        markets[0].engine.backing_short =
+            BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+                market_id,
+                fresh_unliened_backing_num: twin_backing_num,
+                expiry_slot: 10,
+                status: BackingBucketStatusV16::Fresh,
+                ..BackingBucketV16::EMPTY
+            });
+    }
+    markets[0].engine.source_credit_short =
+        SourceCreditStateV16Account::from_runtime(&SourceCreditStateV16 {
+            positive_claim_bound_num: twin_claim_num,
+            exact_positive_claim_num: twin_claim_num,
+            fresh_reserved_backing_num: twin_backing_num,
+            credit_rate_num: twin_rate,
+            ..SourceCreditStateV16::EMPTY
+        });
+    let h0 = header;
+    let s0 = markets[0].engine;
+    assert_eq!(
+        MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape(),
+        Ok(())
+    );
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
+
+    let stranded_raw = backing_raw - principal_raw;
+    let owed_raw = stranded_raw.min(twin_claim_raw - twin_backing_raw);
+    let past_principal = withdraw_raw > principal_raw;
+    let leaves_what_is_owed = backing_raw - withdraw_raw >= owed_raw;
+    kani::cover!(
+        past_principal && !leaves_what_is_owed && principal_raw == 0,
+        "a caller with no principal cannot take a stranded payment"
+    );
+    kani::cover!(
+        past_principal && !leaves_what_is_owed && principal_raw != 0,
+        "a provider cannot take a stranded payment on top of its principal"
+    );
+    kani::cover!(
+        past_principal && leaves_what_is_owed && owed_raw != 0,
+        "past principal, what the twin is owed stays"
+    );
+    kani::cover!(
+        past_principal && owed_raw == 0,
+        "the twin is owed nothing: the exit past principal is as before"
+    );
+    kani::cover!(
+        !past_principal && owed_raw != 0,
+        "principal leaves beside a stranded payment"
+    );
+    if !past_principal || leaves_what_is_owed {
+        assert_eq!(result, Ok(()));
+        let reserved_after = markets[0]
+            .engine
+            .source_credit_long
+            .fresh_reserved_backing_num
+            .get();
+        let principal_after = markets[0].engine.provider_principal_long_num.get();
+        assert_eq!(reserved_after, backing_num - withdraw_num);
+        assert_eq!(principal_after, principal_num.saturating_sub(withdraw_num));
+        if past_principal {
+            assert!(reserved_after >= owed_raw as u128 * BOUND_SCALE);
+        } else {
+            // What the losers paid in is exactly what it was.
+            assert_eq!(
+                reserved_after - principal_after,
+                backing_num - principal_num
+            );
+        }
+        // The twin domain is not touched.
+        assert!(
+            markets[0].engine.source_credit_short == s0.source_credit_short
+                && markets[0].engine.backing_short == s0.backing_short
+        );
+    } else {
+        assert_eq!(result, Err(V16Error::LockActive));
+        assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &s0,
+            &markets[0].engine
+        ));
+    }
+}
+
 // In Live, while a stored position on the asset has not settled the latest K/F
 // change, a gain may exist that is not registered as a claim yet, so the claim
 // watermark cannot protect what the domain's losers paid in. The provider exit
