@@ -120,6 +120,33 @@ fn assert_conserved(m: &MarketGroupV16ViewMut<'_, u64>, provider_funded: bool) {
     }
 }
 
+/// Resolved closes in rounds until every account is paid out; the payouts in the order
+/// given. A leg keeps its loss weight until the other side of its asset has settled, so
+/// the first account in the order is not necessarily the first to finish.
+fn close_all(
+    m: &mut MarketGroupV16ViewMut<'_, u64>,
+    accounts: &mut [&mut PortfolioV16ViewMut<'_>],
+) -> Vec<u128> {
+    let mut paid: Vec<Option<u128>> = vec![None; accounts.len()];
+    for _ in 0..32 {
+        for (i, account) in accounts.iter_mut().enumerate() {
+            if paid[i].is_none() {
+                if let ResolvedCloseOutcomeV16::Closed { payout } =
+                    m.close_resolved_account_not_atomic(account, 0).unwrap()
+                {
+                    paid[i] = Some(payout);
+                }
+            }
+        }
+        if paid.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    paid.into_iter()
+        .map(|p| p.expect("every account closes"))
+        .collect()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct Outcome {
     provider: u128,
@@ -333,16 +360,16 @@ fn s2_resolved_loss_credits_provider_domain_exactly() {
             - m.header.c_tot.get()
             - m.header.insurance.get()
             - m.header.source_fresh_backing_total_num.get() / BOUND_SCALE;
-        let mut loser_payout = None;
-        for _ in 0..16 {
-            if let ResolvedCloseOutcomeV16::Closed { payout } =
-                m.close_resolved_account_not_atomic(&mut l, 0).unwrap()
-            {
-                loser_payout = Some(payout);
-                break;
-            }
+        // The loser pays its loss in its first call. With the winners settled it
+        // is paid out as well; otherwise its leg keeps its loss weight until they
+        // have settled, and it is paid out below.
+        let first = m.close_resolved_account_not_atomic(&mut l, 0).unwrap();
+        if winners_first {
+            assert_eq!(first, ResolvedCloseOutcomeV16::Closed { payout: LOSER_PAYOUT });
+        } else {
+            assert_eq!(first, ResolvedCloseOutcomeV16::ProgressOnly);
+            assert_eq!(l.header.capital.get(), LOSER_PAYOUT);
         }
-        assert_eq!(loser_payout, Some(LOSER_PAYOUT));
         assert_eq!(fresh_atoms(&m, PROVIDER_DOMAIN), PROVIDER + 10_000);
         let residual_after = m.header.vault.get()
             - m.header.c_tot.get()
@@ -353,6 +380,10 @@ fn s2_resolved_loss_credits_provider_domain_exactly() {
             "no junior residual created"
         );
         assert_conserved(&m, true);
+        if !winners_first {
+            let paid = close_all(&mut m, &mut [&mut l, &mut wa, &mut wb]);
+            assert_eq!(paid[0], LOSER_PAYOUT);
+        }
     }
 }
 
@@ -376,32 +407,26 @@ fn s2_past_horizon_bucket_keeps_loss_in_junior_residual() {
     m.resolve_market_not_atomic(4).unwrap();
     // Far past any backing horizon (bounded by resolved_slot + H).
     m.advance_resolved_slot_not_atomic(4 + 1_000).unwrap();
-    let mut loser_payout = None;
+    // The loser pays its loss before the winner has settled. Its leg keeps its loss
+    // weight until the winner has, so it is paid out below.
     for _ in 0..16 {
-        if let ResolvedCloseOutcomeV16::Closed { payout } =
-            m.close_resolved_account_not_atomic(&mut l, 0).unwrap()
-        {
-            loser_payout = Some(payout);
+        if l.header.capital.get() == 995_000 {
             break;
         }
+        assert_eq!(
+            m.close_resolved_account_not_atomic(&mut l, 0).unwrap(),
+            ResolvedCloseOutcomeV16::ProgressOnly
+        );
     }
-    assert_eq!(loser_payout, Some(995_000));
+    assert_eq!(l.header.capital.get(), 995_000);
     assert_ne!(
         bucket(&m, PROVIDER_DOMAIN).status,
         BackingBucketStatusV16::Fresh
     );
     assert_eq!(m.header.source_fresh_backing_total_num.get(), 0);
     assert_conserved(&m, false);
-    let mut winner_payout = None;
-    for _ in 0..16 {
-        if let ResolvedCloseOutcomeV16::Closed { payout } =
-            m.close_resolved_account_not_atomic(&mut w, 0).unwrap()
-        {
-            winner_payout = Some(payout);
-            break;
-        }
-    }
-    assert_eq!(winner_payout, Some(1_005_000));
+    let paid = close_all(&mut m, &mut [&mut l, &mut w]);
+    assert_eq!(paid, vec![995_000, 1_005_000]);
     assert_conserved(&m, false);
 }
 
@@ -509,16 +534,18 @@ fn s2_expired_bucket_loss_refills_provider_receivable_only() {
     m.set_asset_raw_oracle_target_not_atomic(0, 110).unwrap();
     m.accrue_asset_to_not_atomic(0, 3, 110, 0, true).unwrap();
     m.resolve_market_not_atomic(EXPIRY + 1).unwrap();
-    let mut loser_payout = None;
+    // The loser pays its loss before the holder of the position opposite has settled.
+    // Its leg keeps its loss weight until then, so it is paid out below.
     for _ in 0..16 {
-        if let ResolvedCloseOutcomeV16::Closed { payout } =
-            m.close_resolved_account_not_atomic(&mut l, 0).unwrap()
-        {
-            loser_payout = Some(payout);
+        if l.header.capital.get() == 990_000 {
             break;
         }
+        assert_eq!(
+            m.close_resolved_account_not_atomic(&mut l, 0).unwrap(),
+            ResolvedCloseOutcomeV16::ProgressOnly
+        );
     }
-    assert_eq!(loser_payout, Some(990_000));
+    assert_eq!(l.header.capital.get(), 990_000);
     let s = source(&m, PROVIDER_DOMAIN);
     assert_eq!(s.positive_claim_bound_num, 0);
     assert_eq!(s.provider_receivable_num, 0, "receivable refilled");
@@ -528,21 +555,9 @@ fn s2_expired_bucket_loss_refills_provider_receivable_only() {
         "exactly the receivable is credited, nothing beyond it"
     );
     assert_conserved(&m, false);
-    let mut payouts = Vec::new();
-    for acct in [&mut n, &mut w] {
-        let mut paid = None;
-        for _ in 0..16 {
-            if let ResolvedCloseOutcomeV16::Closed { payout } =
-                m.close_resolved_account_not_atomic(acct, 0).unwrap()
-            {
-                paid = Some(payout);
-                break;
-            }
-        }
-        payouts.push(paid.expect("close"));
-        assert_conserved(&m, false);
-    }
-    assert_eq!(payouts, vec![1_005_000, 1_005_000]);
+    let paid = close_all(&mut m, &mut [&mut n, &mut w, &mut l]);
+    assert_conserved(&m, false);
+    assert_eq!(paid, vec![1_005_000, 1_005_000, 990_000]);
 }
 
 /// Engine mirror of the wrapper's INV-067 "late debtor source cap" scenario.
@@ -665,9 +680,14 @@ fn s2_late_debt_beyond_gap_still_reaches_underpaid_receipt_holders() {
                     close(&mut m, &mut a[debtors[1]], debtors[1]);
                     // Both debts joined the funded provider domain in full.
                     assert_eq!(fresh_atoms(&m, PROVIDER_DOMAIN), backing + 250);
-                    // Stages 3-7: bankrupt debtor, waiting winner detaches, converter
-                    // realizes at rate 1, then the asset-1 winner's junior receipt.
-                    for actor in [5, waiting, converter, 4, 4] {
+                    // The debtors' legs keep their loss weight until the winners
+                    // opposite have been touched after resolution, so the stages
+                    // interleave: the bankrupt debtor is booked, each winner's leg
+                    // detaches, the debtors and the bankrupt debtor leave, the
+                    // converter realizes at rate 1, then the asset-1 winner's junior
+                    // receipt. The waiting winner is not called again before the
+                    // provider's expiry.
+                    for actor in [5, waiting, converter, debtors[0], debtors[1], 5, 4, 4, converter, 4, 4] {
                         close(&mut m, &mut a[actor], actor);
                     }
                     assert_eq!(m.header.payout_snapshot_captured, 1);

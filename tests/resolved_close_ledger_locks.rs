@@ -937,9 +937,11 @@ fn resolved_close_reopens_a_finalized_close_for_a_later_loss() {
             book.header.c_tot.get(),
             book.header.insurance.get(),
         );
+        // The later loss is booked as a new close. SECOND's leg keeps its loss
+        // weight until its maker opposite has settled, so the account stays open.
         assert_eq!(
             book.close(SECOND),
-            Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }),
+            Ok(ResolvedCloseOutcomeV16::ProgressOnly),
             "{case}"
         );
         let ledger = book.ledger(SECOND);
@@ -956,7 +958,7 @@ fn resolved_close_reopens_a_finalized_close_for_a_later_loss() {
             "{case}"
         );
         assert_eq!(book.pnl(SECOND), 0, "{case}");
-        assert!(!book.leg(SECOND).active, "{case}");
+        assert!(book.leg(SECOND).active, "{case}");
         assert_eq!(book.barriers(), (0, 0), "{case}");
         // Booking moves no value: the loss is taken from SECOND_MAKER's gain
         // when that account settles.
@@ -1050,11 +1052,14 @@ fn a_later_loss_draws_insurance_through_a_new_close() {
             Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }),
             "{case}"
         );
+        // SECOND's leg keeps its loss weight until its maker opposite has settled,
+        // so the account stays open after the new close.
         assert_eq!(
             book.close(SECOND),
-            Ok(ResolvedCloseOutcomeV16::Closed { payout: 0 }),
+            Ok(ResolvedCloseOutcomeV16::ProgressOnly),
             "{case}"
         );
+        assert!(book.leg(SECOND).active, "{case}");
         let ledger = book.ledger(SECOND);
         assert_eq!(
             (

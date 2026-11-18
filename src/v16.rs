@@ -17214,15 +17214,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             resolved && account.header.last_fee_slot.get() < self.header.resolved_slot.get();
         let resolved_pending =
             resolved && (!account.is_empty_for_dematerialization()? || resolved_fee_sync_pending);
-        let resolved_pre_payout_progress =
-            !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
-                || decode_bool(account.header.b_stale_state)?
-                || decode_bool(account.header.stale_state)?
-                || account.header.pnl.get() <= 0
-                || Self::account_has_source_liens(account)
-                || lapsed_source_backing
-                || ledger.has_pending_residual()
-                || resolved_fee_sync_pending;
+        // Attached legs are work to do unless every one of them is a settled
+        // position that waits for the other side of its asset: close_resolved
+        // would then return a successful no-op for them, as it would for a flat
+        // positive-PnL account before the census is clear.
+        let legs_attached =
+            !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
+        let legs_only_wait =
+            resolved && legs_attached && self.resolved_legs_only_wait_for_the_other_side(account)?;
+        let resolved_pre_payout_progress = (legs_attached && !legs_only_wait)
+            || decode_bool(account.header.b_stale_state)?
+            || decode_bool(account.header.stale_state)?
+            || (!legs_attached && account.header.pnl.get() <= 0)
+            || Self::account_has_source_liens(account)
+            || lapsed_source_backing
+            || ledger.has_pending_residual()
+            || resolved_fee_sync_pending;
         let resolved_winner = resolved_pending
             && (resolved_pre_payout_progress || self.resolved_positive_payout_ready()?);
 
@@ -22219,6 +22226,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         pre_payout_step |=
             !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
         let fee_slot_before = account.header.last_fee_slot.get();
+        let pnl_before_b = account.header.pnl.get();
         if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
             .settle_resolved_account_side_effects_after_kf_not_atomic(
                 account,
@@ -22226,6 +22234,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             )?
         {
             self.validate_shape()?;
+            return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
+        }
+        // A B charge settled from the account's claims leaves the backing that was
+        // behind them in their domains, where no claim owns it any more. The close
+        // reports progress here: the next call passes over the settled legs again
+        // and places that backing before a leg of this account can leave its asset.
+        if pnl_before_b > 0
+            && account.header.pnl.get() < pnl_before_b
+            && !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get))
+        {
+            self.validate_shape()?;
+            account.validate_with_market(&self.as_view())?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
         self.sync_account_fee_to_slot_not_atomic(
@@ -22544,6 +22564,89 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(false)
     }
 
+    /// Resolved mode. Whether a bankruptcy residual can still be booked onto `side`
+    /// of the asset: a stored leg on the opposite side has not settled its final
+    /// K/F, so its loss, if it has one, is not known yet; or some account in the
+    /// market owes a loss that is not booked, or carries a B charge it has not
+    /// settled and may not be able to pay.
+    ///
+    /// The last two are counted for the whole market, not per asset, and a B charge
+    /// that was booked onto a side is counted only once its account is touched.
+    /// Both make this answer "yes" more often than a per-asset count would, never
+    /// less: every account settles its own K/F and B in its own close, without
+    /// waiting for a leg of anyone to detach, so the answer turns to "no" once each
+    /// account has been cranked.
+    fn resolved_side_can_still_be_charged(
+        &self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<bool> {
+        if self.header.negative_pnl_account_count.get() != 0
+            || self.header.b_stale_account_count.get() != 0
+        {
+            return Ok(true);
+        }
+        let asset = self.asset_state(asset_index)?;
+        Ok(match side {
+            SideV16::Long => asset.stale_account_count_short,
+            SideV16::Short => asset.stale_account_count_long,
+        } != 0)
+    }
+
+    /// Resolved mode. Whether the account's attached legs are all settled real
+    /// positions that wait only for the other side of their asset
+    /// (`resolved_side_can_still_be_charged`): a resolved close can do nothing with
+    /// them yet. Any leg that could settle, detach, or is held for another reason
+    /// gives `false`, so this never hides a step that can be taken.
+    fn resolved_legs_only_wait_for_the_other_side(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        if account.header.pnl.get() < 0
+            || decode_bool(account.header.b_stale_state)?
+            || decode_bool(account.header.stale_state)?
+            || account
+                .header
+                .close_progress
+                .try_to_runtime()?
+                .has_pending_residual()
+        {
+            return Ok(false);
+        }
+        let configured_max = self.header.config.max_market_slots.get() as usize;
+        let mut any = false;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                any = true;
+                let asset_index = leg.asset_index as usize;
+                if leg.b_stale
+                    || leg.stale
+                    || asset_index >= configured_max
+                    || leg.basis_pos_q == 0
+                    || leg.loss_weight == 0
+                    || self.has_pending_domain_loss_barrier(asset_index, leg.side)?
+                {
+                    return Ok(false);
+                }
+                let asset = self.asset_state(asset_index)?;
+                let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg)?;
+                if Self::leg_has_exhausted_effective_oi(asset, leg)
+                    || !Self::leg_kf_epoch_is_current(asset, leg)
+                    || k_target != leg.k_snap
+                    || !leg_f_snap_is_settled(leg, f_target)?
+                    || self.b_target_for_leg(asset_index, leg)? != leg.b_snap
+                    || !self.resolved_side_can_still_be_charged(asset_index, leg.side)?
+                {
+                    return Ok(false);
+                }
+            }
+            slot += 1;
+        }
+        Ok(any)
+    }
+
     fn detach_solvent_active_legs_for_resolved_close(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -22571,7 +22674,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // wait for each other for ever: each real position is what the other
         // account's obligation waits for. Neither could close, and through the
         // payout blockers no positive PnL in the market could be paid.
-        let mut waiting_obligation = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        //
+        // A real position keeps its loss weight while a bankruptcy can still be
+        // booked onto its side (`resolved_side_can_still_be_charged`). A residual
+        // is shared by the weight attached when it is booked, so a leg that left
+        // before then would leave its share to the legs that stayed, their capital
+        // included. Only that leg waits; the account's other legs go on.
+        let mut waiting = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -22593,7 +22702,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     if self.resolved_residual_can_still_be_booked()? {
                         return Ok(());
                     }
-                    waiting_obligation[slot] = true;
+                    waiting[slot] = true;
+                }
+                if leg.basis_pos_q != 0
+                    && leg.loss_weight != 0
+                    && self.resolved_side_can_still_be_charged(asset_index, leg.side)?
+                {
+                    waiting[slot] = true;
                 }
                 let asset = self.asset_state(asset_index)?;
                 if Self::leg_has_exhausted_effective_oi(asset, leg) {
@@ -22619,7 +22734,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active && !waiting_obligation[slot] {
+            if leg.active && !waiting[slot] {
                 let asset_index = leg.asset_index as usize;
                 let asset = self.asset_state(asset_index)?;
                 let side_effective_oi_q = match leg.side {

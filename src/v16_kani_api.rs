@@ -1672,6 +1672,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.resolved_residual_can_still_be_booked()
     }
 
+    pub fn kani_resolved_side_can_still_be_charged(
+        &self,
+        asset_index: usize,
+        side: SideV16,
+    ) -> V16Result<bool> {
+        self.resolved_side_can_still_be_charged(asset_index, side)
+    }
+
     pub fn kani_settle_resolved_bankruptcy_negative_pnl(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

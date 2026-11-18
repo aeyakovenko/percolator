@@ -5714,17 +5714,20 @@ fn resolved_loser_close_backing_after(advance_to: Option<u64>) -> (u128, u128, u
     if let Some(slot) = advance_to {
         market.advance_resolved_slot_not_atomic(slot).unwrap();
     }
-    while long.header.legs[0].try_to_runtime().unwrap().active {
-        market
-            .close_resolved_account_not_atomic(&mut long, 0)
-            .unwrap();
-    }
+    // The winner settles first and registers its claim. Its leg keeps its loss
+    // weight until the loser has settled, so it is still attached, and its claim
+    // unrealized, when the loser's capital is measured below.
+    market
+        .close_resolved_account_not_atomic(&mut long, 0)
+        .unwrap();
+    assert!(long.header.legs[0].try_to_runtime().unwrap().active);
     assert!(long.header.pnl.get() > 0);
     while short.header.legs[0].try_to_runtime().unwrap().active {
         market
             .close_resolved_account_not_atomic(&mut short, 0)
             .unwrap();
     }
+    assert!(long.header.pnl.get() > 0);
     market.validate_shape().unwrap();
     short.validate_with_market(&market.as_view()).unwrap();
     let fresh_num = market.header.source_fresh_backing_total_num.get();
@@ -6028,19 +6031,14 @@ fn v16_resolved_zero_conversion_coclaimants_on_empty_bucket_both_close() {
         .unwrap();
     market.resolve_market_not_atomic(4).unwrap();
 
-    let mut loser_payout = None;
-    for _ in 0..16 {
-        match market.close_resolved_account_not_atomic(&mut loser, 0) {
-            Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly) => {}
-            Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) => {
-                loser_payout = Some(payout);
-                break;
-            }
-            Err(e) => panic!("loser close failed: {e:?}"),
-        }
-    }
-    let loser_payout = loser_payout.expect("loser must close first");
-    assert!(loser_payout < 2_000_000);
+    // The loser settles first: its loss is paid before either winner has attributed
+    // a claim. Its leg keeps its loss weight until the winners have settled, so its
+    // close completes in the rounds below.
+    assert_eq!(
+        market.close_resolved_account_not_atomic(&mut loser, 0),
+        Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly)
+    );
+    assert_eq!(loser.header.capital.get(), 1_990_000);
     assert_eq!(
         market.markets[0]
             .engine
@@ -6054,6 +6052,7 @@ fn v16_resolved_zero_conversion_coclaimants_on_empty_bucket_both_close() {
 
     // Both winners now attribute zero-conversion claims to the Empty domain.
     let mut payouts = [None, None];
+    let mut loser_payout = None;
     for _ in 0..32 {
         for (i, winner) in [&mut winner_a, &mut winner_b].into_iter().enumerate() {
             if payouts[i].is_some() {
@@ -6067,10 +6066,21 @@ fn v16_resolved_zero_conversion_coclaimants_on_empty_bucket_both_close() {
                 Err(e) => panic!("winner {i} resolved close must progress, got {e:?}"),
             }
         }
-        if payouts.iter().all(Option::is_some) {
+        if loser_payout.is_none() {
+            match market.close_resolved_account_not_atomic(&mut loser, 0) {
+                Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly) => {}
+                Ok(percolator::ResolvedCloseOutcomeV16::Closed { payout }) => {
+                    loser_payout = Some(payout)
+                }
+                Err(e) => panic!("loser close failed: {e:?}"),
+            }
+        }
+        if payouts.iter().all(Option::is_some) && loser_payout.is_some() {
             break;
         }
     }
+    let loser_payout = loser_payout.expect("the loser closes once the winners have settled");
+    assert!(loser_payout < 2_000_000);
     let [Some(a), Some(b)] = payouts else {
         panic!("both zero-conversion co-claimants must close: {payouts:?}");
     };
@@ -6158,6 +6168,16 @@ fn v16_resolved_close_normalizes_prospective_lapsed_source_before_settlement() {
         Ok(percolator::ResolvedCloseOutcomeV16::ProgressOnly),
     );
     assert!(long.header.pnl.get() > 0);
+    // The winner's leg keeps its loss weight until the loser opposite has settled.
+    assert!(long.header.legs[0].try_to_runtime().unwrap().active);
+    market.validate_shape().unwrap();
+    long.validate_with_market(&market.as_view()).unwrap();
+    market
+        .close_resolved_account_not_atomic(&mut short, 0)
+        .unwrap();
+    market
+        .close_resolved_account_not_atomic(&mut long, 0)
+        .unwrap();
     assert!(!long.header.legs[0].try_to_runtime().unwrap().active);
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
@@ -12074,13 +12094,23 @@ fn v16_legless_side_residue_from_partial_liquidations_dropped() {
     // whether or not the residue is zeroed.
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
+    // The short settles first. Its leg keeps its loss weight until the long has
+    // settled, and the long's gain is paid once the short's leg is gone, so the two
+    // closes interleave.
+    let progress = Ok(AutoCrankOutcomeV16::ResolvedClose(
+        ResolvedCloseOutcomeV16::ProgressOnly,
+    ));
+    let result = crank_at_current_slot(&mut market, &mut short);
+    assert_eq!(result, progress, "short settles, result={result:?}");
+    let result = crank_at_current_slot(&mut market, &mut long);
+    assert_eq!(result, progress, "long settles, result={result:?}");
     let result = crank_at_current_slot(&mut market, &mut short);
     assert_eq!(
         result,
         resolved_closed(49_005_000_000_011),
         "short close result={result:?}"
     );
-    let mut long = PortfolioV16ViewMut::new(&mut long_header);
     let result = crank_at_current_slot(&mut market, &mut long);
     assert_eq!(
         result,

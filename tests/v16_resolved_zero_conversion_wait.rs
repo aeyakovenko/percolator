@@ -353,24 +353,30 @@ fn dust_world(dust_q: u128) -> World {
     w
 }
 
-/// From `dust_world`: L1 closes before any claim is attributed (its 5_000 goes
-/// to the junior residual), W attributes and detaches, L2 funds the winners'
-/// domain. Only X's leg is still stored.
+/// From `dust_world`: L1 pays before any claim is attributed (its 5_000 goes to the
+/// junior residual), W and X attribute their claims, L2 funds the winners' domain. A leg
+/// keeps its loss weight until the other side of its asset has settled, so nobody's leg
+/// leaves before that; then L2, L1 and W go. Only X's leg is still stored.
 fn leave_dust_leg_last(w: &mut World) {
+    assert_eq!(w.close(L1), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert_eq!(w.accounts[L1].capital.get(), 995_000);
+    assert_eq!(w.domain(0), (0, 0), "no claim is attributed yet: L1 paid the junior pool");
+    assert_eq!(w.close(W), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert_eq!(w.close(X), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert!(w.has_leg(W) && w.has_leg(X), "the winners' legs wait for L2");
+    assert!(matches!(
+        w.close(L2),
+        Ok(ResolvedCloseOutcomeV16::Closed { .. })
+    ));
     assert_eq!(
         w.close(L1),
         Ok(ResolvedCloseOutcomeV16::Closed { payout: 995_000 })
     );
     assert_eq!(w.close(W), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
-    assert!(matches!(
-        w.close(L2),
-        Ok(ResolvedCloseOutcomeV16::Closed { .. })
-    ));
     assert_eq!(w.bucket(0).status, BackingBucketStatusV16::Fresh);
-    assert_eq!(w.domain(0).0, 10_000, "only W's claim is attributed so far");
     assert!(w.source(0).credit_rate_num < CREDIT_RATE_SCALE * 51 / 100);
     assert!(w.has_leg(X) && !w.has_leg(W));
-    assert_eq!(w.blockers(), 2, "X's stored + stale-cohort leg");
+    assert_eq!(w.blockers(), 1, "X's stored leg");
 }
 
 /// The defect. X holds the last stored leg and a claim that converts to zero
@@ -452,22 +458,25 @@ fn dust_claim_on_the_last_stored_leg_settles_through_the_public_crank() {
 }
 
 /// Control (passes before and after): the same world when X is not the last
-/// stored leg. Its detach commits while L2 still blocks payouts, W realizes
+/// stored leg. Its detach commits while L1 still blocks payouts, W realizes
 /// first, and the payouts are identical.
 #[test]
 fn control_dust_claim_detached_before_the_last_leg() {
     let mut w = dust_world(UNIT / 5);
-    assert_eq!(
-        w.close(L1),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 995_000 })
-    );
+    assert_eq!(w.close(L1), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
     assert_eq!(w.close(W), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
     assert_eq!(w.close(X), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
-    assert!(!w.has_leg(X));
     assert!(matches!(
         w.close(L2),
         Ok(ResolvedCloseOutcomeV16::Closed { .. })
     ));
+    assert_eq!(w.close(W), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert_eq!(w.close(X), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert!(!w.has_leg(X) && !w.has_leg(W) && w.has_leg(L1));
+    assert_eq!(
+        w.close(L1),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 995_000 })
+    );
     assert_eq!(w.blockers(), 0);
     assert_eq!(w.domain(0), (10_001, 5_001));
     w.sweep(&[W, X]);
@@ -569,13 +578,15 @@ fn control_seniority_world_honest_order() {
 fn dust_leg_last_does_not_cost_backed_winners_their_seniority() {
     let mut w = seniority_world();
     let resolved_slot = w.header.resolved_slot.get();
-    // Winners attribute and detach, losers book, DUST's leg stays stored.
-    for i in [V, A, LV, Z, V, A, LV, Z] {
+    // The winners attribute, DUST among them, the losers book, and every leg but
+    // DUST's goes. A leg keeps its loss weight until the other side of its asset
+    // has settled, so DUST has to settle before Z's leg can leave.
+    for i in [DUST, V, A, LV, Z, V, A, LV, Z] {
         w.close(i).unwrap();
     }
-    assert_eq!(w.blockers(), 2);
+    assert_eq!(w.blockers(), 1);
     assert!(w.has_leg(DUST));
-    assert_eq!(w.domain(0), (13_000, 10_200));
+    assert_eq!(w.domain(0), (13_001, 10_200));
     assert_eq!(w.domain(2), (5_000, 5_000));
     assert_eq!(w.source(2).credit_rate_num, CREDIT_RATE_SCALE);
 
@@ -635,9 +646,10 @@ fn dust_claim_in_one_domain_does_not_hold_the_accounts_other_claims() {
         w.mark(&[asset0, 95]);
     }
     let resolved_slot = w.resolve();
-    // The winner attributes both claims and detaches its asset-0 leg; then
-    // everyone else closes. Its asset-1 leg is the last stored one.
-    for i in [VV, A, LL, Z, A, LL, Z] {
+    // The winner attributes both claims; once Z has settled it detaches its
+    // asset-0 leg; then everyone else closes. Its asset-1 leg is the last stored
+    // one.
+    for i in [VV, A, LL, Z, VV, A, LL, Z] {
         w.close(i).unwrap();
     }
     assert_eq!(w.blockers(), 1);
@@ -681,18 +693,27 @@ fn two_dust_claims_do_not_wait_for_each_other() {
         w.mark(&[95]);
         let resolved_slot = w.resolve();
 
+        // L1 pays before any claim is attributed. The three winners attribute; a
+        // leg keeps its loss weight until the other side of its asset has settled,
+        // so their legs wait for L2. L2 funds the domain and leaves, then L1, W and
+        // X.
+        assert_eq!(w.close(L1), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+        for winner in [W, X, X2] {
+            assert_eq!(w.close(winner), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+        }
+        assert_eq!(
+            w.close(L2),
+            Ok(ResolvedCloseOutcomeV16::Closed { payout: 996_000 })
+        );
         assert_eq!(
             w.close(L1),
             Ok(ResolvedCloseOutcomeV16::Closed { payout: 993_998 })
         );
         assert_eq!(w.close(W), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
         assert_eq!(w.close(X), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
-        assert_eq!(
-            w.close(L2),
-            Ok(ResolvedCloseOutcomeV16::Closed { payout: 996_000 })
-        );
         // X2 owns the last stored leg; domain 0 holds 4_000 for 10_002 of claims.
-        assert_eq!(w.blockers(), 2);
+        assert_eq!(w.blockers(), 1);
+        assert_eq!(w.domain(0), (10_002, 4_000));
         assert_eq!(
             w.close(X2),
             Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_000_000 })
@@ -737,7 +758,8 @@ fn two_dust_claims_do_not_wait_for_each_other() {
 /// Empty bucket and their claims are junior (#220). A third party then
 /// deposits a single atom of backing: the bucket is Fresh, each 5_000 claim
 /// converts to zero, and each used to wait on the other until the bucket
-/// lapsed, with the group's last stored leg rolled back on top of it.
+/// lapsed. (The loser's leg keeps its loss weight until both winners have
+/// settled, so it is the last one stored here.)
 #[test]
 fn a_single_atom_of_backing_does_not_make_every_claimant_wait() {
     const L: usize = 0;
@@ -751,10 +773,8 @@ fn a_single_atom_of_backing_does_not_make_every_claimant_wait() {
     w.trade(0, L, W2, 1_000 * UNIT);
     w.mark(&[95]);
     let resolved_slot = w.resolve();
-    assert_eq!(
-        w.close(L),
-        Ok(ResolvedCloseOutcomeV16::Closed { payout: 990_000 })
-    );
+    assert_eq!(w.close(L), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert_eq!(w.accounts[L].capital.get(), 990_000);
     assert_eq!(w.close(W1), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
     assert_eq!(w.bucket(0).status, BackingBucketStatusV16::Empty);
 
@@ -766,12 +786,18 @@ fn a_single_atom_of_backing_does_not_make_every_claimant_wait() {
         resolved_slot + HORIZON
     );
 
-    // W2 holds the last stored leg. Its share of the atom is half an atom.
+    // W2 attributes its claim and its leg leaves; then the loser's, the last one
+    // stored. W2's share of the atom is half an atom.
+    assert_eq!(w.close(W2), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
+    assert_eq!(
+        w.close(L),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: 990_000 })
+    );
+    assert_eq!(w.blockers(), 0);
     assert_eq!(
         w.close(W2),
         Ok(ResolvedCloseOutcomeV16::Closed { payout: 1_005_000 })
     );
-    assert_eq!(w.blockers(), 0);
     // W1 is the last claimant and converts the atom.
     assert_eq!(
         w.close(W1),
@@ -875,34 +901,30 @@ fn settle_pledged_backing(mut w: World) -> Vec<u128> {
 const PLEDGED_PAID: [u128; 5] = [0, 12_123, 1_003_077, 995_000, 1_023_749];
 
 /// Control (passes before and after): X detaches while other legs are stored,
-/// then waits for Y.
+/// then waits for Y. (X's leg keeps its loss weight until Z has settled, so its
+/// second call is the one that detaches it.)
 #[test]
 fn control_waiting_claim_keeps_its_share_of_pledged_backing() {
     let mut w = pledged_backing_live();
     w.resolve();
-    for i in [PX, S, Z, PH, S, Z, PH] {
+    for i in [PX, S, Z, PH, PX, S, Z, PH] {
         w.close(i).unwrap();
     }
     assert_eq!(settle_pledged_backing(w), PLEDGED_PAID);
 }
 
-/// The same wait when X holds the group's last stored leg: its settlement and
-/// detach commit, and the outcome is identical. X's fee anchor is synced
-/// beforehand, as it is for any account on its second leg, so the detach is
-/// the only step this call has to commit.
+/// The same wait when X holds the group's last stored leg: its detach commits,
+/// and the outcome is identical. X settled in its first call, which Z's leg on
+/// asset 1 had to wait for, so the detach is the only step this call has to
+/// commit.
 #[test]
 fn waiting_claim_on_the_last_stored_leg_keeps_its_share_of_pledged_backing() {
     let mut w = pledged_backing_live();
-    let resolved_slot = w.resolve();
-    for i in [S, Z, PH, S, Z, PH] {
+    w.resolve();
+    for i in [PX, S, Z, PH, S, Z, PH] {
         w.close(i).unwrap();
     }
-    w.on(PX, |m, a| {
-        m.sync_account_fee_to_slot_not_atomic(a, resolved_slot, 0)
-            .map(|_| ())
-    })
-    .unwrap();
-    assert_eq!(w.blockers(), 2);
+    assert_eq!(w.blockers(), 1);
     assert!(w.has_leg(PX));
     assert_eq!(w.close(PX), Ok(ResolvedCloseOutcomeV16::ProgressOnly));
     assert!(!w.has_leg(PX));
@@ -917,10 +939,12 @@ fn waiting_claim_on_the_last_stored_leg_keeps_its_share_of_pledged_backing() {
 fn dust_claim_does_not_wait_for_a_lien_holder() {
     let mut w = pledged_backing_live_with(true);
     w.resolve();
-    for i in [PX, S, Z, PH, PX, S, Z, PH] {
+    // PD settles first: Z's leg on asset 1 keeps its loss weight until both of the
+    // shorts opposite have settled. PD's own leg is then the last one stored.
+    for i in [PD, PX, S, Z, PH, PX, S, Z, PH] {
         w.close(i).unwrap();
     }
-    assert_eq!(w.blockers(), 2);
+    assert_eq!(w.blockers(), 1);
     assert!(w.has_leg(PD));
     assert_eq!(w.source(2).valid_liened_backing_num, 5_000 * BOUND_SCALE);
     assert_eq!(

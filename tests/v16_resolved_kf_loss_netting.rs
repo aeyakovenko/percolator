@@ -253,10 +253,11 @@ fn active_legs(w: &World, i: usize) -> usize {
 }
 
 /// A close places a bounded number of stranded payments per call. X is flat over the round
-/// trip and closes first; nothing can be placed for it, because Y's regain is not claimed
-/// yet. Y's legs are all gains: its first call settles every one of them and places the
-/// bound's worth. The placements that are left wait for Y's following calls, and no leg of
-/// Y detaches before the last one is made.
+/// trip and settles first; nothing can be placed for it, because Y's regain is not claimed
+/// yet, and its legs keep their loss weight until Y has settled. Y's legs are all gains:
+/// its first call settles every one of them and places the bound's worth. The placements
+/// that are left wait for Y's following calls, and no leg of Y detaches before the last
+/// one is made.
 #[test]
 fn stranded_payments_are_placed_a_bounded_number_per_call() {
     let n = RESOLVED_STRANDED_PLACEMENTS_PER_CALL;
@@ -271,15 +272,8 @@ fn stranded_payments_are_placed_a_bounded_number_per_call() {
             .unwrap_or_else(|e| panic!("close of {i}: {e:?}"))
     };
 
-    for call in 1..=assets {
-        let outcome = close(&mut w, 0);
-        assert_eq!(active_legs(&w, 0), assets - call, "one leg detaches per call");
-        if call < assets {
-            assert_eq!(outcome, ResolvedCloseOutcomeV16::ProgressOnly);
-        } else {
-            assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: DEPOSIT });
-        }
-    }
+    assert_eq!(close(&mut w, 0), ResolvedCloseOutcomeV16::ProgressOnly);
+    assert_eq!(active_legs(&w, 0), assets, "X's legs wait for Y to settle");
     assert_eq!(still_stranded(&w, assets), assets);
 
     let mut placed = 0;
@@ -322,6 +316,17 @@ fn stranded_payments_are_placed_a_bounded_number_per_call() {
     assert_eq!(calls, assets.div_ceil(n));
     // The call that placed the last payment went on to detach a leg.
     assert_eq!(active_legs(&w, 1), assets - 1);
+
+    // Y has settled, so X's legs go, one per call.
+    for call in 1..=assets {
+        let outcome = close(&mut w, 0);
+        assert_eq!(active_legs(&w, 0), assets - call, "one leg detaches per call");
+        if call < assets {
+            assert_eq!(outcome, ResolvedCloseOutcomeV16::ProgressOnly);
+        } else {
+            assert_eq!(outcome, ResolvedCloseOutcomeV16::Closed { payout: DEPOSIT });
+        }
+    }
 
     let mut payout = None;
     for _ in 0..4 * assets {

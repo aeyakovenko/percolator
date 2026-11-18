@@ -5623,6 +5623,66 @@ fn proof_v16_resolved_residual_can_still_be_booked_sees_every_blocker() {
     );
 }
 
+/// Resolved mode: `resolved_side_can_still_be_charged`, which decides whether a position
+/// keeps its loss weight, answers yes for a side exactly when a stored leg on the opposite
+/// side of the same asset has unsettled K/F, an account owes a loss, or an account is
+/// marked with an unsettled B charge. The side's own count and the other asset's counts
+/// do not decide it. Checked for both sides of both assets.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_side_can_still_be_charged_reads_the_opposite_side() {
+    let stale: [u8; 4] = kani::any();
+    let negative_accounts: u8 = kani::any();
+    let b_stale_accounts: u8 = kani::any();
+
+    let (mut header, mut markets, _) = two_market_view_fixture();
+    header.mode = 1; // Resolved
+    header.negative_pnl_account_count = V16PodU64::new(negative_accounts as u64);
+    header.b_stale_account_count = V16PodU64::new(b_stale_accounts as u64);
+    let mut index = 0usize;
+    while index < 2 {
+        let mut asset = markets[index].engine.asset.try_to_runtime().unwrap();
+        asset.stale_account_count_long = stale[2 * index] as u64;
+        asset.stale_account_count_short = stale[2 * index + 1] as u64;
+        markets[index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        index += 1;
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let market_wide = negative_accounts != 0 || b_stale_accounts != 0;
+    kani::cover!(
+        !market_wide && stale[0] != 0 && stale[1] == 0 && stale[2] != 0 && stale[3] != 0,
+        "the first asset's short side is held only by its unsettled long leg"
+    );
+    kani::cover!(
+        market_wide && stale[0] == 0 && stale[1] == 0 && stale[2] == 0 && stale[3] == 0,
+        "only an unbooked loss or an unsettled B charge"
+    );
+    kani::cover!(
+        !market_wide && stale[0] == 0 && stale[1] == 0 && stale[2] == 0 && stale[3] == 0,
+        "nothing holds any side"
+    );
+    // Long counts sit at even positions, short counts at odd ones: a long side is held
+    // by the short count of its own asset and the other way round.
+    assert_eq!(
+        market.kani_resolved_side_can_still_be_charged(0, SideV16::Long).unwrap(),
+        market_wide || stale[1] != 0
+    );
+    assert_eq!(
+        market.kani_resolved_side_can_still_be_charged(0, SideV16::Short).unwrap(),
+        market_wide || stale[0] != 0
+    );
+    assert_eq!(
+        market.kani_resolved_side_can_still_be_charged(1, SideV16::Long).unwrap(),
+        market_wide || stale[3] != 0
+    );
+    assert_eq!(
+        market.kani_resolved_side_can_still_be_charged(1, SideV16::Short).unwrap(),
+        market_wide || stale[2] != 0
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]

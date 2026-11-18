@@ -1020,6 +1020,43 @@ without end: each real position is what the other account's obligation waits
 for, neither account closes, and through the payout blockers no positive PnL in
 the market is paid.
 
+A real position keeps its loss weight in Resolved mode until no bankruptcy can
+be booked onto its side any more. A bankrupt account's unpaid loss is shared by
+the loss weight attached on the other side of its asset at the moment it is
+booked, so a leg that detached earlier would leave its share to the legs that
+stayed, up to their whole capital. Resolved close therefore MUST NOT detach a
+leg with a nonzero basis and loss weight while a stored leg on the opposite side
+of its asset has not settled its final K/F, or while any account in the market
+owes a loss that is not booked or is marked with an unsettled B charge. Only
+that leg waits: the account's other legs detach as soon as their own conditions
+hold. Settling K/F, settling a B charge and booking a bankruptcy never wait for
+a leg to detach, so the wait ends once every account has been cranked. A close
+whose attached legs are all settled and wait only for this MUST be reported by
+the public crank as no action, not as a successful call. Its other pre-payout
+steps (a lapsed bucket to expire, a source lien to release, the fee anchor to
+advance) are still performed and reported as progress while the leg waits.
+
+The second condition is market-wide on purpose. The engine counts the accounts
+that owe an unbooked loss or carry an unsettled B charge; it does not record
+which assets they hold. A position on one asset therefore also waits for an
+account that owes a loss on another asset, or that has no leg left at all, and
+no position in the market detaches until every such account has been cranked.
+Capital is not exempt: an account that has paid its loss keeps its position, and
+with it its capital, in the market until then. Positive payouts already waited
+for the same accounts (payout readiness, §5.1.1).
+
+A B charge that an account settles from its claims leaves the backing that was
+behind those claims in their domains. Resolved close MUST report progress after
+such a charge, before any leg of the account detaches, so that the next call
+places that backing (§5.1.1, "Stranded loser payments") while the account is
+still attached.
+
+One case is not covered: a B charge is counted for this rule only once its
+account has been touched. An account that had already settled its K/F when a
+charge was booked onto it, and that cannot pay the charge, books its own
+shortfall when it is next cranked; a leg on the other side that detached in
+between does not share it.
+
 Each leg's `effective_pos_q` is rounded up while `A_side` is rounded down, so
 the effective quantities of one side's legs can sum to more than `OI_eff_side`.
 A dead-leg exit (Recovery forfeit or resolved close) therefore removes
@@ -2031,6 +2068,7 @@ resolved-claim, and rebalance-on-touch routes required for user exits.
 112. `live_provider_backing_withdrawal_leaves_loser_payments_the_twin_is_owed` (in Live with every position settled and no claim registered on the domain, a withdrawal above provider principal succeeds exactly when it leaves the lesser of the domain's loser-paid backing and what the twin domain's claims are still owed, and otherwise is refused before any state changes; a withdrawal within principal always succeeds and leaves the loser-paid part as it was; the twin domain is never touched; six twin states from fully backed to three atoms of claims with nothing behind them).
 113. `resolved_residual_can_still_be_booked_sees_every_blocker` (Resolved mode, two assets: the check that decides whether a waiting Recovery obligation still holds its account's other legs answers yes exactly when a stored leg has unsettled K/F on either side of either asset, a loss barrier is pending on either side of either asset, an account owes a loss, or an account is marked with an unsettled B charge, for every value of those ten counters).
 114. `resolved_stranded_loser_backing_goes_to_its_twin_then_the_junior_pool` (in Resolved mode, with one side of an asset fully settled, loser-paid backing of the twin domain beyond its claims and its provider's principal moves to that side's domain up to what its claims and provider are still owed, and with both sides settled the rest joins the junior pool; provider principal and backing owned by a claim never move, claims and principals are unchanged, vault, capital and insurance are flat, fresh backing falls by exactly what joined the junior pool, and the shape stays valid; exhaustive over small amounts where the destination holds no claim, with `..._backs_the_twin_claims_in_full` and `..._backs_the_twin_claims_in_part` for a destination whose claims are a third backed before or after).
+115. `resolved_side_can_still_be_charged_reads_the_opposite_side` (Resolved mode, two assets: the check that decides whether a position keeps its loss weight answers yes for a side exactly when a stored leg on the opposite side of the same asset has unsettled final K/F, an account owes a loss, or an account is marked with an unsettled B charge; the side's own count and the other asset's counts do not decide it).
 -------------------------------------------------------------------------------
 15. Audit summary and intended tradeoff
 -------------------------------------------------------------------------------
