@@ -1006,6 +1006,18 @@ only, whether it clears the leg or, while opposite real positions remain, keeps
 it as a zero-basis pending obligation. The Live equality above therefore
 excludes Recovery assets.
 
+A pending obligation waits until no real position is attached opposite it.
+While some account in the market still has a loss to settle or to book (a
+stored leg with unsettled final K/F, an account marked with an unsettled B
+charge, an account that owes a loss, or a pending loss barrier), Resolved close
+also keeps every other leg of the obligation's account attached. After that the
+obligation MUST NOT hold the account's other legs: each of them detaches as soon
+as its own conditions hold. Otherwise two accounts that each hold an obligation
+on one asset and a real position on another, crossed, wait for each other
+without end: each real position is what the other account's obligation waits
+for, neither account closes, and through the payout blockers no positive PnL in
+the market is paid.
+
 Each leg's `effective_pos_q` is rounded up while `A_side` is rounded down, so
 the effective quantities of one side's legs can sum to more than `OI_eff_side`.
 A dead-leg exit (Recovery forfeit or resolved close) therefore removes
@@ -1964,6 +1976,7 @@ resolved-claim, and rebalance-on-touch routes required for user exits.
 110. `live_kf_loss_met_by_liened_face_books_lien_backing_for_loss_domain` (in Live, the counterparty backing behind liened face that a K/F loss burns is consumed and booked for the domain the loss is owed to; twin-domain face moves only its loser-paid share and face in the loss domain moves nothing; after every account is refreshed each source domain holds exactly its claims plus provider principal).
 111. `live_provider_backing_withdrawal_is_capped_at_principal_while_a_position_is_unsettled` (in Live, with a stored position on the asset that has not settled the latest K/F change, the provider exit refuses, before any state changes, a withdrawal above the domain's provider principal even when no claim is registered; a withdrawal within it debits principal and reserved backing alike and leaves the loser-paid part exactly as it was).
 112. `live_provider_backing_withdrawal_leaves_loser_payments_the_twin_is_owed` (in Live with every position settled and no claim registered on the domain, a withdrawal above provider principal succeeds exactly when it leaves the lesser of the domain's loser-paid backing and what the twin domain's claims are still owed, and otherwise is refused before any state changes; a withdrawal within principal always succeeds and leaves the loser-paid part as it was; the twin domain is never touched; six twin states from fully backed to three atoms of claims with nothing behind them).
+113. `resolved_residual_can_still_be_booked_sees_every_blocker` (Resolved mode, two assets: the check that decides whether a waiting Recovery obligation still holds its account's other legs answers yes exactly when a stored leg has unsettled K/F on either side of either asset, a loss barrier is pending on either side of either asset, an account owes a loss, or an account is marked with an unsettled B charge, for every value of those ten counters).
 -------------------------------------------------------------------------------
 15. Audit summary and intended tradeoff
 -------------------------------------------------------------------------------

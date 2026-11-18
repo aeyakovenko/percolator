@@ -1653,6 +1653,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         self.resolved_bankruptcy_attribution(account)
     }
 
+    pub fn kani_resolved_residual_can_still_be_booked(&self) -> V16Result<bool> {
+        self.resolved_residual_can_still_be_booked()
+    }
+
     pub fn kani_settle_resolved_bankruptcy_negative_pnl(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,

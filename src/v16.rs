@@ -22089,6 +22089,44 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(true)
     }
 
+    /// Resolved mode. Whether some account is still known to have a loss to settle
+    /// or to book: a stored leg has not settled its final K/F, an account is marked
+    /// with an unsettled B charge or still owes a loss, or a loss barrier is
+    /// pending. While this holds, an account with a waiting Recovery obligation
+    /// keeps all of its legs, as it always has. Once it no longer holds, such an
+    /// account lets its other legs go
+    /// (`detach_solvent_active_legs_for_resolved_close`).
+    ///
+    /// This does not say that no residual can ever be booked again: a B charge that
+    /// was booked onto a side is not counted here until its account is next
+    /// touched. That is why the obligation itself is never released on this
+    /// answer; it still waits until no real position is attached opposite it.
+    fn resolved_residual_can_still_be_booked(&self) -> V16Result<bool> {
+        if self.header.negative_pnl_account_count.get() != 0
+            || self.header.b_stale_account_count.get() != 0
+        {
+            return Ok(true);
+        }
+        let configured = self.header.config.max_market_slots.get() as usize;
+        let mut index = 0usize;
+        while index < configured {
+            let slot = self
+                .markets
+                .get(index)
+                .ok_or(V16Error::InvalidLeg)?
+                .engine_slot();
+            if slot.asset.stale_account_count_long.get() != 0
+                || slot.asset.stale_account_count_short.get() != 0
+                || slot.pending_domain_loss_barrier_long.get() != 0
+                || slot.pending_domain_loss_barrier_short.get() != 0
+            {
+                return Ok(true);
+            }
+            index += 1;
+        }
+        Ok(false)
+    }
+
     fn detach_solvent_active_legs_for_resolved_close(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
@@ -22106,6 +22144,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
 
         let configured_max = self.header.config.max_market_slots.get() as usize;
+        // A Recovery obligation (zero basis, retained loss weight) stays attached
+        // while a real position is attached on the opposite side of its asset: a
+        // bankruptcy of that position would be shared with it. While some account
+        // in the market still has a loss to settle or to book, the obligation keeps
+        // the account's other legs attached as well. After that it holds only
+        // itself. If it went on holding the others, two accounts that each have an
+        // obligation on one asset and a real position on another, crossed, would
+        // wait for each other for ever: each real position is what the other
+        // account's obligation waits for. Neither could close, and through the
+        // payout blockers no positive PnL in the market could be paid.
+        let mut waiting_obligation = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -22124,7 +22173,10 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     && leg.loss_weight != 0
                     && !self.recovery_pending_obligation_release_allowed(asset_index, leg.side)?
                 {
-                    return Ok(());
+                    if self.resolved_residual_can_still_be_booked()? {
+                        return Ok(());
+                    }
+                    waiting_obligation[slot] = true;
                 }
                 let asset = self.asset_state(asset_index)?;
                 if Self::leg_has_exhausted_effective_oi(asset, leg) {
@@ -22150,7 +22202,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
-            if leg.active {
+            if leg.active && !waiting_obligation[slot] {
                 let asset_index = leg.asset_index as usize;
                 let asset = self.asset_state(asset_index)?;
                 let side_effective_oi_q = match leg.side {

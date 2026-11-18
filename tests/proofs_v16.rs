@@ -5560,6 +5560,68 @@ fn install_flat_pending_obligation(
     });
 }
 
+/// Resolved mode: `resolved_residual_can_still_be_booked`, which decides whether a waiting
+/// Recovery obligation still holds its account's other legs, answers yes exactly when some
+/// stored leg has unsettled K/F on either side of either asset, a loss barrier is pending
+/// on either side of either asset, an account owes a loss, or an account is marked with an
+/// unsettled B charge. Every one of those ten counters is read.
+#[kani::proof]
+#[kani::unwind(24)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_residual_can_still_be_booked_sees_every_blocker() {
+    let stale: [u8; 4] = kani::any();
+    let barriers: [u8; 4] = kani::any();
+    let negative_accounts: u8 = kani::any();
+    let b_stale_accounts: u8 = kani::any();
+
+    let (mut header, mut markets, _) = two_market_view_fixture();
+    header.mode = 1; // Resolved
+    header.negative_pnl_account_count = V16PodU64::new(negative_accounts as u64);
+    header.b_stale_account_count = V16PodU64::new(b_stale_accounts as u64);
+    let mut index = 0usize;
+    while index < 2 {
+        let mut asset = markets[index].engine.asset.try_to_runtime().unwrap();
+        asset.stale_account_count_long = stale[2 * index] as u64;
+        asset.stale_account_count_short = stale[2 * index + 1] as u64;
+        markets[index].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        markets[index].engine.pending_domain_loss_barrier_long =
+            V16PodU64::new(barriers[2 * index] as u64);
+        markets[index].engine.pending_domain_loss_barrier_short =
+            V16PodU64::new(barriers[2 * index + 1] as u64);
+        index += 1;
+    }
+
+    let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let possible = market.kani_resolved_residual_can_still_be_booked().unwrap();
+
+    let any_stale = stale[0] != 0 || stale[1] != 0 || stale[2] != 0 || stale[3] != 0;
+    let any_barrier = barriers[0] != 0 || barriers[1] != 0 || barriers[2] != 0 || barriers[3] != 0;
+    kani::cover!(
+        stale[3] != 0 && stale[0] == 0 && stale[1] == 0 && stale[2] == 0 && !any_barrier,
+        "only the second asset's short side has an unsettled leg"
+    );
+    kani::cover!(
+        barriers[2] != 0 && !any_stale && negative_accounts == 0 && b_stale_accounts == 0,
+        "only a barrier on the second asset is pending"
+    );
+    kani::cover!(
+        negative_accounts != 0 && !any_stale && !any_barrier && b_stale_accounts == 0,
+        "only an account that owes a loss"
+    );
+    kani::cover!(
+        b_stale_accounts != 0 && !any_stale && !any_barrier && negative_accounts == 0,
+        "only an account with an unsettled B charge"
+    );
+    kani::cover!(
+        !any_stale && !any_barrier && negative_accounts == 0 && b_stale_accounts == 0,
+        "nothing can book a residual"
+    );
+    assert_eq!(
+        possible,
+        any_stale || any_barrier || negative_accounts != 0 || b_stale_accounts != 0
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
