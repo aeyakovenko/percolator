@@ -5266,6 +5266,9 @@ struct ParNettingBatchV16 {
     netted_num: u128,
     transfer_num: u128,
     expiry_slot: u64,
+    /// Resolved mode: backing moves in whole atoms only, as every resolved
+    /// booking is in whole atoms; a fraction stays where it is.
+    whole_atoms: bool,
 }
 
 /// Loser-paid backing one K/F loss owes its loss domain before support-and-burn:
@@ -5276,6 +5279,9 @@ struct KfLossDomainCreditV16 {
     amount_num: u128,
     expiry_slot: u64,
     payments: u64,
+    /// Resolved mode: each payment is booked on its own by the resolved booking
+    /// rule (`book_realized_kf_loss_for_source_domain_not_atomic`) instead.
+    resolved: bool,
 }
 
 #[repr(C)]
@@ -7546,6 +7552,13 @@ pub const TERMINAL_SLAB_SCAN_ASSETS_PER_CALL: usize = 256;
 /// the one-call settlement uses, so that no call's work grows with the number of
 /// losing legs times the number of source claims.
 pub const RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL: usize = 2;
+/// Most stranded loser payments one Resolved-mode close call places
+/// (`settle_stranded_loser_backing_resolved_not_atomic`). A placement rewrites the
+/// ledgers of both domains of an asset. A close whose legs need more than this
+/// many makes the rest in its following calls, before any leg detaches, so that
+/// no call's work grows with the number of legs that have a payment stranded on
+/// their asset.
+pub const RESOLVED_STRANDED_PLACEMENTS_PER_CALL: usize = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Zeroable, bytemuck::Pod)]
@@ -9586,6 +9599,54 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             ),
         };
         Ok(reserved.saturating_sub(principal))
+    }
+
+    /// Whether `settle_stranded_loser_backing_resolved_not_atomic` can move anything
+    /// for `settled_side` of the asset, from the stored values alone (no decode, no
+    /// bucket). `false` is exact. Below one whole atom of loser-paid backing beyond
+    /// the claims on `from` nothing is stranded; and while the other side still has
+    /// an unsettled leg, only what `to`'s claims and provider are still owed by
+    /// losers can move. `true` says no more than that the full evaluation is needed.
+    fn stranded_loser_backing_may_move(
+        &self,
+        asset_index: usize,
+        settled_side: SideV16,
+        twin_side_settled: bool,
+    ) -> V16Result<bool> {
+        let slot = self
+            .markets
+            .get(asset_index)
+            .ok_or(V16Error::InvalidLeg)?
+            .engine_slot();
+        let long = (
+            &slot.source_credit_long,
+            slot.provider_principal_long_num.get(),
+        );
+        let short = (
+            &slot.source_credit_short,
+            slot.provider_principal_short_num.get(),
+        );
+        let ((to, to_principal), (from, from_principal)) = match settled_side {
+            SideV16::Long => (long, short),
+            SideV16::Short => (short, long),
+        };
+        let stranded = from
+            .fresh_reserved_backing_num
+            .get()
+            .saturating_sub(from_principal)
+            .saturating_sub(from.positive_claim_bound_num.get());
+        if stranded < BOUND_SCALE {
+            return Ok(false);
+        }
+        if twin_side_settled {
+            return Ok(true);
+        }
+        let owed = to
+            .positive_claim_bound_num
+            .get()
+            .saturating_add(to_principal)
+            .saturating_sub(to.fresh_reserved_backing_num.get());
+        Ok(owed >= BOUND_SCALE)
     }
 
     /// Adds counterparty backing a loser paid into `domain` (a crystallized loss, not
@@ -13999,17 +14060,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         // loss-domain credit, the PnL write and the source-array compaction are
         // done once per loss.
         let start_pnl = account.header.pnl.get();
-        if loss_abs == 0
-            || start_pnl <= 0
-            || decode_market_mode(self.header.mode)? != MarketModeV16::Live
-        {
+        if loss_abs == 0 || start_pnl <= 0 {
             return Ok(0);
         }
+        let resolved = match decode_market_mode(self.header.mode)? {
+            MarketModeV16::Live => false,
+            MarketModeV16::Resolved => true,
+            MarketModeV16::Recovery => return Ok(0),
+        };
         let (asset_index, loss_side) = self.domain_asset_side(loss_domain)?;
         let twin_domain = self.insurance_domain_index(asset_index, opposite_side(loss_side))?;
+        // In Live a payment is added to the loss bucket as it stands, so the bucket
+        // must be able to take it. In Resolved mode the resolved booking rule decides
+        // what the loss domain takes and what is left to the junior pool, whatever
+        // the bucket's state.
         let loss_side_open = !self.has_pending_domain_loss_barrier(asset_index, SideV16::Long)?
             && !self.has_pending_domain_loss_barrier(asset_index, SideV16::Short)?
-            && self.loss_bucket_accepts_fresh(loss_domain)?;
+            && (resolved || self.loss_bucket_accepts_fresh(loss_domain)?);
         let mut end = 0usize;
         let mut twin_slot = None;
         while end < PORTFOLIO_SOURCE_DOMAIN_CAP {
@@ -14029,6 +14096,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             netted_num: 0,
             transfer_num: 0,
             expiry_slot: u64::MAX,
+            whole_atoms: resolved,
         };
         if let Some(slot) = twin_slot {
             self.net_slot_face_at_par_not_atomic(
@@ -14048,7 +14116,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 let unliened_num = Self::slot_unliened_claim_num(source)?;
                 if unliened_num != 0 {
                     let d = source.domain.get() as usize;
-                    if self.stored_source_credit_rate_num(d)? == CREDIT_RATE_SCALE {
+                    let rate = self.stored_source_credit_rate_num(d)?;
+                    if rate == CREDIT_RATE_SCALE {
                         self.net_slot_face_at_par_not_atomic(
                             account,
                             slot,
@@ -14057,7 +14126,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                             true,
                             &mut batch,
                         )?;
-                    } else {
+                    } else if !resolved || (rate != 0 && d == loss_domain) {
+                        // Resolved mode: face is kept only where it sits in the
+                        // loss domain itself, below par because that domain's
+                        // losers -- this account among them -- have not all paid
+                        // yet. Face in any other domain below rate 1, and face
+                        // with nothing behind it, is left to support-and-burn as
+                        // before: a rate that an insolvent payer left below 1 is
+                        // what that face is worth.
                         partially_backed_num = partially_backed_num
                             .checked_add(unliened_num)
                             .ok_or(V16Error::ArithmeticOverflow)?;
@@ -14072,18 +14148,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             amount_num: 0,
             expiry_slot: 0,
             payments: 0,
+            resolved,
         };
         if batch.netted != 0 {
             account.compact_source_domains();
             if batch.transfer_num != 0 {
-                let bucket = self.backing_bucket_for_domain(loss_domain)?;
-                credit.expiry_slot = if bucket.status == BackingBucketStatusV16::Fresh {
-                    bucket.expiry_slot
+                if resolved {
+                    // The moved backing was consumed from its domains exactly as
+                    // support is; it is booked for the loss domain by the same rule.
+                    self.book_kf_loss_support_for_source_domain_not_atomic(
+                        loss_domain,
+                        batch.transfer_num / BOUND_SCALE,
+                    )?;
                 } else {
-                    batch.expiry_slot
-                };
-                credit.amount_num = batch.transfer_num;
-                credit.payments = 1;
+                    let bucket = self.backing_bucket_for_domain(loss_domain)?;
+                    credit.expiry_slot = if bucket.status == BackingBucketStatusV16::Fresh {
+                        bucket.expiry_slot
+                    } else {
+                        batch.expiry_slot
+                    };
+                    credit.amount_num = batch.transfer_num;
+                    credit.payments = 1;
+                }
             }
             let netted_i128 =
                 i128::try_from(batch.netted).map_err(|_| V16Error::ArithmeticOverflow)?;
@@ -14261,7 +14347,20 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 credit.positive_claim_bound_num,
             )?
         };
-        let transfer_num = owed_num.min(movable_num).min(loser_cap_num);
+        let mut transfer_num = owed_num.min(movable_num).min(loser_cap_num);
+        if batch.whole_atoms {
+            // Resolved mode. The twin's face is cancelled without a move: how much
+            // of the twin's loser-paid backing answers for this face depends on
+            // whether its losers paid before or after the reversal, which the
+            // pooled share cannot tell. Once a side has settled,
+            // `settle_stranded_loser_backing_resolved_not_atomic` moves what is
+            // then provably unowned to where it is owed.
+            transfer_num = if require_full_backing {
+                transfer_num - transfer_num % BOUND_SCALE
+            } else {
+                0
+            };
+        }
         if require_full_backing && transfer_num != netted_num {
             return Ok(());
         }
@@ -14430,14 +14529,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             self.header.vault.get(),
         )?
         .validate()?;
-        if credit.payments == 0 {
-            credit.expiry_slot = self.fresh_counterparty_backing_expiry_slot(loss_domain)?;
+        if credit.resolved {
+            // Exactly the tail of the ordinary capital reservation
+            // (`reserve_new_capital_backed_loss_for_source_domain_not_atomic`).
+            let junior =
+                self.book_realized_kf_loss_for_source_domain_not_atomic(loss_domain, paid)?;
+            self.credit_post_snapshot_residual_not_atomic(junior)?;
+        } else {
+            if credit.payments == 0 {
+                credit.expiry_slot = self.fresh_counterparty_backing_expiry_slot(loss_domain)?;
+            }
+            credit.amount_num = credit
+                .amount_num
+                .checked_add(paid_num)
+                .ok_or(V16Error::CounterOverflow)?;
+            credit.payments += 1;
         }
-        credit.amount_num = credit
-            .amount_num
-            .checked_add(paid_num)
-            .ok_or(V16Error::CounterOverflow)?;
-        credit.payments += 1;
         Self::record_account_residual_crystallized_loss(account, paid)?;
         account.header.health_cert.valid = 0;
         Ok(paid)
@@ -15245,6 +15352,167 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(())
     }
 
+    /// Resolved mode, after the leg in `leg_slot` has settled its asset's final K/F:
+    /// places what is stranded on that asset
+    /// (`settle_stranded_loser_backing_resolved_not_atomic`), for each of its sides
+    /// that has no stored leg left unsettled. Each placement takes one from
+    /// `placements_left`. Returns `true` when none is left and the asset may still
+    /// hold a stranded payment: the caller reports progress, and the next call
+    /// takes this leg up again.
+    ///
+    /// "May" is `stranded_loser_backing_may_move`: it can say so of a payment that
+    /// the full evaluation then leaves where it is. The call reports progress all
+    /// the same, having placed its bound's worth, and the next call's evaluation
+    /// settles the question without taking from that call's bound.
+    fn place_stranded_loser_backing_after_leg_resolved_not_atomic(
+        &mut self,
+        account: &PortfolioV16View<'_>,
+        leg_slot: usize,
+        placements_left: &mut usize,
+    ) -> V16Result<bool> {
+        // The leg was written back by its settlement just now.
+        let asset_index = account.header.legs[leg_slot].asset_index.get() as usize;
+        let asset = &self
+            .markets
+            .get(asset_index)
+            .ok_or(V16Error::InvalidLeg)?
+            .engine_slot()
+            .asset;
+        let long_settled = asset.stale_account_count_long.get() == 0;
+        let short_settled = asset.stale_account_count_short.get() == 0;
+        for (settled_side, settled, twin_side_settled) in [
+            (SideV16::Long, long_settled, short_settled),
+            (SideV16::Short, short_settled, long_settled),
+        ] {
+            if !settled {
+                continue;
+            }
+            if *placements_left == 0 {
+                if self.stranded_loser_backing_may_move(
+                    asset_index,
+                    settled_side,
+                    twin_side_settled,
+                )? {
+                    return Ok(true);
+                }
+            } else if self.settle_stranded_loser_backing_resolved_not_atomic(
+                asset_index,
+                settled_side,
+                twin_side_settled,
+            )? {
+                *placements_left -= 1;
+            }
+        }
+        Ok(false)
+    }
+
+    /// Resolved mode. `settled_side` has no stored leg left that has not settled the
+    /// asset's final K/F. Its losers have then paid all they will pay into
+    /// `to = (asset, settled_side)`, and its winners have registered every claim they
+    /// will hold on `from = (asset, opposite(settled_side))`. Whatever the other side
+    /// paid into `from` beyond those claims and beyond its provider's principal is
+    /// stranded there: it pays for a gain that was never claimed, a move that
+    /// reversed before its winners were settled, or for face that was cancelled
+    /// against its holder's own loss.
+    ///
+    /// 1. It is first owed to `to`, where that other side claims its regain and
+    ///    nobody else will fund it: it moves there, up to what `to`'s claims and
+    ///    provider are still owed by losers. Without this the regain is paid at
+    ///    the junior rate, or fronted by a provider that is never repaid.
+    /// 2. With the other side settled as well (`twin_side_settled`) no claim can
+    ///    still appear on either domain, and what is left has no owner in this
+    ///    asset: it joins the junior pool now instead of when the bucket lapses,
+    ///    so that junior claims do not wait for it and no provider reserve is
+    ///    held back for them in the meantime.
+    ///
+    /// Only loser-paid backing leaves `from` (never provider principal, never
+    /// backing a claim on it owns), in whole atoms, out of a Fresh, unlapsed bucket
+    /// with no domain-loss barrier pending on the asset, and nothing moves once the
+    /// payout snapshot is captured. `V`, `C_tot` and `I` do not change. Returns
+    /// whether anything left `from`.
+    fn settle_stranded_loser_backing_resolved_not_atomic(
+        &mut self,
+        asset_index: usize,
+        settled_side: SideV16,
+        twin_side_settled: bool,
+    ) -> V16Result<bool> {
+        // Every leg a Resolved close settles or finds settled comes through here,
+        // and almost none has anything to place. The stored values alone say so,
+        // and nothing has to be decoded to know it.
+        if !self.stranded_loser_backing_may_move(asset_index, settled_side, twin_side_settled)? {
+            return Ok(false);
+        }
+        if decode_bool(self.header.payout_snapshot_captured)?
+            || self.has_pending_domain_loss_barrier(asset_index, SideV16::Long)?
+            || self.has_pending_domain_loss_barrier(asset_index, SideV16::Short)?
+        {
+            return Ok(false);
+        }
+        let from = self.insurance_domain_index(asset_index, opposite_side(settled_side))?;
+        let to = self.insurance_domain_index(asset_index, settled_side)?;
+        let now = self.header.current_slot.get();
+        let from_bucket = self.backing_bucket_for_domain(from)?;
+        if from_bucket.status != BackingBucketStatusV16::Fresh || from_bucket.expiry_slot <= now {
+            return Ok(false);
+        }
+        let from_source = self.source_credit_for_domain(from)?;
+        let stranded_num = from_source
+            .fresh_reserved_backing_num
+            .saturating_sub(self.provider_principal_num(from)?)
+            .saturating_sub(from_source.positive_claim_bound_num)
+            .min(from_bucket.fresh_unliened_backing_num);
+        let stranded_num = stranded_num - stranded_num % BOUND_SCALE;
+        if stranded_num == 0 {
+            return Ok(false);
+        }
+        let to_source = self.source_credit_for_domain(to)?;
+        let owed_num = to_source
+            .positive_claim_bound_num
+            .checked_add(self.provider_principal_num(to)?)
+            .ok_or(V16Error::ArithmeticOverflow)?
+            .saturating_sub(to_source.fresh_reserved_backing_num);
+        let owed_num = stranded_num.min(owed_num);
+        let owed_num = owed_num - owed_num % BOUND_SCALE;
+        // `to` takes the payment only as backing that will not lapse on arrival.
+        let to_bucket = self.backing_bucket_for_domain(to)?;
+        let to_expiry_slot = match to_bucket.status {
+            BackingBucketStatusV16::Fresh if to_bucket.expiry_slot > now => {
+                Some(to_bucket.expiry_slot)
+            }
+            BackingBucketStatusV16::Empty | BackingBucketStatusV16::Expired => {
+                Some(self.fresh_counterparty_backing_expiry_slot(to)?).filter(|slot| *slot > now)
+            }
+            _ => None,
+        };
+        let moved_num = if to_expiry_slot.is_some() {
+            owed_num
+        } else {
+            0
+        };
+        let leaving_num = if twin_side_settled {
+            stranded_num
+        } else {
+            moved_num
+        };
+        if leaving_num == 0 {
+            return Ok(false);
+        }
+        let (from_bucket, from_source) = V16Core::prepare_counterparty_backing_withdraw_delta(
+            from_bucket,
+            from_source,
+            leaving_num,
+        )?;
+        self.set_backing_bucket_for_domain(from, from_bucket)?;
+        self.set_source_credit_for_domain(from, from_source)?;
+        self.recompute_source_credit_domain_after_mutation(from)?;
+        self.reservation_encumbrance_proof_for_domain(from)?
+            .validate()?;
+        if let Some(expiry_slot) = to_expiry_slot.filter(|_| moved_num != 0) {
+            self.add_loser_paid_counterparty_backing_unchecked(to, moved_num, expiry_slot)?;
+        }
+        Ok(true)
+    }
+
     /// Reconcile an open account's counterparty liens against the bucket state they reference
     /// (spec: "Individual liens referencing an impaired bucket become impaired by bucket status
     /// and settle later through bounded cranks"). Bounded by `PORTFOLIO_SOURCE_DOMAIN_CAP`; a
@@ -15992,6 +16260,30 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<PermissionlessProgressOutcomeV16> {
         account.validate_with_market(&self.as_view())?;
         self.settle_account_kf_effects_not_atomic(account, false)?;
+        self.settle_account_side_effects_after_kf_not_atomic(account, b_loss_atom_budget)
+    }
+
+    /// `settle_account_side_effects_after_kf_not_atomic` for the Resolved close,
+    /// which settles K/F itself (`settle_resolved_account_kf_not_atomic`). Never
+    /// inlined, so the close's frame does not grow by this one.
+    #[inline(never)]
+    fn settle_resolved_account_side_effects_after_kf_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        b_loss_atom_budget: u128,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
+        self.settle_account_side_effects_after_kf_not_atomic(account, b_loss_atom_budget)
+    }
+
+    /// What `settle_account_side_effects_not_atomic` does once every leg's K/F is
+    /// settled: B in chunks, then negative PnL from principal. Always inlined, so
+    /// that function compiles to what it was.
+    #[inline(always)]
+    fn settle_account_side_effects_after_kf_not_atomic(
+        &mut self,
+        account: &mut PortfolioV16ViewMut<'_>,
+        b_loss_atom_budget: u128,
+    ) -> V16Result<PermissionlessProgressOutcomeV16> {
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
             let leg = account.header.legs[slot].try_to_runtime()?;
@@ -21823,10 +22115,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             account.validate_with_market(&self.as_view())?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
         }
-        // Losses that can burn through the account's source claims are settled a
-        // bounded number of legs per call. The last chunk, and every account without
-        // that product in its work, is left to the ordinary settlement below.
-        if self.settle_resolved_account_kf_chunk_not_atomic(account)? {
+        // The legs' final K/F, with what each leaves stranded on its asset placed
+        // after it. The settlement stops early, and the call reports progress, where
+        // one call's work would otherwise grow with the shape of the account: losses
+        // that can burn through its source claims, and stranded payments to place.
+        if self.settle_resolved_account_kf_not_atomic(account)? {
             self.validate_shape()?;
             account.validate_with_market(&self.as_view())?;
             return Ok(ResolvedCloseOutcomeV16::ProgressOnly);
@@ -21837,7 +22130,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             !active_bitmap_is_empty(account.header.active_bitmap.map(V16PodU64::get));
         let fee_slot_before = account.header.last_fee_slot.get();
         if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
-            .settle_account_side_effects_not_atomic(
+            .settle_resolved_account_side_effects_after_kf_not_atomic(
                 account,
                 self.header.config.public_b_chunk_atoms.get(),
             )?
@@ -21950,56 +22243,164 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         Ok(ResolvedCloseOutcomeV16::Closed { payout })
     }
 
-    /// Resolved mode. An account that holds source claims and still has a loss among
-    /// more than `RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL` unsettled legs settles that many
-    /// of them here and the call returns `true`. Otherwise this does nothing and
-    /// returns `false`, and the caller's ordinary settlement settles every leg.
+    /// Resolved mode: the K/F settlement of a close. Settles the final K/F of the
+    /// account's legs in the order and by the transition
+    /// `settle_account_kf_effects_not_atomic` uses, and after each leg places what
+    /// is then stranded on the leg's asset
+    /// (`settle_stranded_loser_backing_resolved_not_atomic`). Returns `true` when it
+    /// stopped before the last leg: the close reports progress, and its next call
+    /// continues. It stops in two cases, each of which keeps the work of one call
+    /// from growing with the shape of the account.
     ///
-    /// One call that settles every leg costs work for each losing leg and for each
-    /// source claim those losses burn through, and at the largest portfolio shape it
-    /// does not fit in a transaction. A close that cannot settle its legs blocks the
-    /// account and, through the payout blockers, every positive payout in the
-    /// market. Resolved mode has no health certificate that needs the legs settled
-    /// together, so such an account settles them a bounded number at a time. An
-    /// account with no claim to burn, or with no loss left to settle, has no such
-    /// product in its work and settles in one call as before.
+    /// Losses over source claims. One call that settles every leg costs work for
+    /// each losing leg and for each source claim those losses burn through, and at
+    /// the largest portfolio shape it does not fit in a transaction. An account that
+    /// holds source claims and still has a loss among more than
+    /// `RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL` unsettled legs settles that many of
+    /// them and stops. A leg that is already settled has a zero net and touches no
+    /// value, so leaving it out of such a call changes nothing: these calls followed
+    /// by the last one apply exactly the sequence of settlements one call applies.
+    /// An account with no claim to burn, or with no loss left to settle, has no such
+    /// product in its work and settles every leg in one call.
     ///
-    /// The legs are taken in the order `settle_account_kf_effects_not_atomic` settles
-    /// them (losses before gains, then by source domain, then by leg slot), and each
-    /// is settled by the same transition. A leg that is already settled has a zero
-    /// net there and touches no value, so leaving it out of the order changes
-    /// nothing: the chunks followed by the ordinary settlement apply exactly the
-    /// sequence of settlements the one call applies. Negative PnL the chunk leaves
-    /// is settled from principal by the ordinary settlement, after the last leg, as
-    /// in the one call.
-    fn settle_resolved_account_kf_chunk_not_atomic(
+    /// Stranded placements. A placement rewrites the ledgers of both domains of an
+    /// asset. After `RESOLVED_STRANDED_PLACEMENTS_PER_CALL` of them, a leg whose asset
+    /// may need another is left without it, and the next call, which passes over
+    /// every settled leg again, makes it. If the next leg in the order is a loss the
+    /// settlement stops there, because that loss could burn face at a rate the
+    /// waiting placement would change. Gains and settled legs read no rate, so they
+    /// are settled in the same call and a waiting placement does not keep them
+    /// unsettled. Either way the close reports progress before it settles B,
+    /// charges fees or detaches a leg, so no leg leaves its asset with a placement
+    /// waiting on it. A call that leaves a placement waiting has made the bound's
+    /// worth, and a placement only ever takes stranded backing out of its domain,
+    /// so the calls end.
+    ///
+    /// A close that cannot settle its legs blocks the account and, through the
+    /// payout blockers, every positive payout in the market. Resolved mode has no
+    /// health certificate that needs the legs settled together. Negative PnL a
+    /// partial settlement leaves is settled from principal after the last leg, as
+    /// in one call.
+    ///
+    /// Never inlined: the plan lives in this frame, not in the close's.
+    #[inline(never)]
+    fn settle_resolved_account_kf_not_atomic(
         &mut self,
         account: &mut PortfolioV16ViewMut<'_>,
     ) -> V16Result<bool> {
-        if account.header.source_domains[0].is_sparse_tail_default() {
+        account.validate_with_market(&self.as_view())?;
+        let active_bitmap = account.header.active_bitmap.map(V16PodU64::get);
+        if active_bitmap_count_ones(active_bitmap) == 0 {
             return Ok(false);
         }
+        self.reconcile_account_impaired_counterparty_liens_not_atomic(account)?;
+        let mut plan = [None; V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut prepared_by_slot =
+            [AccountKfSettlementPreparedV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
+        let mut plan_len = 0usize;
+        let mut planned = [false; V16_MAX_PORTFOLIO_ASSETS_N];
+        // Only an account that holds source claims can have losses burn through
+        // them. For such an account the unsettled legs are planned first: if there
+        // are more than the bound and a loss is among them, they are the plan.
+        let mut bounded = false;
+        if !account.header.source_domains[0].is_sparse_tail_default() {
+            if let Some(unsettled) = self.resolved_unsettled_legs_with_a_possible_loss(account) {
+                let mut slot = 0usize;
+                while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+                    if unsettled[slot] {
+                        let (entry, prepared) =
+                            self.prepare_account_kf_settlement_entry(account, slot, false)?;
+                        prepared_by_slot[slot] = prepared;
+                        plan_len =
+                            insert_account_kf_settlement_plan_entry(&mut plan, plan_len, entry)?;
+                    }
+                    slot += 1;
+                }
+                planned = unsettled;
+                // Losses come first in the order: if the first entry is not one,
+                // none is.
+                let (first_phase, _, _) = decode_account_kf_settlement_plan_key(
+                    plan[0].ok_or(V16Error::InvalidLeg)?,
+                )?;
+                bounded = first_phase == 0;
+            }
+        }
+        if !bounded {
+            // Every active leg, settled or not, as in the one-call settlement.
+            let mut slot = 0usize;
+            while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+                if !planned[slot] && active_bitmap_get(active_bitmap, slot) {
+                    let (entry, prepared) =
+                        self.prepare_account_kf_settlement_entry(account, slot, false)?;
+                    prepared_by_slot[slot] = prepared;
+                    plan_len = insert_account_kf_settlement_plan_entry(&mut plan, plan_len, entry)?;
+                }
+                slot += 1;
+            }
+        }
+        let legs_this_call = if bounded {
+            RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL
+        } else {
+            plan_len
+        };
+
+        let mut placements_left = RESOLVED_STRANDED_PLACEMENTS_PER_CALL;
+        let mut placements_waiting = false;
+        let mut index = 0usize;
+        while index < legs_this_call {
+            let entry = plan[index].ok_or(V16Error::InvalidLeg)?;
+            let leg_slot = (entry & 0xf) as usize;
+            if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
+                return Err(V16Error::InvalidLeg);
+            }
+            self.apply_account_kf_settlement_entry(account, entry, prepared_by_slot[leg_slot])?;
+            if self.place_stranded_loser_backing_after_leg_resolved_not_atomic(
+                &account.as_view(),
+                leg_slot,
+                &mut placements_left,
+            )? {
+                // This leg's asset may need a placement the call no longer has. A
+                // loss that follows could burn face at a rate the placement is
+                // about to change, so the settlement stops before it. A gain, or a
+                // leg that is already settled, reads no rate: those are settled
+                // now, and the placement waits for the next call.
+                if index + 1 < plan_len {
+                    let (next_phase, _, _) = decode_account_kf_settlement_plan_key(
+                        plan[index + 1].ok_or(V16Error::InvalidLeg)?,
+                    )?;
+                    if next_phase == 0 {
+                        return Ok(true);
+                    }
+                }
+                placements_waiting = true;
+            }
+            index += 1;
+        }
+        Ok(placements_waiting || legs_this_call < plan_len)
+    }
+
+    /// The account's unsettled legs, if there are more than
+    /// `RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL` of them and one may be a loss; `None`
+    /// otherwise. A leg's net is `floor(basis * (target - snapshot) / den)` summed
+    /// over K and F, so it cannot be negative unless one of the two targets is
+    /// below its snapshot.
+    ///
+    /// This only decides. Anything it cannot read gives `None`, and the settlement
+    /// that follows reads the same state and reports it: deciding never makes a
+    /// close fail that would otherwise complete.
+    fn resolved_unsettled_legs_with_a_possible_loss(
+        &self,
+        account: &PortfolioV16ViewMut<'_>,
+    ) -> Option<[bool; V16_MAX_PORTFOLIO_ASSETS_N]> {
         let mut unsettled = [false; V16_MAX_PORTFOLIO_ASSETS_N];
         let mut unsettled_count = 0usize;
-        // A leg's net is `floor(basis * (target - snapshot) / den)` summed over K and F,
-        // so it cannot be negative unless one of the two targets is below its snapshot.
         let mut may_lose = false;
         let mut slot = 0usize;
         while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            // This pass only decides. Anything it cannot read is left to the ordinary
-            // settlement, which reads the same state and reports it: the pass never
-            // makes a close fail that the ordinary settlement would complete.
-            let Ok(leg) = account.header.legs[slot].try_to_runtime() else {
-                return Ok(false);
-            };
+            let leg = account.header.legs[slot].try_to_runtime().ok()?;
             if leg.active {
-                let Ok(asset) = self.asset_state(leg.asset_index as usize) else {
-                    return Ok(false);
-                };
-                let Ok((k_target, f_target)) = Self::kf_target_for_leg_from_asset(asset, leg)
-                else {
-                    return Ok(false);
-                };
+                let asset = self.asset_state(leg.asset_index as usize).ok()?;
+                let (k_target, f_target) = Self::kf_target_for_leg_from_asset(asset, leg).ok()?;
                 if !Self::leg_kf_epoch_is_current(asset, leg)
                     || k_target != leg.k_snap
                     || !leg_f_snap_is_settled(leg, f_target).unwrap_or(false)
@@ -22011,42 +22412,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
             slot += 1;
         }
-        if unsettled_count <= RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL || !may_lose {
-            return Ok(false);
-        }
-        let mut plan = [None; V16_MAX_PORTFOLIO_ASSETS_N];
-        let mut prepared_by_slot =
-            [AccountKfSettlementPreparedV16::default(); V16_MAX_PORTFOLIO_ASSETS_N];
-        let mut plan_len = 0usize;
-        let mut slot = 0usize;
-        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
-            if unsettled[slot] {
-                let (entry, prepared) =
-                    self.prepare_account_kf_settlement_entry(account, slot, false)?;
-                prepared_by_slot[slot] = prepared;
-                plan_len = insert_account_kf_settlement_plan_entry(&mut plan, plan_len, entry)?;
-            }
-            slot += 1;
-        }
-        // Losses come first in the order: if the first entry is not one, none is.
-        let (first_phase, _, _) =
-            decode_account_kf_settlement_plan_key(plan[0].ok_or(V16Error::InvalidLeg)?)?;
-        if first_phase != 0 {
-            return Ok(false);
-        }
-        account.validate_with_market(&self.as_view())?;
-        self.reconcile_account_impaired_counterparty_liens_not_atomic(account)?;
-        let mut index = 0usize;
-        while index < RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL {
-            let entry = plan[index].ok_or(V16Error::InvalidLeg)?;
-            let leg_slot = (entry & 0xf) as usize;
-            if leg_slot >= V16_MAX_PORTFOLIO_ASSETS_N {
-                return Err(V16Error::InvalidLeg);
-            }
-            self.apply_account_kf_settlement_entry(account, entry, prepared_by_slot[leg_slot])?;
-            index += 1;
-        }
-        Ok(true)
+        (unsettled_count > RESOLVED_KF_SETTLEMENT_LEGS_PER_CALL && may_lose).then_some(unsettled)
     }
 
     fn detach_solvent_active_legs_for_resolved_close(
