@@ -97,6 +97,21 @@ pub fn kani_commit_declared_liquidation_recovery(
     V16Core::kernel_commit_declared_liquidation_recovery(error, mode, reason)
 }
 
+pub fn kani_settle_stranded_loser_backing_resolved<T>(
+    group: &mut MarketGroupV16ViewMut<'_, T>,
+    asset_index: usize,
+    settled_side: SideV16,
+    twin_side_settled: bool,
+) -> V16Result<()> {
+    group
+        .settle_stranded_loser_backing_resolved_not_atomic(
+            asset_index,
+            settled_side,
+            twin_side_settled,
+        )
+        .map(|_| ())
+}
+
 pub fn kani_apply_backing_utilization_fee_charge(
     account_capital: u128,
     group_c_tot: u128,

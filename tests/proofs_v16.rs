@@ -21,7 +21,8 @@ use percolator::v16::{
     kani_position_change_requires_unit_adl, kani_position_delta_increases_risk,
     kani_prepare_asset_recovery_transition, kani_refresh_detached_selected_leg,
     kani_select_auto_crank_plan, kani_settle_kf_stale_cohort,
-    kani_should_clear_prior_reset_obligation, kani_source_claim_domain_first_burn_partition,
+    kani_settle_stranded_loser_backing_resolved, kani_should_clear_prior_reset_obligation,
+    kani_source_claim_domain_first_burn_partition,
     kani_source_credit_state_realizable_support_for_claim_num,
     kani_source_credit_state_realizable_support_for_face,
     kani_source_domain_capacity_after_admission, kani_target_effective_lag_adverse_delta,
@@ -9415,6 +9416,226 @@ fn proof_v16_public_live_backing_withdraw_is_capped_at_principal_while_a_positio
             backing_num - principal_num
         );
     }
+}
+
+// Resolved mode, one side of the asset fully settled (here the long side, so
+// `from` is asset 0's short-loser domain and `to` its long-loser domain). What
+// the other side paid into `from` beyond the claims on it and beyond its
+// provider's principal is stranded there. It moves to `to`, up to what `to`'s
+// claims and provider are still owed by losers; with the other side settled as
+// well, the rest joins the junior pool.
+//
+// For the state built from the six amounts (whole atoms) the helper requires:
+// exactly min(stranded, owed) reaches `to`; nothing but stranded backing leaves
+// `from`, so what stays still covers its provider and its claims; `to` is never
+// given more than it is owed; claims, principals, the vault, capital and
+// insurance are unchanged; fresh backing falls by exactly what joined the
+// junior pool; and the result is a valid shape.
+fn resolved_stranded_loser_backing_case(
+    from_backing_raw: u8,
+    from_principal_raw: u8,
+    from_claims_raw: u8,
+    to_backing_raw: u8,
+    to_principal_raw: u8,
+    to_claims_raw: u8,
+    twin_side_settled: bool,
+) -> (u8, u8) {
+    let n = |raw: u8| raw as u128 * BOUND_SCALE;
+    let (mut header, mut markets) = one_market_only_fixture();
+    let market_id = markets[0].engine.asset.market_id.get();
+    header.mode = 1; // Resolved
+    header.resolved_slot = header.current_slot;
+    let claims_total = from_claims_raw as u128 + to_claims_raw as u128;
+    header.vault =
+        V16PodU128::new(from_backing_raw as u128 + to_backing_raw as u128 + claims_total);
+    header.source_fresh_backing_total_num =
+        V16PodU128::new(n(from_backing_raw) + n(to_backing_raw));
+    header.source_claim_bound_total_num = V16PodU128::new(claims_total * BOUND_SCALE);
+    header.pnl_pos_tot = V16PodU128::new(claims_total);
+    header.pnl_pos_bound_tot = V16PodU128::new(claims_total);
+    header.pnl_pos_bound_tot_num = V16PodU128::new(claims_total * BOUND_SCALE);
+    // `from`: asset 0, short losers (domain 1).
+    markets[0].engine.backing_short = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+        market_id,
+        fresh_unliened_backing_num: n(from_backing_raw),
+        expiry_slot: 10,
+        status: BackingBucketStatusV16::Fresh,
+        ..BackingBucketV16::EMPTY
+    });
+    let mut from_source = SourceCreditStateV16 {
+        positive_claim_bound_num: n(from_claims_raw),
+        exact_positive_claim_num: n(from_claims_raw),
+        fresh_reserved_backing_num: n(from_backing_raw),
+        ..SourceCreditStateV16::EMPTY
+    };
+    from_source.credit_rate_num =
+        kani_expected_source_credit_rate_num_for_state(from_source).unwrap();
+    markets[0].engine.source_credit_short = SourceCreditStateV16Account::from_runtime(&from_source);
+    markets[0].engine.provider_principal_short_num = V16PodU128::new(n(from_principal_raw));
+    // `to`: asset 0, long losers (domain 0).
+    if to_backing_raw != 0 {
+        markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
+            market_id,
+            fresh_unliened_backing_num: n(to_backing_raw),
+            expiry_slot: 10,
+            status: BackingBucketStatusV16::Fresh,
+            ..BackingBucketV16::EMPTY
+        });
+    }
+    let mut to_source = SourceCreditStateV16 {
+        positive_claim_bound_num: n(to_claims_raw),
+        exact_positive_claim_num: n(to_claims_raw),
+        fresh_reserved_backing_num: n(to_backing_raw),
+        ..SourceCreditStateV16::EMPTY
+    };
+    to_source.credit_rate_num = kani_expected_source_credit_rate_num_for_state(to_source).unwrap();
+    markets[0].engine.source_credit_long = SourceCreditStateV16Account::from_runtime(&to_source);
+    markets[0].engine.provider_principal_long_num = V16PodU128::new(n(to_principal_raw));
+    let h0 = header;
+    assert_eq!(
+        MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape(),
+        Ok(())
+    );
+
+    let result = kani_settle_stranded_loser_backing_resolved(
+        &mut MarketGroupV16ViewMut::new(&mut header, &mut markets),
+        0,
+        SideV16::Long,
+        twin_side_settled,
+    );
+
+    assert_eq!(result, Ok(()));
+    let stranded = from_backing_raw
+        .saturating_sub(from_principal_raw)
+        .saturating_sub(from_claims_raw);
+    let owed = (to_claims_raw + to_principal_raw).saturating_sub(to_backing_raw);
+    let moved = stranded.min(owed);
+    let leaving = if twin_side_settled { stranded } else { moved };
+    let from_after = markets[0].engine.source_credit_short;
+    let to_after = markets[0].engine.source_credit_long;
+    assert_eq!(
+        from_after.fresh_reserved_backing_num.get(),
+        n(from_backing_raw - leaving)
+    );
+    assert_eq!(
+        to_after.fresh_reserved_backing_num.get(),
+        n(to_backing_raw + moved)
+    );
+    // Claims and provider principal are untouched on both sides. What stays in
+    // `from` still covers its provider and its claims, and `to` is never given more
+    // than its claims and provider are owed.
+    assert_eq!(
+        from_after.positive_claim_bound_num.get(),
+        n(from_claims_raw)
+    );
+    assert_eq!(to_after.positive_claim_bound_num.get(), n(to_claims_raw));
+    assert_eq!(
+        markets[0].engine.provider_principal_short_num.get(),
+        n(from_principal_raw)
+    );
+    assert_eq!(
+        markets[0].engine.provider_principal_long_num.get(),
+        n(to_principal_raw)
+    );
+    if leaving != 0 {
+        assert!(from_backing_raw - leaving >= from_principal_raw + from_claims_raw);
+    }
+    if moved != 0 {
+        assert!(to_backing_raw + moved <= to_principal_raw + to_claims_raw);
+    }
+    // No funded stock class moves. Fresh backing falls by exactly what joined
+    // the junior pool, which is the vault less the senior classes.
+    assert_eq!(header.vault.get(), h0.vault.get());
+    assert_eq!(header.c_tot.get(), h0.c_tot.get());
+    assert_eq!(header.insurance.get(), h0.insurance.get());
+    assert_eq!(
+        header.source_fresh_backing_total_num.get(),
+        h0.source_fresh_backing_total_num.get() - n(leaving - moved)
+    );
+    assert_eq!(
+        MarketGroupV16ViewMut::new(&mut header, &mut markets).validate_shape(),
+        Ok(())
+    );
+    (stranded, moved)
+}
+
+// Every combination of backing 1..=4, principal and claims within it in `from`
+// (claims at most 2), and backing 0..=2 and provider principal 0..=3 in `to`,
+// with the other side settled or not. `to` holds no claim here, so what it is
+// owed is what its provider fronted and no credit rate is ever fractional.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_stranded_loser_backing_goes_to_its_twin_then_the_junior_pool() {
+    let from_backing_raw: u8 = kani::any();
+    let from_principal_raw: u8 = kani::any();
+    let from_claims_raw: u8 = kani::any();
+    let to_backing_raw: u8 = kani::any();
+    let to_principal_raw: u8 = kani::any();
+    let twin_side_settled: bool = kani::any();
+    kani::assume((1..=4).contains(&from_backing_raw));
+    kani::assume(from_principal_raw <= from_backing_raw);
+    kani::assume(from_claims_raw <= 2 && from_claims_raw <= from_backing_raw);
+    kani::assume(to_backing_raw <= 2);
+    kani::assume(to_principal_raw <= 3);
+    let (stranded, moved) = resolved_stranded_loser_backing_case(
+        from_backing_raw,
+        from_principal_raw,
+        from_claims_raw,
+        to_backing_raw,
+        to_principal_raw,
+        0,
+        twin_side_settled,
+    );
+    let owed = to_principal_raw.saturating_sub(to_backing_raw);
+    kani::cover!(stranded == 0 && owed != 0, "nothing is stranded");
+    kani::cover!(
+        stranded != 0 && owed == 0 && !twin_side_settled,
+        "nothing is owed and the other side may still claim: it stays"
+    );
+    kani::cover!(
+        moved != 0 && moved == stranded && stranded < owed,
+        "all that is stranded moves"
+    );
+    kani::cover!(
+        moved != 0 && moved < stranded && !twin_side_settled,
+        "only what is owed moves"
+    );
+    kani::cover!(
+        moved != 0 && moved < stranded && twin_side_settled,
+        "what is owed moves and the rest joins the junior pool"
+    );
+    kani::cover!(
+        moved != 0 && to_backing_raw == 0,
+        "an empty bucket takes the payment"
+    );
+}
+
+// Claims on `to` that the move backs in full: 3 of claims on 1 of backing (a
+// third backed), 2 stranded in `from` beside 1 of principal and 1 of claims.
+// Both atoms move and `to` ends fully backed, whether or not the other side
+// has settled.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_stranded_loser_backing_backs_the_twin_claims_in_full() {
+    let twin_side_settled: bool = kani::any();
+    let (stranded, moved) =
+        resolved_stranded_loser_backing_case(4, 1, 1, 1, 0, 3, twin_side_settled);
+    assert_eq!((stranded, moved), (2, 2));
+}
+
+// Claims on `to` that the move backs in part: 3 of claims and 1 of provider
+// principal on an empty bucket, 1 stranded in `from`. It moves, `to` ends a
+// third backed, and nothing is left for the junior pool.
+#[kani::proof]
+#[kani::unwind(48)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_stranded_loser_backing_backs_the_twin_claims_in_part() {
+    let twin_side_settled: bool = kani::any();
+    let (stranded, moved) =
+        resolved_stranded_loser_backing_case(3, 1, 1, 0, 1, 3, twin_side_settled);
+    assert_eq!((stranded, moved), (1, 1));
 }
 
 #[kani::proof]
