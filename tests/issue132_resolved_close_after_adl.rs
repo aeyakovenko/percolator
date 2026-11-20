@@ -5,9 +5,15 @@
 //! OI from the opposite side by lowering that side's A index instead of
 //! rewriting every leg. A leg's effective quantity is
 //! `ceil(raw * A_side / a_basis)` while `A_side` itself is floored, so the
-//! legs of one side can add up to more than the side's effective OI. The last
-//! legs to leave then own less than their rounded-up quantity, possibly
-//! nothing.
+//! legs of one side can add up to more than the side's effective OI. A leg
+//! that leaves takes its whole rounded-up quantity, so the legs that stay
+//! are left with less, possibly nothing.
+//!
+//! Since percolator-prog #449 the A index is derived again from the side's
+//! effective OI and raw basis after every exit. While the side holds any
+//! effective OI, no leg's quantity exceeds it and the last leg's quantity
+//! equals it, so the cap described below binds only on a side whose effective
+//! OI is already zero: an exhausted side, whose remaining legs own nothing.
 //!
 //! The reported path (resolved close subtracting a leg's raw basis from the
 //! reduced side OI) no longer reproduces: resolved close consumes
@@ -704,37 +710,90 @@ const S1: usize = 2;
 const S2: usize = 3;
 const CAPITAL: u128 = 1_000_000;
 
-/// Longs L1 and L2 hold 3 atoms each against shorts S1 and S2. L1 and then S1
-/// reduce by one atom on their own, so each side's A index is floored below
-/// the ceiling of its legs:
+/// Longs L1 and L2 hold 30 atoms each against shorts S1 and S2. L1 and then
+/// S1 reduce by seven atoms on their own, so each side is haircut and its legs
+/// are rounded up past what the side holds:
 ///
-/// | side  | effective OI | leg effective quantities |
-/// |-------|--------------|--------------------------|
-/// | long  | 4            | L1 = 2, L2 = 3           |
-/// | short | 4            | S1 = 2, S2 = 3           |
+/// | side  | effective OI | raw basis | leg effective quantities |
+/// |-------|--------------|-----------|--------------------------|
+/// | long  | 46           | 23 + 30   | L1 = 20, L2 = 27         |
+/// | short | 46           | 22 + 30   | S1 = 20, S2 = 27         |
+///
+/// S1's own reduction happens on an already haircut side. It removes seven of
+/// the side's 53 atoms, and its raw basis falls from 30 to 22: the 7 * 60 / 53
+/// = 7.9 raw atoms that carry seven effective atoms, rounded up against the
+/// reducing leg (#449).
 fn rounded_up_legs_on_both_sides() -> Book {
     let mut book = Book::new(4, 10_000);
     for account in [L1, L2, S1, S2] {
         book.deposit(account, CAPITAL);
     }
-    book.trade(L1, S1, 3).unwrap();
-    book.trade(L2, S2, 3).unwrap();
-    assert_eq!(book.rebalance(L1, 1), Ok(1));
-    assert_eq!(book.rebalance(S1, 1), Ok(1));
+    book.trade(L1, S1, 30).unwrap();
+    book.trade(L2, S2, 30).unwrap();
+    assert_eq!(book.rebalance(L1, 7), Ok(7));
+    assert_eq!(book.rebalance(S1, 7), Ok(7));
     assert_eq!(
         (book.side_oi(LONG), book.side_oi(SHORT)),
-        (4, 4),
+        (46, 46),
         "side effective OI"
     );
     assert_eq!(
+        [L1, L2, S1, S2].map(|account| book.raw(account)),
+        [23, 30, 22, 30],
+        "leg raw basis"
+    );
+    assert_eq!(
         [L1, L2, S1, S2].map(|account| book.effective(account)),
-        [2, 3, 2, 3],
+        [20, 27, 20, 27],
         "leg effective quantities"
     );
     assert_eq!(
         (book.side_a(LONG), book.side_a(SHORT)),
-        (ADL_ONE * 4 / 5, ADL_ONE * 5 / 6),
-        "A indices"
+        (ADL_ONE * 46 / 53, ADL_ONE * 46 / 52),
+        "A indices: floor(ADL_ONE * effective OI / raw basis)"
+    );
+    book
+}
+
+/// L1 and S1 hold one atom, L2 and S2 five. L2 and then S2 reduce by two atoms
+/// on their own. Each side then holds two effective atoms, and its larger leg
+/// alone is rounded up to both of them:
+///
+/// | side  | effective OI | raw basis | leg effective quantities |
+/// |-------|--------------|-----------|--------------------------|
+/// | long  | 2            | 1 + 3     | L1 = 1, L2 = 2           |
+/// | short | 2            | 1 + 2     | S1 = 1, S2 = 2           |
+///
+/// When the larger leg leaves it takes the side's whole effective OI, and the
+/// one-atom leg is left on an exhausted side.
+fn a_leg_that_owns_its_whole_side_on_both_sides() -> Book {
+    let mut book = Book::new(4, 10_000);
+    for account in [L1, L2, S1, S2] {
+        book.deposit(account, CAPITAL);
+    }
+    book.trade(L1, S1, 1).unwrap();
+    book.trade(L2, S2, 5).unwrap();
+    assert_eq!(book.rebalance(L2, 2), Ok(2));
+    assert_eq!(book.rebalance(S2, 2), Ok(2));
+    assert_eq!(
+        (book.side_oi(LONG), book.side_oi(SHORT)),
+        (2, 2),
+        "side effective OI"
+    );
+    assert_eq!(
+        [L1, L2, S1, S2].map(|account| book.raw(account)),
+        [1, 3, 1, 2],
+        "leg raw basis"
+    );
+    assert_eq!(
+        [L1, L2, S1, S2].map(|account| book.effective(account)),
+        [1, 2, 1, 2],
+        "leg effective quantities"
+    );
+    assert_eq!(
+        (book.side_a(LONG), book.side_a(SHORT)),
+        (ADL_ONE * 2 / 4, ADL_ONE * 2 / 3),
+        "A indices: floor(ADL_ONE * effective OI / raw basis)"
     );
     book
 }
@@ -765,9 +824,11 @@ fn control_resolved_close_with_rounded_up_legs_in_every_order() {
     }
 }
 
-/// Fails before the fix: the second forfeit on each side returned
-/// `CounterUnderflow`, because the first one had already taken its rounded-up
-/// share and the side held less than the next leg's ceiling.
+/// Before the #132 fix the second forfeit on each side returned
+/// `CounterUnderflow`: the first one had taken its rounded-up share and the
+/// side held less than the next leg's ceiling. Since #449 the A index is
+/// derived again after the first forfeit, so the second leg's quantity is
+/// exactly what its side still holds.
 #[test]
 fn issue132_recovery_forfeit_removes_only_the_remaining_side_effective_oi() {
     let mut book = rounded_up_legs_on_both_sides();
@@ -778,14 +839,15 @@ fn issue132_recovery_forfeit_removes_only_the_remaining_side_effective_oi() {
     assert_eq!(book.forfeit(L2), Ok(false), "forfeit L2");
     assert_eq!(
         book.side_oi(LONG),
-        1,
-        "L2 removed its 3 of the long side's 4"
+        19,
+        "L2 removed its 27 of the long side's 46"
     );
     assert_eq!(
-        book.forfeit(L1),
-        Ok(false),
-        "forfeit L1: effective 2 against a side that holds 1"
+        (book.raw(L1), book.effective(L1)),
+        (23, 19),
+        "L1 (raw, effective): its ceiling was 20; it now carries the 19 left"
     );
+    assert_eq!(book.forfeit(L1), Ok(false), "forfeit L1");
     assert_eq!(book.side_oi(LONG), 0);
     assert_eq!(book.side_counts(LONG), (2, 2), "long (stored, pending)");
     assert_eq!((book.raw(L1), book.raw(L2)), (0, 0));
@@ -794,14 +856,15 @@ fn issue132_recovery_forfeit_removes_only_the_remaining_side_effective_oi() {
     assert_eq!(book.forfeit(S2), Ok(true), "forfeit S2");
     assert_eq!(
         book.side_oi(SHORT),
-        1,
-        "S2 removed its 3 of the short side's 4"
+        19,
+        "S2 removed its 27 of the short side's 46"
     );
     assert_eq!(
-        book.forfeit(S1),
-        Ok(true),
-        "forfeit S1: effective 2 against a side that holds 1"
+        (book.raw(S1), book.effective(S1)),
+        (22, 19),
+        "S1 (raw, effective): its ceiling was 20; it now carries the 19 left"
     );
+    assert_eq!(book.forfeit(S1), Ok(true), "forfeit S1");
     assert_eq!(book.side_oi(SHORT), 0);
     assert_eq!(book.side_counts(SHORT), (0, 0), "short (stored, pending)");
 
@@ -825,19 +888,14 @@ fn issue132_recovery_forfeit_removes_only_the_remaining_side_effective_oi() {
     book.assert_valid();
 }
 
-/// Fails before the fix: after the matched Recovery close consumed the last
-/// effective OI, both survivors kept one raw atom on a side that could not
-/// reset, and every later forfeit returned `CounterUnderflow`.
-#[test]
-fn issue132_recovery_forfeit_detaches_a_leg_whose_side_has_no_effective_oi_left() {
-    let mut book = rounded_up_legs_on_both_sides();
+/// One forfeit per side: each takes its side's whole effective OI and stays
+/// as an obligation, so neither side can reset. The one-atom legs L1 and S1
+/// are left on sides that hold nothing.
+fn exhausted_legs_behind_an_obligation_on_each_side() -> Book {
+    let mut book = a_leg_that_owns_its_whole_side_on_both_sides();
     book.force_recovery();
     assert_eq!(book.forfeit(L2), Ok(false), "forfeit L2");
     assert_eq!(book.forfeit(S2), Ok(false), "forfeit S2");
-    assert_eq!((book.side_oi(LONG), book.side_oi(SHORT)), (1, 1));
-
-    // The public pair close lands only the matched effective atom.
-    assert_eq!(book.recovery_pair_close(L1, S1, 10), Ok(1));
     assert_eq!((book.side_oi(LONG), book.side_oi(SHORT)), (0, 0));
     assert_eq!(
         (
@@ -849,11 +907,34 @@ fn issue132_recovery_forfeit_detaches_a_leg_whose_side_has_no_effective_oi_left(
         (1, 1, 1, 1),
         "(L1 raw, L1 effective, S1 raw, S1 effective)"
     );
+    assert_eq!(
+        (book.side_a(LONG), book.side_a(SHORT)),
+        (1, 1),
+        "A indices of the exhausted sides: the smallest valid index"
+    );
+    assert_eq!(book.side_counts(LONG), (2, 1), "long (stored, pending)");
+    assert_eq!(book.side_counts(SHORT), (2, 1), "short (stored, pending)");
     let asset = book.asset();
     assert_eq!(
         (asset.mode_long, asset.mode_short),
         (SideModeV16::Normal, SideModeV16::Normal),
         "neither side can reset while it carries an obligation"
+    );
+    book
+}
+
+/// Fails before the #132 fix: once a side held no effective OI and could not
+/// reset, both survivors kept one raw atom and every later forfeit returned
+/// `CounterUnderflow`.
+#[test]
+fn issue132_recovery_forfeit_detaches_a_leg_whose_side_has_no_effective_oi_left() {
+    let mut book = exhausted_legs_behind_an_obligation_on_each_side();
+
+    // Nothing is left to pair off: the matched close has no effective atom
+    // to land.
+    assert_eq!(
+        book.recovery_pair_close(L1, S1, 10),
+        Err(V16Error::NonProgress)
     );
 
     // S1 is still a real position, so L1 keeps its weight as an obligation
@@ -876,43 +957,33 @@ fn issue132_recovery_forfeit_detaches_a_leg_whose_side_has_no_effective_oi_left(
     book.assert_valid();
 }
 
-/// One forfeit per side, then the market resolves.
-fn resolved_with_an_obligation_on_each_side() -> Book {
-    let mut book = rounded_up_legs_on_both_sides();
-    book.force_recovery();
-    assert_eq!(book.forfeit(L2), Ok(false), "forfeit L2");
-    assert_eq!(book.forfeit(S2), Ok(false), "forfeit S2");
-    assert_eq!((book.side_oi(LONG), book.side_oi(SHORT)), (1, 1));
-    assert_eq!((book.effective(L1), book.effective(S1)), (2, 2));
-    assert_eq!(book.side_counts(LONG), (2, 1), "long (stored, pending)");
-    assert_eq!(book.side_counts(SHORT), (2, 1), "short (stored, pending)");
-    book.resolve();
-    book
-}
-
-/// Fails before the fix: L1 and S1 each consumed their side's last effective
-/// atom and then returned `InvalidLeg` on every call, while the two
-/// obligations waited for them. All four accounts stayed locked.
+/// Fails before the #132 fix: L1 and S1 sat on sides with no effective OI
+/// left and returned `InvalidLeg` on every call, while the two obligations
+/// waited for them. All four accounts stayed locked.
 #[test]
 fn issue132_resolved_close_detaches_exhausted_legs_behind_pending_obligations() {
     for order in permutations(&[L1, L2, S1, S2]) {
-        let mut book = resolved_with_an_obligation_on_each_side();
+        let mut book = exhausted_legs_behind_an_obligation_on_each_side();
+        book.resolve();
         assert_everyone_closes_whole(&mut book, &order, "obligation on each side");
     }
 }
 
-/// Fails before the fix: with the obligation only on its own side L1 did get
-/// out eventually, but only after other accounts closed first; its own calls
-/// returned `InvalidLeg`. A solvent settled leg must not depend on that.
+/// Fails before the #132 fix: with the obligation only on its own side L1 did
+/// get out eventually, but only after other accounts closed first; its own
+/// calls returned `InvalidLeg`. A solvent settled leg must not depend on that.
 #[test]
 fn issue132_resolved_close_of_an_exhausted_leg_does_not_wait_for_other_accounts() {
-    let mut book = rounded_up_legs_on_both_sides();
+    let mut book = a_leg_that_owns_its_whole_side_on_both_sides();
     book.force_recovery();
     assert_eq!(book.forfeit(L2), Ok(false), "forfeit L2");
-    assert_eq!(book.side_oi(LONG), 1);
+    assert_eq!(
+        (book.side_oi(LONG), book.raw(L1), book.effective(L1)),
+        (0, 1, 1),
+        "(long OI, L1 raw, L1 effective): L2 took the side's whole OI"
+    );
     book.resolve();
 
-    // First call takes the last effective atom, second detaches the residue.
     assert_eq!(book.close_alone(L1, 3), Ok(CAPITAL), "L1 on its own");
     assert_eq!(
         book.side_counts(LONG),

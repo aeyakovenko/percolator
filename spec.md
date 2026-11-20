@@ -106,11 +106,13 @@ effective_pos_q =
        * ceil(abs(raw_basis_pos_q) * current_A_side / leg_a_basis)
 
 For a same-side public resize, `size_q` is an effective-quantity delta. A
-post-ADL risk reduction selects the largest raw basis no greater than the prior
-raw basis whose conservative effective quantity equals the requested post-trade
-quantity. Aggregate effective OI, health, liquidation sizing, full-close
-detection, and pending-obligation conversion all use `effective_pos_q`; raw
-basis remains only for K/F settlement and social-loss weight accounting.
+post-ADL risk reduction removes exactly `abs(size_q)` from the side's effective
+OI and keeps the raw basis given by the side A index rule (§5, "Side A index"):
+the leg gives up at least the raw basis that carries the removed quantity, so
+its effective quantity afterwards is at most the requested post-trade quantity.
+Aggregate effective OI, health, liquidation sizing, full-close detection, and
+pending-obligation conversion all use `effective_pos_q`; raw basis remains for
+K/F settlement, social-loss weight accounting, and the side's raw basis sum.
 
 trade_notional =
     floor(abs(size_q) * exec_price / POS_SCALE)
@@ -876,6 +878,7 @@ Asset {
     A_epoch_start_long, A_epoch_start_short
 
     OI_eff_long, OI_eff_short
+    raw_basis_sum_long, raw_basis_sum_short
     stored_pos_count_long, stored_pos_count_short
     stale_account_count_long, stale_account_count_short
 
@@ -993,7 +996,12 @@ For every Active/DrainOnly/Recovery asset side:
 
 ```text
 0 < A_side <= ADL_ONE
-if side is Normal and has current-epoch stored positions: A_side >= MIN_A_SIDE
+every stored leg has a_basis == ADL_ONE
+raw_basis_sum_side == sum of abs(raw_basis_pos_q) over the side's current-epoch legs
+raw_basis_sum_side <= loss_weight_sum_side
+if raw_basis_sum_side > 0: OI_eff_side <= raw_basis_sum_side
+if raw_basis_sum_side > 0: A_side == max(1, floor(ADL_ONE * OI_eff_side / raw_basis_sum_side))
+if side is Normal, has current-epoch stored positions and OI_eff_side > 0: A_side >= MIN_A_SIDE
 0 <= OI_eff_side <= MAX_OI_SIDE_Q_PER_ASSET
 if Live and asset is not Recovery: OI_eff_long == OI_eff_short
 if OI_eff_side > 0 and side is not ResetPending: loss_weight_sum_side > 0
@@ -1057,18 +1065,100 @@ charge was booked onto it, and that cannot pay the charge, books its own
 shortfall when it is next cranked; a leg on the other side that detached in
 between does not share it.
 
-Each leg's `effective_pos_q` is rounded up while `A_side` is rounded down, so
-the effective quantities of one side's legs can sum to more than `OI_eff_side`.
-A dead-leg exit (Recovery forfeit or resolved close) therefore removes
-`min(abs(effective_pos_q), OI_eff_side)`, the leg's remaining share of the
-aggregate, and MUST NOT fail because the side carries less. Once `OI_eff_side`
-is zero, a side without pending obligations resets and its remaining legs
-detach as prior-reset obligations. A side that still carries pending
-obligations cannot reset (§9); its remaining current-epoch legs then detach, or
-convert to pending obligations, with a zero effective-OI change. Their loss
-weight is removed or retained exactly as for any other leg. No other
-transition may clear or retain a current-epoch nonzero-basis leg without
-removing at least one effective-OI atom.
+#### Side A index
+
+A position opens or grows only while `A_long == A_short == ADL_ONE`, so every
+stored leg has `a_basis == ADL_ONE` and a side's exact exposure is
+`raw_basis_sum_side * A_side / ADL_ONE`. `A_side` is not an independent state
+variable: every transition that changes `OI_eff_side` or `raw_basis_sum_side`
+MUST then set
+
+```text
+A_side = ADL_ONE                                                   if OI_eff_side == raw_basis_sum_side > 0
+A_side = max(1, floor(ADL_ONE * OI_eff_side / raw_basis_sum_side))   if raw_basis_sum_side > OI_eff_side
+A_side unchanged                                                   if raw_basis_sum_side == 0
+```
+
+and MUST fail if `OI_eff_side > raw_basis_sum_side > 0`. A side left with
+effective OI at `A_side < MIN_A_SIDE` becomes DrainOnly. A side with no
+current-epoch basis keeps its index, so a haircut side still shows
+`A_side != ADL_ONE` until it resets. The index MUST NOT be obtained by scaling
+its previous value: the rounding of each scaling would accumulate.
+
+For a side with `R = raw_basis_sum_side <= MAX_OI_SIDE_Q_PER_ASSET` and
+`OI = OI_eff_side > 0` this gives, after every transition and whatever the
+history:
+
+```text
+OI - R / ADL_ONE < R * A_side / ADL_ONE <= OI          exact exposure; R / ADL_ONE <= 1/10 raw unit
+OI <= sum(abs(effective_pos_q)) < OI + legs            legs = current-epoch legs with basis
+abs(effective_pos_q) <= OI for every leg, with equality for a side's only leg
+A_side >= 10
+```
+
+A unilateral reduction of `q` on the opposite side (quantity ADL) sets
+`OI_eff_side -= q`, leaves the raw basis unchanged, and re-derives `A_side`.
+
+A same-side reduction of a leg from effective quantity `e` to `e'`
+(`1 <= e' < e`) removes `d = e - e'` from `OI_eff_side`. With `r` the leg's raw
+basis, `S = R - r` the other legs' raw basis and `OI' = OI - d`, the leg keeps
+
+```text
+c1 = r - ceil(d * R / OI)
+c2 = floor(e' * S / (OI' - e'))   if OI' > e', else r
+r' = max(min(c1, c2), OI' - S, 1)
+```
+
+then `raw_basis_sum_side = S + r'` and `A_side` is re-derived. Writing a leg's
+share of its side as `raw * OI / R`, `r'` is the largest raw basis for which the
+reducing leg's share falls by at least `d` (`c1`) and its new share is at most
+`e'` (`c2`), but not less than the side needs to carry `OI'` at
+`A_side <= ADL_ONE`, and not less than one unit. `1 <= r' < r` always, and
+`r' = e'` at `A_side == ADL_ONE`. Consequences:
+
+- the rounding of a reduction is taken from the reducing leg: no other leg's
+  share falls, except by less than one raw unit in the single case where the
+  reducing leg is held at its last raw unit;
+- the reducing leg's `abs(effective_pos_q)` after the reduction is at most
+  `e'`; it can be lower than `e'` by rounding.
+
+A full close, or a conversion to a pending obligation, removes
+`min(abs(effective_pos_q), OI_eff_side)` from the side's effective OI and the
+leg's whole raw basis from `raw_basis_sum_side`; the shares of the side's other
+legs fall by less than one raw unit in total.
+
+Because `A_side` is re-derived on same-side transitions, a leg's
+`effective_pos_q` can change by one unit through another leg's reduction or
+close. A haircut side whose effective OI again equals its raw basis is at
+`A_side == ADL_ONE` without a reset and accepts new positions like a side that
+was never haircut.
+
+A falling `A_side` only lowers the effective quantity of the side's legs, so a
+health certificate issued before it stays conservative. A rising `A_side` can
+raise the effective quantity of the side's other legs without any action of
+their owners. Whenever a transition leaves `A_side` higher than it found it
+while the side holds raw basis beyond the leg that changed, `risk_epoch` MUST
+advance in the same transition, so that no certificate issued before the change
+is current. The leg that changed is certified again by its own transition, and
+a leg alone on its side affects no other account. A certificate issued for the
+account whose leg changed, including the incremental certificate after a
+single fill, MUST be computed from the leg's `effective_pos_q` as stored after
+the transition, which can be below the quantity the transition asked for.
+
+Each leg's `effective_pos_q` is rounded up, so the effective quantities of one
+side's legs can sum to more than `OI_eff_side`, and a leg that leaves takes its
+whole rounded-up quantity. The legs that stay then own less, and once
+`OI_eff_side` is zero they own nothing: the side is exhausted, its index is 1
+and each remaining leg still shows one unit. A dead-leg exit (Recovery forfeit
+or resolved close) therefore removes `min(abs(effective_pos_q), OI_eff_side)`,
+the leg's remaining share of the aggregate, and MUST NOT fail because the side
+carries less. Once `OI_eff_side` is zero, a side without pending obligations
+resets and its remaining legs detach as prior-reset obligations. A side that
+still carries pending obligations cannot reset (§9); its remaining
+current-epoch legs then detach, or convert to pending obligations, with a zero
+effective-OI change. Their loss weight is removed or retained exactly as for
+any other leg. No other transition may clear or retain a current-epoch
+nonzero-basis leg without removing at least one effective-OI atom.
 
 When a side reset or leg clear combines two valid sub-atom social-loss carries,
 the sum is normalized modulo `SOCIAL_LOSS_DEN`. Crossing the denominator adds
@@ -1717,7 +1807,7 @@ If `W == 0`, residual clears only by reserved insurance or explicit protocol-own
 
 Quantity ADL applies exactly once after residual durability and is atomic with closing exposure clear/finalization or protected by a non-preemptible finalization barrier.
 
-`begin_full_drain_reset(asset, side)` requires zero OI, no close/pending barrier, no pending obligations, no liens, and side not already `ResetPending`.
+`begin_full_drain_reset(asset, side)` requires zero OI, no close/pending barrier, no pending obligations, no liens, and side not already `ResetPending`. It zeroes `raw_basis_sum_side` and sets `A_side = ADL_ONE`: the new epoch has no leg.
 
 -------------------------------------------------------------------------------
 10. Liquidation and bankrupt close

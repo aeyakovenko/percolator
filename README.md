@@ -41,6 +41,13 @@ The proof suite is a decomposition over production v16 code, not one monolithic
   are decomposed into bounded production kernels and public-route tests. A
   non-progressing path must either leave state unchanged or route to a terminal
   progress/recovery path.
+- **Exact side exposure:** each side keeps the sum of its legs' raw basis and
+  derives its ADL index `A` from that sum and its effective open interest after
+  every position change and every haircut. A side's exposure therefore never
+  exceeds its matched open interest and is short of it by less than a tenth of
+  a raw unit, whatever the history; a same-side reduction is rounded against
+  the reducing leg, and an index that rises retires every health certificate
+  issued before it (`spec.md` §5, "Side A index"; percolator-prog #449).
 - **Arithmetic discipline:** wide arithmetic that is too expensive for Kani is
   isolated behind small helpers and checked by differential/property tests under
   `--features fuzz`.
@@ -62,8 +69,8 @@ Source-checkable counts in this checkout:
 | Plain Kani proofs in `tests/proofs_v16.rs` | 334 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
 | Plain Kani proofs in `src/v16_proofs.rs` | 44 |
-| Function-contract proofs in `src/v16_proofs.rs` | 63 |
-| Production `kernel_*` helpers in `src/v16.rs` | 38 |
+| Function-contract proofs in `src/v16_proofs.rs` | 65 |
+| Production `kernel_*` helpers in `src/v16.rs` | 41 |
 | Public `*_not_atomic` engine APIs in `src/v16.rs` | 63 |
 
 Spot-check the inventory directly:

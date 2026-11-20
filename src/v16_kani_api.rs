@@ -552,6 +552,54 @@ pub fn kani_raw_basis_for_adl_effective_quantity(
     V16Core::kernel_raw_basis_for_adl_effective_quantity(effective_abs_q, a_basis, current_a)
 }
 
+pub fn kani_side_adl_index(
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+    current_a: u128,
+) -> V16Result<u128> {
+    V16Core::kernel_side_adl_index(oi_eff_q, raw_basis_sum_q, current_a)
+}
+
+pub fn kani_sync_side_adl_index(asset: AssetStateV16, side: SideV16) -> V16Result<AssetStateV16> {
+    V16Core::kernel_sync_side_adl_index(asset, side)
+}
+
+/// The audit scan's per-side predicate (`validate_shape` under test, Kani or
+/// the `audit-scan` feature), exposed so a test can hold it against
+/// `kernel_side_adl_index`.
+#[cfg(any(kani, feature = "audit-scan"))]
+pub fn kani_side_adl_totals_are_coherent(
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+    a_side: u128,
+    loss_weight_sum: u128,
+    mode: SideModeV16,
+) -> bool {
+    MarketGroupV16View::<'_, u64>::side_adl_totals_are_coherent(
+        oi_eff_q,
+        raw_basis_sum_q,
+        a_side,
+        loss_weight_sum,
+        mode,
+    )
+}
+
+pub fn kani_raw_basis_after_adl_reduction(
+    raw_abs_q: u128,
+    effective_abs_q: u128,
+    next_effective_abs_q: u128,
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+) -> V16Result<u128> {
+    V16Core::kernel_raw_basis_after_adl_reduction(
+        raw_abs_q,
+        effective_abs_q,
+        next_effective_abs_q,
+        oi_eff_q,
+        raw_basis_sum_q,
+    )
+}
+
 pub fn kani_adl_scaled_accrual_index_deltas(
     price_delta: i128,
     funding_index_delta: i128,

@@ -811,6 +811,7 @@ fn resolved_close_prepares_lapsed_backing_before_pending_k_loss() {
     asset.oi_eff_long_q = POSITION_Q;
     asset.stored_pos_count_long = 1;
     asset.loss_weight_sum_long = POSITION_Q;
+    asset.raw_basis_sum_long_q = POSITION_Q;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
     let mut account_header = winner_account(CAPITAL, PNL);

@@ -2,6 +2,15 @@
 //! so after a quantity ADL the sum of a side's leg ceilings can exceed the
 //! side's aggregate effective OI. These tests pin what the engine does with
 //! that surplus on every exit route.
+//!
+//! The first two were written against the engine before the fix and pass
+//! unchanged. The third characterised the defect: the surplus grew with every
+//! same-side reduction. It now pins the fix: each side keeps the sum of its
+//! legs' raw basis and derives its A index from it, so the surplus stays
+//! below the leg count and the exact exposure never exceeds the effective OI.
+//! The last two pin what keeps health certificates sound under the fix:
+//! an index that rises while other legs share the side advances the risk epoch,
+//! and the certificate issued after a fill describes the position the fill left.
 
 use percolator::{
     active_bitmap_is_empty, AssetStateV16, EngineAssetSlotV16Account, Market,
@@ -231,14 +240,21 @@ fn issue_449_every_exit_order_and_route_drains_exactly() {
 }
 
 /// Repeated unilateral ADL rounds interleaved with 1-unit bilateral long
-/// reductions. The ceiling surplus D = sum(ceil) - OI and the exact surplus
-/// G = sum(exact) - OI are NOT bounded by the leg count: each same-side
-/// resize can move up to one raw-grid step (A/a_basis < 1 effective unit) of
-/// exact exposure into G, because the resize inverse keeps the largest raw
-/// basis whose ceiling equals the target. They are bounded by the number of
-/// same-side reducing operations in the epoch.
+/// reductions: the history that made the surplus compound before the fix.
+/// The ceiling surplus D = sum(ceil) - OI and the exact surplus
+/// G = sum(exact) - OI were then bounded only by the number of same-side
+/// reducing operations (D reached 2001 with four legs, G 1999.33 raw units),
+/// because a resize kept the largest raw basis whose own ceiling equalled the
+/// target and so gave up less exposure than the effective OI it removed.
+///
+/// With A derived from the side's totals after every operation, and a resize
+/// giving up at least the raw basis that carries the removed effective OI:
+/// - G is never positive, and is short of zero by less than
+///   `raw_basis_sum / ADL_ONE` raw units (the floor of the derived A);
+/// - D is never negative and stays below the number of legs;
+/// - a 10% move creates no equity in the closed universe.
 #[test]
-fn issue_449_characterize_resize_rounding_surplus_compounds_hardening_gap() {
+fn issue_449_resize_rounding_surplus_stays_below_the_leg_count() {
     const N: usize = 4;
     let (mut header, mut markets) = market();
     // accts[0..N] longs, accts[N] = ADL'ing short, accts[N+1] = short reducer
@@ -261,48 +277,55 @@ fn issue_449_characterize_resize_rounding_surplus_compounds_hardening_gap() {
         rebalance(&mut header, &mut markets, &mut s[0], s0_eff * 2 / 3).unwrap();
     }
     let mut max_d = 0u128;
-    let mut max_g_num = 0i128;
+    let mut min_g_num = 0i128;
     let rounds = 2_000u128;
-    let mut long_reducing_ops = 0u128;
     for _ in 0..rounds {
         let (l, s) = accts.split_at_mut(N);
         rebalance(&mut header, &mut markets, &mut s[0], 1).unwrap();
         for leg in l.iter_mut() {
             trade(&mut header, &mut markets, &mut s[1], leg, 1).unwrap();
-            long_reducing_ops += 1;
         }
         let a = asset(&markets);
         assert_eq!(a.oi_eff_long_q, a.oi_eff_short_q);
         let c = census(&markets, &accts);
-        let d = c[0].0 - a.oi_eff_long_q;
+        // the engine's own total is the sum of the legs' raw basis
+        let raw_sum: u128 = accts[..N]
+            .iter()
+            .filter_map(raw_and_basis)
+            .map(|(_, raw, _, _)| raw)
+            .sum();
+        assert_eq!(a.raw_basis_sum_long_q, raw_sum);
+        assert_eq!(a.a_long, ADL_ONE * a.oi_eff_long_q / raw_sum);
+        // exact long exposure: never above the OI, short of it by less than
+        // raw_sum / ADL_ONE raw units
         let g = c[0].1 as i128 - (a.oi_eff_long_q * ADL_ONE) as i128;
+        assert!(g <= 0 && g > -(raw_sum as i128), "G_num = {g}");
+        // ceilings: cover the OI, exceed it by less than one per leg
+        assert!(c[0].0 >= a.oi_eff_long_q, "ceilings below the long OI");
+        let d = c[0].0 - a.oi_eff_long_q;
+        assert!(d < N as u128, "D = {d}");
         max_d = max_d.max(d);
-        max_g_num = max_g_num.max(g);
+        min_g_num = min_g_num.min(g);
         // short side is never haircut here, so its legs are exact
         assert_eq!(c[1].0, a.oi_eff_short_q);
-        // Op-count bound: |G| <= same-side reducing ops (+1 for the initial
-        // large ADL's scaling floor), D < G + N.
-        assert!(g.unsigned_abs() <= (long_reducing_ops + 1) * ADL_ONE);
-        assert!(d < long_reducing_ops + 1 + N as u128);
+        assert_eq!(a.a_short, ADL_ONE);
     }
     let a = asset(&markets);
     let c = census(&markets, &accts);
     let g_num = c[0].1 as i128 - (a.oi_eff_long_q * ADL_ONE) as i128;
     eprintln!(
-        "rounds={rounds} n={N} a_long={} oi={} final D={} max D={} max G={:.6} final G={:.6}",
+        "rounds={rounds} n={N} a_long={} oi={} final D={} max D={} min G={:.6} final G={:.6}",
         a.a_long,
         a.oi_eff_long_q,
         c[0].0 - a.oi_eff_long_q,
         max_d,
-        max_g_num as f64 / ADL_ONE as f64,
+        min_g_num as f64 / ADL_ONE as f64,
         g_num as f64 / ADL_ONE as f64,
     );
-    // Documented finding: the surplus compounds past any per-leg tolerance.
-    assert!(max_d > rounds / 2, "expected linear growth, max D={max_d}");
 
-    // Value consequence: the matched book is no longer zero-sum. Move the
-    // price up 10%; aggregate PnL across the closed universe becomes positive
-    // by ~G * dP / POS_SCALE (unbacked, so subject to haircut).
+    // Value consequence: the matched book stays zero-sum. Move the price up
+    // 10%; the longs' aggregate gain cannot exceed the shorts' loss, and each
+    // account's settlement rounds against it by less than one atom.
     let new_price = PRICE + PRICE / 10;
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -318,7 +341,184 @@ fn issue_449_characterize_resize_rounding_surplus_compounds_hardening_gap() {
         market.full_account_refresh_not_atomic(&mut v).unwrap();
         sum_pnl += v.header.pnl.get() + v.header.capital.get() as i128 - 1_000_000_000_000;
     }
-    let expected = g_num * i128::from(new_price - PRICE) / (ADL_ONE * POS_SCALE) as i128;
-    eprintln!("sum (capital+pnl-deposit) after +10% = {sum_pnl} (G*dP/POS_SCALE = {expected})");
-    assert!(sum_pnl > 0, "zero-sum broken by the harvested surplus");
+    eprintln!("sum (capital+pnl-deposit) after +10% = {sum_pnl}");
+    assert!(
+        sum_pnl <= 0 && sum_pnl > -(N as i128 + 2),
+        "closed universe after +10%: {sum_pnl} atoms"
+    );
+}
+
+fn long_effective(markets: &[Market<u64>], acct: &PortfolioAccountV16Account) -> u128 {
+    let (_, raw, a_basis, _) = raw_and_basis(acct).expect("long leg");
+    ceil_eff(raw, a_basis, asset(markets).a_long)
+}
+
+/// Whether the account's certificate is still current by its risk epoch. A certificate that is
+/// current must be no healthier than a full refresh of the same account in the same state.
+fn current_certificate_is_conservative(
+    header: &MarketGroupV16HeaderAccount,
+    markets: &[Market<u64>],
+    acct: &PortfolioAccountV16Account,
+) -> bool {
+    let cached = acct.health_cert.try_to_runtime().unwrap();
+    if !cached.valid || cached.cert_risk_epoch != header.risk_epoch.get() {
+        return false;
+    }
+    let mut header_copy = header.clone();
+    let mut markets_copy = markets.to_vec();
+    let mut acct_copy = acct.clone();
+    let mut market = MarketGroupV16ViewMut::new(&mut header_copy, &mut markets_copy);
+    let mut view = PortfolioV16ViewMut::new(&mut acct_copy);
+    let full = market.full_account_refresh_not_atomic(&mut view).unwrap();
+    assert!(
+        cached.certified_initial_req >= full.certified_initial_req
+            && cached.certified_maintenance_req >= full.certified_maintenance_req
+            && cached.certified_worst_case_loss >= full.certified_worst_case_loss
+            && cached.certified_equity <= full.certified_equity,
+        "a current certificate is healthier than the account's state: {cached:?} against {full:?}"
+    );
+    true
+}
+
+/// A reduction on a haircut side is rounded against the reducing leg, so the
+/// side's A index can rise, and with it the effective quantity of the side's
+/// other legs, by a unit and without any action of their owners. A health
+/// certificate issued before the rise would understate their requirement, so
+/// the rise advances the risk epoch and no earlier certificate is current.
+/// A falling index needs no new epoch, and neither does a leg that is alone on
+/// its side: its own account is certified again by the route that changed it.
+#[test]
+fn issue_449_an_index_rise_retires_earlier_certificates() {
+    // Two longs share the haircut side; L1 gives up one unit at a time. A further haircut of
+    // an odd size first takes the side off the exact 1:3 ratio of `issue_state`, where a
+    // reduction gives up whole raw units and nothing is rounded.
+    let (mut header, mut markets, mut accts) = issue_state();
+    {
+        let (_, s) = accts.split_at_mut(2);
+        assert_eq!(rebalance(&mut header, &mut markets, &mut s[0], 12_345).unwrap(), 12_345);
+    }
+    let mut index_rises = 0u32;
+    let mut peer_quantity_rises = 0u32;
+    for step in 0..2_000 {
+        // The peer holds an exact, current certificate before the other long reduces.
+        {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let mut peer = PortfolioV16ViewMut::new(&mut accts[1]);
+            market.full_account_refresh_not_atomic(&mut peer).unwrap();
+        }
+        let a_before = asset(&markets).a_long;
+        let epoch_before = header.risk_epoch.get();
+        let peer_before = long_effective(&markets, &accts[1]);
+        {
+            let (l, s) = accts.split_at_mut(2);
+            trade(&mut header, &mut markets, &mut s[0], &mut l[0], 1).unwrap();
+        }
+        let a_after = asset(&markets).a_long;
+        let rose = a_after > a_before;
+        assert_eq!(
+            header.risk_epoch.get() > epoch_before,
+            rose,
+            "step {step}: index {a_before} -> {a_after}, risk epoch {epoch_before} -> {}",
+            header.risk_epoch.get()
+        );
+        // The peer did nothing. Its effective quantity moves up only with the index, and
+        // every such move is covered by a new risk epoch: its certificate is then no longer
+        // current. While the certificate is still current it is no healthier than a full
+        // refresh of the same account.
+        let peer_after = long_effective(&markets, &accts[1]);
+        let current = current_certificate_is_conservative(&header, &markets, &accts[1]);
+        assert_eq!(current, !rose, "step {step}");
+        if peer_after > peer_before {
+            assert!(rose && peer_after == peer_before + 1, "step {step}");
+            peer_quantity_rises += 1;
+        }
+        index_rises += u32::from(rose);
+    }
+    assert!(index_rises > 0 && peer_quantity_rises > 0);
+
+    // A haircut lowers the index. The peer's certificate, exact before it, stays current and
+    // is only more conservative afterwards: no new epoch.
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut peer = PortfolioV16ViewMut::new(&mut accts[1]);
+        market.full_account_refresh_not_atomic(&mut peer).unwrap();
+    }
+    let a_before = asset(&markets).a_long;
+    let epoch_before = header.risk_epoch.get();
+    {
+        let (_, s) = accts.split_at_mut(2);
+        assert_eq!(rebalance(&mut header, &mut markets, &mut s[0], 1_000).unwrap(), 1_000);
+    }
+    assert!(asset(&markets).a_long < a_before);
+    assert_eq!(header.risk_epoch.get(), epoch_before);
+    assert!(current_certificate_is_conservative(&header, &markets, &accts[1]));
+
+    // One long alone on its haircut side: its index rises as it reduces, and no other leg
+    // is there to be affected.
+    let (mut header, mut markets) = market();
+    let mut accts = vec![account(40), account(41)];
+    for a in accts.iter_mut() {
+        deposit(&mut header, &mut markets, a);
+    }
+    let mut sole_rises = 0u32;
+    {
+        let (l, s) = accts.split_at_mut(1);
+        trade(&mut header, &mut markets, &mut l[0], &mut s[0], 750_000).unwrap();
+        rebalance(&mut header, &mut markets, &mut s[0], 512_345).unwrap();
+        let epoch_before = header.risk_epoch.get();
+        for _ in 0..500 {
+            let a_before = asset(&markets).a_long;
+            trade(&mut header, &mut markets, &mut s[0], &mut l[0], 1).unwrap();
+            sole_rises += u32::from(asset(&markets).a_long > a_before);
+        }
+        assert_eq!(header.risk_epoch.get(), epoch_before);
+    }
+    assert!(sole_rises > 0);
+    eprintln!(
+        "index rises with a peer: {index_rises}, peer quantity rises: {peer_quantity_rises}, \
+         sole-leg index rises: {sole_rises}"
+    );
+}
+
+/// A single-fill trade certifies both accounts incrementally, from the position each leg had
+/// and the position it has now. On a haircut side the reducing leg can end below the quantity
+/// the fill asked for, so the certificate has to be built from the leg as stored: it must equal
+/// a full refresh of the same account in the same state.
+#[test]
+fn issue_449_a_fill_certifies_the_position_it_left() {
+    let (mut header, mut markets, mut accts) = issue_state();
+    {
+        let (_, s) = accts.split_at_mut(2);
+        assert_eq!(rebalance(&mut header, &mut markets, &mut s[0], 12_345).unwrap(), 12_345);
+    }
+    // Haircuts leave certificates alone (they only got more conservative), so the two accounts'
+    // certificates still describe their opening positions. Refresh them: from here on each
+    // fill builds its certificate from an exact one.
+    for who in [0, 2] {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut view = PortfolioV16ViewMut::new(&mut accts[who]);
+        market.full_account_refresh_not_atomic(&mut view).unwrap();
+    }
+    let mut below_request = 0u32;
+    for step in 0..500 {
+        let before = long_effective(&markets, &accts[0]);
+        {
+            let (l, s) = accts.split_at_mut(2);
+            trade(&mut header, &mut markets, &mut s[0], &mut l[0], 1).unwrap();
+        }
+        let after = long_effective(&markets, &accts[0]);
+        assert!(after < before && before - after <= 3, "step {step}: {before} -> {after}");
+        below_request += u32::from(before - after > 1);
+        for who in [0, 2] {
+            let stored = accts[who].health_cert.try_to_runtime().unwrap();
+            let mut header_copy = header.clone();
+            let mut markets_copy = markets.clone();
+            let mut account_copy = accts[who].clone();
+            let mut market = MarketGroupV16ViewMut::new(&mut header_copy, &mut markets_copy);
+            let mut view = PortfolioV16ViewMut::new(&mut account_copy);
+            let full = market.full_account_refresh_not_atomic(&mut view).unwrap();
+            assert_eq!(stored, full, "step {step}: account {who} after the fill");
+        }
+    }
+    assert!(below_request > 0, "no fill left the reducer below its request");
 }

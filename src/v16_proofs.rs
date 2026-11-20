@@ -1629,7 +1629,9 @@ fn contract_check_kernel_resize_leg_same_side() {
         pending_obligation_count_long: kani::any(),
         pending_obligation_count_short: kani::any(),
         loss_weight_sum_long: kani::any(),
+        raw_basis_sum_long_q: kani::any(),
         loss_weight_sum_short: kani::any(),
+        raw_basis_sum_short_q: kani::any(),
         social_loss_remainder_long_num: kani::any(),
         social_loss_remainder_short_num: kani::any(),
         social_loss_dust_long_num: kani::any(),
@@ -1705,7 +1707,9 @@ fn contract_check_kernel_attach_leg() {
         pending_obligation_count_long: kani::any(),
         pending_obligation_count_short: kani::any(),
         loss_weight_sum_long: kani::any(),
+        raw_basis_sum_long_q: kani::any(),
         loss_weight_sum_short: kani::any(),
+        raw_basis_sum_short_q: kani::any(),
         social_loss_remainder_long_num: kani::any(),
         social_loss_remainder_short_num: kani::any(),
         social_loss_dust_long_num: kani::any(),
@@ -1740,6 +1744,50 @@ fn contract_check_kernel_attach_leg() {
         basis_pos_q,
         loss_weight,
         asset_index_u32,
+    );
+}
+
+// #449: contract check of the derived side A index,
+// floor(ADL_ONE * oi_eff / raw_basis_sum). The operands are bounded to 8 bits:
+// a symbolic u128 division resists Kani at full width. The same contract for
+// every input is the subject of the Aristotle property K59, and
+// tests/adl_side_index_449.rs checks it on boundary and random operands up to
+// MAX_OI_SIDE_Q.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_side_adl_index)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_side_adl_index() {
+    let oi_eff_q: u8 = kani::any();
+    let raw_basis_sum_q: u8 = kani::any();
+    let current_a: u128 = kani::any();
+    let _ = V16Core::kernel_side_adl_index(
+        u128::from(oi_eff_q),
+        u128::from(raw_basis_sum_q),
+        current_a,
+    );
+}
+
+// #449: contract check of the raw basis a leg keeps after a same-side
+// reduction on a haircut side, on the same 8-bit grid (see above; Aristotle
+// property K60).
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_raw_basis_after_adl_reduction)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_raw_basis_after_adl_reduction() {
+    let raw_abs_q: u8 = kani::any();
+    let effective_abs_q: u8 = kani::any();
+    let next_effective_abs_q: u8 = kani::any();
+    let oi_eff_q: u8 = kani::any();
+    let raw_basis_sum_q: u8 = kani::any();
+    kani::assume(raw_abs_q <= raw_basis_sum_q);
+    let _ = V16Core::kernel_raw_basis_after_adl_reduction(
+        u128::from(raw_abs_q),
+        u128::from(effective_abs_q),
+        u128::from(next_effective_abs_q),
+        u128::from(oi_eff_q),
+        u128::from(raw_basis_sum_q),
     );
 }
 
@@ -1814,7 +1862,9 @@ fn contract_check_kernel_clear_leg() {
         pending_obligation_count_long: kani::any(),
         pending_obligation_count_short: kani::any(),
         loss_weight_sum_long: kani::any(),
+        raw_basis_sum_long_q: kani::any(),
         loss_weight_sum_short: kani::any(),
+        raw_basis_sum_short_q: kani::any(),
         social_loss_remainder_long_num: kani::any(),
         social_loss_remainder_short_num: kani::any(),
         social_loss_dust_long_num: kani::any(),
@@ -2083,11 +2133,87 @@ fn kani_any_loss_weight(_abs_basis_q: u128, _a_basis: u128) -> V16Result<u128> {
     Ok(w)
 }
 
+// The side A index is derived again after every leg change (#449), and its
+// general case divides (`ADL_ONE * oi_eff / raw_basis_sum`): the same class of
+// primitive as loss_weight_for_basis. This abstraction keeps the index
+// kernel's exact cases (no raw basis: the index is unchanged; more effective
+// OI than raw basis: rejected; equal totals: unit A) and over-approximates
+// only the division-bearing branch, by any index its contract allows there or
+// its overflow error. The value in that branch is kernel_side_adl_index's own
+// contract (contract_check_kernel_side_adl_index); the compositions below
+// assert where things are written and how the side totals move.
+#[cfg(all(kani, feature = "contracts"))]
+fn axiom_side_adl_index_without_division(
+    oi_eff_q: u128,
+    raw_basis_sum_q: u128,
+    current_a: u128,
+) -> V16Result<u128> {
+    if raw_basis_sum_q == 0 {
+        return Ok(current_a);
+    }
+    if oi_eff_q > raw_basis_sum_q {
+        return Err(V16Error::InvalidLeg);
+    }
+    if oi_eff_q == raw_basis_sum_q {
+        return Ok(ADL_ONE);
+    }
+    if kani::any() {
+        return Err(V16Error::ArithmeticOverflow);
+    }
+    let a: u128 = kani::any();
+    kani::assume(a >= 1 && a < ADL_ONE);
+    Ok(a)
+}
+
+// kernel_sync_side_adl_index, statement for statement, with the index taken
+// from the abstraction above. The index kernel carries a contract, so it
+// cannot be replaced by a plain stub itself; the step that writes its result
+// carries none and is replaced by this mirror.
+#[cfg(all(kani, feature = "contracts"))]
+fn axiom_sync_side_adl_index_without_division(
+    mut asset: AssetStateV16,
+    side: SideV16,
+) -> V16Result<AssetStateV16> {
+    match side {
+        SideV16::Long => {
+            asset.a_long = axiom_side_adl_index_without_division(
+                asset.oi_eff_long_q,
+                asset.raw_basis_sum_long_q,
+                asset.a_long,
+            )?;
+            if asset.oi_eff_long_q != 0
+                && asset.a_long < MIN_A_SIDE
+                && asset.mode_long == SideModeV16::Normal
+            {
+                asset.mode_long = SideModeV16::DrainOnly;
+            }
+        }
+        SideV16::Short => {
+            asset.a_short = axiom_side_adl_index_without_division(
+                asset.oi_eff_short_q,
+                asset.raw_basis_sum_short_q,
+                asset.a_short,
+            )?;
+            if asset.oi_eff_short_q != 0
+                && asset.a_short < MIN_A_SIDE
+                && asset.mode_short == SideModeV16::Normal
+            {
+                asset.mode_short = SideModeV16::DrainOnly;
+            }
+        }
+    }
+    Ok(asset)
+}
+
 #[cfg(all(kani, feature = "contracts"))]
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 #[kani::stub(crate::v16::loss_weight_for_basis, kani_any_loss_weight)]
+#[kani::stub(
+    V16Core::kernel_sync_side_adl_index,
+    axiom_sync_side_adl_index_without_division
+)]
 #[kani::stub_verified(V16Core::kernel_attach_leg)]
 fn composition_attach_body_frame_division_stubbed() {
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
@@ -2142,8 +2268,10 @@ fn composition_attach_body_frame_division_stubbed() {
 }
 
 // Composition frame for clear_leg: stub_verified(kernel_clear_leg) abstracts
-// the asset transform (the body has NO division — it uses the leg's existing
+// the asset transform (the kernel has NO division — it uses the leg's existing
 // weight), so only the kernel-contract-check interaction needs the stub. The
+// side index derived after the clear is abstracted like the weight
+// (axiom_sync_side_adl_index_without_division). The
 // whole-body frame: clearing the leg at the active slot sets that leg EMPTY,
 // clears its bitmap bit, and invalidates the cert — every OTHER leg and
 // account field frozen.
@@ -2152,6 +2280,10 @@ fn composition_attach_body_frame_division_stubbed() {
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 #[kani::stub(crate::v16::loss_weight_for_basis, kani_any_loss_weight)]
+#[kani::stub(
+    V16Core::kernel_sync_side_adl_index,
+    axiom_sync_side_adl_index_without_division
+)]
 #[kani::stub_verified(V16Core::kernel_clear_leg)]
 #[kani::stub_verified(V16Core::kernel_attach_leg)]
 fn composition_clear_leg_body_frame() {
@@ -2374,6 +2506,10 @@ fn axiom_loss_weight_nonzero(_abs: u128, a: u128) -> V16Result<u128> {
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 #[kani::stub(crate::v16::loss_weight_for_basis, axiom_loss_weight_nonzero)]
+#[kani::stub(
+    V16Core::kernel_sync_side_adl_index,
+    axiom_sync_side_adl_index_without_division
+)]
 #[kani::stub_verified(V16Core::kernel_attach_leg)]
 fn composition_attach_value_conservation_under_axiom() {
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
@@ -2404,6 +2540,12 @@ fn composition_attach_value_conservation_under_axiom() {
         .try_to_runtime()
         .unwrap()
         .loss_weight_sum_long;
+    let raw0 = markets[0]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap()
+        .raw_basis_sum_long_q;
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -2421,11 +2563,14 @@ fn composition_attach_value_conservation_under_axiom() {
     // fields the ensures pins round-trip losslessly.
     let oi1 = markets[0].engine.asset.oi_eff_long_q.get();
     let ws1 = markets[0].engine.asset.loss_weight_sum_long.get();
+    let raw1 = markets[0].engine.asset.raw_basis_sum_long_q.get();
     let leg_weight = account_header.legs[0].loss_weight.get();
     let leg_basis = account_header.legs[0].basis_pos_q.get();
-    // CONSERVATION (no wide arithmetic): OI rises by exactly abs; the side
-    // weight sum rises by exactly the weight written to the leg.
+    // CONSERVATION (no wide arithmetic): OI and the side's raw basis sum rise
+    // by exactly abs; the side weight sum rises by exactly the weight written
+    // to the leg.
     assert_eq!(oi1, oi0.wrapping_add(abs));
+    assert_eq!(raw1, raw0.wrapping_add(abs));
     assert_eq!(ws1, ws0.wrapping_add(leg_weight));
     assert_eq!(leg_basis, basis);
 }
@@ -2612,6 +2757,10 @@ fn composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
 #[kani::stub(crate::v16::loss_weight_for_basis, axiom_loss_weight_nonzero)]
+#[kani::stub(
+    V16Core::kernel_sync_side_adl_index,
+    axiom_sync_side_adl_index_without_division
+)]
 #[kani::stub_verified(V16Core::kernel_clear_leg)]
 #[kani::stub_verified(V16Core::kernel_attach_leg)]
 fn composition_clear_leg_value_conservation() {
@@ -2642,6 +2791,12 @@ fn composition_clear_leg_value_conservation() {
         .try_to_runtime()
         .unwrap()
         .loss_weight_sum_long;
+    let raw0 = markets[0]
+        .engine
+        .asset
+        .try_to_runtime()
+        .unwrap()
+        .raw_basis_sum_long_q;
     {
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut account = PortfolioV16ViewMut::new(&mut account_header);
@@ -2655,6 +2810,7 @@ fn composition_clear_leg_value_conservation() {
     // post-attach asset/leg state, read RAW (the attach kernel havoc'd the POD)
     let oi_mid = markets[0].engine.asset.oi_eff_long_q.get();
     let ws_mid = markets[0].engine.asset.loss_weight_sum_long.get();
+    let raw_mid = markets[0].engine.asset.raw_basis_sum_long_q.get();
     let leg_weight = account_header.legs[0].loss_weight.get();
     let leg_abs = account_header.legs[0].basis_pos_q.get().unsigned_abs();
     {
@@ -2667,11 +2823,14 @@ fn composition_clear_leg_value_conservation() {
     kani::cover!(true, "clear value-conservation reached");
     let oi1 = markets[0].engine.asset.oi_eff_long_q.get();
     let ws1 = markets[0].engine.asset.loss_weight_sum_long.get();
+    let raw1 = markets[0].engine.asset.raw_basis_sum_long_q.get();
     // CONSERVATION: clear removes EXACTLY the leg's stored basis/weight ...
     assert_eq!(oi1, oi_mid.wrapping_sub(leg_abs));
+    assert_eq!(raw1, raw_mid.wrapping_sub(leg_abs));
     assert_eq!(ws1, ws_mid.wrapping_sub(leg_weight));
     // ... and attach;clear is an exact round-trip back to the pre-attach asset.
     assert_eq!(oi1, oi0);
+    assert_eq!(raw1, raw0);
     assert_eq!(ws1, ws0);
 }
 
@@ -3342,12 +3501,13 @@ fn proof_principal_cure_preserves_close_ledger_partition() {
 
 /// Issue #132: the two leg-teardown kernels remove zero effective OI for a
 /// current-epoch nonzero-basis leg only when that leg's side has none left
-/// (per-leg effective quantities round up while the side A index rounds down,
-/// so earlier exits can consume the whole side). On such a side the zero
-/// removal succeeds whenever the leg's own counters are present, and changes
-/// only those. On any other side it is rejected, so a live leg can never
-/// detach, or convert to a pending obligation, and leave its effective OI
-/// behind.
+/// (per-leg effective quantities round up and a leg that leaves takes its
+/// whole rounded-up quantity, so earlier exits can consume the whole side).
+/// On such a side the zero removal succeeds whenever the leg's own counters
+/// are present, its raw basis in the side's raw basis sum among them (#449),
+/// and changes only those. On any other side it is rejected, so a live leg
+/// can never detach, or convert to a pending obligation, and leave its
+/// effective OI behind.
 ///
 /// Closure layer (plain proof over the kernel bodies, no contract machinery).
 #[cfg(all(kani, feature = "closure"))]
@@ -3359,26 +3519,29 @@ fn closure_leg_teardown_removes_zero_effective_oi_only_on_an_exhausted_side() {
     let removed_q: u128 = kani::any();
     kani::assume(leg.basis_pos_q > i128::MIN);
     let raw_abs_q = leg.basis_pos_q.unsigned_abs();
-    let (side_oi_q, side_epoch, side_mode, stored, pending, weight_sum, dust) = match leg.side {
-        SideV16::Long => (
-            asset.oi_eff_long_q,
-            asset.epoch_long,
-            asset.mode_long,
-            asset.stored_pos_count_long,
-            asset.pending_obligation_count_long,
-            asset.loss_weight_sum_long,
-            asset.social_loss_dust_long_num,
-        ),
-        SideV16::Short => (
-            asset.oi_eff_short_q,
-            asset.epoch_short,
-            asset.mode_short,
-            asset.stored_pos_count_short,
-            asset.pending_obligation_count_short,
-            asset.loss_weight_sum_short,
-            asset.social_loss_dust_short_num,
-        ),
-    };
+    let (side_oi_q, raw_sum_q, side_epoch, side_mode, stored, pending, weight_sum, dust) =
+        match leg.side {
+            SideV16::Long => (
+                asset.oi_eff_long_q,
+                asset.raw_basis_sum_long_q,
+                asset.epoch_long,
+                asset.mode_long,
+                asset.stored_pos_count_long,
+                asset.pending_obligation_count_long,
+                asset.loss_weight_sum_long,
+                asset.social_loss_dust_long_num,
+            ),
+            SideV16::Short => (
+                asset.oi_eff_short_q,
+                asset.raw_basis_sum_short_q,
+                asset.epoch_short,
+                asset.mode_short,
+                asset.stored_pos_count_short,
+                asset.pending_obligation_count_short,
+                asset.loss_weight_sum_short,
+                asset.social_loss_dust_short_num,
+            ),
+        };
     let prior_reset =
         side_mode == SideModeV16::ResetPending && leg.epoch_snap.checked_add(1) == Some(side_epoch);
     let live_leg = leg.active && raw_abs_q != 0 && !prior_reset;
@@ -3414,52 +3577,72 @@ fn closure_leg_teardown_removes_zero_effective_oi_only_on_an_exhausted_side() {
             pending != 0,
             "exhausted side still carrying a pending obligation"
         );
-        if stored != 0
+        let clear_counters_present = stored != 0
             && weight_sum >= leg.loss_weight
             && leg.b_rem < SOCIAL_LOSS_DEN
-            && dust < SOCIAL_LOSS_DEN
-        {
+            && dust < SOCIAL_LOSS_DEN;
+        if raw_sum_q < raw_abs_q {
+            // The side's raw basis sum does not hold this leg's raw basis:
+            // both kernels refuse instead of wrapping the sum.
+            if clear_counters_present {
+                assert_eq!(cleared, Err(V16Error::CounterUnderflow));
+            }
+            if leg.loss_weight != 0 {
+                assert_eq!(retained, Err(V16Error::CounterUnderflow));
+            }
+        }
+        if clear_counters_present && raw_sum_q >= raw_abs_q {
             let after = cleared.unwrap();
-            let (oi, stored_after, pending_after, weight_after) = match leg.side {
+            let (oi, raw_after, stored_after, pending_after, weight_after) = match leg.side {
                 SideV16::Long => (
                     after.oi_eff_long_q,
+                    after.raw_basis_sum_long_q,
                     after.stored_pos_count_long,
                     after.pending_obligation_count_long,
                     after.loss_weight_sum_long,
                 ),
                 SideV16::Short => (
                     after.oi_eff_short_q,
+                    after.raw_basis_sum_short_q,
                     after.stored_pos_count_short,
                     after.pending_obligation_count_short,
                     after.loss_weight_sum_short,
                 ),
             };
             assert_eq!(
-                (oi, stored_after, pending_after, weight_after),
-                (0, stored - 1, pending, weight_sum - leg.loss_weight)
+                (oi, raw_after, stored_after, pending_after, weight_after),
+                (
+                    0,
+                    raw_sum_q - raw_abs_q,
+                    stored - 1,
+                    pending,
+                    weight_sum - leg.loss_weight
+                )
             );
         }
-        if leg.loss_weight != 0 && pending != u64::MAX {
+        if leg.loss_weight != 0 && pending != u64::MAX && raw_sum_q >= raw_abs_q {
             let (obligation, after) = retained.unwrap();
             assert!(obligation.active && obligation.basis_pos_q == 0);
             assert_eq!(obligation.loss_weight, leg.loss_weight);
-            let (oi, stored_after, pending_after, weight_after) = match leg.side {
+            let (oi, raw_after, stored_after, pending_after, weight_after) = match leg.side {
                 SideV16::Long => (
                     after.oi_eff_long_q,
+                    after.raw_basis_sum_long_q,
                     after.stored_pos_count_long,
                     after.pending_obligation_count_long,
                     after.loss_weight_sum_long,
                 ),
                 SideV16::Short => (
                     after.oi_eff_short_q,
+                    after.raw_basis_sum_short_q,
                     after.stored_pos_count_short,
                     after.pending_obligation_count_short,
                     after.loss_weight_sum_short,
                 ),
             };
             assert_eq!(
-                (oi, stored_after, pending_after, weight_after),
-                (0, stored, pending + 1, weight_sum)
+                (oi, raw_after, stored_after, pending_after, weight_after),
+                (0, raw_sum_q - raw_abs_q, stored, pending + 1, weight_sum)
             );
         }
     }

@@ -2388,7 +2388,9 @@ fn v16_crossed_trade_cannot_spend_same_call_addition_as_preexisting_oi() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SURVIVOR_Q;
+    asset.raw_basis_sum_long_q = SURVIVOR_Q;
     asset.loss_weight_sum_short = MATCHED_Q;
+    asset.raw_basis_sum_short_q = MATCHED_Q;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.resolved_payout_blocker_count = V16PodU64::new(2);
 
@@ -2492,7 +2494,9 @@ fn v16_exact_oi_cross_starts_reset_for_adl_basis_residue() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SURVIVOR_Q;
+    asset.raw_basis_sum_long_q = SURVIVOR_Q;
     asset.loss_weight_sum_short = MATCHED_Q;
+    asset.raw_basis_sum_short_q = MATCHED_Q;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.resolved_payout_blocker_count = V16PodU64::new(2);
 
@@ -2592,7 +2596,9 @@ fn v16_exact_oi_unilateral_reduce_starts_reset_for_adl_basis_residue() {
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     asset.loss_weight_sum_long = SURVIVOR_Q;
+    asset.raw_basis_sum_long_q = SURVIVOR_Q;
     asset.loss_weight_sum_short = MATCHED_Q;
+    asset.raw_basis_sum_short_q = MATCHED_Q;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.resolved_payout_blocker_count = V16PodU64::new(2);
 
@@ -3530,7 +3536,9 @@ fn v16_public_empty_asset_oracle_anchor_reset_rejects_any_group_position_state()
     other_asset.stored_pos_count_long = 1;
     other_asset.stored_pos_count_short = 1;
     other_asset.loss_weight_sum_long = POS_SCALE;
+    other_asset.raw_basis_sum_long_q = POS_SCALE;
     other_asset.loss_weight_sum_short = POS_SCALE;
+    other_asset.raw_basis_sum_short_q = POS_SCALE;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&other_asset);
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -3912,7 +3920,9 @@ fn v16_retire_normalizes_only_inert_social_loss_audit_state() {
     live_asset.stored_pos_count_long = 1;
     live_asset.stored_pos_count_short = 1;
     live_asset.loss_weight_sum_long = POS_SCALE;
+    live_asset.raw_basis_sum_long_q = POS_SCALE;
     live_asset.loss_weight_sum_short = POS_SCALE;
+    live_asset.raw_basis_sum_short_q = POS_SCALE;
     live_markets[0].engine.asset = AssetStateV16Account::from_runtime(&live_asset);
     let slot_before = live_markets[0].engine;
 
@@ -4976,7 +4986,9 @@ fn v16_public_liquidation_on_unfunded_domain_cannot_drain_shared_insurance() {
     asset.oi_eff_long_q = 2 * POS_SCALE;
     asset.oi_eff_short_q = 2 * POS_SCALE;
     asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset.loss_weight_sum_short = 2 * POS_SCALE;
+    asset.raw_basis_sum_short_q = 2 * POS_SCALE;
     asset.stored_pos_count_long = 2;
     asset.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -5043,7 +5055,9 @@ fn v16_liquidation_engine_selects_full_close_and_allows_dust_min_fee() {
     asset.oi_eff_long_q = POSITION_Q * 2;
     asset.oi_eff_short_q = POSITION_Q * 2;
     asset.loss_weight_sum_long = POSITION_Q * 2;
+    asset.raw_basis_sum_long_q = POSITION_Q * 2;
     asset.loss_weight_sum_short = POSITION_Q * 2;
+    asset.raw_basis_sum_short_q = POSITION_Q * 2;
     asset.stored_pos_count_long = 2;
     asset.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -5127,7 +5141,9 @@ fn v16_liquidation_engine_selects_healthy_partial_before_margin_floor() {
     asset.oi_eff_long_q = POSITION_Q * 2;
     asset.oi_eff_short_q = POSITION_Q * 2;
     asset.loss_weight_sum_long = POSITION_Q * 2;
+    asset.raw_basis_sum_long_q = POSITION_Q * 2;
     asset.loss_weight_sum_short = POSITION_Q * 2;
+    asset.raw_basis_sum_short_q = POSITION_Q * 2;
     asset.stored_pos_count_long = 2;
     asset.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -5195,7 +5211,9 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
     asset0.oi_eff_long_q = 2 * POS_SCALE;
     asset0.oi_eff_short_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.raw_basis_sum_short_q = 2 * POS_SCALE;
     asset0.stored_pos_count_long = 2;
     asset0.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
@@ -5204,7 +5222,9 @@ fn v16_permissionless_liquidation_progresses_when_unrelated_asset_is_loss_stale(
     asset1.oi_eff_long_q = POS_SCALE;
     asset1.oi_eff_short_q = POS_SCALE;
     asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.raw_basis_sum_long_q = POS_SCALE;
     asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.raw_basis_sum_short_q = POS_SCALE;
     asset1.stored_pos_count_long = 1;
     asset1.stored_pos_count_short = 1;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
@@ -5355,7 +5375,9 @@ fn v16_b_index_headroom_exhaustion_declares_value_neutral_recovery() {
         asset.stored_pos_count_long = 1;
         asset.stored_pos_count_short = 1;
         asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
+        asset.raw_basis_sum_long_q = SOCIAL_LOSS_DEN;
         asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
+        asset.raw_basis_sum_short_q = SOCIAL_LOSS_DEN;
         asset.b_short_num = u128::MAX;
         asset.social_loss_remainder_short_num = 0;
         markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -7997,7 +8019,9 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
     asset0.oi_eff_long_q = POS_SCALE;
     asset0.oi_eff_short_q = POS_SCALE;
     asset0.loss_weight_sum_long = POS_SCALE;
+    asset0.raw_basis_sum_long_q = POS_SCALE;
     asset0.loss_weight_sum_short = POS_SCALE;
+    asset0.raw_basis_sum_short_q = POS_SCALE;
     asset0.stored_pos_count_long = 1;
     asset0.stored_pos_count_short = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
@@ -8007,7 +8031,9 @@ fn v16_auto_crank_skips_recovery_first_leg_for_live_refresh() {
     asset1.oi_eff_long_q = POS_SCALE;
     asset1.oi_eff_short_q = POS_SCALE;
     asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.raw_basis_sum_long_q = POS_SCALE;
     asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.raw_basis_sum_short_q = POS_SCALE;
     asset1.stored_pos_count_long = 1;
     asset1.stored_pos_count_short = 1;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
@@ -8135,6 +8161,7 @@ fn v16_fractional_social_loss_carry_normalizes_on_reset_and_clear() {
             SideV16::Long => {
                 clear_asset.oi_eff_long_q = basis_q;
                 clear_asset.loss_weight_sum_long = basis_q;
+                clear_asset.raw_basis_sum_long_q = basis_q;
                 clear_asset.stored_pos_count_long = 1;
                 clear_asset.social_loss_dust_long_num = SOCIAL_LOSS_DEN / 2;
                 clear_asset.explicit_unallocated_loss_long = 11;
@@ -8142,6 +8169,7 @@ fn v16_fractional_social_loss_carry_normalizes_on_reset_and_clear() {
             SideV16::Short => {
                 clear_asset.oi_eff_short_q = basis_q;
                 clear_asset.loss_weight_sum_short = basis_q;
+                clear_asset.raw_basis_sum_short_q = basis_q;
                 clear_asset.stored_pos_count_short = 1;
                 clear_asset.social_loss_dust_short_num = SOCIAL_LOSS_DEN / 2;
                 clear_asset.explicit_unallocated_loss_short = 11;
@@ -8201,7 +8229,9 @@ fn v16_auto_crank_detaches_prior_reset_obligation_after_asset_recovery() {
     asset.oi_eff_long_q = 0;
     asset.oi_eff_short_q = 0;
     asset.loss_weight_sum_long = 0;
+    asset.raw_basis_sum_long_q = 0;
     asset.loss_weight_sum_short = 0;
+    asset.raw_basis_sum_short_q = 0;
     asset.stored_pos_count_long = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.resolved_payout_blocker_count = V16PodU64::new(1);
@@ -8279,7 +8309,9 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
     asset0.oi_eff_long_q = 0;
     asset0.oi_eff_short_q = 0;
     asset0.loss_weight_sum_long = 0;
+    asset0.raw_basis_sum_long_q = 0;
     asset0.loss_weight_sum_short = 0;
+    asset0.raw_basis_sum_short_q = 0;
     asset0.stored_pos_count_long = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
 
@@ -8288,7 +8320,9 @@ fn v16_auto_crank_skips_prior_reset_obligation_for_live_liquidation() {
     asset1.oi_eff_long_q = 2 * POS_SCALE;
     asset1.oi_eff_short_q = 2 * POS_SCALE;
     asset1.loss_weight_sum_long = 2 * POS_SCALE;
+    asset1.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset1.loss_weight_sum_short = 2 * POS_SCALE;
+    asset1.raw_basis_sum_short_q = 2 * POS_SCALE;
     asset1.stored_pos_count_long = 2;
     asset1.stored_pos_count_short = 2;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
@@ -8399,7 +8433,9 @@ fn v16_adl_reduced_basis_caps_exit_to_effective_oi_then_detaches_residue() {
     asset.oi_eff_short_q = POS_SCALE;
     asset.a_long = ADL_ONE / 2;
     asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -8458,8 +8494,11 @@ fn v16_auto_crank_migrates_legacy_normal_adl_residue_into_reset_cleanup() {
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = 0;
     asset.oi_eff_short_q = 0;
-    asset.a_long = ADL_ONE / 2;
+    // An exhausted side: no effective OI under a leg that still has raw basis,
+    // so the index derived from the two totals is the smallest one.
+    asset.a_long = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.stored_pos_count_long = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.resolved_payout_blocker_count = V16PodU64::new(1);
@@ -8518,8 +8557,11 @@ fn v16_resolved_close_migrates_legacy_normal_adl_residue_before_detach() {
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = 0;
     asset.oi_eff_short_q = 0;
-    asset.a_long = ADL_ONE / 2;
+    // An exhausted side: no effective OI under a leg that still has raw basis,
+    // so the index derived from the two totals is the smallest one.
+    asset.a_long = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.stored_pos_count_long = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.resolved_payout_blocker_count = V16PodU64::new(1);
@@ -8573,7 +8615,9 @@ fn v16_resolved_close_caps_adl_reduced_basis_before_reset_detach() {
     asset.oi_eff_short_q = POS_SCALE;
     asset.a_long = ADL_ONE / 2;
     asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -8633,8 +8677,11 @@ fn v16_recovery_forfeit_migrates_legacy_normal_adl_residue_before_detach() {
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = 0;
     asset.oi_eff_short_q = 0;
-    asset.a_long = ADL_ONE / 2;
+    // An exhausted side: no effective OI under a leg that still has raw basis,
+    // so the index derived from the two totals is the smallest one.
+    asset.a_long = 1;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.stored_pos_count_long = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.resolved_payout_blocker_count = V16PodU64::new(1);
@@ -8696,6 +8743,7 @@ fn v16_recovery_forfeit_commits_terminal_recovery_when_absorbing_side_is_empty()
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = POS_SCALE;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.stored_pos_count_long = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     header.negative_pnl_account_count = V16PodU64::new(1);
@@ -9061,7 +9109,9 @@ fn v16_auto_crank_clears_released_recovery_obligation_with_finalized_close() {
         asset.pending_obligation_count_long = 0;
         asset.pending_obligation_count_short = 1;
         asset.loss_weight_sum_long = 0;
+        asset.raw_basis_sum_long_q = 0;
         asset.loss_weight_sum_short = 30_000;
+        asset.raw_basis_sum_short_q = 0;
         markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
 
         account_header.capital = V16PodU128::new(7);
@@ -9270,7 +9320,9 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
     asset0.oi_eff_long_q = 2 * POS_SCALE;
     asset0.oi_eff_short_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.raw_basis_sum_short_q = 2 * POS_SCALE;
     asset0.stored_pos_count_long = 2;
     asset0.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
@@ -9279,7 +9331,9 @@ fn v16_auto_crank_drives_stale_underwater_account_to_derisked_fixed_point() {
     asset1.oi_eff_long_q = POS_SCALE;
     asset1.oi_eff_short_q = POS_SCALE;
     asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.raw_basis_sum_long_q = POS_SCALE;
     asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.raw_basis_sum_short_q = POS_SCALE;
     asset1.stored_pos_count_long = 1;
     asset1.stored_pos_count_short = 1;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
@@ -9735,7 +9789,9 @@ fn v16_auto_crank_liquidates_current_account_without_observation() {
     asset.oi_eff_long_q = 2 * POS_SCALE;
     asset.oi_eff_short_q = 2 * POS_SCALE;
     asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset.loss_weight_sum_short = 2 * POS_SCALE;
+    asset.raw_basis_sum_short_q = 2 * POS_SCALE;
     asset.stored_pos_count_long = 2;
     asset.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -9815,7 +9871,9 @@ fn v16_auto_crank_commits_recovery_for_uncovered_cross_margin_liquidation() {
         asset.oi_eff_long_q = 2 * POS_SCALE;
         asset.oi_eff_short_q = 2 * POS_SCALE;
         asset.loss_weight_sum_long = 2 * POS_SCALE;
+        asset.raw_basis_sum_long_q = 2 * POS_SCALE;
         asset.loss_weight_sum_short = 2 * POS_SCALE;
+        asset.raw_basis_sum_short_q = 2 * POS_SCALE;
         asset.stored_pos_count_long = 2;
         asset.stored_pos_count_short = 2;
         market_slot.engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -10094,7 +10152,9 @@ fn v16_auto_crank_settles_b_stale_leg() {
     asset0.oi_eff_long_q = POS_SCALE;
     asset0.oi_eff_short_q = POS_SCALE;
     asset0.loss_weight_sum_long = POS_SCALE;
+    asset0.raw_basis_sum_long_q = POS_SCALE;
     asset0.loss_weight_sum_short = POS_SCALE;
+    asset0.raw_basis_sum_short_q = POS_SCALE;
     asset0.stored_pos_count_long = 1;
     asset0.stored_pos_count_short = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
@@ -10172,7 +10232,9 @@ fn v16_auto_crank_settles_latent_b_delta_on_recovery_leg() {
     asset.oi_eff_long_q = POS_SCALE;
     asset.oi_eff_short_q = POS_SCALE;
     asset.loss_weight_sum_long = POS_SCALE;
+    asset.raw_basis_sum_long_q = POS_SCALE;
     asset.loss_weight_sum_short = POS_SCALE;
+    asset.raw_basis_sum_short_q = POS_SCALE;
     asset.stored_pos_count_long = 1;
     asset.stored_pos_count_short = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -10421,7 +10483,9 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
             asset0.oi_eff_long_q = POS_SCALE;
             asset0.oi_eff_short_q = POS_SCALE;
             asset0.loss_weight_sum_long = POS_SCALE;
+            asset0.raw_basis_sum_long_q = POS_SCALE;
             asset0.loss_weight_sum_short = POS_SCALE;
+            asset0.raw_basis_sum_short_q = POS_SCALE;
             asset0.stored_pos_count_long = 1;
             asset0.stored_pos_count_short = 1;
             markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
@@ -10531,7 +10595,9 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
             asset.oi_eff_long_q = 2 * POS_SCALE;
             asset.oi_eff_short_q = 2 * POS_SCALE;
             asset.loss_weight_sum_long = 2 * POS_SCALE;
+            asset.raw_basis_sum_long_q = 2 * POS_SCALE;
             asset.loss_weight_sum_short = 2 * POS_SCALE;
+            asset.raw_basis_sum_short_q = 2 * POS_SCALE;
             asset.stored_pos_count_long = 2;
             asset.stored_pos_count_short = 2;
             markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -11017,15 +11083,22 @@ fn side_oi_over_cap_fixture(
             market.deposit_not_atomic(acct, DEPOSIT).unwrap();
         }
         side_oi_cap_trade(&mut market, &mut a, &mut b, HALF_Q).unwrap();
+        // Hide most of the first pair from both side totals (effective OI and
+        // the raw basis it rests on, so the sides stay at unit A) while the
+        // second pair opens under the cap, then put it back.
         let hidden = HALF_Q - 1;
         let mut asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
         asset.oi_eff_long_q -= hidden;
         asset.oi_eff_short_q -= hidden;
+        asset.raw_basis_sum_long_q -= hidden;
+        asset.raw_basis_sum_short_q -= hidden;
         market.markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
         side_oi_cap_trade(&mut market, &mut c, &mut d, HALF_Q).unwrap();
         let mut asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
         asset.oi_eff_long_q += hidden;
         asset.oi_eff_short_q += hidden;
+        asset.raw_basis_sum_long_q += hidden;
+        asset.raw_basis_sum_short_q += hidden;
         market.markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
         let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
         assert_eq!(asset.oi_eff_long_q, 2 * HALF_Q);
@@ -11563,8 +11636,13 @@ fn owner_rebalance(
 /// Opens `RESIDUE_OPEN_Q` at price 1 with the small reducer on `reducer_side`,
 /// lets the reducer rebalance by `reduces[0]`, trades 999 back, then applies
 /// the remaining rebalances. Each rebalance subtracts the holder side's OI
-/// exactly but floors its A index; with the trade in between, two of them
-/// leave the holder's leg one effective atom below that side's OI.
+/// exactly. Before percolator-prog #449 it also scaled the side's A index by
+/// floor, and with the trade in between two of them left the holder's leg one
+/// effective atom below that side's OI: an atom no leg owned. The A index is
+/// now derived from the side's effective OI and raw basis after every
+/// change, so a side's only leg always carries the side's whole effective OI
+/// and these histories leave nothing unowned. The tests below keep the
+/// histories and pin that.
 fn rebalanced_pair_fixture(
     reducer_side: SideV16,
     reduces: &[u128],
@@ -11660,6 +11738,37 @@ fn assert_side_reset_and_empty(market: &MarketGroupV16ViewMut<'_, u64>, side: Si
     );
 }
 
+/// A side that returned to unit A before its last leg left (its effective
+/// OI caught up with its raw basis) empties like a side that was never
+/// haircut: there is nothing to reset.
+#[track_caller]
+fn assert_side_empty_at_unit_a(market: &MarketGroupV16ViewMut<'_, u64>, side: SideV16) {
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    let state = match side {
+        SideV16::Long => (
+            asset.oi_eff_long_q,
+            asset.raw_basis_sum_long_q,
+            asset.loss_weight_sum_long,
+            asset.stored_pos_count_long,
+            asset.mode_long,
+            asset.a_long,
+        ),
+        SideV16::Short => (
+            asset.oi_eff_short_q,
+            asset.raw_basis_sum_short_q,
+            asset.loss_weight_sum_short,
+            asset.stored_pos_count_short,
+            asset.mode_short,
+            asset.a_short,
+        ),
+    };
+    assert_eq!(
+        state,
+        (0, 0, 0, 0, SideModeV16::Normal, ADL_ONE),
+        "{side:?} side (oi_eff, raw basis, loss_weight_sum, stored, mode, A)"
+    );
+}
+
 #[track_caller]
 fn assert_finalizes_to_empty_sides(market: &mut MarketGroupV16ViewMut<'_, u64>, side: SideV16) {
     assert_eq!(
@@ -11703,8 +11812,8 @@ fn v16_legless_side_dropped_when_last_long_closes_after_resolution() {
     );
     assert_eq!(
         leg_effective_q(&markets, &long_header),
-        49_999_998_749_001,
-        "long leg effective_q"
+        asset.oi_eff_long_q,
+        "the only long leg carries the whole long OI"
     );
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -11743,8 +11852,8 @@ fn v16_legless_side_dropped_when_last_short_closes_after_resolution() {
     );
     assert_eq!(
         leg_effective_q(&markets, &short_header),
-        49_999_998_749_001,
-        "short leg effective_q"
+        asset.oi_eff_short_q,
+        "the only short leg carries the whole short OI"
     );
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -11775,55 +11884,58 @@ fn v16_legless_side_dropped_when_last_short_closes_after_resolution() {
 fn v16_legless_side_from_live_trade_out_dropped_by_other_sides_close() {
     let (mut header, mut markets, mut short_header, mut long_header) =
         rebalanced_pair_fixture(SideV16::Short, &[750_000, 500_000], (237, 238));
+    let asset = markets[0].engine.asset.try_to_runtime().unwrap();
     let long_effective_q = leg_effective_q(&markets, &long_header);
-    assert_eq!(long_effective_q, 49_999_998_749_001, "long leg effective_q");
+    assert_eq!(
+        (long_effective_q, leg_effective_q(&markets, &short_header)),
+        (asset.oi_eff_long_q, asset.oi_eff_short_q),
+        "each side's only leg carries its side's whole OI"
+    );
 
     // While Live, the long sells its whole effective size back to the short.
-    // The long leg clears, but the long side keeps one atom of OI that no leg
-    // owns. Under audit-scan the full scan refuses that trade (spec.md:953), so
-    // the test checks the refusal and stops there.
+    // Before #449 the long leg cleared but the long side kept one atom of OI
+    // that no leg owned (and the audit scan refused the trade for it). Now
+    // the trade is the whole OI of both sides: both legs clear, nothing is
+    // left unowned, and the haircut long side starts its reset.
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
-    let trade_out = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+    trade_at(
+        &mut market,
         &mut short,
         &mut long,
-        TradeRequestV16 {
-            asset_index: 0,
-            size_q: signed_q(long_effective_q),
-            exec_price: 1,
-            fee_bps: 0,
-        },
+        signed_q(long_effective_q),
+        1,
     );
-    if cfg!(feature = "audit-scan") {
-        assert_eq!(
-            trade_out.map(|_| ()),
-            Err(V16Error::InvalidConfig),
-            "audit-scan trade_out"
-        );
-        return;
-    }
-    trade_out.unwrap();
+    assert_side_reset_and_empty(&market, SideV16::Long);
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(
         (
-            asset.oi_eff_long_q,
-            asset.loss_weight_sum_long,
-            asset.stored_pos_count_long,
-            asset.mode_long
+            asset.oi_eff_short_q,
+            asset.loss_weight_sum_short,
+            asset.stored_pos_count_short,
+            asset.mode_short,
+            asset.a_short
         ),
-        (1, 0, 0, SideModeV16::Normal),
-        "long side after trade-out (oi_eff, loss_weight_sum, stored, mode)"
+        (0, 0, 0, SideModeV16::Normal, ADL_ONE),
+        "short side after trade-out (oi_eff, loss_weight_sum, stored, mode, A): never haircut, no reset"
     );
+    market.validate_shape().unwrap();
 
-    // The short is the only leg left. Its resolved close also clears the long
-    // side's unowned atom.
+    // Both accounts are flat: each takes its capital out of the resolved
+    // market, and the asset retires.
     market.resolve_market_not_atomic(1).unwrap();
     let result = crank_at_current_slot(&mut market, &mut short);
     assert_eq!(
         result,
         resolved_closed(RESIDUE_REDUCER_CAPITAL),
         "short close result={result:?}"
+    );
+    let result = crank_at_current_slot(&mut market, &mut long);
+    assert_eq!(
+        result,
+        resolved_closed(RESIDUE_HOLDER_CAPITAL),
+        "long close result={result:?}"
     );
     assert_side_reset_and_empty(&market, SideV16::Long);
     assert_finalizes_and_retires(&mut market, SideV16::Long);
@@ -11879,17 +11991,21 @@ fn v16_legless_side_residue_kept_until_last_long_leaves() {
         small_q,
         "small long effective_q"
     );
+    // Before #449 the two long ceilings fell one atom short of the long OI.
+    // With the derived A index they always cover it (and can exceed it by
+    // less than one atom per leg); here they add up to it exactly.
     assert_eq!(
-        asset.oi_eff_long_q - long_effective_q - small_q,
-        1,
-        "long residue (oi_eff_long minus both leg ceilings)"
+        long_effective_q + small_q,
+        asset.oi_eff_long_q,
+        "long ceilings against the long OI"
     );
     let small_loss_weight = small_long_header.legs[0]
         .try_to_runtime()
         .unwrap()
         .loss_weight;
 
-    // The small long is still stored, so the residue stays on the side.
+    // The large long closes its whole ceiling. The small long is then the
+    // side's only leg and carries exactly what the side still holds.
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
     let result = crank_at_current_slot(&mut market, &mut long);
@@ -11906,8 +12022,17 @@ fn v16_legless_side_residue_kept_until_last_long_leaves() {
             after.stored_pos_count_long,
             after.mode_long
         ),
-        (small_q + 1, small_loss_weight, 1, SideModeV16::Normal),
+        (small_q, small_loss_weight, 1, SideModeV16::Normal),
         "long side after first close (oi_eff, loss_weight_sum, stored, mode)"
+    );
+    assert_eq!(
+        (
+            leg_effective_q(market.markets, &small_long_header),
+            after.raw_basis_sum_long_q,
+            after.a_long
+        ),
+        (small_q, small_q, ADL_ONE),
+        "the remaining long leg carries the whole long OI at its raw basis, so A is back at one"
     );
 
     let mut small_long = PortfolioV16ViewMut::new(&mut small_long_header);
@@ -11917,7 +12042,7 @@ fn v16_legless_side_residue_kept_until_last_long_leaves() {
         resolved_closed(RESIDUE_HOLDER_CAPITAL),
         "small long close result={result:?}"
     );
-    assert_side_reset_and_empty(&market, SideV16::Long);
+    assert_side_empty_at_unit_a(&market, SideV16::Long);
 
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
     let result = crank_at_current_slot(&mut market, &mut short);
@@ -11942,7 +12067,9 @@ fn v16_legless_side_of_released_obligation_dropped() {
     market.resolve_market_not_atomic(1).unwrap();
 
     // The short still holds a real position, so forfeit keeps the long's loss
-    // weight as a zero-basis obligation and removes only its effective OI.
+    // weight as a zero-basis obligation and removes its effective OI. That is
+    // the side's whole OI: before #449 one atom stayed behind with no basis
+    // to own it.
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
     let forfeit = market
         .forfeit_recovery_leg_not_atomic(&mut long, 0, u128::MAX)
@@ -11952,11 +12079,12 @@ fn v16_legless_side_of_released_obligation_dropped() {
     assert_eq!(
         (
             asset.oi_eff_long_q,
+            asset.raw_basis_sum_long_q,
             asset.stored_pos_count_long,
             asset.pending_obligation_count_long
         ),
-        (1, 1, 1),
-        "long side with obligation (oi_eff, stored, pending_obligations)"
+        (0, 0, 1, 1),
+        "long side with obligation (oi_eff, raw basis, stored, pending_obligations)"
     );
 
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
@@ -11991,19 +12119,22 @@ fn v16_legless_side_residue_above_last_leg_raw_basis_dropped() {
         let mut long = PortfolioV16ViewMut::new(&mut long_header);
         trade_at(&mut market, &mut short, &mut long, signed_q(sell_q), 1);
     }
-    // The long's raw basis now equals its effective quantity, and the side
-    // still carries the residue, so the side's OI exceeds the leg's raw basis
-    // and cannot be removed through the leg clear.
+    // Before #449 the long's raw basis then equalled its effective quantity
+    // while the side still carried one more atom, which the leg clear could
+    // not remove. Now the reduction leaves the side's only leg with the
+    // side's whole OI, and with raw basis and OI equal the side is back at
+    // unit A.
     let asset = markets[0].engine.asset.try_to_runtime().unwrap();
     let long_leg = long_header.legs[0].try_to_runtime().unwrap();
     assert_eq!(
         (
             long_leg.basis_pos_q.unsigned_abs(),
             leg_effective_q(&markets, &long_header),
-            asset.oi_eff_long_q
+            asset.oi_eff_long_q,
+            asset.a_long
         ),
-        (keep_q, keep_q, keep_q + 1),
-        "(long raw basis, long effective_q, oi_eff_long_q)"
+        (keep_q, keep_q, keep_q, ADL_ONE),
+        "(long raw basis, long effective_q, oi_eff_long_q, a_long)"
     );
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -12015,7 +12146,7 @@ fn v16_legless_side_residue_above_last_leg_raw_basis_dropped() {
         resolved_closed(RESIDUE_HOLDER_CAPITAL),
         "long close result={result:?}"
     );
-    assert_side_reset_and_empty(&market, SideV16::Long);
+    assert_side_empty_at_unit_a(&market, SideV16::Long);
 
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
     let result = crank_at_current_slot(&mut market, &mut short);
@@ -12056,8 +12187,9 @@ fn v16_legless_side_residue_from_partial_liquidations_dropped() {
             PRICE_0,
         );
         // Each 1% rise takes the fully margined short below maintenance. Each
-        // partial liquidation then subtracts the long OI exactly but floors
-        // A_long, the same arithmetic as an owner rebalance.
+        // partial liquidation then subtracts the long OI exactly and re-derives
+        // A_long from the long side's totals, the same arithmetic as an owner
+        // rebalance.
         let liquidation = LiquidationRequestV16 { asset_index: 0 };
         market
             .accrue_asset_to_not_atomic(0, 2, PRICE_1, 0, true)
@@ -12086,12 +12218,11 @@ fn v16_legless_side_residue_from_partial_liquidations_dropped() {
     assert_eq!(asset.oi_eff_long_q, 48_039_407_901_196, "oi_eff_long_q");
     assert_eq!(
         leg_effective_q(&markets, &long_header),
-        asset.oi_eff_long_q - 1,
-        "long leg effective_q"
+        asset.oi_eff_long_q,
+        "the only long leg carries the whole long OI (one atom short of it before #449)"
     );
 
-    // Both accounts carry PnL from the price moves; the payouts are the same
-    // whether or not the residue is zeroed.
+    // Both accounts carry PnL from the price moves.
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
@@ -12149,21 +12280,30 @@ fn v16_legless_side_residue_grown_by_repeated_reduces_dropped() {
             -signed_q(RESIDUE_OPEN_Q),
             1,
         );
-        // Each reduce floors A_long under the long's unchanged raw basis, and
-        // each trade back stores that basis again by floor. The shortfall adds
-        // up instead of staying within one atom.
+        // Before #449 each reduce floored A_long under the long's unchanged
+        // raw basis and each trade back stored that basis again by floor, so
+        // the shortfall added up (ten atoms after these 200 pairs) instead of
+        // staying within one atom. A is now derived from the side's totals
+        // after every step, and no history can separate the two.
         for _ in 0..200 {
             owner_rebalance(&mut market, &mut short, 1_000_000);
             trade_at(&mut market, &mut short, &mut long, 999, 1);
+            let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+            assert_eq!(
+                leg_effective_q(market.markets, long.header),
+                asset.oi_eff_long_q,
+                "the only long leg carries the whole long OI after every pair"
+            );
         }
         market.resolve_market_not_atomic(1).unwrap();
     }
     let asset = markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(
-        asset.oi_eff_long_q - leg_effective_q(&markets, &long_header),
-        10,
-        "long residue after 200 reduce and trade pairs"
+        leg_effective_q(&markets, &long_header),
+        asset.oi_eff_long_q,
+        "long leg effective_q after 200 reduce and trade pairs"
     );
+    assert_ne!(asset.a_long, ADL_ONE, "the long side is still haircut");
 
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
@@ -12194,38 +12334,42 @@ fn v16_legless_side_kept_with_loss_barrier() {
         rebalanced_pair_fixture(SideV16::Short, &[750_000, 500_000], (251, 252));
     let long_effective_q = leg_effective_q(&markets, &long_header);
     {
-        // The Live trade-out leaves one unowned atom on the legless long side;
-        // under audit-scan the trade is refused, so there is nothing to test.
+        // The Live trade-out clears both legs. Before #449 it left one unowned
+        // atom on the legless long side; now the haircut long side holds
+        // nothing and resets at once.
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         let mut long = PortfolioV16ViewMut::new(&mut long_header);
-        let trade_out = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        trade_at(
+            &mut market,
             &mut short,
             &mut long,
-            TradeRequestV16 {
-                asset_index: 0,
-                size_q: signed_q(long_effective_q),
-                exec_price: 1,
-                fee_bps: 0,
-            },
+            signed_q(long_effective_q),
+            1,
         );
-        if cfg!(feature = "audit-scan") {
-            assert_eq!(
-                trade_out.map(|_| ()),
-                Err(V16Error::InvalidConfig),
-                "audit-scan trade_out"
-            );
-            return;
-        }
-        trade_out.unwrap();
+        assert_side_reset_and_empty(&market, SideV16::Long);
+        market.validate_shape().unwrap();
         market.resolve_market_not_atomic(1).unwrap();
     }
-    // A pending loss barrier on the legless long side, written directly.
+    if cfg!(feature = "audit-scan") {
+        // The rest writes OI that no leg owns, which the full scan refuses
+        // (spec §5: effective OI needs loss weight).
+        return;
+    }
+    // The engine keeps its rule for OI on a legless side behind a pending loss
+    // barrier: such OI stays until the barrier clears. No public history
+    // leaves OI unowned any more, so both are written directly: the one atom
+    // the trade-out used to leave on the long side, and a pending loss barrier
+    // on that side.
+    let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+    asset.oi_eff_long_q = 1;
+    asset.mode_long = SideModeV16::Normal;
+    markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
     markets[0].engine.pending_domain_loss_barrier_long = V16PodU64::new(1);
     header.resolved_payout_blocker_count =
         V16PodU64::new(header.resolved_payout_blocker_count.get() + 1);
 
-    // The barrier side keeps its OI, so the short still closes.
+    // The barrier side keeps its OI, and the short still closes.
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
     let result = crank_at_current_slot(&mut market, &mut short);
@@ -12253,8 +12397,8 @@ fn v16_legless_side_kept_with_loss_barrier() {
 fn v16_legless_side_absent_when_legs_exceed_oi() {
     // percolator-prog#449 issue_state(): longs of 500_000 and 250_000 against a
     // 750_000 short at price 1,000,000, then the short reduces 500_000. The long
-    // ceilings, 166_667 + 83_334, exceed the long OI of 250_000 by one, the
-    // opposite of a residue, and the existing caps close it cleanly.
+    // ceilings, 166_667 + 83_334, exceed the long OI of 250_000 by one: each
+    // leg is rounded up on its own. They can never fall short of it.
     const PRICE: u64 = POS_SCALE as u64;
     let (mut header, mut markets) = market_fixture(1, PRICE);
     let mut long_a_header = account_fixture(1, 253);
@@ -12295,26 +12439,31 @@ fn v16_legless_side_absent_when_legs_exceed_oi() {
         resolved_closed(RESIDUE_HOLDER_CAPITAL),
         "long_a close"
     );
-    // The second long is capped at the remaining OI, the side resets, and its
-    // prior-epoch remainder detaches on the next call.
+    // The first close takes its whole ceiling, 166_667, out of the long OI.
+    // A is derived again from what is left, so the second long now carries
+    // exactly the remaining 83_333 and closes in one call. Before #449 its
+    // ceiling stayed at 83_334: the close was capped at the remaining OI, the
+    // side reset, and the prior-epoch remainder needed a second call.
+    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(
+        (
+            after.oi_eff_long_q,
+            leg_effective_q(market.markets, long_b.header)
+        ),
+        (83_333, 83_333),
+        "(oi_eff_long, long_b effective_q) after long_a closed"
+    );
     assert_eq!(
         crank_at_current_slot(&mut market, &mut long_b),
-        Ok(AutoCrankOutcomeV16::ResolvedClose(
-            ResolvedCloseOutcomeV16::ProgressOnly
-        )),
-        "long_b first call"
+        resolved_closed(RESIDUE_HOLDER_CAPITAL),
+        "long_b close"
     );
+    assert_side_reset_and_empty(&market, SideV16::Long);
     assert_eq!(
         crank_at_current_slot(&mut market, &mut short),
         resolved_closed(RESIDUE_HOLDER_CAPITAL),
         "short close"
     );
-    assert_eq!(
-        crank_at_current_slot(&mut market, &mut long_b),
-        resolved_closed(RESIDUE_HOLDER_CAPITAL),
-        "long_b second call"
-    );
-    assert_side_reset_and_empty(&market, SideV16::Long);
     assert_finalizes_and_retires(&mut market, SideV16::Long);
     market.validate_shape().unwrap();
     long_a.validate_with_market(&market.as_view()).unwrap();
@@ -12354,7 +12503,8 @@ fn v16_legless_asset_after_two_sided_trade_out_resets_and_trades_again() {
             -signed_q(RESIDUE_OPEN_Q),
             1,
         );
-        // Rebalances from both owners leave one unowned atom on each side.
+        // Rebalances from both owners. Before #449 they left one unowned atom
+        // on each side; now each side's only leg carries its whole OI.
         owner_rebalance(&mut market, &mut short, 1_060_806);
         owner_rebalance(&mut market, &mut long, 1_467_457);
         owner_rebalance(&mut market, &mut short, 1_891_202);
@@ -12372,39 +12522,21 @@ fn v16_legless_asset_after_two_sided_trade_out_resets_and_trades_again() {
         (
             49_999_994_660_366,
             49_999_994_660_366,
-            49_999_994_660_365,
-            49_999_994_660_365
+            49_999_994_660_366,
+            49_999_994_660_366
         ),
         "(oi_eff_long, oi_eff_short, long effective_q, short effective_q)"
     );
 
     {
-        // The short buys the long's whole effective size, so both legs clear
-        // and the asset is left with no leg. The trade's own audit scan runs
-        // before the side resets, so under audit-scan it refuses the transient
-        // atoms (spec.md:953) as before, and the test stops there.
+        // The short buys the long's whole effective size, which is the whole
+        // OI of both sides: both legs clear, the asset is left with no leg and
+        // no OI, and both haircut sides reset. (Before #449 the trade left the
+        // unowned atoms behind for a moment, and the audit scan refused it.)
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         let mut long = PortfolioV16ViewMut::new(&mut long_header);
-        let trade_out = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
-            &mut short,
-            &mut long,
-            TradeRequestV16 {
-                asset_index: 0,
-                size_q: signed_q(effective_q),
-                exec_price: 1,
-                fee_bps: 0,
-            },
-        );
-        if cfg!(feature = "audit-scan") {
-            assert_eq!(
-                trade_out.map(|_| ()),
-                Err(V16Error::InvalidConfig),
-                "audit-scan trade_out"
-            );
-            return;
-        }
-        trade_out.unwrap();
+        trade_at(&mut market, &mut short, &mut long, signed_q(effective_q), 1);
         assert_side_reset_and_empty(&market, SideV16::Long);
         assert_side_reset_and_empty(&market, SideV16::Short);
         assert_eq!(
@@ -12474,58 +12606,33 @@ fn v16_legless_asset_after_unequal_residues_resets_on_last_rebalance() {
     let asset = markets[0].engine.asset.try_to_runtime().unwrap();
     let long_effective_q = leg_effective_q(&markets, &long_header);
     let short_effective_q = leg_effective_q(&markets, &short_header);
+    // Before #449 these six rebalances left one unowned atom on the long side
+    // and two on the short side, so the two legs differed by one atom and a
+    // trade-out of the short's whole size left the long one unit that only its
+    // owner's rebalance could remove. Now both legs carry the same quantity,
+    // the whole OI of their sides.
     assert_eq!(
-        (
-            asset.oi_eff_long_q - long_effective_q,
-            asset.oi_eff_short_q - short_effective_q,
-            long_effective_q - short_effective_q
-        ),
-        (1, 2, 1),
-        "(long residue, short residue, long minus short effective_q)"
+        (long_effective_q, short_effective_q),
+        (asset.oi_eff_long_q, asset.oi_eff_short_q),
+        "(long effective_q, short effective_q) against (oi_eff_long, oi_eff_short)"
+    );
+    assert_eq!(
+        asset.oi_eff_long_q, asset.oi_eff_short_q,
+        "matched effective OI"
     );
 
-    // The short buys back its whole effective size: its side is left legless
-    // with two unowned atoms while the long keeps one unit. The audit scan
-    // refuses that one-sided state (spec.md:953) as before, so under
-    // audit-scan the test stops there.
+    // The short buys back its whole effective size. Both legs clear in that
+    // one trade, the asset is legless and both sides reset together.
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
-    let trade_out = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+    trade_at(
+        &mut market,
         &mut short,
         &mut long,
-        TradeRequestV16 {
-            asset_index: 0,
-            size_q: signed_q(short_effective_q),
-            exec_price: 1,
-            fee_bps: 0,
-        },
+        signed_q(short_effective_q),
+        1,
     );
-    if cfg!(feature = "audit-scan") {
-        assert_eq!(
-            trade_out.map(|_| ()),
-            Err(V16Error::InvalidConfig),
-            "audit-scan trade_out"
-        );
-        return;
-    }
-    trade_out.unwrap();
-    let after = market.markets[0].engine.asset.try_to_runtime().unwrap();
-    assert_eq!(
-        (
-            after.oi_eff_short_q,
-            after.loss_weight_sum_short,
-            after.stored_pos_count_short,
-            after.oi_eff_long_q,
-            after.stored_pos_count_long
-        ),
-        (2, 0, 0, 2, 1),
-        "after trade-out (oi_eff_short, loss_weight_sum_short, stored_short, oi_eff_long, stored_long)"
-    );
-
-    // The long's last unit leaves through its owner's rebalance; the asset is
-    // then legless and both sides reset together.
-    owner_rebalance(&mut market, &mut long, 1);
     assert_side_reset_and_empty(&market, SideV16::Long);
     assert_side_reset_and_empty(&market, SideV16::Short);
     assert_eq!(
@@ -12617,8 +12724,8 @@ fn v16_legless_asset_after_recovery_forfeits_without_residue_retires() {
         Ok(true),
         "long release"
     );
-    // No residue, but the long side's A index was floored, so it still needs
-    // the reset that the last forfeit now starts.
+    // The long side's A index is below one, so it still needs the reset that
+    // the last forfeit starts.
     assert_side_reset_and_empty(&market, SideV16::Long);
     assert_finalizes_and_retires(&mut market, SideV16::Long);
     market.validate_shape().unwrap();
@@ -12628,35 +12735,28 @@ fn v16_legless_asset_after_recovery_forfeits_without_residue_retires() {
 
 #[test]
 fn v16_legless_asset_after_recovery_pair_close_retires() {
-    for (reduces, residue) in [(&[750_000u128][..], false), (&[750_000, 500_000][..], true)] {
+    // The second history left one unowned atom on the long side before #449:
+    // the pair close then left the short one unit against it, which only the
+    // short's forfeit could remove (and the audit scan refused the pair
+    // close). Both histories now pair off completely.
+    for reduces in [&[750_000u128][..], &[750_000, 500_000][..]] {
         let (mut header, mut markets, mut short_header, mut long_header) =
             rebalanced_pair_fixture(SideV16::Short, reduces, (150, 151));
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         market.force_asset_recovery_not_atomic(0, 1).unwrap();
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         let mut long = PortfolioV16ViewMut::new(&mut long_header);
-        let closed =
-            market.force_close_recovery_pair_not_atomic(&mut long, &mut short, 0, u128::MAX);
-        if residue && cfg!(feature = "audit-scan") {
-            // The pair close leaves the long side's atom with no loss weight,
-            // which the trade's audit scan refuses (spec.md:953) as before.
-            assert_eq!(
-                closed,
-                Err(V16Error::InvalidConfig),
-                "audit-scan pair close"
-            );
-            continue;
-        }
-        closed.unwrap();
-        if residue {
-            // The short keeps one unit against the long side's unowned atom;
-            // its forfeit leaves the asset legless and starts the resets.
-            assert_eq!(
-                forfeit_leg(&mut market, &mut short),
-                Ok(true),
-                "short forfeit"
-            );
-        }
+        market
+            .force_close_recovery_pair_not_atomic(&mut long, &mut short, 0, u128::MAX)
+            .unwrap();
+        assert_eq!(
+            (
+                long.header.active_bitmap[0].get(),
+                short.header.active_bitmap[0].get()
+            ),
+            (0, 0),
+            "reduces={reduces:?}: both legs are gone after the pair close"
+        );
         assert_side_reset_and_empty(&market, SideV16::Long);
         assert_finalizes_and_retires(&mut market, SideV16::Long);
         market.validate_shape().unwrap();
@@ -12818,36 +12918,44 @@ fn v16_legless_asset_with_one_barrier_side_keeps_live_oi_until_barrier_clears() 
         }
         let short_effective_q = leg_effective_q(&markets, &short_header);
         {
-            // The short buys back its whole effective size, leaving its side
-            // legless with two unowned atoms. The audit scan refuses that
-            // one-sided state (spec.md:953) as before, so under audit-scan the
-            // test stops there.
+            // The short buys back its whole effective size. Before #449 that
+            // left its side legless with two unowned atoms and the long with
+            // one unit; now both legs clear and both haircut sides reset.
             let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
             let mut short = PortfolioV16ViewMut::new(&mut short_header);
             let mut long = PortfolioV16ViewMut::new(&mut long_header);
-            let trade_out = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+            trade_at(
+                &mut market,
                 &mut short,
                 &mut long,
-                TradeRequestV16 {
-                    asset_index: 0,
-                    size_q: signed_q(short_effective_q),
-                    exec_price: 1,
-                    fee_bps: 0,
-                },
+                signed_q(short_effective_q),
+                1,
             );
-            if cfg!(feature = "audit-scan") {
-                assert_eq!(
-                    trade_out.map(|_| ()),
-                    Err(V16Error::InvalidConfig),
-                    "audit-scan trade_out"
-                );
-                return;
-            }
-            trade_out.unwrap();
+            assert_side_reset_and_empty(&market, SideV16::Long);
+            assert_side_reset_and_empty(&market, SideV16::Short);
+            market.validate_shape().unwrap();
         }
-        // A bankrupt close of 10 is pending against the legless short side:
-        // its barrier, and the flat closer's deficit and close ledger, are
-        // written directly.
+        if cfg!(feature = "audit-scan") {
+            // The rest writes OI that no leg owns, which the full scan refuses
+            // (spec §5: effective OI needs loss weight).
+            return;
+        }
+        // The engine keeps its rule for a legless asset that still shows OI
+        // behind a pending loss barrier: neither side drops its OI until the
+        // barrier clears, so Live OI stays equal, and clearing the barrier
+        // starts the resets. No public history leaves OI unowned any more, so
+        // the state is written directly: one unowned atom on each side of the
+        // legless asset, both sides back in Normal mode at a haircut index,
+        // and a bankrupt close of 10 pending against the short side (its
+        // barrier, and the flat closer's deficit and close ledger).
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.oi_eff_long_q = 1;
+        asset.oi_eff_short_q = 1;
+        asset.a_long = ADL_ONE - 1;
+        asset.a_short = ADL_ONE - 1;
+        asset.mode_long = SideModeV16::Normal;
+        asset.mode_short = SideModeV16::Normal;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
         let market_id = markets[0].engine.asset.try_to_runtime().unwrap().market_id;
         let current_slot = header.current_slot.get();
         markets[0].engine.pending_domain_loss_barrier_short = V16PodU64::new(1);
@@ -12878,13 +12986,10 @@ fn v16_legless_asset_with_one_barrier_side_keeps_live_oi_until_barrier_clears() 
                 residual_remaining: 10,
             });
 
-        // The long's last unit leaves; the asset is legless, but with a barrier
-        // on one side neither side drops its atom, so Live OI stays equal.
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let short = PortfolioV16ViewMut::new(&mut short_header);
-        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let long = PortfolioV16ViewMut::new(&mut long_header);
         let mut closer = PortfolioV16ViewMut::new(&mut closer_header);
-        owner_rebalance(&mut market, &mut long, 1);
         let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
         assert_eq!(
             (
@@ -12959,8 +13064,8 @@ fn v16_legless_asset_after_bankrupt_liquidation_of_last_leg_resets() {
             -signed_q(RESIDUE_OPEN_Q),
             1,
         );
-        // The unequal residues with the sides swapped: the short side keeps
-        // one unowned atom, the long side two.
+        // Rebalances from both owners. Before #449 they left one unowned atom
+        // on the short side and two on the long side.
         owner_rebalance(&mut market, &mut short, 1_710_514);
         owner_rebalance(&mut market, &mut long, 788_597);
         owner_rebalance(&mut market, &mut short, 1_479_425);
@@ -12985,42 +13090,53 @@ fn v16_legless_asset_after_bankrupt_liquidation_of_last_leg_resets() {
     let long_effective_q = leg_effective_q(&markets, &long_header);
     let short_effective_q = leg_effective_q(&markets, &short_header);
     assert_eq!(
-        (
-            asset.oi_eff_long_q - long_effective_q,
-            asset.oi_eff_short_q - short_effective_q,
-            short_effective_q - long_effective_q
-        ),
-        (2, 1, 1),
-        "(long residue, short residue, short minus long effective_q)"
+        (long_effective_q, short_effective_q),
+        (asset.oi_eff_long_q, asset.oi_eff_short_q),
+        "each side's only leg carries its side's whole OI"
+    );
+    assert_eq!(
+        asset.oi_eff_long_q, asset.oi_eff_short_q,
+        "matched effective OI"
     );
 
     {
-        // The long sells its whole effective size back to the short, leaving
-        // the long side legless with two unowned atoms and the short with one
-        // unit. The audit scan refuses that one-sided state (spec.md:953) as
-        // before, so under audit-scan the test stops there.
+        // The long sells all but one unit back to the short. (Before #449 the
+        // long sold its whole size and the short still kept one unit, against
+        // the long side's unowned atoms.)
         let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
         let mut short = PortfolioV16ViewMut::new(&mut short_header);
         let mut long = PortfolioV16ViewMut::new(&mut long_header);
-        let trade_out = market.execute_trade_with_fee_loss_stale_scoped_not_atomic(
+        trade_at(
+            &mut market,
             &mut short,
             &mut long,
-            TradeRequestV16 {
-                asset_index: 0,
-                size_q: signed_q(long_effective_q),
-                exec_price: 4,
-                fee_bps: 0,
-            },
+            signed_q(long_effective_q - 1),
+            4,
         );
-        if cfg!(feature = "audit-scan") {
-            assert_eq!(
-                trade_out.map(|_| ()),
-                Err(V16Error::InvalidConfig),
-                "audit-scan trade_out"
-            );
-            return;
-        }
-        trade_out.unwrap();
+        let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
+        assert_eq!(
+            (
+                asset.oi_eff_long_q,
+                leg_effective_q(market.markets, long.header),
+                asset.oi_eff_short_q,
+                leg_effective_q(market.markets, short.header)
+            ),
+            (1, 1, 1, 1),
+            "(oi_eff_long, long effective_q, oi_eff_short, short effective_q)"
+        );
+        // One unit of OI on one unit of raw basis: both sides are back at
+        // unit A.
+        assert_eq!(
+            (
+                asset.raw_basis_sum_long_q,
+                asset.a_long,
+                asset.raw_basis_sum_short_q,
+                asset.a_short
+            ),
+            (1, ADL_ONE, 1, ADL_ONE),
+            "(long raw basis, a_long, short raw basis, a_short)"
+        );
+        market.validate_shape().unwrap();
     }
     assert!(
         short_header.pnl.get() < 0 && short_header.capital.get() == 0,
@@ -13030,13 +13146,17 @@ fn v16_legless_asset_after_bankrupt_liquidation_of_last_leg_resets() {
     );
     let deficit = short_header.pnl.get().unsigned_abs();
 
-    // Liquidating the short's last unit opens its close against the legless
-    // long side, where the barrier goes; the long domain's insurance covers
-    // the deficit within the call, which clears the barrier before the leg
-    // leaves, so the asset ends legless with no barrier and both sides reset.
+    // Liquidating the short's last unit opens its close against the long
+    // side, where the barrier goes; the long domain's insurance covers the
+    // deficit within the call, which clears the barrier before the leg leaves.
+    // The liquidation takes the last effective unit from both sides. The
+    // short side empties at unit A and has nothing to reset. The long side
+    // loses its whole OI to the haircut while its leg is still attached, so it
+    // resets and the leg stays behind as a prior-reset obligation that owns
+    // nothing.
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
-    let long = PortfolioV16ViewMut::new(&mut long_header);
+    let mut long = PortfolioV16ViewMut::new(&mut long_header);
     let outcome = market
         .liquidate_account_not_atomic(&mut short, LiquidationRequestV16 { asset_index: 0 })
         .unwrap();
@@ -13068,13 +13188,25 @@ fn v16_legless_asset_after_bankrupt_liquidation_of_last_leg_resets() {
         0,
         "barrier_long"
     );
-    assert_side_reset_and_empty(&market, SideV16::Long);
-    assert_side_reset_and_empty(&market, SideV16::Short);
+    assert_side_empty_at_unit_a(&market, SideV16::Short);
+    let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(
-        market.finalize_side_reset_not_atomic(0, SideV16::Short),
-        Ok(()),
-        "finalize Short"
+        (
+            asset.oi_eff_long_q,
+            asset.raw_basis_sum_long_q,
+            asset.loss_weight_sum_long,
+            asset.stored_pos_count_long,
+            asset.mode_long
+        ),
+        (0, 0, 0, 1, SideModeV16::ResetPending),
+        "long side after the liquidation (oi_eff, raw basis, loss_weight_sum, stored, mode)"
     );
+
+    // The long's refresh detaches its prior-reset leg, and the asset is
+    // legless with both sides reset.
+    market.full_account_refresh_not_atomic(&mut long).unwrap();
+    assert_eq!(long.header.active_bitmap[0].get(), 0, "long leg detached");
+    assert_side_reset_and_empty(&market, SideV16::Long);
     assert_finalizes_to_empty_sides(&mut market, SideV16::Long);
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
@@ -14734,7 +14866,9 @@ fn v16_auto_crank_refresh_leaves_a_current_certificate_in_a_moving_market() {
     asset.oi_eff_long_q = 2 * POS_SCALE;
     asset.oi_eff_short_q = 2 * POS_SCALE;
     asset.loss_weight_sum_long = 2 * POS_SCALE;
+    asset.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset.loss_weight_sum_short = 2 * POS_SCALE;
+    asset.raw_basis_sum_short_q = 2 * POS_SCALE;
     asset.stored_pos_count_long = 2;
     asset.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
@@ -14843,7 +14977,9 @@ fn v16_auto_crank_converges_in_a_moving_market() {
     asset0.oi_eff_long_q = 2 * POS_SCALE;
     asset0.oi_eff_short_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.raw_basis_sum_short_q = 2 * POS_SCALE;
     asset0.stored_pos_count_long = 2;
     asset0.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
@@ -14852,7 +14988,9 @@ fn v16_auto_crank_converges_in_a_moving_market() {
     asset1.oi_eff_long_q = POS_SCALE;
     asset1.oi_eff_short_q = POS_SCALE;
     asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.raw_basis_sum_long_q = POS_SCALE;
     asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.raw_basis_sum_short_q = POS_SCALE;
     asset1.stored_pos_count_long = 1;
     asset1.stored_pos_count_short = 1;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
@@ -14972,7 +15110,9 @@ fn v16_auto_crank_reaches_liquidation_in_a_persistently_moving_market() {
     asset0.oi_eff_long_q = 2 * POS_SCALE;
     asset0.oi_eff_short_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.raw_basis_sum_short_q = 2 * POS_SCALE;
     asset0.stored_pos_count_long = 2;
     asset0.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
@@ -14981,7 +15121,9 @@ fn v16_auto_crank_reaches_liquidation_in_a_persistently_moving_market() {
     asset1.oi_eff_long_q = POS_SCALE;
     asset1.oi_eff_short_q = POS_SCALE;
     asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.raw_basis_sum_long_q = POS_SCALE;
     asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.raw_basis_sum_short_q = POS_SCALE;
     asset1.stored_pos_count_long = 1;
     asset1.stored_pos_count_short = 1;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);
@@ -15093,7 +15235,9 @@ fn v16_owner_can_still_exit_while_the_crank_is_stuck_in_a_moving_market() {
     asset0.oi_eff_long_q = 2 * POS_SCALE;
     asset0.oi_eff_short_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_long = 2 * POS_SCALE;
+    asset0.raw_basis_sum_long_q = 2 * POS_SCALE;
     asset0.loss_weight_sum_short = 2 * POS_SCALE;
+    asset0.raw_basis_sum_short_q = 2 * POS_SCALE;
     asset0.stored_pos_count_long = 2;
     asset0.stored_pos_count_short = 2;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
@@ -15102,7 +15246,9 @@ fn v16_owner_can_still_exit_while_the_crank_is_stuck_in_a_moving_market() {
     asset1.oi_eff_long_q = POS_SCALE;
     asset1.oi_eff_short_q = POS_SCALE;
     asset1.loss_weight_sum_long = POS_SCALE;
+    asset1.raw_basis_sum_long_q = POS_SCALE;
     asset1.loss_weight_sum_short = POS_SCALE;
+    asset1.raw_basis_sum_short_q = POS_SCALE;
     asset1.stored_pos_count_long = 1;
     asset1.stored_pos_count_short = 1;
     markets[1].engine.asset = AssetStateV16Account::from_runtime(&asset1);

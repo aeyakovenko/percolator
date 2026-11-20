@@ -7,19 +7,21 @@
 //! G is the phantom exposure: a +dP move pays the side G * dP / POS_SCALE more than the
 //! other side loses.
 //!
-//! What these tests pin:
-//! * Every same-side reducing op raises that side's G by strictly less than one raw unit,
-//!   whatever the route (bilateral trade, RebalanceReduce, full clear), size, leg count,
-//!   or A. ADL re-scaling of the passive side never raises G. So G stays below
-//!   (same-side reducing ops) * 1 raw unit. The bound also holds against a greedy search
-//!   that picks the ADL shaping size and the harvest op that maximise the next step's
-//!   growth.
-//! * No op touches more than one leg per (asset, side): a bilateral trade reduces at most one
-//!   long leg and one short leg, so the combined two-sided growth stays below 2 per op.
-//! * Realisation: the phantom pays out only through source-domain backing. In a closed universe
-//!   the excess long PnL is not realizable equity. When another winner shares the same source
-//!   domain, the attacker takes the excess from that winner's haircut. The amount stays at most
-//!   G * dP / POS_SCALE atoms, and the attacker carries the matching downside.
+//! These tests were written against the engine before the fix, where every same-side reducing
+//! op raised that side's G by up to one raw unit and G was bounded only by the number of such
+//! ops. They keep the same adversaries and now pin the fix:
+//! * A side keeps the sum of its legs' raw basis and derives A from it after every operation,
+//!   and a reduction gives up at least the raw basis that carries the effective OI it removes.
+//!   G is therefore never positive while the side has effective OI, and is short of zero by
+//!   less than `raw_basis_sum / ADL_ONE` raw units, whatever the route (bilateral trade,
+//!   RebalanceReduce, full clear), size, leg count, A, or number of operations.
+//! * D is never negative and never exceeds the number of legs.
+//! * The greedy adversary that picks the ADL shaping size and the harvest op to maximise the
+//!   next step's growth ends with no phantom exposure at all.
+//! * Realisation: a 10% move in either direction gives the adversary nothing, with or without
+//!   another winner in the same source domain.
+//! * A haircut side stays closed to new risk until its effective OI again equals its raw
+//!   basis (A back at ADL_ONE) or it resets.
 
 use percolator::{
     AssetStateV16, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount,
@@ -327,6 +329,103 @@ impl Tally {
     }
 }
 
+/// The bounds of the fix, checked after every successful operation.
+fn assert_side_totals_are_exact(w: &World) {
+    let a = w.asset();
+    let c = w.census();
+    let mut legs = [0i128; 2];
+    let mut raw = [0u128; 2];
+    for k in 0..w.accts.len() {
+        if let Some((side, r, _, ep)) = w.leg(k) {
+            let (cur_ep, s) = match side {
+                SideV16::Long => (a.epoch_long, 0),
+                SideV16::Short => (a.epoch_short, 1),
+            };
+            if ep == cur_ep && r != 0 {
+                legs[s] += 1;
+                raw[s] += r;
+            }
+        }
+    }
+    let totals = [
+        (a.oi_eff_long_q, a.raw_basis_sum_long_q, a.a_long),
+        (a.oi_eff_short_q, a.raw_basis_sum_short_q, a.a_short),
+    ];
+    for s in 0..2 {
+        let (oi, raw_sum, a_side) = totals[s];
+        let (g_num, d, _) = c[s];
+        assert_eq!(raw_sum, raw[s], "side {s}: raw basis sum");
+        if raw_sum == 0 {
+            assert_eq!(
+                (g_num, d),
+                (0, -(oi as i128)),
+                "side {s}: no current-epoch basis"
+            );
+            continue;
+        }
+        assert!(oi <= raw_sum, "side {s}: OI {oi} above raw basis {raw_sum}");
+        assert_eq!(
+            a_side,
+            (ADL_ONE * oi / raw_sum).max(1),
+            "side {s}: A is derived from OI {oi} and raw basis {raw_sum}"
+        );
+        if oi == 0 {
+            // exhausted: the smallest index, under a tenth of a raw unit of exposure
+            assert_eq!(g_num, raw_sum as i128, "side {s}: exhausted");
+            assert_eq!(d, legs[s], "side {s}: exhausted");
+            continue;
+        }
+        // exact exposure: never above the OI, short of it by less than raw_sum / ADL_ONE
+        assert!(
+            g_num <= 0 && g_num > -(raw_sum as i128),
+            "side {s}: G_num {g_num} outside (-{raw_sum}, 0]"
+        );
+        // ceilings: cover the OI, exceed it by less than one per leg
+        assert!(
+            d >= 0 && d < legs[s],
+            "side {s}: D {d} with {} legs",
+            legs[s]
+        );
+    }
+}
+
+/// No certificate that still counts as current may be healthier than the account's state.
+///
+/// A haircut only shrinks effective quantities, so certificates issued before it stay
+/// conservative. A reduction on a haircut side can raise the side's index and with it another
+/// account's effective quantity; the engine then advances the risk epoch, and the certificates
+/// issued before are no longer current. Checked for every account after every operation: a
+/// certificate whose epochs and bitmap still match is compared with a full refresh of a copy.
+fn assert_current_certificates_are_conservative(w: &World) {
+    for k in 0..w.accts.len() {
+        let cached = w.accts[k].health_cert.try_to_runtime().unwrap();
+        let current = cached.valid
+            && cached.cert_oracle_epoch == w.header.oracle_epoch.get()
+            && cached.cert_funding_epoch == w.header.funding_epoch.get()
+            && cached.cert_risk_epoch == w.header.risk_epoch.get()
+            && cached.cert_asset_set_epoch == w.header.asset_set_epoch.get()
+            && cached.active_bitmap_at_cert == w.accts[k].active_bitmap.map(|word| word.get());
+        if !current {
+            continue;
+        }
+        let mut copy = w.clone();
+        let mut m = MarketGroupV16ViewMut::new(&mut copy.header, &mut copy.markets);
+        let mut v = PortfolioV16ViewMut::new(&mut copy.accts[k]);
+        let Ok(full) = m.full_account_refresh_not_atomic(&mut v) else {
+            continue;
+        };
+        assert!(
+            cached.certified_equity <= full.certified_equity
+                && cached.certified_initial_req >= full.certified_initial_req
+                && cached.certified_maintenance_req >= full.certified_maintenance_req
+                && cached.certified_worst_case_loss >= full.certified_worst_case_loss
+                && cached.certified_liq_deficit >= full.certified_liq_deficit,
+            "account {k}: a current certificate is healthier than a full refresh: \
+             cached {cached:?}, full {full:?}"
+        );
+    }
+}
+
 fn run(w: &mut World, t: &mut Tally, op: Op) -> bool {
     let before = w.census();
     let snapshot = w.clone();
@@ -335,6 +434,8 @@ fn run(w: &mut World, t: &mut Tally, op: Op) -> bool {
             let after = w.census();
             let ns = w.accts.len() - w.nl;
             t.record(before, after, op, [w.nl, ns]);
+            assert_side_totals_are_exact(w);
+            assert_current_certificates_are_conservative(w);
             true
         }
         Err(_) => {
@@ -371,8 +472,9 @@ fn g_units(num: i128) -> f64 {
 }
 
 /// Strategy matrix: leg counts, position sizes, ADL depth (A), and the reducing route.
+/// `run` checks the exact bounds after every op; the totals here show that nothing accumulates.
 #[test]
-fn harvest_449_strategy_matrix_growth_per_op_below_one_raw_unit() {
+fn harvest_449_strategy_matrix_never_accumulates_exposure() {
     #[derive(Clone, Copy, Debug)]
     enum Strat {
         /// shape A_long with a 1-unit short rebalance, then 1-unit bilateral reduces on every long
@@ -475,8 +577,10 @@ fn harvest_449_strategy_matrix_growth_per_op_below_one_raw_unit() {
         "BEST sustained growth = {:.4} raw units/same-side op ({})",
         best_avg.0, best_avg.1
     );
-    assert!(worst.0 < ADL_ONE as i128);
-    assert!(best_avg.0 < 1.0);
+    // G moves only inside (-raw_basis_sum / ADL_ONE, 0], so a single op cannot raise it by a
+    // tenth of a raw unit, and it never accumulates.
+    assert!(worst.0 < (ADL_ONE / 10) as i128);
+    assert_eq!(best_avg.0, 0.0, "no sustained growth");
     assert!(
         drain_only_runs > 0,
         "matrix must reach A < MIN_A_SIDE (DrainOnly)"
@@ -485,10 +589,11 @@ fn harvest_449_strategy_matrix_growth_per_op_below_one_raw_unit() {
 
 /// Greedy adversary with two-step lookahead. For each ADL shaping size (short rebalance q),
 /// try every harvest (any long leg, any chunk size) and keep the pair that maximises the long
-/// side's G. This is the attacker steering A to leave each leg's exact exposure at the bottom
-/// of its ceiling bucket before the reduce.
+/// side's G. Before the fix this steered A to leave each leg's exact exposure at the bottom of
+/// its ceiling bucket before the reduce, and harvested more than half a raw unit per op. It
+/// now ends where it started: with no exposure above the long OI.
 #[test]
-fn harvest_449_greedy_adl_shaping_adversary_stays_below_one_unit_per_op() {
+fn harvest_449_greedy_adl_shaping_adversary_harvests_nothing() {
     for &(nl, base) in &[(4usize, 1_000 * POS_SCALE), (8, 3 * POS_SCALE + 1)] {
         let ns = 2;
         let mut w = open(nl, ns, base);
@@ -544,35 +649,37 @@ fn harvest_449_greedy_adl_shaping_adversary_stays_below_one_unit_per_op() {
             g_units(best_harvest_growth),
             w.asset().a_long
         );
-        assert!(best_harvest_growth < ADL_ONE as i128);
-        assert!(g < (harvest_ops * ADL_ONE) as i128);
-        // the steered attacker approaches, but never reaches, one raw unit per harvest op
-        assert!(
-            g_units(g) / harvest_ops as f64 > 0.5,
-            "greedy should beat random bucket placement"
-        );
+        assert!(harvest_ops > 0);
+        // the best single step moves G by less than a tenth of a raw unit, inside
+        // (-raw_basis_sum / ADL_ONE, 0], and the steered attacker ends with nothing
+        assert!(best_harvest_growth < (ADL_ONE / 10) as i128);
+        assert!(g <= 0, "greedy adversary kept G_num = {g}");
     }
 }
 
-/// Bounded lifetime. While A != ADL_ONE no leg can grow or open, so OI only shrinks, and each
-/// reducing op removes at least one raw unit of OI. G therefore stays below both the op count
-/// and the OI that existed at the ADL. When OI reaches zero the side resets and the phantom
-/// vanishes.
+/// Lifetime of a haircut side. While A != ADL_ONE no leg can grow or open, so the side's
+/// effective OI and raw basis only shrink. Each reduction is rounded against the reducing leg,
+/// so the raw basis falls at least as fast as the effective OI carried on it, and the side
+/// ends in one of two ways: its effective OI reaches zero and it resets, or its effective OI
+/// catches up with its raw basis and it is exactly at unit A again, every leg's effective
+/// quantity equal to its raw basis. Only then can risk be added. At no point does the side
+/// carry exposure above its OI.
 #[test]
-fn harvest_449_no_reopen_while_haircut_and_phantom_dies_at_reset() {
+fn harvest_449_no_reopen_while_haircut_and_no_phantom_at_any_point() {
     let mut w = open(2, 2, 1_000);
     let s0 = w.eff(2);
     w.rebalance(2, s0 / 3).unwrap();
-    // risk increase is locked while A_long != ADL_ONE: no fresh leg, no growth
-    let mut grow = w.clone();
-    assert!(
-        grow.trade_raw(0, 3, 1).is_err(),
-        "long grow must be locked while haircut"
-    );
+    assert_ne!(w.asset().a_long, ADL_ONE);
     let mut t = Tally::new(&w);
     let oi0 = w.asset().oi_eff_long_q;
-    let mut peak = 0i128;
+    let mut peak = i128::MIN;
     loop {
+        // risk increase is locked while A_long != ADL_ONE: no fresh leg, no growth
+        let mut grow = w.clone();
+        assert!(
+            grow.trade_raw(0, 3, 1).is_err(),
+            "long grow must be locked while haircut"
+        );
         let progressed = (0..2).any(|i| run(&mut w, &mut t, Op::Trade { i, j: 1, q: 1 }))
             || run(&mut w, &mut t, Op::RebalShort { j: 0, q: 1 })
             || (0..2).any(|i| {
@@ -586,31 +693,47 @@ fn harvest_449_no_reopen_while_haircut_and_phantom_dies_at_reset() {
                 )
             });
         peak = peak.max(w.census()[0].0);
-        if !progressed || w.asset().oi_eff_long_q == 0 {
+        let a = w.asset();
+        if !progressed || a.oi_eff_long_q == 0 || a.a_long == ADL_ONE {
             break;
         }
     }
-    assert_eq!(w.asset().oi_eff_long_q, 0);
-    assert_eq!(w.census()[0].0, 0, "reset erases the phantom");
+    let a = w.asset();
+    let c = w.census();
     eprintln!(
-        "lifetime: oi0={oi0} ops={} peak G={:.3}",
+        "lifetime: oi0={oi0} ops={} peak G={:.6} end oi={} raw={} a_long={}",
         t.ops,
-        g_units(peak)
+        g_units(peak),
+        a.oi_eff_long_q,
+        a.raw_basis_sum_long_q,
+        a.a_long
     );
-    assert!(peak < (oi0 * ADL_ONE) as i128);
+    assert!(peak <= 0, "exposure above the long OI: G_num {peak}");
+    assert!(t.ops < 2 * oi0 as u64, "bounded by the OI at the ADL");
+    if a.oi_eff_long_q == 0 {
+        assert_eq!(c[0].0, 0, "the side reset");
+    } else {
+        // back at unit A: nothing is rounded any more
+        assert_eq!(a.a_long, ADL_ONE);
+        assert_eq!(a.oi_eff_long_q, a.raw_basis_sum_long_q);
+        assert_eq!((c[0].0, c[0].1), (0, 0), "(G_num, D) at unit A");
+        // and the asset takes new risk again without a reset
+        assert!(a.a_short == ADL_ONE && a.epoch_long == 0);
+        let mut grow = w.clone();
+        assert!(
+            grow.trade_raw(0, 3, 1).is_ok(),
+            "long grow is open again at unit A"
+        );
+    }
 }
 
-/// Realisation. The price moves 10% while the harvested phantom G is live on the long side.
-/// The attacker holds both sides, so the face-value change is exactly the phantom
-/// G * dP / POS_SCALE. It is directional: a down move turns it into a real loss.
-/// Realizable (engine-certified, haircut) equity:
-/// (a) Closed universe: no extra backing in the long source domain, so the phantom gain is
-///     not realizable.
-/// (b) An honest winner earned backed PnL on an earlier episode of the same asset. The
-///     attacker's realizable gain is bounded by the face phantom and paid by the honest
-///     winner's haircut.
+/// Realisation. The price moves 10% after the same 400 rounds that harvested more than a
+/// hundred raw units of phantom long exposure before the fix. The adversary holds both sides
+/// of the book. There is now no exposure above the long OI, so the face value of its accounts
+/// moves by rounding only: each account's settlement rounds against it by less than one atom,
+/// in either direction, with or without an honest winner in the same source domain.
 #[test]
-fn harvest_449_realization_is_capped_by_phantom_and_directional() {
+fn harvest_449_no_phantom_to_realize_in_either_direction() {
     const N: usize = 4;
     for honest in [false, true] {
         for up in [true, false] {
@@ -641,7 +764,7 @@ fn harvest_449_realization_is_capped_by_phantom_and_directional() {
                 }
             }
             let g_num = w.census()[0].0;
-            assert!(g_num > 100 * ADL_ONE as i128);
+            assert!(g_num <= 0, "exposure above the long OI: G_num {g_num}");
             let att: Vec<usize> = (0..N + 2).collect();
             let face0: i128 = att.iter().map(|&k| w.face_value(k)).sum();
             let cert0: i128 = att.iter().map(|&k| w.certified_equity(k)).sum();
@@ -651,38 +774,21 @@ fn harvest_449_realization_is_capped_by_phantom_and_directional() {
             let face1: i128 = att.iter().map(|&k| w.face_value(k)).sum();
             let cert1: i128 = att.iter().map(|&k| w.certified_equity(k)).sum();
             let hcert1 = w.certified_equity(hl);
-            let dp = p2 as i128 - p1 as i128;
-            let predicted = g_num * dp / (ADL_ONE * POS_SCALE) as i128;
             let (face_gain, cert_gain, honest_delta) =
                 (face1 - face0, cert1 - cert0, hcert1 - hcert0);
             eprintln!(
-                "realize honest={honest} up={up}: G={:.2} raw ({:.6} base), face gain={face_gain} atoms (pred {predicted}), attacker certified gain={cert_gain}, honest certified delta={honest_delta}, honest pnl={}",
+                "realize honest={honest} up={up}: G={:.6} raw, face gain={face_gain} atoms, adversary certified gain={cert_gain}, honest certified delta={honest_delta}, honest pnl={}",
                 g_units(g_num),
-                g_units(g_num) / POS_SCALE as f64,
                 w.accts[hl].pnl.get()
             );
             assert!(
-                (face_gain - predicted).abs() <= N as i128 + 2,
-                "face {face_gain} vs {predicted}"
+                face_gain <= 0 && face_gain >= -(N as i128 + 2),
+                "face value moved by {face_gain} atoms"
             );
-            assert!(
-                cert_gain <= face_gain.max(0),
-                "realizable never exceeds the phantom"
-            );
-            if !up {
-                assert!(face_gain < 0, "down move: phantom is a real loss");
-                assert!(cert_gain < 0);
-            }
-            if up && !honest {
-                assert!(
-                    cert_gain <= 0,
-                    "closed universe: the phantom is unbacked, so nothing is realizable"
-                );
-            }
-            if up && honest {
-                // whatever the attacker realizes comes out of the honest winner's haircut
-                assert!(honest_delta <= 0);
-                assert!(cert_gain.max(0) <= -honest_delta + N as i128 + 2);
+            assert!(cert_gain <= 0, "nothing is realizable: {cert_gain}");
+            if honest {
+                // the honest winner is flat during the move and pays for nothing
+                assert!(honest_delta >= 0, "honest winner lost {honest_delta}");
             }
         }
     }
