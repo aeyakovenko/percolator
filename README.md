@@ -72,11 +72,15 @@ Trusted base and limits:
   solver budget even with concrete inputs (the "INTRACTABLE-TIER" notes in
   `tests/proofs_v16.rs`, which record the same for the full account refresh
   and for the full resolved close). For the trade, the rebalance reduction,
-  the paired Recovery close and the Recovery forfeit, Kani proves the gates: a
+  the paired Recovery close and the Recovery forfeit, Kani proves gates: a
   call that must be refused is refused with its documented error and leaves
   the market and the accounts unchanged, and a refused trade restores the
-  loss-stale flag it had suspended. What those routes do once they run rests
-  on the component proofs, the tests and the fuzzing.
+  loss-stale flag it had suspended. For a trade that covers the market mode,
+  the size guards, an unconfigured asset and an empty batch; a request that
+  fails only the price or fee guards, and an over-long batch, could not be
+  shown end to end (they reach the fill) and rest on the contract of the
+  guard summary. What those routes do once they run rests on the component
+  proofs, the tests and the fuzzing.
 - Payments of a resolved market do not depend on the order of the claims once
   the payout snapshot is captured. Before that, the order of the permissionless
   closes can still decide what one account is paid, in five cases that

@@ -22643,11 +22643,17 @@ fn proof_v16_resolved_foreign_expiry_provider_retirement_acceptance_is_exact() {
 // their bodies run (see the INTRACTABLE-TIER notes above), and until these proofs no harness
 // called their entry points at all. What Kani can do for them is the gate: a call that must be
 // refused is refused with the documented error, and nothing in the market or in either account
-// has changed. In each proof the inputs that decide the refusal are concrete, which keeps the
-// body behind the gate out of the formula; the other inputs are symbolic. The scalar guards of a
-// trade request are a short-circuit chain (asset, size, price, fee), so a proof about one guard
-// fixes the fields the chain reads before it; that every guard is exactly its condition for all
-// inputs is the contract of `build_trade_request_guard_summary`.
+// has changed. In each proof the inputs that decide the refusal are concrete and the other inputs
+// are symbolic.
+//
+// Not every gate can be shown this way. For a trade in a Live market the solver does not fold
+// the configuration to a constant, so the request guards stay symbolic and the settlement of
+// both accounts enters the formula; the proof still closes when something concrete stops the
+// fill loop (a zero or oversized size, an unconfigured asset). A request that fails only the
+// price guards or the fee guard, and a batch longer than the portfolio, reach the fill itself,
+// and with it the trade seam that is beyond the budget: those four were tried (2026-11-20) and
+// ran out of memory. They are refused at the same early return as the others; that each guard is
+// exactly its condition, for all inputs, is the contract of `build_trade_request_guard_summary`.
 
 fn two_flat_accounts_fixture() -> (
     MarketGroupV16HeaderAccount,
