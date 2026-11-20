@@ -48,6 +48,15 @@ The proof suite is a decomposition over production v16 code, not one monolithic
   a raw unit, whatever the history; a same-side reduction is rounded against
   the reducing leg, and an index that rises retires every health certificate
   issued before it (`spec.md` §5, "Side A index"; percolator-prog #449).
+- **Provider losses are recorded once:** each source domain keeps the lowest
+  provider protection it has had (provider principal that neither a claim nor an
+  unrepaid consumption has taken), moved only by the provider's own deposits and
+  withdrawals. A loss that a loser later refills stays recorded, and spending the
+  refill again down to that low records nothing, so a program that keeps
+  depositor shares over a provider position charges each loss exactly once
+  whenever it looks. Read it through `provider_protection_floor_num`; the stored
+  value is brought up to date once per mutable view, and nothing about views is
+  stored (`spec.md` §2.2, "Provider-protection floor"; percolator-prog #382).
 - **Arithmetic discipline:** wide arithmetic that is too expensive for Kani is
   isolated behind small helpers and checked by differential/property tests under
   `--features fuzz`.
@@ -66,10 +75,10 @@ Source-checkable counts in this checkout:
 
 | Class | Count |
 | --- | ---: |
-| Plain Kani proofs in `tests/proofs_v16.rs` | 334 |
+| Plain Kani proofs in `tests/proofs_v16.rs` | 339 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
 | Plain Kani proofs in `src/v16_proofs.rs` | 44 |
-| Function-contract proofs in `src/v16_proofs.rs` | 65 |
+| Function-contract proofs in `src/v16_proofs.rs` | 68 |
 | Production `kernel_*` helpers in `src/v16.rs` | 41 |
 | Public `*_not_atomic` engine APIs in `src/v16.rs` | 63 |
 
@@ -131,12 +140,12 @@ plain-proof `kani::cover!` reachability should be judged under
 `--features fuzz,contracts -Z function-contracts`.
 
 In the `contracts` run Kani 0.66 also asserts every contract inside the plain
-proofs that call a contracted function directly. Forty-five plain proofs cannot
+proofs that call a contracted function directly. Forty-seven plain proofs cannot
 pass there and are compiled out of that run (`#[cfg(not(feature = "contracts"))]`
-in `tests/proofs_v16.rs`, with the reasons at the top of that file): forty-four
+in `tests/proofs_v16.rs`, with the reasons at the top of that file): forty-six
 call a kernel that takes a record by value as `mut`, where the `ensures` closure
 reads the argument after the body has mutated it, and one passes inputs outside a
-`requires` on purpose. All forty-five verify in the main run, and the contracts
+`requires` on purpose. All forty-seven verify in the main run, and the contracts
 they touch are verified for all inputs by their `contract_check_*` harnesses. With
 them out, every harness of the contracts run is expected to verify.
 

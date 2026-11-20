@@ -1265,6 +1265,64 @@ impl V16Core {
             .ok_or(V16Error::ArithmeticOverflow)
     }
 
+    /// PRODUCTION KERNEL: provider protection of a source domain, BOUND_SCALE-scaled: the
+    /// provider principal that is still the provider's own.
+    ///
+    /// Claims on a domain are paid from its fresh reserved backing, and the part of that
+    /// backing its losers paid in (`reserved - principal`) goes first. The provider is
+    /// therefore exposed to the exact claims beyond that part, and to principal that was
+    /// consumed and has not been repaid (`principal > reserved`). Both cases are
+    /// `min(principal, reserved - exact claims)`, floored at 0.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|out: &u128|
+        *out <= provider_principal_num
+            && if fresh_reserved_backing_num >= exact_positive_claim_num {
+                *out <= fresh_reserved_backing_num - exact_positive_claim_num
+                    && (*out == provider_principal_num
+                        || *out == fresh_reserved_backing_num - exact_positive_claim_num)
+            } else {
+                *out == 0
+            }))]
+    fn kernel_provider_protection_num(
+        provider_principal_num: u128,
+        fresh_reserved_backing_num: u128,
+        exact_positive_claim_num: u128,
+    ) -> u128 {
+        provider_principal_num
+            .min(fresh_reserved_backing_num.saturating_sub(exact_positive_claim_num))
+    }
+
+    /// PRODUCTION KERNEL: the provider-protection floor after observing a state whose
+    /// protection is `protection_num`. An observation never raises the floor, and lowers it
+    /// exactly to a protection below it.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|out: &u128|
+        *out <= floor_num
+            && *out <= protection_num
+            && (*out == floor_num || *out == protection_num)))]
+    fn kernel_provider_protection_floor_observe(floor_num: u128, protection_num: u128) -> u128 {
+        floor_num.min(protection_num)
+    }
+
+    /// PRODUCTION KERNEL: the provider-protection floor after the provider deposited
+    /// (`add`) or withdrew `amount_num` of principal. The floor moves with the principal,
+    /// so neither is recorded as a gain or a loss; a withdrawal beyond the floor leaves 0.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|out: &u128|
+        if add {
+            *out >= floor_num && (*out - floor_num == amount_num || *out == u128::MAX)
+        } else {
+            *out <= floor_num && (floor_num - *out == amount_num || *out == 0)
+        }))]
+    fn kernel_provider_protection_floor_shift(
+        floor_num: u128,
+        amount_num: u128,
+        add: bool,
+    ) -> u128 {
+        if add {
+            floor_num.saturating_add(amount_num)
+        } else {
+            floor_num.saturating_sub(amount_num)
+        }
+    }
+
     /// Claim bound that the domain's unliened backing is owed to: every claim except the
     /// face that valid liens cover with their own pledged backing.
     ///
@@ -5784,7 +5842,40 @@ pub struct MarketGroupV16View<'a, T> {
 pub struct MarketGroupV16ViewMut<'a, T> {
     pub header: &'a mut MarketGroupV16HeaderAccount,
     pub markets: &'a mut [Market<T>],
+    /// The source domains whose provider-protection floor this view has brought up to date
+    /// and that still have a floor above zero: the view records nothing more for them (see
+    /// `EngineAssetSlotV16Account::provider_protection_floor_long_num`). Not stored, so two
+    /// histories that differ only in how their calls are split over views leave the same
+    /// bytes unless a provider's protection was lower between two of the views.
+    ///
+    /// One entry per asset, filled from the front: the asset index plus one in the low
+    /// fourteen bits (zero is an empty entry) and one bit per side above them. The view lives
+    /// in the stack frame of whoever opened it, so this is two bytes an asset.
+    protection_observed: [u16; PROVIDER_PROTECTION_OBSERVED_ASSET_CAP],
 }
+
+/// How many assets with a provider-protection floor one mutable view can change and still
+/// record each of their domains exactly once.
+///
+/// A transition that settles a portfolio changes source credit only in the assets of that
+/// portfolio's legs and of the domains its source roster names, and admission keeps the two
+/// together within `PORTFOLIO_SOURCE_DOMAIN_CAP` domains (a leg's favorable domain has a
+/// roster place reserved, and the domain its losses are paid into is the other side of the
+/// same asset). No public transition settles more than two portfolios, so twice the roster
+/// capacity covers every one of them. The terminal slab scan passes more assets under one
+/// view, and changes them only by expiring a lapsed bucket, after which the domain has no
+/// fresh backing and its protection is zero in the middle of the step as at its end.
+///
+/// Beyond the cap, and for an asset index above `PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX`,
+/// a view forgets the domain: a later change of that view to it is observed again, which can
+/// only lower the floor.
+pub const PROVIDER_PROTECTION_OBSERVED_ASSET_CAP: usize = 2 * PORTFOLIO_SOURCE_DOMAIN_CAP;
+/// The largest asset index whose domains a mutable view can remember.
+pub const PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX: usize =
+    PROVIDER_PROTECTION_OBSERVED_ASSET_MASK as usize - 1;
+const PROVIDER_PROTECTION_OBSERVED_ASSET_MASK: u16 = (1 << 14) - 1;
+const PROVIDER_PROTECTION_OBSERVED_LONG: u16 = 1 << 14;
+const PROVIDER_PROTECTION_OBSERVED_SHORT: u16 = 1 << 15;
 
 impl<'a, T> MarketGroupV16View<'a, T> {
     pub fn new(header: &'a MarketGroupV16HeaderAccount, markets: &'a [Market<T>]) -> Self {
@@ -5794,7 +5885,11 @@ impl<'a, T> MarketGroupV16View<'a, T> {
 
 impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     pub fn new(header: &'a mut MarketGroupV16HeaderAccount, markets: &'a mut [Market<T>]) -> Self {
-        Self { header, markets }
+        Self {
+            header,
+            markets,
+            protection_observed: [0; PROVIDER_PROTECTION_OBSERVED_ASSET_CAP],
+        }
     }
 
     pub fn as_view(&self) -> MarketGroupV16View<'_, T> {
@@ -8498,6 +8593,27 @@ pub struct EngineAssetSlotV16Account {
     /// reversal face to another domain. Loser payments and consumption never write it.
     pub provider_principal_long_num: V16PodU128,
     pub provider_principal_short_num: V16PodU128,
+    /// Per source domain, BOUND_SCALE-scaled: the provider-protection floor of the asset's
+    /// current generation (`asset.market_id`; a restarted or retired slot starts at zero).
+    ///
+    /// Provider protection is the provider principal that neither a claim on the domain nor
+    /// an unrepaid consumption has taken: `min(P, R - exact claims)`, floored at 0, with `P`
+    /// and `R` as above. The floor is the lowest protection the domain has had in any state
+    /// a mutable view was opened on, moved only by what the provider itself did: a deposit
+    /// raises it by the deposit, a principal withdrawal lowers it by the withdrawal, and
+    /// nothing else raises it. A loss that a later loser payment refills is recorded once and
+    /// for good, and spending that refill again down to the floor records nothing.
+    ///
+    /// The stored value is brought up to date when a mutable view first changes what the
+    /// domain's protection is computed from, and it is brought up to date from the state the
+    /// earlier views left. A later change by the same view can see a half-done step (a trade
+    /// that closes a winner against its loser registers the gain before it receives the loss
+    /// that pays it), so it records nothing; the view remembers which domains it has done,
+    /// and nothing about that is stored. After a view's last change the stored value can
+    /// therefore be above the current protection: read it through
+    /// `provider_protection_floor_num`, which returns the lower of the two.
+    pub provider_protection_floor_long_num: V16PodU128,
+    pub provider_protection_floor_short_num: V16PodU128,
 }
 
 fn asset_contributes_to_loss_stale_summary(asset: AssetStateV16) -> bool {
@@ -8570,6 +8686,8 @@ impl EngineAssetSlotV16Account {
             && self.pending_domain_loss_barrier_short.get() == 0
             && self.provider_principal_long_num.get() == 0
             && self.provider_principal_short_num.get() == 0
+            && self.provider_protection_floor_long_num.get() == 0
+            && self.provider_protection_floor_short_num.get() == 0
             && Self::source_credit_account_is_empty_for_activation(self.source_credit_long)
             && Self::source_credit_account_is_empty_for_activation(self.source_credit_short)
             && Self::backing_bucket_account_is_empty_for_activation(self.backing_long)
@@ -8580,6 +8698,35 @@ impl EngineAssetSlotV16Account {
             && Self::insurance_reservation_account_is_empty_for_activation(
                 self.insurance_reservation_short,
             ))
+    }
+
+    /// `(protection, floor)` of one of the asset's two source domains, BOUND_SCALE-scaled:
+    /// the provider protection of the stored state, and the provider-protection floor of the
+    /// asset's current generation, which is the stored floor or the protection if that is
+    /// lower (see `provider_protection_floor_long_num`). Reads four stored amounts and
+    /// validates nothing; for a state that passes the shape checks.
+    pub fn provider_protection_and_floor_num(&self, side: SideV16) -> (u128, u128) {
+        let (source, principal_num, floor_num) = match side {
+            SideV16::Long => (
+                &self.source_credit_long,
+                self.provider_principal_long_num.get(),
+                self.provider_protection_floor_long_num.get(),
+            ),
+            SideV16::Short => (
+                &self.source_credit_short,
+                self.provider_principal_short_num.get(),
+                self.provider_protection_floor_short_num.get(),
+            ),
+        };
+        let protection_num = V16Core::kernel_provider_protection_num(
+            principal_num,
+            source.fresh_reserved_backing_num.get(),
+            source.exact_positive_claim_num.get(),
+        );
+        (
+            protection_num,
+            V16Core::kernel_provider_protection_floor_observe(floor_num, protection_num),
+        )
     }
 
     fn validate_market_id_binding(&self) -> V16Result<()> {
@@ -8618,6 +8765,8 @@ impl EngineAssetSlotV16Account {
             ),
             provider_principal_long_num: V16PodU128::default(),
             provider_principal_short_num: V16PodU128::default(),
+            provider_protection_floor_long_num: V16PodU128::default(),
+            provider_protection_floor_short_num: V16PodU128::default(),
         }
     }
 
@@ -9140,6 +9289,8 @@ impl MarketGroupV16HeaderAccount {
             ),
             provider_principal_long_num: V16PodU128::default(),
             provider_principal_short_num: V16PodU128::default(),
+            provider_protection_floor_long_num: V16PodU128::default(),
+            provider_protection_floor_short_num: V16PodU128::default(),
         };
         self.next_market_id = V16PodU64::new(next_market_id);
         self.current_slot = V16PodU64::new(now_slot);
@@ -9886,6 +10037,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<()> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let old_source = self.source_credit_for_domain_shape(domain)?;
+        if source.fresh_reserved_backing_num != old_source.fresh_reserved_backing_num
+            || source.exact_positive_claim_num != old_source.exact_positive_claim_num
+        {
+            self.observe_provider_protection_before_change(
+                asset_index,
+                side,
+                old_source.fresh_reserved_backing_num,
+                old_source.exact_positive_claim_num,
+            );
+        }
         self.update_source_credit_aggregate_totals(old_source, source)?;
         let slot = self.markets[asset_index].engine_slot_mut();
         match side {
@@ -9897,6 +10058,152 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
         }
         Ok(())
+    }
+
+    /// Brings a domain's provider-protection floor up to date before this view first changes
+    /// what the domain's protection is computed from: its fresh reserved backing, its exact
+    /// claims or its provider principal. `fresh_reserved_backing_num` and
+    /// `exact_positive_claim_num` are the stored values. At a view's first change they are the
+    /// state earlier views left, which is a complete state. Later changes of the same view
+    /// record nothing, because a step can be half done between them: a trade that closes a
+    /// winner against its loser registers the gain and then receives the loss that pays it,
+    /// and lien face is consumed before its claim is burned. Either would read as a loss that
+    /// the next write takes back.
+    ///
+    /// Nothing but the floor is written, and only when it falls. A floor of zero cannot fall,
+    /// so a domain without one costs one read here.
+    #[inline(never)]
+    fn observe_provider_protection_before_change(
+        &mut self,
+        asset_index: usize,
+        side: SideV16,
+        fresh_reserved_backing_num: u128,
+        exact_positive_claim_num: u128,
+    ) {
+        let slot = self.markets[asset_index].engine_slot();
+        let (principal_num, floor_num) = match side {
+            SideV16::Long => (
+                slot.provider_principal_long_num.get(),
+                slot.provider_protection_floor_long_num.get(),
+            ),
+            SideV16::Short => (
+                slot.provider_principal_short_num.get(),
+                slot.provider_protection_floor_short_num.get(),
+            ),
+        };
+        if floor_num == 0 || self.provider_protection_is_observed(asset_index, side) {
+            return;
+        }
+        let observed_num = V16Core::kernel_provider_protection_floor_observe(
+            floor_num,
+            V16Core::kernel_provider_protection_num(
+                principal_num,
+                fresh_reserved_backing_num,
+                exact_positive_claim_num,
+            ),
+        );
+        if observed_num != floor_num {
+            let slot = self.markets[asset_index].engine_slot_mut();
+            match side {
+                SideV16::Long => {
+                    slot.provider_protection_floor_long_num = V16PodU128::new(observed_num)
+                }
+                SideV16::Short => {
+                    slot.provider_protection_floor_short_num = V16PodU128::new(observed_num)
+                }
+            }
+        }
+        if observed_num != 0 {
+            self.remember_provider_protection_observed(asset_index, side);
+        }
+    }
+
+    fn provider_protection_is_observed(&self, asset_index: usize, side: SideV16) -> bool {
+        let side_bit = match side {
+            SideV16::Long => PROVIDER_PROTECTION_OBSERVED_LONG,
+            SideV16::Short => PROVIDER_PROTECTION_OBSERVED_SHORT,
+        };
+        let mut i = 0usize;
+        while i < PROVIDER_PROTECTION_OBSERVED_ASSET_CAP && self.protection_observed[i] != 0 {
+            let entry = self.protection_observed[i];
+            if (entry & PROVIDER_PROTECTION_OBSERVED_ASSET_MASK) as usize == asset_index + 1 {
+                return entry & side_bit != 0;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    fn remember_provider_protection_observed(&mut self, asset_index: usize, side: SideV16) {
+        if asset_index > PROVIDER_PROTECTION_OBSERVED_MAX_ASSET_INDEX {
+            return;
+        }
+        let key = (asset_index + 1) as u16;
+        let side_bit = match side {
+            SideV16::Long => PROVIDER_PROTECTION_OBSERVED_LONG,
+            SideV16::Short => PROVIDER_PROTECTION_OBSERVED_SHORT,
+        };
+        let mut i = 0usize;
+        while i < PROVIDER_PROTECTION_OBSERVED_ASSET_CAP && self.protection_observed[i] != 0 {
+            if self.protection_observed[i] & PROVIDER_PROTECTION_OBSERVED_ASSET_MASK == key {
+                self.protection_observed[i] |= side_bit;
+                return;
+            }
+            i += 1;
+        }
+        if i < PROVIDER_PROTECTION_OBSERVED_ASSET_CAP {
+            self.protection_observed[i] = key | side_bit;
+        }
+    }
+
+    /// A provider deposit or principal withdrawal moves the provider-protection floor with
+    /// the principal. Called by exactly those two paths, after the source credit and the
+    /// principal moved (so the floor was brought up to date first): what the provider puts in
+    /// is protected until a claim takes it, and what it takes out is not a loss. Expiry and
+    /// impairment also take principal, and are losses: they do not call this.
+    fn shift_provider_protection_floor_num(
+        &mut self,
+        domain: usize,
+        amount_num: u128,
+        add: bool,
+    ) -> V16Result<()> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        let slot = self.markets[asset_index].engine_slot_mut();
+        let floor = match side {
+            SideV16::Long => &mut slot.provider_protection_floor_long_num,
+            SideV16::Short => &mut slot.provider_protection_floor_short_num,
+        };
+        let shifted_num =
+            V16Core::kernel_provider_protection_floor_shift(floor.get(), amount_num, add);
+        *floor = V16PodU128::new(shifted_num);
+        // The provider's own step is done and the domain has been observed for this view: a
+        // later change of the view must not take the state in between as a low.
+        if shifted_num != 0 {
+            self.remember_provider_protection_observed(asset_index, side);
+        }
+        Ok(())
+    }
+
+    /// Provider protection of `domain` in the stored state, BOUND_SCALE-scaled (see
+    /// `EngineAssetSlotV16Account::provider_protection_floor_long_num`).
+    pub fn provider_protection_num(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        Ok(self.markets[asset_index]
+            .engine_slot()
+            .provider_protection_and_floor_num(side)
+            .0)
+    }
+
+    /// Provider-protection floor of `domain` for its asset's current generation,
+    /// BOUND_SCALE-scaled: the lowest protection the domain has had, net of the provider's own
+    /// deposits and withdrawals (see
+    /// `EngineAssetSlotV16Account::provider_protection_floor_long_num`).
+    pub fn provider_protection_floor_num(&self, domain: usize) -> V16Result<u128> {
+        let (asset_index, side) = self.domain_asset_side(domain)?;
+        Ok(self.markets[asset_index]
+            .engine_slot()
+            .provider_protection_and_floor_num(side)
+            .1)
     }
 
     /// Fresh reserved backing that leaves a domain without being consumed (a provider
@@ -9923,6 +10230,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         add: bool,
     ) -> V16Result<()> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
+        // Protection is computed from provider principal too. Every caller has changed the
+        // domain's fresh backing first, so this records nothing today; it keeps the floor
+        // right if a path ever moves principal before it writes source credit.
+        if amount != 0 {
+            let (fresh_reserved_backing_num, exact_positive_claim_num) = {
+                let slot = self.markets[asset_index].engine_slot();
+                let source = match side {
+                    SideV16::Long => &slot.source_credit_long,
+                    SideV16::Short => &slot.source_credit_short,
+                };
+                (
+                    source.fresh_reserved_backing_num.get(),
+                    source.exact_positive_claim_num.get(),
+                )
+            };
+            self.observe_provider_protection_before_change(
+                asset_index,
+                side,
+                fresh_reserved_backing_num,
+                exact_positive_claim_num,
+            );
+        }
         let slot = self.markets[asset_index].engine_slot_mut();
         let field = match side {
             SideV16::Long => &mut slot.provider_principal_long_num,
@@ -10376,6 +10705,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     ) -> V16Result<()> {
         self.add_fresh_counterparty_backing_unchecked(domain, amount, expiry_slot)?;
         self.adjust_provider_principal_num(domain, amount, true)?;
+        self.shift_provider_protection_floor_num(domain, amount, true)?;
         self.validate_shape()
     }
 
@@ -10397,6 +10727,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let backing_num = V16Core::bound_num_from_amount(amount)?;
         self.add_fresh_counterparty_backing_unchecked(domain, backing_num, expiry_slot)?;
         self.adjust_provider_principal_num(domain, backing_num, true)?;
+        self.shift_provider_protection_floor_num(domain, backing_num, true)?;
         self.header.vault = V16PodU128::new(
             self.header
                 .vault
@@ -10523,6 +10854,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             source_before.fresh_reserved_backing_num,
             source.fresh_reserved_backing_num,
         )?;
+        self.shift_provider_protection_floor_num(domain, backing_num, false)?;
         self.header.risk_epoch = V16PodU64::new(next_risk_epoch);
         self.header.vault = V16PodU128::new(next_vault);
         self.validate_source_domain_ledger(domain)?;

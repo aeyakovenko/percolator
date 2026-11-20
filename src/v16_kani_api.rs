@@ -307,6 +307,26 @@ pub fn kani_available_backing_num_for_source_credit_state(
     V16Core::available_backing_num_for_source_credit_state(state)
 }
 
+pub fn kani_provider_protection_num(
+    provider_principal_num: u128,
+    fresh_reserved_backing_num: u128,
+    exact_positive_claim_num: u128,
+) -> u128 {
+    V16Core::kernel_provider_protection_num(
+        provider_principal_num,
+        fresh_reserved_backing_num,
+        exact_positive_claim_num,
+    )
+}
+
+pub fn kani_provider_protection_floor_observe(floor_num: u128, protection_num: u128) -> u128 {
+    V16Core::kernel_provider_protection_floor_observe(floor_num, protection_num)
+}
+
+pub fn kani_provider_protection_floor_shift(floor_num: u128, amount_num: u128, add: bool) -> u128 {
+    V16Core::kernel_provider_protection_floor_shift(floor_num, amount_num, add)
+}
+
 pub fn kani_source_claim_domain_first_burn_partition(
     source_claim_num: u128,
     burn_num: u128,
@@ -2035,6 +2055,11 @@ pub fn kani_eq_engine_asset_slot_v16_account(
             &a.insurance_reservation_short,
             &b.insurance_reservation_short,
         )
+        && a.provider_principal_long_num.get() == b.provider_principal_long_num.get()
+        && a.provider_principal_short_num.get() == b.provider_principal_short_num.get()
+        && a.provider_protection_floor_long_num.get() == b.provider_protection_floor_long_num.get()
+        && a.provider_protection_floor_short_num.get()
+            == b.provider_protection_floor_short_num.get()
 }
 
 pub fn kani_eq_provenance_header_v16_account(

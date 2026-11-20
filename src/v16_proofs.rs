@@ -1185,6 +1185,30 @@ fn contract_check_available_backing_num_for_source_credit_state() {
 }
 
 #[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_provider_protection_num)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_provider_protection_num() {
+    let _ = V16Core::kernel_provider_protection_num(kani::any(), kani::any(), kani::any());
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_provider_protection_floor_observe)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_provider_protection_floor_observe() {
+    let _ = V16Core::kernel_provider_protection_floor_observe(kani::any(), kani::any());
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_provider_protection_floor_shift)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_provider_protection_floor_shift() {
+    let _ = V16Core::kernel_provider_protection_floor_shift(kani::any(), kani::any(), kani::any());
+}
+
+#[cfg(all(kani, feature = "contracts"))]
 #[kani::proof_for_contract(V16Core::health_requirements_from_base_and_target_lag)]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
