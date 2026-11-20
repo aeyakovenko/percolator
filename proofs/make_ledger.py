@@ -649,11 +649,46 @@ for p in props:
         pieces[pid]["evidence"] = f"{p['name']} (engine {NEW_REV}, batch t1)"
     elif st.startswith("REFUTED"):
         pieces[pid]["status"] = "REFUTED"; pieces[pid]["evidence"] = p["name"]
+    elif st:
+        # The service lists a property that a stopped task left unfinished as IN_PROGRESS again as soon
+        # as any later task starts. No task after t1 was asked for these.
+        pieces[pid]["status"] = "attempted, open"
+        pieces[pid]["evidence"] = f"{p['name']}: batch t1 was stopped before this one finished"
+
+# The trade pilot (task s2, engine d1fa39f6): the prover's names for the pieces TF, TA, TB and TC1-TC9.
+TRADE_ROWS = {
+    "Spec.Trade.tf_margin": "TF.margin", "Spec.Trade.tf_locked": "TF.locked", "Spec.Trade.tf_frame": "TF.frame",
+    "finish_trade_checks_not_atomic.order": "TF.order",
+    "apply_trade_after_refresh_not_atomic.fee": "TA.fee", "apply_trade_after_refresh_not_atomic.conservation": "TA.conservation",
+    "apply_trade_after_refresh_not_atomic.positions": "TA.positions", "apply_trade_after_refresh_not_atomic.gate": "TA.gate",
+    "apply_trade_after_refresh_not_atomic.frame": "TA.frame", "apply_trade_after_refresh_not_atomic.nopanic": "TA.nopanic",
+    "Spec.Trade.tb_flag": "TB.flag", "Spec.Trade.tb_checked": "TB.checked",
+    "Spec.Trade.tc1_charge_fee": "TC1", "Spec.Trade.tc2_preflight": "TC2", "Spec.Trade.tc3_risk_change": "TC3",
+    "Spec.Trade.tc4_terminal_residual": "TC4", "Spec.Trade.tc5_position_delta": "TC5",
+    "transfer_trade_residual_reward_credit.frame": "TC6", "Spec.Trade.tc7_recertify": "TC7",
+    "Spec.Trade.tc8_oi_cap_gate": "TC8", "Spec.Trade.tc9_im_lien": "TC9",
+}
+_trade_unmapped = []
+for p in props:
+    name, st = p["name"], p["status"]
+    pid = TRADE_ROWS.get(name)
+    if pid is None:
+        if name.startswith("Spec.Trade.") or name.startswith(("apply_trade_after_refresh_not_atomic.", "finish_trade_checks_not_atomic.",
+                                                               "execute_batch_with_fee_loss_stale_scoped_not_atomic.")):
+            _trade_unmapped.append(name)
+        continue
+    if st.startswith("PROVED"):
+        pieces[pid]["status"] = "proved, final check pending" if "unchecked" in st else "proved"
+        pieces[pid]["evidence"] = f"{name} (engine {LANDED_REV}, task s2)"
+    elif st.startswith("REFUTED"):
+        pieces[pid]["status"] = "REFUTED"; pieces[pid]["evidence"] = name
     elif st.startswith("IN_PROGRESS") or st.startswith("IN PROGRESS"):
         pieces[pid]["status"] = "in progress"
     elif st:
         pieces[pid]["status"] = "attempted, open"
-        pieces[pid]["evidence"] = f"{p['name']}: batch t1 was stopped at its spending cap before this one finished"
+        pieces[pid]["evidence"] = f"{name}: no verdict in task s2"
+if _trade_unmapped:
+    print("trade rows without a ledger piece:", ", ".join(sorted(_trade_unmapped)), file=sys.stderr)
 
 # The three provider-protection kernels are small scalar functions that Kani verifies for all inputs.
 # They are not queued for Aristotle (the owner's priority: Aristotle goes where Kani has gaps).
@@ -757,7 +792,7 @@ for p in pieces.values():
     by_layer.setdefault(p["layer"], []).append(p)
 total_proved = sum(1 for p in pieces.values() if p["status"] == "proved")
 total_pending = sum(1 for p in pieces.values() if p["status"] == "proved, final check pending")
-now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+now = datetime.datetime.utcnow().strftime("%Y-%m-%d")  # the date only: a publish with no change leaves no diff
 md = []
 md.append("# Proof ledger: the charter's invariants as provable pieces\n")
 md.append(f"Generated {now} by `make_ledger.py` from the live Aristotle property list. "

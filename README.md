@@ -94,7 +94,7 @@ Source-checkable counts in this checkout:
 
 | Class | Count |
 | --- | ---: |
-| Plain Kani proofs in `tests/proofs_v16.rs` | 352 |
+| Plain Kani proofs in `tests/proofs_v16.rs` | 354 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
 | Plain Kani proofs in `src/v16_proofs.rs` | 44 |
 | Function-contract proofs in `src/v16_proofs.rs` | 68 |
@@ -231,10 +231,11 @@ On engine `d1fa39f6`, Kani 0.66.0, with the three commands of "Run Kani":
 | `--features fuzz,closure` | 373 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
 | `--features fuzz,contracts -Z function-contracts` | 394 | `composition_clear_leg_value_conservation` |
 
-Thirteen gate proofs (the trade, the rebalance reduction, the Recovery close and forfeit, the
-resolved clock) were added after these runs. All thirteen verify in the `--features fuzz` run,
-which makes 365 there; their checks in the other two runs are in progress, and this table is
-updated when they finish.
+Fifteen proofs were added after these runs: thirteen for the gates of the trade, the rebalance
+reduction, the Recovery close and forfeit and for the resolved clock, and two for
+`force_asset_recovery_not_atomic`. All fifteen verify in the `--features fuzz` run, which makes 367
+there, and the thirteen verify in the closure run. The remaining checks in the closure and
+contracts runs are in progress, and this table is updated when they finish.
 
 A whole run takes one and a half to two hours on a 64-core machine at
 `-j 12 --output-format terse`. Run them one after the other: the two harnesses without a verdict

@@ -70,7 +70,7 @@ PHASE0 = [
     ("done", "#449, #448, keeper reward during catch-up, #477, #453", "Landed 2026-11-19 and 2026-11-20."),
     ("done", "Charter consistency", "No two charter statements contradict each other (audit of 2026-11-19; the one real conflict it found, two base-unit mints against a single quote unit, was resolved by program #480 and #481)."),
 ]
-now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+now = datetime.datetime.utcnow().strftime("%Y-%m-%d")  # the date only: a publish with no change leaves no diff
 _p1_done, _p1_all = sel(PH[0][2])
 _p1_kani = sum(1 for r in dep if PH[0][2](r["id"]) and r["status"] == "verified by Kani")
 if _p1_done == _p1_all:

@@ -1,6 +1,6 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-20 22:53 UTC from `proof_ledger.tsv`. **180 of 623 pieces of the deployed build are done
+Generated 2026-11-20 from `proof_ledger.tsv`. **180 of 623 pieces of the deployed build are done
 (170 proved by Aristotle, 10 verified by Kani); 0 of 89 charter invariants are closed.**
 
 ## The end goal

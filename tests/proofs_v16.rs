@@ -23010,3 +23010,89 @@ fn proof_v16_advance_resolved_slot_moves_only_the_clock() {
         &markets[0].engine
     ));
 }
+
+// `force_asset_recovery_not_atomic`, in full, on an Active asset. It is refused outside Live mode
+// and for a slot behind the clock, without mutation. Otherwise the asset goes to Recovery with its
+// oracle target frozen at the effective price, the asset-set and risk epochs advance by one, and
+// nothing else in the header or the slot changes. The clock is checked and not written.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_force_asset_recovery_moves_only_the_lifecycle_and_the_epochs() {
+    const CURRENT_SLOT: u64 = 5;
+    let mode: u8 = kani::any();
+    kani::assume(mode <= 2);
+    let now_slot: u64 = kani::any();
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.mode = mode;
+    header.current_slot = V16PodU64::new(CURRENT_SLOT);
+    let h0 = header;
+    let s0 = markets[0].engine;
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .force_asset_recovery_not_atomic(0, now_slot);
+
+    kani::cover!(
+        result.is_ok(),
+        "an Active asset of a Live market enters Recovery"
+    );
+    kani::cover!(
+        mode == 0 && now_slot < CURRENT_SLOT,
+        "a slot behind the clock is refused"
+    );
+    kani::cover!(mode != 0, "a market that is not Live is refused");
+    let accepted = mode == 0 && now_slot >= CURRENT_SLOT;
+    assert_eq!(
+        result,
+        if accepted {
+            Ok(())
+        } else {
+            Err(V16Error::InvalidConfig)
+        }
+    );
+    let mut h1 = h0;
+    let mut s1 = s0;
+    if accepted {
+        h1.asset_set_epoch = V16PodU64::new(h0.asset_set_epoch.get() + 1);
+        h1.risk_epoch = V16PodU64::new(h0.risk_epoch.get() + 1);
+        let mut asset = s0.asset.try_to_runtime().unwrap();
+        asset.lifecycle = AssetLifecycleV16::Recovery;
+        asset.raw_oracle_target_price = asset.effective_price;
+        s1.asset = AssetStateV16Account::from_runtime(&asset);
+    }
+    assert!(kani_eq_market_group_v16_header_account(&h1, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s1,
+        &markets[0].engine
+    ));
+}
+
+// Forcing Recovery twice is the same as forcing it once: for any two slots that are not behind
+// the clock, the second call succeeds and writes nothing (no second epoch bump). The slots need
+// not be ordered: the call checks the clock and does not move it.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_force_asset_recovery_is_idempotent() {
+    let now_slot: u64 = kani::any();
+    let later_slot: u64 = kani::any();
+    let (mut header, mut markets) = one_market_only_fixture();
+    let current_slot = header.current_slot.get();
+    kani::assume(now_slot >= current_slot);
+    kani::assume(later_slot >= current_slot);
+    MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .force_asset_recovery_not_atomic(0, now_slot)
+        .unwrap();
+    let h1 = header;
+    let s1 = markets[0].engine;
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .force_asset_recovery_not_atomic(0, later_slot);
+
+    assert_eq!(result, Ok(()));
+    assert!(kani_eq_market_group_v16_header_account(&h1, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s1,
+        &markets[0].engine
+    ));
+}

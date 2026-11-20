@@ -1,6 +1,6 @@
 # Proof ledger: the charter's invariants as provable pieces
 
-Generated 2026-11-20 22:53 UTC by `make_ledger.py` from the live Aristotle property list. **170 of 685 pieces are proved and checked; 0 more are proved with the final check pending** (their task was stopped before its closing check).
+Generated 2026-11-20 by `make_ledger.py` from the live Aristotle property list. **170 of 685 pieces are proved and checked; 0 more are proved with the final check pending** (their task was stopped before its closing check).
 
 ## The end goal
 
@@ -71,7 +71,7 @@ checks that function by function, and `src/wide_math.rs` is identical in all thr
 | K kernel | 132 | 6 | 116 | 0 | 10 | 0 |
 | L liveness | 12 | 0 | 0 | 0 | 0 | 12 |
 | P panic sites | 29 | 0 | 9 | 0 | 0 | 20 |
-| S settlement glue | 44 | 0 | 0 | 0 | 0 | 44 |
+| S settlement glue | 44 | 0 | 0 | 0 | 21 | 23 |
 | T transition | 262 | 56 | 0 | 0 | 5 | 201 |
 | W wrapper | 50 | 0 | 0 | 0 | 0 | 50 |
 | X committed after an error | 10 | 0 | 0 | 0 | 0 | 10 |
@@ -521,27 +521,27 @@ Layer T has two pieces per entry point. `.header`: the production shape check (h
 
 | Piece | Target | Statement | Status | Evidence |
 |---|---|---|---|---|
-| TF.margin | `finish_trade_checks_not_atomic` | no trade that needed initial margin from an account ends with that account below it: its certificate is valid and `certified_equity >= certified_initial_req` at the return (rests on TC9) | open |  |
-| TF.locked | `finish_trade_checks_not_atomic` | in the locked lane the account also meets its initial requirement from capital and negative PnL alone, without positive credit | open |  |
-| TF.frame | `finish_trade_checks_not_atomic` | writes nothing unless the trade increased risk outside the locked lane; then only the fields a lien creation writes (rests on TC9) | open |  |
-| TF.order | `finish_trade_checks_not_atomic` | the long account's certificate is still current when its margin is checked, after the short account's margin lien was created | open |  |
-| TA.fee | `apply_trade_after_refresh_not_atomic` | each account pays `min(fee, capital)`, or nothing when its PnL is negative; the fee and the notional are the stated formulas (rests on TC1) | open |  |
-| TA.conservation | `apply_trade_after_refresh_not_atomic` | applying a fill moves no token value and no PnL: `vault` and both accounts' PnL are unchanged, and each fee moves from that account's capital (and `c_tot`) to `insurance` (rests on TC1 to TC7) | open |  |
-| TA.positions | `apply_trade_after_refresh_not_atomic` | each account's position on the traded asset becomes the planned one and its other legs are unchanged (rests on TC2, TC5) | open |  |
-| TA.gate | `apply_trade_after_refresh_not_atomic` | a side the fill grew does not end above the side cap (rests on TC8) | open |  |
-| TA.frame | `apply_trade_after_refresh_not_atomic` | writes four header fields, eight account fields and only the traded asset's slot (rests on TC1 to TC7) | open |  |
-| TA.nopanic | `apply_trade_after_refresh_not_atomic` | no execution of the body panics outside its named callees | open |  |
-| TB.flag | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | the scoped suspension of `loss_stale_active` never leaks: on every return after the inner call, Ok or Err, the flag has its entry value | open |  |
-| TB.checked | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | every Ok return follows a passing `validate_shape` and `validate_with_market` of both accounts on the final state | open |  |
-| TC1 | `charge_account_fee_current_not_atomic` | contract: charges `min(requested, capital)` or nothing when PnL is negative; capital and `c_tot` fall and `insurance` rises by that amount; `vault` is not written | open |  |
-| TC2 | `validate_trade_position_preflight` | contract: writes nothing; returns the lookups it was given and the risk flags computed from them | open |  |
-| TC3 | `require_asset_risk_change_allowed` | contract: writes nothing; a risk increase needs both side indices at `ADL_ONE` | open |  |
-| TC4 | `begin_terminal_trade_residual_if_needed` | contract: writes only the account's close ledger and one header counter, and nothing unless a final fill closes a losing single-leg account | open |  |
-| TC5 | `apply_current_position_delta_with_lookup` | contract: the leg becomes the planned position, other legs are unchanged, and none of capital, PnL, `c_tot`, `insurance`, `vault` is written | open |  |
-| TC6 | `transfer_trade_residual_reward_credit` | contract: writes only the two accounts' residual reward counters | open |  |
-| TC7 | `recertify_account_after_trade_delta` | contract: writes only the account's certificate | open |  |
-| TC8 | `kernel_trade_side_oi_cap_gate` | contract: the exact return condition of the side cap gate | open |  |
-| TC9 | `create_initial_margin_source_lien_if_needed` | contract: on Ok the certificate is valid; writes only capital, certificate and source domains of that account and six header fields | open |  |
+| TF.margin | `finish_trade_checks_not_atomic` | no trade that needed initial margin from an account ends with that account below it: its certificate is valid and `certified_equity >= certified_initial_req` at the return (rests on TC9) | in progress |  |
+| TF.locked | `finish_trade_checks_not_atomic` | in the locked lane the account also meets its initial requirement from capital and negative PnL alone, without positive credit | in progress |  |
+| TF.frame | `finish_trade_checks_not_atomic` | writes nothing unless the trade increased risk outside the locked lane; then only the fields a lien creation writes (rests on TC9) | in progress |  |
+| TF.order | `finish_trade_checks_not_atomic` | the long account's certificate is still current when its margin is checked, after the short account's margin lien was created | in progress |  |
+| TA.fee | `apply_trade_after_refresh_not_atomic` | each account pays `min(fee, capital)`, or nothing when its PnL is negative; the fee and the notional are the stated formulas (rests on TC1) | in progress |  |
+| TA.conservation | `apply_trade_after_refresh_not_atomic` | applying a fill moves no token value and no PnL: `vault` and both accounts' PnL are unchanged, and each fee moves from that account's capital (and `c_tot`) to `insurance` (rests on TC1 to TC7) | in progress |  |
+| TA.positions | `apply_trade_after_refresh_not_atomic` | each account's position on the traded asset becomes the planned one and its other legs are unchanged (rests on TC2, TC5) | in progress |  |
+| TA.gate | `apply_trade_after_refresh_not_atomic` | a side the fill grew does not end above the side cap (rests on TC8) | in progress |  |
+| TA.frame | `apply_trade_after_refresh_not_atomic` | writes four header fields, eight account fields and only the traded asset's slot (rests on TC1 to TC7) | in progress |  |
+| TA.nopanic | `apply_trade_after_refresh_not_atomic` | no execution of the body panics outside its named callees | in progress |  |
+| TB.flag | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | the scoped suspension of `loss_stale_active` never leaks: on every return after the inner call, Ok or Err, the flag has its entry value | in progress |  |
+| TB.checked | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | every Ok return follows a passing `validate_shape` and `validate_with_market` of both accounts on the final state | in progress |  |
+| TC1 | `charge_account_fee_current_not_atomic` | contract: charges `min(requested, capital)` or nothing when PnL is negative; capital and `c_tot` fall and `insurance` rises by that amount; `vault` is not written | in progress |  |
+| TC2 | `validate_trade_position_preflight` | contract: writes nothing; returns the lookups it was given and the risk flags computed from them | in progress |  |
+| TC3 | `require_asset_risk_change_allowed` | contract: writes nothing; a risk increase needs both side indices at `ADL_ONE` | in progress |  |
+| TC4 | `begin_terminal_trade_residual_if_needed` | contract: writes only the account's close ledger and one header counter, and nothing unless a final fill closes a losing single-leg account | in progress |  |
+| TC5 | `apply_current_position_delta_with_lookup` | contract: the leg becomes the planned position, other legs are unchanged, and none of capital, PnL, `c_tot`, `insurance`, `vault` is written | in progress |  |
+| TC6 | `transfer_trade_residual_reward_credit` | contract: writes only the two accounts' residual reward counters | in progress |  |
+| TC7 | `recertify_account_after_trade_delta` | contract: writes only the account's certificate | in progress |  |
+| TC8 | `kernel_trade_side_oi_cap_gate` | contract: the exact return condition of the side cap gate | in progress |  |
+| TC9 | `create_initial_margin_source_lien_if_needed` | contract: on Ok the certificate is valid; writes only capital, certificate and source domains of that account and six header fields | in progress |  |
 | S0.C1 | `fresh_counterparty_backing_expiry_slot` | contract: writes nothing | open |  |
 | S0.C2 | `credit_post_snapshot_residual_not_atomic` | contract: writes only `payout_snapshot` and `resolved_payout_ledger`, and nothing when the amount is zero or no snapshot is captured | open |  |
 | S0.C3.bound | `book_realized_kf_loss_for_source_domain_not_atomic` | contract: the returned junior amount is at most the amount booked | open |  |
@@ -570,11 +570,11 @@ Layer T has two pieces per entry point. `.header`: the production shape check (h
 
 | Piece | Target | Statement | Status | Evidence |
 |---|---|---|---|---|
-| T01.header | `accrue_asset_path_to_not_atomic` | [local] if the header predicate (`validate_shape` of a default build) held before `accrue_asset_path_to_not_atomic` and it returns Ok, it holds of the state it leaves. Found when read: writes `current_slot = now_slot` after refusing `now_slot < current_slot`, and `slot_last = asset.slot_last <= now_slot`; `loss_stale_active` from `encode_bool`. Ends in the audit-only scan | attempted, open | Spec.LayerT.t01_header: batch t1 was stopped at its spending cap before this one finished |
+| T01.header | `accrue_asset_path_to_not_atomic` | [local] if the header predicate (`validate_shape` of a default build) held before `accrue_asset_path_to_not_atomic` and it returns Ok, it holds of the state it leaves. Found when read: writes `current_slot = now_slot` after refusing `now_slot < current_slot`, and `slot_last = asset.slot_last <= now_slot`; `loss_stale_active` from `encode_bool`. Ends in the audit-only scan | attempted, open | Spec.LayerT.t01_header: batch t1 was stopped before this one finished |
 | T01.scan | `accrue_asset_path_to_not_atomic` | if the per-asset scan predicate (`validate_shape_full_audit_scan`) held before `accrue_asset_path_to_not_atomic` and it returns Ok, it holds after | open |  |
 | T01.account | `accrue_asset_path_to_not_atomic` | every portfolio account `accrue_asset_path_to_not_atomic` is given passes `validate_with_market` against the market it leaves, if it did before and the call returns Ok | open |  |
 | T01.mirror | `accrue_asset_path_to_not_atomic` | `accrue_asset_path_to_not_atomic` keeps every market total in step with the accounts it is given: for each mirrored total (capital, positive PnL and its bound, source claims per domain, stored positions, raw basis and loss weight per side, stale and negative-PnL counts) the total minus the given accounts' contribution is unchanged (specs: global invariant, part M) | open |  |
-| T02.header | `accrue_asset_to_not_atomic` | [local] if the header predicate (`validate_shape` of a default build) held before `accrue_asset_to_not_atomic` and it returns Ok, it holds of the state it leaves. Found when read: writes `current_slot = max(current_slot, now_slot)` and `slot_last = asset.slot_last <= now_slot`; `loss_stale_active` from `encode_bool`. Ends in the audit-only scan | attempted, open | Spec.LayerT.t02_header: batch t1 was stopped at its spending cap before this one finished |
+| T02.header | `accrue_asset_to_not_atomic` | [local] if the header predicate (`validate_shape` of a default build) held before `accrue_asset_to_not_atomic` and it returns Ok, it holds of the state it leaves. Found when read: writes `current_slot = max(current_slot, now_slot)` and `slot_last = asset.slot_last <= now_slot`; `loss_stale_active` from `encode_bool`. Ends in the audit-only scan | attempted, open | Spec.LayerT.t02_header: batch t1 was stopped before this one finished |
 | T02.scan | `accrue_asset_to_not_atomic` | if the per-asset scan predicate (`validate_shape_full_audit_scan`) held before `accrue_asset_to_not_atomic` and it returns Ok, it holds after | open |  |
 | T02.account | `accrue_asset_to_not_atomic` | every portfolio account `accrue_asset_to_not_atomic` is given passes `validate_with_market` against the market it leaves, if it did before and the call returns Ok | open |  |
 | T02.mirror | `accrue_asset_to_not_atomic` | `accrue_asset_to_not_atomic` keeps every market total in step with the accounts it is given: for each mirrored total (capital, positive PnL and its bound, source claims per domain, stored positions, raw basis and loss weight per side, stale and negative-PnL counts) the total minus the given accounts' contribution is unchanged (specs: global invariant, part M) | open |  |
@@ -698,7 +698,7 @@ Layer T has two pieces per entry point. `.header`: the production shape check (h
 | T32.scan | `expire_source_backing_bucket_not_atomic` | if the per-asset scan predicate (`validate_shape_full_audit_scan`) held before `expire_source_backing_bucket_not_atomic` and it returns Ok, it holds after | open |  |
 | T32.account | `expire_source_backing_bucket_not_atomic` | every portfolio account `expire_source_backing_bucket_not_atomic` is given passes `validate_with_market` against the market it leaves, if it did before and the call returns Ok | open |  |
 | T32.mirror | `expire_source_backing_bucket_not_atomic` | `expire_source_backing_bucket_not_atomic` keeps every market total in step with the accounts it is given: for each mirrored total (capital, positive PnL and its bound, source claims per domain, stored positions, raw basis and loss weight per side, stale and negative-PnL counts) the total minus the given accounts' contribution is unchanged (specs: global invariant, part M) | open |  |
-| T33.header | `finalize_side_reset_not_atomic` | [frame] if the header predicate (`validate_shape` of a default build) held before `finalize_side_reset_not_atomic` and it returns Ok, it holds of the state it leaves. Found when read: early `Ok` for a side that is already Normal, before any write; otherwise writes one asset record, `resolved_payout_blocker_count` and `risk_epoch`, and calls `validate_header_aggregate_totals` (H14 to H17) in every build | attempted, open | Spec.LayerT.t33_header: batch t1 was stopped at its spending cap before this one finished |
+| T33.header | `finalize_side_reset_not_atomic` | [frame] if the header predicate (`validate_shape` of a default build) held before `finalize_side_reset_not_atomic` and it returns Ok, it holds of the state it leaves. Found when read: early `Ok` for a side that is already Normal, before any write; otherwise writes one asset record, `resolved_payout_blocker_count` and `risk_epoch`, and calls `validate_header_aggregate_totals` (H14 to H17) in every build | attempted, open | Spec.LayerT.t33_header: batch t1 was stopped before this one finished |
 | T33.scan | `finalize_side_reset_not_atomic` | if the per-asset scan predicate (`validate_shape_full_audit_scan`) held before `finalize_side_reset_not_atomic` and it returns Ok, it holds after | open |  |
 | T33.account | `finalize_side_reset_not_atomic` | every portfolio account `finalize_side_reset_not_atomic` is given passes `validate_with_market` against the market it leaves, if it did before and the call returns Ok | open |  |
 | T33.mirror | `finalize_side_reset_not_atomic` | `finalize_side_reset_not_atomic` keeps every market total in step with the accounts it is given: for each mirrored total (capital, positive PnL and its bound, source claims per domain, stored positions, raw basis and loss weight per side, stale and negative-PnL counts) the total minus the given accounts' contribution is unchanged (specs: global invariant, part M) | open |  |
