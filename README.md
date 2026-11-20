@@ -231,11 +231,8 @@ On engine `d1fa39f6`, Kani 0.66.0, with the three commands of "Run Kani":
 | `--features fuzz,closure` | 373 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
 | `--features fuzz,contracts -Z function-contracts` | 394 | `composition_clear_leg_value_conservation` |
 
-Fifteen proofs were added after these runs: thirteen for the gates of the trade, the rebalance
-reduction, the Recovery close and forfeit and for the resolved clock, and two for
-`force_asset_recovery_not_atomic`. All fifteen verify in the `--features fuzz` run, which makes 367
-there, and the thirteen verify in the closure run. The remaining checks in the closure and
-contracts runs are in progress, and this table is updated when they finish.
+The table is from full runs. Since then 15 proofs were added and verified one by one: 15 with `--features fuzz`, 13 in the closure run, 13 in the contracts run (still being checked: 2 in the closure run, 2 in the contracts run). `proofs/kani_added.tsv` lists
+them with their verdict in each run; add the ones marked verified to the numbers above.
 
 A whole run takes one and a half to two hours on a 64-core machine at
 `-j 12 --output-format terse`. Run them one after the other: the two harnesses without a verdict
@@ -286,7 +283,8 @@ aristotle submit --project-dir /tmp/engine-export --prompt-file proofs/prompts/s
 # 3. Each later task continues the same project, one at a time
 export ARISTOTLE_PROJECT=<project id printed by step 2>
 aristotle continue "$ARISTOTLE_PROJECT" --prompt-file proofs/prompts/stage_b2_scalar_kernels.txt \
-    --files aristotle/kernel_contracts_spec.md --project-dir /tmp/engine-export --json --no-questions
+    --files /tmp/engine-export/aristotle/kernel_contracts_spec.md --project-dir /tmp/engine-export \
+    --json --no-questions        # --files: changed or new files, paths under the project folder
 
 # 4. Read the verdicts and compare them with proofs/proof_ledger.md
 aristotle properties "$ARISTOTLE_PROJECT" --status ALL --json
