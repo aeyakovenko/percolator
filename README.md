@@ -68,6 +68,12 @@ Trusted base and limits:
   custody, and CU limits.
 - Kani proves bounded symbolic harnesses and function contracts; large
   route-level properties are proven by decomposition plus runtime/fuzz tests.
+- Payments of a resolved market do not depend on the order of the claims once
+  the payout snapshot is captured. Before that, the order of the permissionless
+  closes can still decide what one account is paid, in five cases that
+  `spec.md` lists with measurements (§5.1.1, "What close order can still
+  decide"; #132, #175). No account is kept from closing. This is measured over
+  random histories, not proved.
 
 ## Current Verification Inventory
 
