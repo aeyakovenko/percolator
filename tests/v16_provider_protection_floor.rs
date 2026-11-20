@@ -542,6 +542,122 @@ fn past_the_view_cap_a_floor_can_only_be_lower() {
     }
 }
 
+/// One trade settles both of its accounts whole, and an account changes source
+/// credit in every asset it has a leg on and in every domain it still holds a
+/// claim in from a position it has left: as many assets as its source roster has
+/// places, which is twice the leg cap. Here one trade changes 36 assets that have a
+/// provider floor. The account settled first has a full roster: its loss on the
+/// traded asset takes the claims it kept in sixteen assets it has left, and then
+/// its fifteen other legs register their gains. The second account's loss then
+/// takes the claims it kept in three more assets, the 33rd to 35th the view
+/// changes. Every floor must come out as the lower of what it was and the
+/// protection the trade left, because the view remembers every one of them.
+///
+/// A view that remembers 32 assets passes this history too, for a reason that is
+/// not a property of the floor: the engine settles an account's losses before its
+/// gains and gives a claim up in one write, so none of the domains such a view
+/// forgets is changed twice. The view is sized so that nothing depends on that.
+#[test]
+fn one_trade_over_more_assets_than_two_accounts_have_legs_records_no_transient() {
+    const GAINS: core::ops::Range<usize> = 0..15;
+    const SHARED: usize = 15;
+    const LAST: usize = 16;
+    const LEFT_BY_0: core::ops::Range<usize> = 17..33;
+    const LEFT_BY_1: core::ops::Range<usize> = 33..36;
+    const ASSETS: usize = 36;
+    const PRINCIPAL: u128 = 50_000_000;
+    let mut w = World::with_config(ASSETS, &[DEPOSIT; 5], |cfg| {
+        cfg.max_portfolio_assets = percolator::V16_MAX_PORTFOLIO_ASSETS_N as u16;
+    });
+    // `World` activates one asset per slot and then accrues each of them once. An accrual
+    // moves an asset by one slot here, which leaves the early assets of a market this size
+    // behind the clock, and a market with an asset behind the clock admits no trade on it.
+    let slot = w.slot;
+    for asset in 0..ASSETS {
+        for _ in 0..ASSETS {
+            w.op(|m, _| m.accrue_asset_to_not_atomic(asset, slot, PX0, 0, true))
+                .unwrap();
+        }
+    }
+    for domain in 0..2 * ASSETS {
+        deposit(&mut w, domain, PRINCIPAL);
+    }
+    // Each account wins 1,000,000 on every asset it is about to leave, is paid by its
+    // loser before it registers the gain, and leaves with the claim unconverted.
+    for (account, other, left) in [(0, 3, LEFT_BY_0), (1, 4, LEFT_BY_1)] {
+        for asset in left.clone() {
+            w.trade(account, other, asset, 100);
+        }
+        for asset in left.clone() {
+            w.step(asset, PX0 + 10_000, 0);
+        }
+        w.refresh(other);
+        w.refresh(account);
+        for asset in left {
+            w.trade(other, account, asset, 100);
+            assert_eq!(
+                w.claim(account, World::loss_domain(asset, false)),
+                1_000_000
+            );
+            assert_eq!(w.pos[account][asset], 0);
+        }
+    }
+    // Account 0: fifteen legs that gain 1,000,000 each and the shared asset, on which it
+    // loses 20,000,000 to account 1. With its sixteen claims its source roster is full.
+    // Account 1 loses 10,000,000 on its other leg.
+    for asset in GAINS {
+        w.trade(0, 2, asset, 100);
+    }
+    w.trade(0, 1, SHARED, 2_000);
+    w.trade(1, 4, LAST, 500);
+    for asset in GAINS {
+        w.step(asset, PX0 + 10_000, 0);
+    }
+    w.step(SHARED, PX0 - 10_000, 0);
+    w.step(LAST, PX0 - 20_000, 0);
+    // The other sides settle; accounts 0 and 1 are settled by the trade below.
+    w.refresh(2);
+    w.refresh(4);
+
+    let before: Vec<_> = (0..2 * ASSETS)
+        .map(|domain| (protection_and_floor_num(&w, domain), w.source(domain)))
+        .collect();
+    w.trade(0, 1, SHARED, 1);
+
+    let mut assets_changed = 0usize;
+    for asset in 0..ASSETS {
+        let mut changed = false;
+        for domain in [2 * asset, 2 * asset + 1] {
+            let ((_, floor_before), source_before) = before[domain];
+            let (protection, floor) = protection_and_floor_num(&w, domain);
+            // One view: the states a reader can have seen are the one before the call
+            // and the one after it.
+            assert_eq!(
+                floor,
+                floor_before.min(protection),
+                "domain {domain}: the floor is the lower of what it was and the protection the trade left"
+            );
+            let source = w.source(domain);
+            changed |= floor_before != 0
+                && (source.fresh_reserved_backing_num != source_before.fresh_reserved_backing_num
+                    || source.exact_positive_claim_num != source_before.exact_positive_claim_num);
+        }
+        assets_changed += usize::from(changed);
+    }
+    assert_eq!(
+        assets_changed, ASSETS,
+        "the trade changed source credit in every asset, and each has a provider floor"
+    );
+    // The provider of a domain whose claim was given up lost nothing.
+    for (account, left) in [(0, LEFT_BY_0), (1, LEFT_BY_1)] {
+        for asset in left {
+            let domain = World::loss_domain(asset, false);
+            assert_eq!(w.claim(account, domain), 0);
+            assert_eq!(protection_and_floor(&w, domain), (PRINCIPAL, PRINCIPAL));
+        }
+    }
+}
+
 // ---------------------------------------------------------------- random histories
 
 /// The floor a reader must see after each call, from what it saw before the call:
