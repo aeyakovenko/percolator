@@ -4730,6 +4730,8 @@ fn v16_public_domain_insurance_spent_setter_rejects_unbacked_clear() {
 fn v16_backing_provider_earnings_credit_and_withdraw_are_engine_accounted() {
     let (mut header, mut markets) = market_fixture(1, 100);
     header.vault = V16PodU128::new(10);
+    // The header total mirrors the slot's fresh backing set below.
+    header.source_fresh_backing_total_num = V16PodU128::new(1);
     let market_id = markets[0].engine.asset.market_id.get();
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id,
@@ -4780,6 +4782,8 @@ fn v16_backing_provider_earnings_credit_rejects_without_vault_slack() {
     let (mut header, mut markets) = market_fixture(1, 100);
     header.vault = V16PodU128::new(10);
     header.c_tot = V16PodU128::new(10);
+    // The header total mirrors the slot's fresh backing set below.
+    header.source_fresh_backing_total_num = V16PodU128::new(1);
     let market_id = markets[0].engine.asset.market_id.get();
     markets[0].engine.backing_long = BackingBucketV16Account::from_runtime(&BackingBucketV16 {
         market_id,
@@ -5374,13 +5378,17 @@ fn v16_b_index_headroom_exhaustion_declares_value_neutral_recovery() {
         asset.oi_eff_short_q = POS_SCALE;
         asset.stored_pos_count_long = 1;
         asset.stored_pos_count_short = 1;
+        // The raw basis of a side at unit A equals its effective OI; the loss weight is what this
+        // test makes extreme.
         asset.loss_weight_sum_long = SOCIAL_LOSS_DEN;
-        asset.raw_basis_sum_long_q = SOCIAL_LOSS_DEN;
+        asset.raw_basis_sum_long_q = POS_SCALE;
         asset.loss_weight_sum_short = SOCIAL_LOSS_DEN;
-        asset.raw_basis_sum_short_q = SOCIAL_LOSS_DEN;
+        asset.raw_basis_sum_short_q = POS_SCALE;
         asset.b_short_num = u128::MAX;
         asset.social_loss_remainder_short_num = 0;
         markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+        // The header counts the slot's two stored positions as payout blockers.
+        header.resolved_payout_blocker_count = V16PodU64::new(2);
         let asset_before = markets[0].engine.asset;
         let vault_before = header.vault;
         let c_tot_before = header.c_tot;
@@ -10158,6 +10166,8 @@ fn v16_auto_crank_settles_b_stale_leg() {
     asset0.stored_pos_count_long = 1;
     asset0.stored_pos_count_short = 1;
     markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset0);
+    // The header counts the slot's two stored positions as payout blockers.
+    header.resolved_payout_blocker_count = V16PodU64::new(2);
 
     // Active leg flagged b-stale, with b_snap already at the current target so the
     // settle resolves to a clean delta_b=0 clear (progress: clears the b-stale flag).
@@ -11220,11 +11230,14 @@ fn v16_side_oi_cap_growth_to_exact_cap_admitted_past_cap_rejected() {
     side_oi_cap_trade(&mut market, &mut c, &mut d, 1).expect("growth to exactly the cap");
     let asset = market.markets[0].engine.asset.try_to_runtime().unwrap();
     assert_eq!(asset.oi_eff_long_q, percolator::MAX_OI_SIDE_Q);
+    // The admitted fills left the committed state: validate that one. The fill below is rejected,
+    // and a rejected `*_not_atomic` call may have written part of its work, which the caller
+    // discards; an audit build's full scan does not accept that partial state.
+    market.validate_shape().unwrap();
     assert_eq!(
         side_oi_cap_trade(&mut market, &mut a, &mut b, 1),
         Err(V16Error::InvalidLeg)
     );
-    market.validate_shape().unwrap();
 }
 
 // ---- a loss landing on lapsed backing must not revert refresh ----
