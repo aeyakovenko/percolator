@@ -130,12 +130,15 @@ plain-proof `kani::cover!` reachability should be judged under
 `--features fuzz`. Contract obligations should be judged under
 `--features fuzz,contracts -Z function-contracts`.
 
-In the `contracts` run only the `contract_check_*` harnesses and the lib
-`composition_*`/`closure_*` harnesses are meaningful. Kani 0.66 also asserts
-every contract inside plain proofs that call a contracted function directly, and
-there the `ensures` closure sees a by-value `mut` argument after the body has
-mutated it. About forty-five plain proofs fail in that run for this reason alone
-and pass under `--features fuzz`.
+In the `contracts` run Kani 0.66 also asserts every contract inside the plain
+proofs that call a contracted function directly. Forty-five plain proofs cannot
+pass there and are compiled out of that run (`#[cfg(not(feature = "contracts"))]`
+in `tests/proofs_v16.rs`, with the reasons at the top of that file): forty-four
+call a kernel that takes a record by value as `mut`, where the `ensures` closure
+reads the argument after the body has mutated it, and one passes inputs outside a
+`requires` on purpose. All forty-five verify in the main run, and the contracts
+they touch are verified for all inputs by their `contract_check_*` harnesses. With
+them out, every harness of the contracts run is expected to verify.
 
 Two lib harnesses have not produced a verdict within a one-hour harness timeout
 on any tree measured so far and count as unverified, not as passing:

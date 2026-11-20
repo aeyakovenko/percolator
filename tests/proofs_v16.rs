@@ -1,5 +1,24 @@
 #![cfg(kani)]
+// The contracts run (`--features fuzz,contracts -Z function-contracts`) and plain proofs.
+//
+// With the `contracts` feature every `kani::requires`/`kani::ensures` of the engine is active, and
+// Kani 0.66 asserts them inside every plain proof that calls a contracted function directly. Two
+// kinds of plain proof cannot pass there, for reasons that are not defects of the code they prove,
+// and are compiled out of that run with `#[cfg(not(feature = "contracts"))]`. They remain part of
+// the main run (`--tests --features fuzz`), where they verify.
+//
+// 1. Proofs that call a kernel taking a state record by value as `mut` and returning the updated
+//    record (the `prepare_*_delta` family, `kernel_accumulate_batch_trade`,
+//    `kernel_settle_kf_stale_cohort`). In assert mode the `ensures` closure reads the parameter
+//    after the body has mutated it, so a clause such as `out.x == input.x - amount` is evaluated
+//    with `input` already updated and fails. The contracts themselves are verified for all inputs
+//    by their `contract_check_*` harnesses, which see the argument as it was passed.
+// 2. `proof_v16_public_domain_insurance_spent_setter_rejects_invalid_without_mutation`, which
+//    passes inputs outside a contract's `requires` on purpose, to prove that the function rejects
+//    them without writing.
 
+// Some of these names are used only by the proofs that are compiled out of the contracts run.
+#[cfg_attr(feature = "contracts", allow(unused_imports))]
 use percolator::v16::{
     active_bitmap_count_ones, active_bitmap_get, active_bitmap_is_empty,
     backing_domain_fee_split_for_lien_delta_num, canonical_accrual_price_step_v16,
@@ -1503,6 +1522,7 @@ fn proof_v16_kf_accrual_marks_each_stored_cohort_exactly_once() {
     assert!(marked.stale_account_count_short <= marked.stored_pos_count_short);
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
@@ -5015,6 +5035,7 @@ fn proof_v16_trade_preflight_risk_gate_blocks_only_unsafe_risk_increase() {
     }
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
@@ -5087,6 +5108,7 @@ fn proof_v16_batch_outcome_accumulator_is_exact_and_overflow_checked() {
     }
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -5738,6 +5760,7 @@ fn proof_v16_released_flat_pending_obligation_is_publicly_actionable() {
     assert_eq!(summary.is_actionable(), !barrier_active);
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
@@ -7729,6 +7752,7 @@ fn proof_v16_public_backing_provider_earnings_credit_uses_only_vault_slack() {
     assert_eq!(market.kani_residual(), residual_before - amount);
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -7806,6 +7830,7 @@ fn proof_v16_public_counterparty_backing_deposit_moves_vault_and_scaled_source_s
     );
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -9021,6 +9046,7 @@ fn proof_v16_flat_source_lien_normalization_is_total_and_fail_closed() {
     );
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -9107,6 +9133,7 @@ fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source
     );
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -9243,6 +9270,7 @@ fn proof_v16_public_counterparty_backing_withdraw_rejects_lapsed_bucket_after_ex
 // principal 0..=backing, withdrawal 1..=backing, and six twin states from fully
 // backed to nothing behind three atoms of claims. A withdrawal within principal
 // always succeeds and leaves the loser-paid backing as it was.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -9388,6 +9416,7 @@ fn proof_v16_public_live_backing_withdraw_leaves_loser_payments_the_twin_is_owed
 // the unsettled position on either side. With every position settled the same
 // withdrawals succeed whatever the principal:
 // proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -9501,6 +9530,7 @@ fn proof_v16_public_live_backing_withdraw_is_capped_at_principal_while_a_positio
 // given more than it is owed; claims, principals, the vault, capital and
 // insurance are unchanged; fresh backing falls by exactly what joined the
 // junior pool; and the result is a valid shape.
+#[cfg(not(feature = "contracts"))] // used only by proofs that are not part of the contracts run
 fn resolved_stranded_loser_backing_case(
     from_backing_raw: u8,
     from_principal_raw: u8,
@@ -9633,6 +9663,7 @@ fn resolved_stranded_loser_backing_case(
 // (claims at most 2), and backing 0..=2 and provider principal 0..=3 in `to`,
 // with the other side settled or not. `to` holds no claim here, so what it is
 // owed is what its provider fronted and no credit rate is ever fractional.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -9685,6 +9716,7 @@ fn proof_v16_resolved_stranded_loser_backing_goes_to_its_twin_then_the_junior_po
 // third backed), 2 stranded in `from` beside 1 of principal and 1 of claims.
 // Both atoms move and `to` ends fully backed, whether or not the other side
 // has settled.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -9698,6 +9730,7 @@ fn proof_v16_resolved_stranded_loser_backing_backs_the_twin_claims_in_full() {
 // Claims on `to` that the move backs in part: 3 of claims and 1 of provider
 // principal on an empty bucket, 1 stranded in `from`. It moves, `to` ends a
 // third backed, and nothing is left for the junior pool.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -9708,6 +9741,7 @@ fn proof_v16_resolved_stranded_loser_backing_backs_the_twin_claims_in_part() {
     assert_eq!((stranded, moved), (1, 1));
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -9772,6 +9806,7 @@ fn proof_v16_counterparty_backing_withdraw_delta_debits_only_unliened_backing() 
     }
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -9907,6 +9942,7 @@ fn proof_v16_counterparty_backing_withdraw_delta_status_transitions_are_exact() 
     }
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
@@ -11042,6 +11078,7 @@ fn proof_v16_lien_and_unliened_source_support_sum_capped_by_shared_backing() {
 // kernels. Creating a lien never raises the credit rate, never cuts the rate of
 // a domain whose backing covers its claims, and never lifts the rate above the
 // lien-free rate; releasing it restores the exact pre-lien rate.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -11114,6 +11151,7 @@ fn proof_v16_lien_create_release_never_cuts_fully_backed_domain_rate() {
 // stays full down to the last unliened atom above the claims. The public
 // provider gate keeps master's stricter watermark (unliened backing >= the
 // whole claim bound), so every withdrawal it admits also leaves the full rate.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -11250,6 +11288,7 @@ fn proof_v16_validate_shape_rejects_global_junior_bound_below_domain_claims() {
 // the collateralization step behind every source-credited winner claim, and it had
 // NO proof coverage. `backing = min(new_loss, capital - negative_before)` exercises
 // both the loss-capped and capital-capped branches.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
@@ -11329,6 +11368,7 @@ fn proof_v16_capital_backed_loss_reservation_is_value_neutral_and_capital_capped
 // insurance and fresh backing -- falls by exactly the same amount. (Stated on
 // the stock components rather than through `kani_residual`, whose division by
 // BOUND_SCALE is costly to bit-blast.)
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
@@ -11630,6 +11670,7 @@ fn proof_v16_residual_excludes_senior_backing_provider_earnings() {
 // by Resolved-mode source-claim burn; the full close/set_account_pnl path is
 // covered by integration tests, while this harness keeps Kani focused on the
 // liveness-critical arithmetic/ledger transition.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -11678,6 +11719,7 @@ fn proof_v16_resolved_winddown_releases_liened_source_claim() {
 // returning liened backing is a wind-down operation, not a fresh lending action.
 // If this regresses to the Live release helper, a resolved market can deadlock
 // after a bucket expires.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -11732,6 +11774,7 @@ fn proof_v16_resolved_winddown_releases_expired_liened_source_claim() {
 // liens; terminal cleanup needs to remove the impaired counter and the reserved
 // insurance backing, otherwise the source domain/asset slot can never become
 // empty again.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -11862,6 +11905,7 @@ fn proof_v16_final_impaired_source_claim_burn_clears_account_occupancy_counters(
     }
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -14654,6 +14698,7 @@ fn proof_v16_view_negative_funding_pays_long_side() {
     assert_eq!(net, units);
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
@@ -14731,6 +14776,7 @@ fn proof_v16_view_initial_margin_source_lien_creation_is_backed() {
     assert_eq!(source_domain.source_lien_fee_last_slot.get(), current_slot);
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -14798,6 +14844,7 @@ fn proof_v16_public_counterparty_lien_create_moves_fresh_to_valid_without_value_
     assert_eq!(source.credit_epoch, 1);
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -14883,6 +14930,7 @@ fn proof_v16_counterparty_lien_create_delta_is_expiry_gated_and_exact() {
     }
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -14945,6 +14993,7 @@ fn proof_v16_public_counterparty_lien_release_restores_unliened_backing_without_
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -15007,6 +15056,7 @@ fn proof_v16_public_counterparty_lien_consume_creates_receivable_without_value_m
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -15160,6 +15210,7 @@ fn proof_v16_counterparty_lien_consume_delta_is_receivable_exact_and_fail_closed
 // impaired retirement, expiry, top-up, withdrawal) moves the bucket and source
 // aggregate in lockstep, so the coupling validate_source_domain_ledger_parts
 // enforces is inductive. Fields are full-width u128 bounded only by the coupling.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(4)]
 #[kani::solver(cadical)]
@@ -15345,6 +15396,7 @@ fn proof_v16_counterparty_lien_lifecycle_preserves_bucket_source_coupling() {
     assert_eq!(source_after.credit_epoch, source.credit_epoch);
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -16324,6 +16376,7 @@ fn proof_v16_public_domain_insurance_spent_setter_preserves_budget_total_and_val
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(24)]
 #[kani::solver(cadical)]
@@ -16501,6 +16554,7 @@ fn proof_v16_public_insurance_reserve_encumbers_budget_without_value_movement() 
     assert_eq!(market.header.insurance, insurance_before);
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -16580,6 +16634,7 @@ fn proof_v16_public_insurance_lien_create_moves_reserved_credit_to_valid_lien() 
     assert_eq!(market.validate_shape(), Ok(()));
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -16664,6 +16719,7 @@ fn proof_v16_public_insurance_lien_release_restores_reserved_credit_without_valu
     assert_eq!(source.credit_epoch, 1);
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -16857,6 +16913,7 @@ fn proof_v16_insurance_lien_fractional_consume_rejects() {
     assert_eq!(result, Err(V16Error::InvalidConfig));
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -16908,6 +16965,7 @@ fn proof_v16_expired_counterparty_backing_bucket_accepts_receivable_refill() {
     );
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -17436,6 +17494,7 @@ fn proof_v16_underbacked_source_credit_cannot_satisfy_im_lien_requirements() {
     }
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(16)]
 #[kani::solver(cadical)]
@@ -18758,6 +18817,7 @@ fn proof_v16_insolvent_resolved_receipt_clears_at_terminal_rate() {
 // otherwise the resolved payout snapshot promises winners the same vault
 // atoms the provider can still withdraw, and whichever party moves second is
 // robbed or stranded (Finding-B class: residual() omitting a senior claim).
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -20506,6 +20566,7 @@ fn proof_v16_frame_budget_credit_touches_only_declared_state() {
 // backing-deposit frame: exactly {vault, source_fresh_backing_total_num} on
 // the header, {backing_long bucket, source_credit_long fresh_reserved} on
 // the slot — nothing else anywhere.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -20552,6 +20613,7 @@ fn proof_v16_frame_backing_deposit_touches_only_declared_state() {
 }
 
 // backing-withdraw frame: the exact inverse set.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
@@ -21788,6 +21850,7 @@ fn proof_v16_liquidation_error_commits_only_fully_declared_recovery() {
 // Prove the exact production reset+clear composition: reset preserves the old
 // K/F/B epoch targets, and the prior-epoch clear cannot subtract basis or loss
 // weight from the already-zero current epoch.
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -22063,6 +22126,7 @@ fn proof_v16_resolved_foreign_expiry_lien_impairment_is_exact_relabel() {
     );
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
@@ -22155,6 +22219,7 @@ fn proof_v16_resolved_foreign_expiry_retires_exact_provider_label_only() {
     );
 }
 
+#[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
