@@ -22637,3 +22637,370 @@ fn proof_v16_resolved_foreign_expiry_provider_retirement_acceptance_is_exact() {
     );
     assert_eq!(result.is_ok(), accepted);
 }
+
+// ============ GATES OF THE ENTRY POINTS NO OTHER PROOF REACHED ============
+// The trade, the rebalance reduction and the Recovery routes are beyond Kani's budget once
+// their bodies run (see the INTRACTABLE-TIER notes above), and until these proofs no harness
+// called their entry points at all. What Kani can do for them is the gate: a call that must be
+// refused is refused with the documented error, and nothing in the market or in either account
+// has changed. In each proof the inputs that decide the refusal are concrete, which keeps the
+// body behind the gate out of the formula; the other inputs are symbolic. The scalar guards of a
+// trade request are a short-circuit chain (asset, size, price, fee), so a proof about one guard
+// fixes the fields the chain reads before it; that every guard is exactly its condition for all
+// inputs is the contract of `build_trade_request_guard_summary`.
+
+fn two_flat_accounts_fixture() -> (
+    MarketGroupV16HeaderAccount,
+    [Market<u64>; 1],
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+) {
+    let (header, markets, first) = one_market_view_fixture();
+    let (market_id, _, _) = ids();
+    let second = empty_account_fixture(market_id, 3);
+    (header, markets, first, second)
+}
+
+fn symbolic_trade_request() -> percolator::v16::TradeRequestV16 {
+    percolator::v16::TradeRequestV16 {
+        asset_index: kani::any(),
+        size_q: kani::any(),
+        exec_price: kani::any(),
+        fee_bps: kani::any(),
+    }
+}
+
+/// One trade on the one-asset fixture with two flat accounts. Asserts the error and that the
+/// header (the loss-stale flag included), the asset slot and both accounts are what they were.
+fn trade_is_rejected_without_mutation(
+    mode: u8,
+    loss_stale_active: u8,
+    request: percolator::v16::TradeRequestV16,
+    expected: V16Error,
+) {
+    let (mut header, mut markets, mut long_header, mut short_header) = two_flat_accounts_fixture();
+    header.mode = mode;
+    header.loss_stale_active = loss_stale_active;
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let l0 = long_header;
+    let r0 = short_header;
+
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.execute_trade_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, request)
+    };
+
+    assert_eq!(result, Err(expected));
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(&l0, &long_header));
+    assert!(kani_eq_portfolio_account_v16_account(&r0, &short_header));
+}
+
+// A Resolved market takes no trade, whatever the request.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_in_a_resolved_market_is_rejected_without_mutation() {
+    trade_is_rejected_without_mutation(1, 0, symbolic_trade_request(), V16Error::LockActive);
+}
+
+// Nor does a market in Recovery.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_in_a_recovery_market_is_rejected_without_mutation() {
+    trade_is_rejected_without_mutation(2, 0, symbolic_trade_request(), V16Error::LockActive);
+}
+
+// The scoped suspension of the loss-stale flag does not leak when the trade is refused. The flag
+// is set and the trade's asset and both accounts are unrelated to it, so the entry point clears
+// the flag for the inner call; the inner call refuses (the market is Resolved); the flag is back
+// at its entry value on return. `trade_is_rejected_without_mutation` compares the whole header.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_rejected_trade_restores_the_suspended_loss_stale_flag() {
+    let mut request = symbolic_trade_request();
+    request.asset_index = 0;
+    trade_is_rejected_without_mutation(1, 1, request, V16Error::LockActive);
+}
+
+// A request that fails one scalar guard is refused in a Live market before anything is settled.
+// One proof per guard: the failing field is concrete, the others are symbolic.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_of_zero_size_is_rejected_without_mutation() {
+    let mut request = symbolic_trade_request();
+    request.size_q = 0;
+    trade_is_rejected_without_mutation(0, 0, request, V16Error::InvalidConfig);
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_above_the_size_cap_is_rejected_without_mutation() {
+    let mut request = symbolic_trade_request();
+    request.size_q = MAX_TRADE_SIZE_Q as i128 + 1;
+    trade_is_rejected_without_mutation(0, 0, request, V16Error::InvalidConfig);
+}
+
+// The fixture has one asset slot, so asset 1 is not configured.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_trade_on_an_unconfigured_asset_is_rejected_without_mutation() {
+    let mut request = symbolic_trade_request();
+    request.asset_index = 1;
+    trade_is_rejected_without_mutation(0, 0, request, V16Error::InvalidConfig);
+}
+
+/// One batch on the one-asset fixture with two flat accounts.
+fn trade_batch_is_rejected_without_mutation(
+    loss_stale_active: u8,
+    requests: &[percolator::v16::TradeRequestV16],
+    expected: V16Error,
+) {
+    let (mut header, mut markets, mut long_header, mut short_header) = two_flat_accounts_fixture();
+    header.loss_stale_active = loss_stale_active;
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let l0 = long_header;
+    let r0 = short_header;
+
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.execute_batch_with_fee_loss_stale_scoped_not_atomic(&mut long, &mut short, requests)
+    };
+
+    assert_eq!(result, Err(expected));
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(&l0, &long_header));
+    assert!(kani_eq_portfolio_account_v16_account(&r0, &short_header));
+}
+
+// A batch needs at least one fill. An empty batch never suspends the loss-stale flag, whatever
+// the flag is.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_empty_trade_batch_is_rejected_without_mutation() {
+    let loss_stale_active = u8::from(kani::any::<bool>());
+    kani::cover!(
+        loss_stale_active == 1,
+        "an empty batch is refused under a set loss-stale flag"
+    );
+    trade_batch_is_rejected_without_mutation(loss_stale_active, &[], V16Error::NonProgress);
+}
+
+/// One rebalance reduction on the one-asset fixture with a flat account.
+fn rebalance_reduce_is_rejected_without_mutation(
+    mode: u8,
+    request: percolator::v16::RebalanceRequestV16,
+    expected: V16Error,
+) {
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = mode;
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.rebalance_reduce_position_not_atomic(&mut account, request)
+    };
+
+    assert_eq!(result, Err(expected));
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
+}
+
+// Rebalancing is a Live-market action.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_rebalance_reduce_outside_live_mode_is_rejected_without_mutation() {
+    let recovery: bool = kani::any();
+    let request = percolator::v16::RebalanceRequestV16 {
+        asset_index: kani::any(),
+        reduce_q: kani::any(),
+    };
+    if recovery {
+        rebalance_reduce_is_rejected_without_mutation(2, request, V16Error::LockActive);
+    } else {
+        rebalance_reduce_is_rejected_without_mutation(1, request, V16Error::LockActive);
+    }
+}
+
+// A reduction by zero is refused whatever the asset.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_rebalance_reduce_by_zero_is_rejected_without_mutation() {
+    let request = percolator::v16::RebalanceRequestV16 {
+        asset_index: kani::any(),
+        reduce_q: 0,
+    };
+    rebalance_reduce_is_rejected_without_mutation(0, request, V16Error::InvalidConfig);
+}
+
+// And so is a reduction on an asset that is not configured, whatever the quantity.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_rebalance_reduce_on_an_unconfigured_asset_is_rejected_without_mutation() {
+    let request = percolator::v16::RebalanceRequestV16 {
+        asset_index: 1,
+        reduce_q: kani::any(),
+    };
+    rebalance_reduce_is_rejected_without_mutation(0, request, V16Error::InvalidConfig);
+}
+
+// The paired Recovery close: outside Live mode, with a zero request, or on an asset that is
+// not in Recovery, it refuses before it reads either account.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_force_close_recovery_pair_gates_reject_without_mutation() {
+    let mode: u8 = kani::any();
+    kani::assume(mode <= 2);
+    let close_request_q: u128 = kani::any();
+    let (mut header, mut markets, mut a_header, mut b_header) = two_flat_accounts_fixture();
+    header.mode = mode;
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = a_header;
+    let b0 = b_header;
+
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account_a = PortfolioV16ViewMut::new(&mut a_header);
+        let mut account_b = PortfolioV16ViewMut::new(&mut b_header);
+        market.force_close_recovery_pair_not_atomic(
+            &mut account_a,
+            &mut account_b,
+            0,
+            close_request_q,
+        )
+    };
+
+    kani::cover!(
+        mode == 0 && close_request_q != 0,
+        "a Live asset that is not in Recovery refuses"
+    );
+    kani::cover!(mode == 0 && close_request_q == 0, "a zero request refuses");
+    kani::cover!(mode != 0, "a market that is not Live refuses");
+    // The fixture's asset is Active, so a Live market with a nonzero request stops at the
+    // lifecycle check.
+    let expected = if mode != 0 || close_request_q != 0 {
+        V16Error::LockActive
+    } else {
+        V16Error::InvalidConfig
+    };
+    assert_eq!(result, Err(expected));
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &a_header));
+    assert!(kani_eq_portfolio_account_v16_account(&b0, &b_header));
+}
+
+// Forfeiting a Recovery leg: an account with no leg has nothing to forfeit, whatever the asset
+// and the budget.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_forfeit_recovery_leg_of_a_flat_account_is_rejected_without_mutation() {
+    let asset_index: usize = kani::any();
+    let b_loss_atom_budget: u128 = kani::any();
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.forfeit_recovery_leg_not_atomic(&mut account, asset_index, b_loss_atom_budget)
+    };
+
+    kani::cover!(
+        asset_index == 0 && b_loss_atom_budget != 0,
+        "a configured asset and a nonzero budget reach the leg lookup"
+    );
+    assert_eq!(result, Err(V16Error::InvalidLeg));
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
+}
+
+// The resolved clock (`advance_resolved_slot_not_atomic`), in full: it accepts exactly a slot that
+// is not behind the clock in a Resolved market, writes that slot to `current_slot` and nothing
+// else, and on a refusal writes nothing.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_advance_resolved_slot_moves_only_the_clock() {
+    let mode: u8 = kani::any();
+    kani::assume(mode <= 2);
+    let current_slot: u64 = kani::any();
+    let authenticated_slot: u64 = kani::any();
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.mode = mode;
+    header.current_slot = V16PodU64::new(current_slot);
+    let h0 = header;
+    let s0 = markets[0].engine;
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .advance_resolved_slot_not_atomic(authenticated_slot);
+
+    kani::cover!(
+        result.is_ok() && authenticated_slot > current_slot,
+        "the clock advances"
+    );
+    kani::cover!(
+        mode == 1 && authenticated_slot < current_slot,
+        "a past slot is refused"
+    );
+    kani::cover!(mode != 1, "a market that is not Resolved is refused");
+    let expected = if mode != 1 {
+        Err(V16Error::LockActive)
+    } else if authenticated_slot < current_slot {
+        Err(V16Error::Stale)
+    } else {
+        Ok(())
+    };
+    assert_eq!(result, expected);
+    let mut h1 = h0;
+    if result.is_ok() {
+        h1.current_slot = V16PodU64::new(authenticated_slot);
+    }
+    assert!(kani_eq_market_group_v16_header_account(&h1, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+}

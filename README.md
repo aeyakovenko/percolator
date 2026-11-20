@@ -68,6 +68,15 @@ Trusted base and limits:
   custody, and CU limits.
 - Kani proves bounded symbolic harnesses and function contracts; large
   route-level properties are proven by decomposition plus runtime/fuzz tests.
+- No Kani proof executes a trade: applying one fill to two accounts exceeds the
+  solver budget even with concrete inputs (the "INTRACTABLE-TIER" notes in
+  `tests/proofs_v16.rs`, which record the same for the full account refresh
+  and for the full resolved close). For the trade, the rebalance reduction,
+  the paired Recovery close and the Recovery forfeit, Kani proves the gates: a
+  call that must be refused is refused with its documented error and leaves
+  the market and the accounts unchanged, and a refused trade restores the
+  loss-stale flag it had suspended. What those routes do once they run rests
+  on the component proofs, the tests and the fuzzing.
 - Payments of a resolved market do not depend on the order of the claims once
   the payout snapshot is captured. Before that, the order of the permissionless
   closes can still decide what one account is paid, in five cases that
@@ -81,7 +90,7 @@ Source-checkable counts in this checkout:
 
 | Class | Count |
 | --- | ---: |
-| Plain Kani proofs in `tests/proofs_v16.rs` | 339 |
+| Plain Kani proofs in `tests/proofs_v16.rs` | 352 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
 | Plain Kani proofs in `src/v16_proofs.rs` | 44 |
 | Function-contract proofs in `src/v16_proofs.rs` | 68 |
@@ -217,6 +226,11 @@ On engine `d1fa39f6`, Kani 0.66.0, with the three commands of "Run Kani":
 | `--features fuzz` | 352 | none |
 | `--features fuzz,closure` | 373 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
 | `--features fuzz,contracts -Z function-contracts` | 394 | `composition_clear_leg_value_conservation` |
+
+Thirteen gate proofs (the trade, the rebalance reduction, the Recovery close and forfeit, the
+resolved clock) were added after these runs. All thirteen verify in the `--features fuzz` run,
+which makes 365 there; their checks in the other two runs are in progress, and this table is
+updated when they finish.
 
 A whole run takes one and a half to two hours on a 64-core machine at
 `-j 12 --output-format terse`. Run them one after the other: the two harnesses without a verdict

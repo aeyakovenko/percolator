@@ -34,6 +34,11 @@ On engine `{{REV}}`, Kani 0.66.0, with the three commands of "Run Kani":
 |---|---|---|
 {{KANI_ROWS}}
 
+Thirteen gate proofs (the trade, the rebalance reduction, the Recovery close and forfeit, the
+resolved clock) were added after these runs. All thirteen verify in the `--features fuzz` run,
+which makes 365 there; their checks in the other two runs are in progress, and this table is
+updated when they finish.
+
 A whole run takes one and a half to two hours on a 64-core machine at
 `-j 12 --output-format terse`. Run them one after the other: the two harnesses without a verdict
 use up to about 100 GB of memory each.
