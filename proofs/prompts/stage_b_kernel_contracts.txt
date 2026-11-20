@@ -1,0 +1,5 @@
+Formally verify the engine's kernel contracts as specified in aristotle/kernel_contracts_spec.md.
+
+Scope: the 58 functions of src/v16.rs listed in that file, each with the contract written in its kani::requires, kani::ensures and kani::modifies attributes, and the helpers those functions reach (including src/wide_math.rs, where properties already proved in this project can be reused). Verify the deployed function bodies: no cfg(kani), default features, the crate's release profile.
+
+For each function prove the two properties the spec file names, Kxx.contract and Kxx.nopanic, and report them under those labels. Follow the priority order at the end of the spec file. If a contract is false as written, report it as refuted with a concrete counterexample; do not weaken a contract silently, and say so if you had to add a precondition.

@@ -1,0 +1,80 @@
+module
+
+public import SepLogic.Public
+
+@[expose] public section
+
+namespace Mir.KernelC
+
+open Rust2Lean.Public
+
+-- Use these names with `Vocab` to state reusable properties.
+-- Named handles make no correctness claim about their functions.
+def Fn.«core::num::<impl u128>::saturating_add» : RustFn := { name := "core::num::<impl u128>::saturating_add", id := (51307866143739807416006888394262755616 : Int) }
+def Fn.«core::num::<impl i128>::is_negative» : RustFn := { name := "core::num::<impl i128>::is_negative", id := (133306193405843168131914071349404344656 : Int) }
+def Fn.«<core::result::Result<u64, percolator::v16::V16Error> as core::ops::try_trait::Try>::branch» : RustFn := { name := "<core::result::Result<u64, percolator::v16::V16Error> as core::ops::try_trait::Try>::branch", id := (57154053583624677269146839331515574168 : Int) }
+def Fn.«<core::result::Result<(), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual» : RustFn := { name := "<core::result::Result<(), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual", id := (28901881018909679730878975854050444088 : Int) }
+def Fn.«core::ptr::drop_in_place::<u128> - shim(None)» : RustFn := { name := "core::ptr::drop_in_place::<u128> - shim(None)", id := (107766890128911304943209900586142633028 : Int) }
+def Fn.«core::option::Option::<u64>::ok_or::<percolator::v16::V16Error>» : RustFn := { name := "core::option::Option::<u64>::ok_or::<percolator::v16::V16Error>", id := (137159422104574853733099035657017448652 : Int) }
+def Fn.«<core::result::Result<(u128, u128), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual» : RustFn := { name := "<core::result::Result<(u128, u128), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual", id := (54091769859318773441818170188894995404 : Int) }
+def Fn.«core::cmp::impls::<impl core::cmp::PartialOrd for u128>::le» : RustFn := { name := "core::cmp::impls::<impl core::cmp::PartialOrd for u128>::le", id := (128754520962660303441184977700924025090 : Int) }
+def Fn.«<core::ops::range::RangeInclusive<u128> as core::ops::range::RangeBounds<u128>>::end_bound» : RustFn := { name := "<core::ops::range::RangeInclusive<u128> as core::ops::range::RangeBounds<u128>>::end_bound", id := (61259552244066541072097991436454976274 : Int) }
+def Fn.«core::num::<impl u128>::checked_mul» : RustFn := { name := "core::num::<impl u128>::checked_mul", id := (23429884298195247566452777566007312690 : Int) }
+def Fn.«<percolator::v16::SideModeV16 as core::cmp::PartialEq>::eq» : RustFn := { name := "<percolator::v16::SideModeV16 as core::cmp::PartialEq>::eq", id := (93208432543508372609057285297517351818 : Int) }
+def Fn.«<core::result::Result<(), percolator::v16::V16Error> as core::ops::try_trait::Try>::branch» : RustFn := { name := "<core::result::Result<(), percolator::v16::V16Error> as core::ops::try_trait::Try>::branch", id := (53784003459645926085737895338314700314 : Int) }
+def Fn.«core::num::<impl i128>::unsigned_abs» : RustFn := { name := "core::num::<impl i128>::unsigned_abs", id := (129004402165060441327703524308762021722 : Int) }
+def Fn.«core::convert::num::<impl core::convert::From<bool> for u128>::from» : RustFn := { name := "core::convert::num::<impl core::convert::From<bool> for u128>::from", id := (24972117578812676707572993586826824966 : Int) }
+def Fn.«core::num::<impl u128>::checked_sub» : RustFn := { name := "core::num::<impl u128>::checked_sub", id := (23432652757974463190918266574010969286 : Int) }
+def Fn.«core::option::Option::<u128>::and_then::<u128, {closure@percolator::v16::social_loss_book_split::{closure#0}}>» : RustFn := { name := "core::option::Option::<u128>::and_then::<u128, {closure@percolator::v16::social_loss_book_split::{closure#0}}>", id := (68187029020516074966369341547972721302 : Int) }
+def Fn.«core::cmp::impls::<impl core::cmp::PartialOrd for &u128>::le» : RustFn := { name := "core::cmp::impls::<impl core::cmp::PartialOrd for &u128>::le", id := (152844363774758592251604840380989047638 : Int) }
+def Fn.«<roots>» : RustFn := { name := "<roots>", id := (111346825598767891485696918120015726990 : Int) }
+def Fn.«<core::result::Result<(u128, u128), percolator::v16::V16Error> as core::ops::try_trait::Try>::branch» : RustFn := { name := "<core::result::Result<(u128, u128), percolator::v16::V16Error> as core::ops::try_trait::Try>::branch", id := (50380647600235440073757445916878381870 : Int) }
+def Fn.«core::ops::range::RangeInclusive::<u128>::new» : RustFn := { name := "core::ops::range::RangeInclusive::<u128>::new", id := (133402587777213323720871581646372465262 : Int) }
+def Fn.«percolator::v16::V16Core::kernel_normalize_social_loss_carry» : RustFn := { name := "percolator::v16::V16Core::kernel_normalize_social_loss_carry", id := (34621117956251193587803164144402286830 : Int) }
+def Fn.«core::num::<impl u64>::checked_add» : RustFn := { name := "core::num::<impl u64>::checked_add", id := (106579863178903051545858681162963951262 : Int) }
+def Fn.«percolator::v16::V16Core::kernel_settle_kf_stale_cohort» : RustFn := { name := "percolator::v16::V16Core::kernel_settle_kf_stale_cohort", id := (12680286473837662839442152465113602654 : Int) }
+def Fn.«percolator::v16::V16Core::apply_bankruptcy_residual_chunk_to_loss_side» : RustFn := { name := "percolator::v16::V16Core::apply_bankruptcy_residual_chunk_to_loss_side", id := (104110887216600736089980357721403759361 : Int) }
+def Fn.«core::cmp::impls::<impl core::cmp::PartialOrd for &u128>::lt» : RustFn := { name := "core::cmp::impls::<impl core::cmp::PartialOrd for &u128>::lt", id := (152844363780019837418567706549310330945 : Int) }
+def Fn.«<core::result::Result<u128, percolator::v16::V16Error> as core::ops::try_trait::Try>::branch» : RustFn := { name := "<core::result::Result<u128, percolator::v16::V16Error> as core::ops::try_trait::Try>::branch", id := (146913755060127999129233463737715911105 : Int) }
+def Fn.«<core::result::Result<(percolator::v16::AssetStateV16, u64), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual» : RustFn := { name := "<core::result::Result<(percolator::v16::AssetStateV16, u64), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual", id := (107073193132937709757598908059980719393 : Int) }
+def Fn.«core::intrinsics::unlikely» : RustFn := { name := "core::intrinsics::unlikely", id := (102015680453086198088526854363201851617 : Int) }
+def Fn.«<core::result::Result<(percolator::v16::PortfolioLegV16, percolator::v16::AssetStateV16), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual» : RustFn := { name := "<core::result::Result<(percolator::v16::PortfolioLegV16, percolator::v16::AssetStateV16), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual", id := (107053270085700268680582162057789473553 : Int) }
+def Fn.«core::option::Option::<u128>::is_some» : RustFn := { name := "core::option::Option::<u128>::is_some", id := (53000983883415907701163900125211752329 : Int) }
+def Fn.«percolator::v16::V16Core::kernel_mark_kf_stale_cohorts» : RustFn := { name := "percolator::v16::V16Core::kernel_mark_kf_stale_cohorts", id := (108461867558004321028864678362999136553 : Int) }
+def Fn.«core::num::<impl u128>::overflowing_mul» : RustFn := { name := "core::num::<impl u128>::overflowing_mul", id := (63041717955937800355273004794978692377 : Int) }
+def Fn.«core::num::<impl i128>::wrapping_abs» : RustFn := { name := "core::num::<impl i128>::wrapping_abs", id := (64057307946374913316116635869897712473 : Int) }
+def Fn.«percolator::v16::adjust_u128» : RustFn := { name := "percolator::v16::adjust_u128", id := (131948387655380310720067970089890189625 : Int) }
+def Fn.«core::num::<impl u128>::saturating_sub» : RustFn := { name := "core::num::<impl u128>::saturating_sub", id := (51306553160394310575622415022128450553 : Int) }
+def Fn.«percolator::v16::V16Core::kernel_raw_basis_after_adl_reduction» : RustFn := { name := "percolator::v16::V16Core::kernel_raw_basis_after_adl_reduction", id := (4029854646577606370323501078131925893 : Int) }
+def Fn.«<core::result::Result<(percolator::v16::AssetStateV16, percolator::v16::PortfolioLegV16), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual» : RustFn := { name := "<core::result::Result<(percolator::v16::AssetStateV16, percolator::v16::PortfolioLegV16), percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual", id := (169344324250174835785999822384819940293 : Int) }
+def Fn.«<u128 as core::cmp::Ord>::min» : RustFn := { name := "<u128 as core::cmp::Ord>::min", id := (31159708073120700215659057203504047333 : Int) }
+def Fn.«<core::result::Result<percolator::v16::AssetStateV16, percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual» : RustFn := { name := "<core::result::Result<percolator::v16::AssetStateV16, percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual", id := (130014676678454814732406694784456016717 : Int) }
+def Fn.«percolator::v16::V16Core::kernel_attach_leg» : RustFn := { name := "percolator::v16::V16Core::kernel_attach_leg", id := (28333442613183951024036433317190707821 : Int) }
+def Fn.«core::cmp::impls::<impl core::cmp::PartialOrd for u128>::lt» : RustFn := { name := "core::cmp::impls::<impl core::cmp::PartialOrd for u128>::lt", id := (128754520967921548608147843869245308397 : Int) }
+def Fn.«percolator::v16::social_loss_book_split» : RustFn := { name := "percolator::v16::social_loss_book_split", id := (36720941299696199681130794116305879901 : Int) }
+def Fn.«core::num::<impl i128>::wrapping_sub» : RustFn := { name := "core::num::<impl i128>::wrapping_sub", id := (64058619286045522995337449244718949955 : Int) }
+def Fn.«core::option::Option::<u128>::is_none» : RustFn := { name := "core::option::Option::<u128>::is_none", id := (51969724300414843707869938235335744691 : Int) }
+def Fn.«core::ptr::drop_in_place::<percolator::v16::V16Error> - shim(None)» : RustFn := { name := "core::ptr::drop_in_place::<percolator::v16::V16Error> - shim(None)", id := (139676731930426496357896855466982275507 : Int) }
+def Fn.«<core::ops::range::RangeInclusive<u128> as core::ops::range::RangeBounds<u128>>::start_bound» : RustFn := { name := "<core::ops::range::RangeInclusive<u128> as core::ops::range::RangeBounds<u128>>::start_bound", id := (49456235201009767706179787716190113651 : Int) }
+def Fn.«core::cmp::impls::<impl core::cmp::PartialEq for u64>::eq» : RustFn := { name := "core::cmp::impls::<impl core::cmp::PartialEq for u64>::eq", id := (13070591749200850158605915675945587955 : Int) }
+def Fn.«<u128 as core::cmp::Ord>::max» : RustFn := { name := "<u128 as core::cmp::Ord>::max", id := (31159709650875280284876217562438682891 : Int) }
+def Fn.«<core::option::Option<u64> as core::cmp::PartialEq>::eq» : RustFn := { name := "<core::option::Option<u64> as core::cmp::PartialEq>::eq", id := (152800965671550580858269312002291410091 : Int) }
+def Fn.«core::option::Option::<u128>::ok_or::<percolator::v16::V16Error>» : RustFn := { name := "core::option::Option::<u128>::ok_or::<percolator::v16::V16Error>", id := (52111552698604515156144493543826329691 : Int) }
+def Fn.«percolator::v16::V16Core::kernel_clear_leg» : RustFn := { name := "percolator::v16::V16Core::kernel_clear_leg", id := (104702903515138520442057854544181625563 : Int) }
+def Fn.«core::ops::range::RangeInclusive::<u128>::contains::<u128>» : RustFn := { name := "core::ops::range::RangeInclusive::<u128>::contains::<u128>", id := (68700059851208620096374713357315428091 : Int) }
+def Fn.«percolator::v16::add_open_interest_for_new_position» : RustFn := { name := "percolator::v16::add_open_interest_for_new_position", id := (101645424581217108747186696814702618695 : Int) }
+def Fn.«<core::result::Result<u128, percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual» : RustFn := { name := "<core::result::Result<u128, percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual", id := (109694191781049067729999018489448058135 : Int) }
+def Fn.«core::num::<impl u128>::checked_add» : RustFn := { name := "core::num::<impl u128>::checked_add", id := (23431016484111826894904242745685293455 : Int) }
+def Fn.«percolator::v16::V16Core::kernel_retain_leg_as_pending_obligation» : RustFn := { name := "percolator::v16::V16Core::kernel_retain_leg_as_pending_obligation", id := (133341995576693577283017941927878551887 : Int) }
+def Fn.«percolator::v16::V16Core::kernel_side_adl_index» : RustFn := { name := "percolator::v16::V16Core::kernel_side_adl_index", id := (134658085862436267367835845108775743439 : Int) }
+def Fn.«core::num::<impl u64>::checked_sub» : RustFn := { name := "core::num::<impl u64>::checked_sub", id := (106578166052859844137691864393256942127 : Int) }
+def Fn.«percolator::v16::social_loss_book_split::{closure#0}» : RustFn := { name := "percolator::v16::social_loss_book_split::{closure#0}", id := (59124401712393446663776534222133827743 : Int) }
+def Fn.«core::ptr::drop_in_place::<{closure@percolator::v16::social_loss_book_split::{closure#0}}> - shim(None)» : RustFn := { name := "core::ptr::drop_in_place::<{closure@percolator::v16::social_loss_book_split::{closure#0}}> - shim(None)", id := (19093375618069742563039672586660359839 : Int) }
+def Fn.«<core::ops::range::RangeInclusive<u128> as core::ops::range::RangeBounds<u128>>::contains::<u128>» : RustFn := { name := "<core::ops::range::RangeInclusive<u128> as core::ops::range::RangeBounds<u128>>::contains::<u128>", id := (27524789531203335802881392288008967007 : Int) }
+def Fn.«<core::result::Result<core::option::Option<percolator::v16::BResidualBookingOutcomeV16>, percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual» : RustFn := { name := "<core::result::Result<core::option::Option<percolator::v16::BResidualBookingOutcomeV16>, percolator::v16::V16Error> as core::ops::try_trait::FromResidual<core::result::Result<core::convert::Infallible, percolator::v16::V16Error>>>::from_residual", id := (127427919383688649783705139071678199775 : Int) }
+def Fn.«<percolator::v16::V16Error as core::convert::From<percolator::v16::V16Error>>::from» : RustFn := { name := "<percolator::v16::V16Error as core::convert::From<percolator::v16::V16Error>>::from", id := (53049272397075653128787038259679659391 : Int) }
+def Fn.«core::num::<impl i128>::wrapping_neg» : RustFn := { name := "core::num::<impl i128>::wrapping_neg", id := (64056111219525930814900503618186701055 : Int) }
+def Fn.«percolator::v16::V16Core::kernel_resize_leg_same_side» : RustFn := { name := "percolator::v16::V16Core::kernel_resize_leg_same_side", id := (143361523407257390393419986037522176511 : Int) }
+def Global.«const [1 bytes] 165f0cf0fda1e660» : RustGlobal := { name := "const [1 bytes] 165f0cf0fda1e660", id := (154447764893550801351642968956631804652 : Int) }
+
+end Mir.KernelC

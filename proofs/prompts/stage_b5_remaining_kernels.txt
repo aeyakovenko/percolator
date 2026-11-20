@@ -1,0 +1,36 @@
+New task on the same project. The spec file aristotle/kernel_contracts_spec.md is unchanged. This task has two parts. Please do them in this order and record each finished property before starting the next, so finished results are kept if the task stops early.
+
+Part 1: the decision the previous task asked for. K06, K42 and K47 are compiled only under cfg(any(kani, feature = "fuzz")): they serve entry points that exist only for tests and proofs. Take option (b): those six properties are not applicable to the deployed build. Keep the proofs you made on the fuzz-feature build as they are and do not spend more on them. Nothing else from the previous task is open.
+
+For every function of Part 2, check first that it is compiled in the default build. If one is not, say under which cfg it lives, prove it on the fuzz-feature build as you did for K06, K42 and K47, and report it the same way, without stopping the task for a decision.
+
+Part 2: prove these seventeen functions of src/v16.rs, both properties each (Kxx.contract and Kxx.nopanic as the spec file defines them), in this order. The first group selects and classifies; the second group applies one accounting delta to a record of counters and says exactly which counters move.
+
+Selection and classification:
+- K19 first_actionable_slot
+- K20 select_auto_crank_plan
+- K21 build_trade_request_guard_summary
+- K10 kernel_accumulate_batch_trade
+- K30 kernel_advance_leg_b_snap
+- K02 kernel_mark_kf_stale_cohorts
+- K03 kernel_settle_kf_stale_cohort
+
+Accounting deltas:
+- K01 apply_backing_provider_earnings_withdraw
+- K26 apply_bankruptcy_residual_chunk_to_loss_side (it has a modifies clause)
+- K49 debit (it has a modifies clause)
+- K50 apply_total_delta
+- K51 credit_backing_provider_earnings_delta
+- K52 set_domain_insurance_spent_delta
+- K53 set_domain_insurance_budget_delta
+- K54 withdraw_domain_insurance_delta
+- K55 credit_account_from_insurance_delta
+- K56 retire_terminal_unbudgeted_insurance_delta
+
+Do not work on K07, K32, K34 or K35 in this task: their source is about to change and they will be submitted with the new revision.
+
+Kxx.nopanic means: for all inputs that satisfy every requires of the function, no execution of the call panics, including by arithmetic overflow. It does not ask for a proof that the call returns. Say in the summary whether a body has any loop or recursion, and for a body with a loop state the bound you used.
+
+Verify the deployed function bodies: no cfg(kani), default features, this crate's release profile (overflow-checks = true). A parameter name inside an ensures clause denotes the value the caller passed, also where the body mutates or rebinds a by-value parameter.
+
+Report each property under its label, proved or refuted with a concrete counterexample. Do not weaken a contract silently; say so if you had to add a precondition, and list every library function whose documented behaviour a proof assumes instead of covering by proof.

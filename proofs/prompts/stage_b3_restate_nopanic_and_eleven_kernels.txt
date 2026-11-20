@@ -1,0 +1,24 @@
+New task on the same project. The file aristotle/kernel_contracts_spec.md is uploaded again with one wording change, and this task has three parts. Please do them in this order and record each finished property before starting the next, so finished results are kept if the task is stopped early.
+
+Part 1: restate the no-panic properties. The spec now defines Kxx.nopanic as: for all inputs that satisfy every requires of the function, no execution of the call panics, including by arithmetic overflow. It no longer asks for a proof that the call returns. In the previous task you reported, for K11, K29, K09, K08, K14, K15, K31 and K28, that you had proved exactly this (no execution of the body panics) and left the property open only because of the word "returns". Restate those eight properties under the new definition and close them with the proofs you already have. Do the same for K36, K37 and K38 if their statements carry the same wording, but do not start proof work on those three functions.
+
+Part 2: K12 kernel_consume_insurance_layer and K13 kernel_resolved_payout_step still show as "proved (unchecked)" from a task that was cancelled by a spending cap. Run the final check for their four properties (restating the two nopanic ones under the new definition if needed) so that they are recorded as checked.
+
+Part 3: prove these eleven functions of src/v16.rs, both properties each (Kxx.contract and Kxx.nopanic as the spec file defines them), in this order:
+
+- K22 kernel_cert_is_current
+- K23 actionable_summary_from_signals
+- K24 kernel_open_close_snapshot_is_stale
+- K25 kernel_social_loss_chunk_cap
+- K28 is already done; skip it
+- K27 kernel_bresidual_step
+- K33 kernel_recovery_pending_obligation_release_allowed
+- K57 asset_restart_next_counters
+- K58 trade_signed_size_deltas
+- K16 kernel_classify_position_delta
+- K17 kernel_trade_side_oi_cap_gate
+- K18 kernel_reduce_position_delta
+
+Verify the deployed function bodies: no cfg(kani), default features. A parameter name inside an ensures clause denotes the value the caller passed.
+
+Report each property under its label, proved or refuted with a concrete counterexample. Do not weaken a contract silently; say so if you had to add a precondition, and list every library function whose documented behaviour a proof assumes instead of covering by its body. Do not work on any other function in this task.

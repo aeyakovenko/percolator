@@ -1,0 +1,18 @@
+New task on the same project: more of the engine's kernel contracts, described in aristotle/kernel_contracts_spec.md (already in the project).
+
+In this task prove only these eight functions of src/v16.rs, in this order, then stop:
+
+- K11 kernel_settle_principal
+- K29 kernel_settle_resolved_pnl_after_booking
+- K09 kernel_locked_margin_gate
+- K08 kernel_initial_margin_gate
+- K14 kernel_released_pnl_conversion_partition
+- K15 kernel_retain_terminal_source_haircut
+- K31 kernel_normalize_social_loss_carry
+- K28 kernel_forfeit_residual_step
+
+Finish and record both properties of one function before starting the next, so that finished results are kept if the task is stopped early.
+
+For each, prove the two properties the spec file names: Kxx.contract (the function's kani::requires and kani::ensures attributes in src/v16.rs, read as that file explains: a parameter name inside an ensures clause denotes the value the caller passed) and Kxx.nopanic (under its requires the call returns and does not panic; overflow checks are on). Verify the deployed function bodies: no cfg(kani), default features.
+
+Report each property under its label, proved or refuted with a concrete counterexample. Do not weaken a contract silently; say so if you had to add a precondition, and list every library function whose documented behaviour a proof assumes instead of covering by its body. Do not work on any other function in this task, and do not resume the three prepare_counterparty_* functions.

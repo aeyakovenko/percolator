@@ -1,0 +1,12 @@
+The previous task on this project was cancelled before it finished, so none of its results were recorded. Please build on the work it left (Spec/WideMath.lean and the proofs in progress).
+
+In this task finish only these four properties, then stop:
+
+- div_rem_u256_zero_spec: div_rem_u256 never returns normally when the divisor is zero.
+- checked_div_rem_by_u256_zero_spec: U512::checked_div_rem_by_u256 never returns normally when the divisor is zero.
+- widening_mul_u128_spec (D1 of aristotle/wide_math_spec.md).
+- mul_u256_spec (D2).
+
+None of the four needs a loop invariant. Do not work in this task on div_rem_u256_nonzero_spec, div_rem_u256_panics_iff_zero, checked_div_rem_by_u256_nonzero_spec or checked_div_rem_by_u256_property: leave them for a later task.
+
+Report each of the four as proved, or as refuted with a concrete counterexample. Do not weaken a statement silently.

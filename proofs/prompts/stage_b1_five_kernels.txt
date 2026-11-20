@@ -1,0 +1,13 @@
+New task on the same project: the engine's kernel contracts, described in aristotle/kernel_contracts_spec.md (uploaded with this message).
+
+In this task prove only five of the functions listed there, then stop:
+
+- K38 prepare_counterparty_backing_withdraw_delta
+- K37 prepare_counterparty_backing_add_delta
+- K36 prepare_counterparty_lien_create_delta
+- K12 kernel_consume_insurance_layer
+- K13 kernel_resolved_payout_step
+
+For each, prove the two properties the spec file names: Kxx.contract (the function's kani::requires and kani::ensures attributes in src/v16.rs, read as that file explains: a parameter name inside an ensures clause denotes the value the caller passed) and Kxx.nopanic (under its requires the call returns and does not panic; overflow checks are on). Verify the deployed function bodies: no cfg(kani), default features.
+
+Report each property under its label, proved or refuted with a concrete counterexample. Do not weaken a contract silently; say so if you had to add a precondition. Do not work on any other function in this task.

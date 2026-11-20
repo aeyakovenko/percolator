@@ -1,0 +1,22 @@
+New task on the same project, for a new revision of the engine. The engine sources are uploaded again at revision d1fa39f6, the next revision of the engine's master branch (it replaces c030aa40, the revision you worked on last). Of the files uploaded, only src/v16.rs matters for this task (it replaces the earlier src/v16.rs); src/lib.rs, src/v16_kani_api.rs, src/v16_proofs.rs, spec.md, README.md and the files under tests/ are uploaded only so that the tree is one consistent revision. aristotle/kernel_contracts_spec.md is uploaded again for this revision: its table has 63 functions, and its last section, "What changed in engine revision d1fa39f6 (since c030aa40)", says what this task is about.
+
+Proofs made against the earlier revisions stay valid for every listed function whose text, contract, callees and types are unchanged, and for this revision that is every function of the earlier list: a function-by-function comparison found no listed kernel with changed text, a changed or new callee, or a changed type (the two changed types are the market view MarketGroupV16ViewMut and the account slot EngineAssetSlotV16Account, which no kernel takes, returns or names). Please do not redo those. If you find that one of the earlier kernels does depend on something that changed, say which and why instead of re-proving it silently.
+
+This task has two parts; do them in this order and record each finished property before starting the next, so that finished results are kept if the task stops early.
+
+Part 1, the three new kernels, both properties each (Kxx.contract and Kxx.nopanic as the spec file defines them). They are associated functions of V16Core over u128 scalars and a bool, with no loop and no call into wide_math:
+- K61 kernel_provider_protection_num(provider_principal_num, fresh_reserved_backing_num, exact_positive_claim_num)
+- K62 kernel_provider_protection_floor_observe(floor_num, protection_num)
+- K63 kernel_provider_protection_floor_shift(floor_num, amount_num, add)
+
+Part 2, the four named consequences from the spec file's last section, for all inputs:
+- K61.realization: for x <= r and x <= c, kernel_provider_protection_num(p, r - x, c - x) == kernel_provider_protection_num(p, r, c).
+- K61.monotone: kernel_provider_protection_num(p, r, c) <= kernel_provider_protection_num(p, r2, c) whenever r <= r2; kernel_provider_protection_num(p, r, c2) <= kernel_provider_protection_num(p, r, c) whenever c <= c2.
+- K62.minimum: for every finite sequence of protections x1 .. xn and every starting floor f, folding kernel_provider_protection_floor_observe over the sequence in any order returns min(f, x1, .., xn).
+- K63.inverse: (a) if floor + a does not exceed u128::MAX, then kernel_provider_protection_floor_shift(kernel_provider_protection_floor_shift(floor, a, true), a, false) == floor. (b) for floor <= principal and a <= principal: if a <= floor, then kernel_provider_protection_floor_shift(floor, a, false) == floor - a and (principal - a) - (floor - a) == principal - floor; if a > floor, the result is 0 and principal - a < principal - floor.
+
+Kxx.nopanic means: for all inputs that satisfy every requires of the function, no execution of the call panics, including by arithmetic overflow. It does not ask for a proof that the call returns. None of the three has a requires clause, so the claim is for all inputs. Say in the summary whether a body has any loop or recursion.
+
+Verify the deployed function bodies: no cfg(kani), default features, this crate's release profile (overflow-checks = true). A parameter name inside an ensures clause denotes the value the caller passed. For every function, check first that it is compiled in the default build; if one is not, say under which cfg it lives.
+
+Report each property under its label, proved or refuted with a concrete counterexample. Do not weaken a contract or a consequence silently; say so if you had to add a precondition, and list every library function whose documented behaviour a proof assumes instead of covering by proof. In the summary, state for which engine revision each recorded proof of the project now holds.

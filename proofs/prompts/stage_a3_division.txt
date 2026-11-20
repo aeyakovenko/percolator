@@ -1,0 +1,28 @@
+New task on the same project, finishing the arithmetic layer. The file aristotle/wide_math_spec.md lists properties A1 to G5 of src/wide_math.rs; it is uploaded again with this task because label A7 is corrected in it (your finding: abs_u256 asserts self != I256::MIN).
+
+Two decisions the previous task asked for:
+- The constants of A2 and A6: take option (b). A harness that compiles src/wide_math.rs unchanged and returns each constant from a function is allowed; prove the values that way and record them under A2 and A6. Do this first; it is small.
+- abs_u256 at I256::MIN: do not change the source. The assert is deliberate. What matters is whether a caller can reach it, so for every function of this task that calls abs_u256 (directly or through a callee), state its panic conditions exactly, including the inputs for which the assert is reached.
+
+This task is about the functions that divide. Two of them contain a loop (the long division of a U256 by a U256 and of a U512 by a U256), and every later property rests on those two, so please do the work in this order and record each finished property before starting the next.
+
+Step 1, the two division loops. For each loop, state the loop invariant you use in the summary.
+- C1 and C2: div_rem_u256(num, den) for a nonzero divisor returns (q, r) with val(num) = val(q)*val(den) + val(r) and val(r) < val(den). The zero-divisor half of C1 is proved; finish the "panics exactly when" statement as two properties: every execution with a zero divisor panics, and no execution with a nonzero divisor panics.
+- D3: U512::checked_div_rem_by_u256 for a nonzero divisor: Some((q, r)) with the exact quotient and remainder exactly when the quotient is below 2^256, None exactly when it is not. Its zero-divisor half is proved.
+
+Step 2, the functions built on step 1, none of which has a loop of its own:
+- B4 and the / and % parts of B9
+- C3 ceil_div_positive_checked
+- D4 mul_div_floor_u256, D5 mul_div_floor_u256_with_rem, D6 mul_div_ceil_u256, D7 checked_mul_div_ceil_u256
+- F1 mul_div_floor_u128, F2 mul_div_ceil_u128, F3 wide_mul_div_floor_u128, F4 wide_mul_div_ceil_u128_or_over_i128max
+
+Step 3, signed division:
+- E1 and E2 floor_div_signed_conservative, E3 floor_div_signed_conservative_i128
+- E4 wide_signed_mul_div_floor, and E4b (which I expect to be false: confirm it with the counterexample in the spec file or prove it)
+- E5 wide_signed_mul_div_floor_from_k_pair
+
+Step 4, the consequences the engine relies on: G1, G2, G3, G4, G5.
+
+Termination of the loops is not asked for: state every panic condition as "every execution with these inputs panics" or "no execution with these inputs panics", and every value property as "if the call returns, then". If a loop invariant cannot be found within the task, record the properties of step 1 as open with what you tried, and still do the parts of steps 2 to 4 that can be proved from the step 1 statements taken as assumptions, marking clearly which results are conditional on them.
+
+Verify the deployed function bodies: no cfg(kani), default features, this crate's release profile (overflow-checks = true). Report each property under its label, proved or refuted with a concrete counterexample. Do not weaken a statement silently, and list every library function whose documented behaviour a proof assumes instead of covering by proof.

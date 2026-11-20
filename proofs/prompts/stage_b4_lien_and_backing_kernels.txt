@@ -1,0 +1,28 @@
+New task on the same project. The spec file aristotle/kernel_contracts_spec.md is unchanged. This task has two parts. Please do them in this order and record each finished property before starting the next, so finished results are kept if the task stops early.
+
+Part 1: finish what the previous task left open. If any property of K12, K13, K16, K17, K18, K22, K23, K24, K25, K27, K33, K57 or K58, or any restated Kxx.nopanic property of K08, K09, K11, K14, K15, K28, K29 or K31, is not recorded as proved or refuted with its final check done, finish it first. Skip the ones that are done.
+
+Part 2: prove these sixteen functions of src/v16.rs, both properties each (Kxx.contract and Kxx.nopanic as the spec file defines them), in this order. They are the source-credit, lien and backing delta kernels: each takes a small record of counters and returns the record after one accounting step, and its contract says which counters move and by exactly how much.
+
+- K04 available_backing_num_for_source_credit_state
+- K05 prepare_source_positive_claim_burn_delta
+- K06 prepare_source_positive_claim_bound_delta
+- K36 prepare_counterparty_lien_create_delta
+- K37 prepare_counterparty_backing_add_delta
+- K38 prepare_counterparty_backing_withdraw_delta
+- K39 prepare_counterparty_lien_release_delta
+- K40 prepare_counterparty_lien_terminal_release_delta
+- K41 prepare_counterparty_lien_consume_delta
+- K42 prepare_counterparty_lien_impair_delta
+- K43 prepare_counterparty_impaired_lien_retirement_delta
+- K44 prepare_insurance_lien_create_delta
+- K45 prepare_insurance_lien_release_delta
+- K46 prepare_insurance_lien_terminal_release_delta
+- K47 prepare_insurance_lien_impair_delta
+- K48 health_requirements_from_base_and_target_lag
+
+Kxx.nopanic means: for all inputs that satisfy every requires of the function, no execution of the call panics, including by arithmetic overflow. It does not ask for a proof that the call returns. Say in the summary whether a body has any loop or recursion.
+
+Verify the deployed function bodies: no cfg(kani), default features, this crate's release profile (overflow-checks = true). A parameter name inside an ensures clause denotes the value the caller passed, also where the body mutates or rebinds a by-value parameter.
+
+Report each property under its label, proved or refuted with a concrete counterexample. Do not weaken a contract silently; say so if you had to add a precondition, and list every library function whose documented behaviour a proof assumes instead of covering by proof. If a contract holds only because an earlier guard returns an error, that is a proof, not a weakening.

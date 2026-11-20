@@ -1,0 +1,27 @@
+New task on the same project, back on the arithmetic layer. The file aristotle/wide_math_spec.md (uploaded with the first task) lists properties A1 to G5 of src/wide_math.rs. D1 and D2 are proved, and so are the zero-divisor halves of C1 and D3.
+
+In this task prove the properties whose functions contain no loop, in this order. Record each finished property before starting the next, so finished results are kept if the task stops early.
+
+Representation and comparisons:
+- A1, A2, A3, A4, A5, A6, A7, A8
+
+U256 arithmetic without division:
+- B1 checked_add, B2 checked_sub, B3 checked_mul (it is built on the wide product of D2)
+- B5 overflowing_add and overflowing_sub
+- B6 saturating_add and saturating_sub
+- B7 shl and shr, for every shift amount including 256 and above
+- B8 bitand and bitor
+- the parts of B9 that concern + - * << >> & | += -= (leave / and % for the division task)
+
+Signed helpers without division:
+- E6 I256 checked_add, checked_sub, checked_neg, checked_mul_i256, saturating_add
+
+Native helpers without division:
+- D8 saturating_mul_u256_u64 and saturating_mul_u128_u64
+- F5 fee_debt_u128_checked
+
+If one of these turns out to contain a loop after all, say so and leave it for the division task: do not spend this task on loop invariants. Do not work in this task on B4, C1 to C3, D3 to D7, E1 to E5, F1 to F4 or G1 to G5.
+
+As before: "returns" means the call returns normally and "panics" means it does not; a property about a returned value says nothing about inputs on which the function panics, and the panic conditions are separate properties (state them as "no execution panics" or "every execution panics", not as termination claims). Verify the deployed function bodies: no cfg(kani), default features, this crate's release profile (overflow-checks = true).
+
+Report each property under its label, proved or refuted with a concrete counterexample. Do not weaken a statement silently, and list every library function whose documented behaviour a proof assumes instead of covering by proof.

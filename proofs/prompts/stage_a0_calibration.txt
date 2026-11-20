@@ -1,0 +1,5 @@
+Formally verify five properties of the wide_math module of this crate. They are stated in aristotle/wide_math_spec.md under the labels C1, C2, D1, D2 and D3; the Notation section of that file defines val(). Verify only these five in this run and report each under its label.
+
+Scope: src/wide_math.rs as compiled without cfg(kani) (the [u64; 4] layout of U256), including the private U512 type and the private helpers widening_mul_u128, U512::mul_u256, U512::checked_div_rem_by_u256 and the public div_rem_u256. Do not verify src/v16.rs, src/v16_proofs.rs, src/v16_kani_api.rs or anything under tests/.
+
+Prove functional correctness against mathematical integers, including the stated panic conditions in both directions. If a property is false, report it as refuted with a concrete counterexample; do not weaken a property silently, and say so if you had to add a precondition.

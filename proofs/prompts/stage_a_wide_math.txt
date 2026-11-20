@@ -1,0 +1,7 @@
+Formally verify the wide_math module of this crate against aristotle/wide_math_spec.md.
+
+Scope: src/wide_math.rs as compiled without cfg(kani) (the [u64; 4] layout of U256 and I256), including the private U512 type and the private helper functions. Do not verify src/v16.rs, src/v16_proofs.rs, src/v16_kani_api.rs or anything under tests/ in this run.
+
+Prove functional correctness against mathematical integers for every lettered property in the spec file, and report each as its own property under the same label (A1 to G5). The panic conditions are part of the properties: where the spec says a function panics exactly under a condition, prove both directions. Where a property is false, report it as refuted with a concrete counterexample; do not weaken a property silently, and tell me if you had to add a precondition.
+
+Give priority to what the engine in src/v16.rs calls: checked_mul_div_ceil_u256, mul_div_floor_u256_with_rem, floor_div_signed_conservative_i128, wide_signed_mul_div_floor_from_k_pair, wide_mul_div_floor_u128, and the U256 and I256 methods they reach (div_rem_u256, U512::mul_u256, U512::checked_div_rem_by_u256, widening_mul_u128).

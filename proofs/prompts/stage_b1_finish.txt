@@ -1,0 +1,8 @@
+The previous task on this project was cancelled by a spending cap before it finished. This task only closes out work that is already done. Please keep it as short as possible.
+
+Do exactly this and nothing else:
+
+1. The four properties for K12 kernel_consume_insurance_layer and K13 kernel_resolved_payout_step (Spec.Kernel.kernel_consume_insurance_layer_contract, Spec.Kernel.kernel_consume_insurance_layer_nopanic, Spec.Kernel.kernel_resolved_payout_step_contract, Spec.Kernel.kernel_resolved_payout_step_nopanic) are marked "proved (unchecked)". Run whatever final check turns that into a checked result, and report the outcome for each.
+2. Write the summary for those four: the exact statement proved in plain words, which function bodies and library functions the proofs cover, and every condition or assumption.
+
+Do not start or resume any proof search. Do not work on K36, K37 or K38 (the three prepare_counterparty_* functions); leave them unresolved. If the final check of a property would need new proof work, stop and report it as unchecked instead.

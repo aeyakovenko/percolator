@@ -1,0 +1,25 @@
+New task on the same project, for a new revision of the engine. The engine sources are uploaded again at revision c030aa40, the next revision of the engine's master branch (it replaces add1d027, the revision you have worked on so far). Of the files uploaded, only src/v16.rs matters for this task (it replaces the earlier src/v16.rs); src/v16_kani_api.rs, src/v16_proofs.rs, spec.md, README.md and the tests are uploaded only so that the project tree is one consistent revision. The file aristotle/kernel_contracts_spec.md is regenerated for the new revision (same labels; K59 and K60 are new rows). Its last section, "What changed in engine revision c030aa40", says exactly what differs from add1d027.
+
+Proofs made against the earlier revision stay valid for every listed function whose text, contract, callees and types are unchanged. Please do not redo those. This task has three parts; do them in this order and record each finished property before starting the next, so finished results are kept if the task stops early.
+
+Part 1, the two new kernels, both properties each (Kxx.contract and Kxx.nopanic as the spec file defines them):
+- K59 kernel_side_adl_index
+- K60 kernel_raw_basis_after_adl_reduction
+and the two named consequences from the spec file's last section: K59.exposure and K60.progress.
+
+Part 2, the four kernels whose bodies and contracts changed (each maintains the side's new raw-basis sum), both properties each:
+- K35 kernel_attach_leg
+- K07 kernel_resize_leg_same_side
+- K34 kernel_clear_leg
+- K32 kernel_retain_leg_as_pending_obligation
+
+Part 3, three kernels whose text is unchanged but which take or return AssetStateV16, a record that gained two fields (raw_basis_sum_long_q, raw_basis_sum_short_q). Establish both properties again on the new record:
+- K02 kernel_mark_kf_stale_cohorts
+- K03 kernel_settle_kf_stale_cohort
+- K26 apply_bankruptcy_residual_chunk_to_loss_side (it has a modifies clause)
+
+Kxx.nopanic means: for all inputs that satisfy every requires of the function, no execution of the call panics, including by arithmetic overflow. It does not ask for a proof that the call returns. Say in the summary whether a body has any loop or recursion.
+
+Verify the deployed function bodies: no cfg(kani), default features, this crate's release profile (overflow-checks = true). A parameter name inside an ensures clause denotes the value the caller passed, also where the body mutates or rebinds a by-value parameter. For every function, check first that it is compiled in the default build; if one is not, say under which cfg it lives, prove it on the fuzz-feature build and report it that way, without stopping the task for a decision.
+
+Report each property under its label, proved or refuted with a concrete counterexample. Do not weaken a contract silently; say so if you had to add a precondition, and list every library function whose documented behaviour a proof assumes instead of covering by proof. In the summary, state for which engine revision each recorded proof of the project now holds.

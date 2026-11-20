@@ -1,0 +1,1353 @@
+[
+ {
+  "name": "register_empty_materialized_portfolio_not_atomic.h_preserved",
+  "status_name": "FAILED",
+  "unchecked": false,
+  "description": "T47 `MarketGroupV16ViewMut::<'_, ()>::register_empty_materialized_portfolio_not_atomic(account)`: for every market view satisfying H and every 9419-byte `PortfolioV16View` account, if the call returns `Ok(())`, then the only header field written is `materialized_portfolio_count` (raised by one), the market slots and the portfolio account are unchanged, and H holds afterwards.",
+  "last_updated": "2026-11-20T15:30:27.847819+00:00"
+ },
+ {
+  "name": "Spec.LayerT.t33_header",
+  "status_name": "FAILED",
+  "unchecked": false,
+  "description": "T33 `finalize_side_reset_not_atomic(asset_index, side)` (on `MarketGroupV16ViewMut<'_, ()>`): for every market view satisfying H and all arguments, if the call returns `Ok(())`, then either the header is unchanged (side already `Normal`) or the only header fields written are `resolved_payout_blocker_count` (through `set_asset_state`) and `risk_epoch` (raised by one); the slice of market slots keeps its length; and H holds afterwards.",
+  "last_updated": "2026-11-20T15:30:27.847819+00:00"
+ },
+ {
+  "name": "deregister_empty_materialized_portfolio_not_atomic.h_preserved",
+  "status_name": "FAILED",
+  "unchecked": false,
+  "description": "T29 `MarketGroupV16ViewMut::<'_, ()>::deregister_empty_materialized_portfolio_not_atomic(account)`: for every market view satisfying H and every 9419-byte `PortfolioV16View` account, if the call returns `Ok(())`, then the only header field written is `materialized_portfolio_count` (lowered by one), the market slots and the portfolio account are unchanged, and H holds afterwards.",
+  "last_updated": "2026-11-20T15:30:27.847819+00:00"
+ },
+ {
+  "name": "advance_terminal_slab_not_atomic.scan_progress.h_preserved",
+  "status_name": "FAILED",
+  "unchecked": false,
+  "description": "T10 `MarketGroupV16ViewMut::<'_, ()>::advance_terminal_slab_not_atomic(authenticated_slot, scan_start_asset_index)`, `ScanProgress` returns. For every market view satisfying H and all arguments, if the call returns `Ok(TerminalSlabOutcomeV16::ScanProgress { .. })`, then the only header field written is `current_slot` (now `authenticated_slot`). The market slots are unchanged, and H holds afterwards.",
+  "last_updated": "2026-11-20T15:30:27.847819+00:00"
+ },
+ {
+  "name": "activate_empty_market_slot_not_atomic.market.hh_preserved",
+  "status_name": "FAILED",
+  "unchecked": false,
+  "description": "T05 `MarketGroupV16HeaderAccount::activate_empty_market_slot_not_atomic::<Market<()>>(asset_index, slot, authenticated_price, now_slot)`: makes the same claim as the `EngineAssetSlotV16Account` instance. On `Ok(())`, `now_slot >=` the old `current_slot`, and only the six activation fields of the header are written (`asset_slot_capacity` and `config` are unchanged). Hh holds afterwards.",
+  "last_updated": "2026-11-20T15:30:27.847819+00:00"
+ },
+ {
+  "name": "activate_empty_market_slot_not_atomic.engine_slot.hh_preserved",
+  "status_name": "FAILED",
+  "unchecked": false,
+  "description": "T05 `MarketGroupV16HeaderAccount::activate_empty_market_slot_not_atomic::<EngineAssetSlotV16Account>(asset_index, slot, authenticated_price, now_slot)`: for every header account satisfying Hh (all fields in range), every 1365-byte slot and all `u32`/`u64` arguments, if the call returns `Ok(())`, then `now_slot >=` the old `current_slot`; the header left behind differs only in `next_market_id`, `asset_activation_count`, `asset_set_epoch`, `risk_epoch` (each raised by one) and `current_slot`, `last_asset_activation_slot` (both now `now_slot`), so `asset_slot_capacity` and `config` are unchanged; and Hh holds of it.",
+  "last_updated": "2026-11-20T15:30:27.847819+00:00"
+ },
+ {
+  "name": "activate_empty_asset_slot_not_atomic.hh_preserved",
+  "status_name": "FAILED",
+  "unchecked": false,
+  "description": "T03 `MarketGroupV16HeaderAccount::activate_empty_asset_slot_not_atomic(asset_index, slot, authenticated_price, now_slot)` calls T05 at `EngineAssetSlotV16Account`. On `Ok(())`, `now_slot >=` the old `current_slot`, and only the six activation fields of the header are written (`asset_slot_capacity` and `config` are unchanged). Hh holds afterwards.",
+  "last_updated": "2026-11-20T15:30:27.847819+00:00"
+ },
+ {
+  "name": "Spec.LayerT.t02_header",
+  "status_name": "FAILED",
+  "unchecked": false,
+  "description": "T02 `accrue_asset_to_not_atomic(asset_index, now_slot, effective_price, funding_rate_e9, protective_progress_committed)` (on `MarketGroupV16ViewMut<'_, ()>`): for every market view satisfying H and all arguments, if the call returns `Ok(_)`, then the only header fields written are `current_slot` (now `max(current_slot, now_slot)`), `slot_last` (now at most `now_slot`), `loss_stale_active` (now 0 or 1), `oracle_epoch`, `funding_epoch` and `resolved_payout_blocker_count`; the slice keeps its length; and H holds afterwards. No assumption beyond H at entry.",
+  "last_updated": "2026-11-20T15:30:27.847819+00:00"
+ },
+ {
+  "name": "Spec.LayerT.t01_header",
+  "status_name": "FAILED",
+  "unchecked": false,
+  "description": "T01 `accrue_asset_path_to_not_atomic(asset_index, now_slot, raw_oracle_target_price, steps, protective_progress_committed)` (on `MarketGroupV16ViewMut<'_, ()>`): for every market view satisfying H and all arguments, if the call returns `Ok(_)`, then `now_slot` was at least the old `current_slot`, and the only header fields written are `current_slot` (now `now_slot`), `slot_last` (now at most `now_slot`), `loss_stale_active` (now 0 or 1), `oracle_epoch`, `funding_epoch` and `resolved_payout_blocker_count`; the slice keeps its length; the steps are unchanged; and H holds afterwards.",
+  "last_updated": "2026-11-20T15:30:27.847819+00:00"
+ },
+ {
+  "name": "Spec.LayerT.t38_header",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "T38 `MarketGroupV16HeaderAccount::grow_asset_slot_capacity_not_atomic(new_asset_slot_capacity, new_max_market_slots)`: for every header account satisfying Hh and all `u32` arguments, if the call returns `Ok(())`, then the header left behind differs from the old one only in `asset_slot_capacity` (now `new_asset_slot_capacity`), `config.max_market_slots` (now `new_max_market_slots`, every other config field unchanged after the `V16ConfigAccount::from_runtime` / `try_to_runtime_shape` round trip), `asset_set_epoch` and `risk_epoch` (each raised by one); `new_max_market_slots <= new_asset_slot_capacity`; and Hh holds of it.",
+  "last_updated": "2026-11-20T15:22:04.412003+00:00"
+ },
+ {
+  "name": "Spec.LayerT.t09_header",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "T09 `MarketGroupV16ViewMut::<'_, ()>::advance_resolved_slot_not_atomic(authenticated_slot)`: for every market view satisfying H (all fields in range) and every `u64` `authenticated_slot`, if the call returns `Ok(())`, then the only header field written is `current_slot`, now `authenticated_slot` (which `kernel_advance_resolved_slot` only accepts when it is not below the old `current_slot` and the mode is `Resolved`). The market slots are unchanged, and H holds afterwards. Panics are allowed and not constrained.",
+  "last_updated": "2026-11-20T14:32:09.476570+00:00"
+ },
+ {
+  "name": "Spec.Kernel.apply_bankruptcy_residual_chunk_to_loss_side_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K26.nopanic: for every in-range `*asset` owned by the caller and all `u128` amounts, no execution of `V16Core::apply_bankruptcy_residual_chunk_to_loss_side(..)` panics, including by arithmetic overflow or division by zero in `social_loss_book_split`.",
+  "last_updated": "2026-11-20T12:09:49.299340+00:00"
+ },
+ {
+  "name": "Spec.Kernel.apply_bankruptcy_residual_chunk_to_loss_side_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K26.contract: for every in-range `*asset: AssetStateV16` owned by the caller, `opp`, `engine_chunk` and `residual_remaining: u128` (no `requires`), if `V16Core::apply_bankruptcy_residual_chunk_to_loss_side(asset, ..)` returns, then on every path the loss side `opp`'s B-index has not decreased and the other side's B-index and social-loss remainder are unchanged; and if the result is `Ok(Some(o))`, then `o.explicit_loss == 0`, `o.booked_loss == engine_chunk`, `o.delta_b > 0` and `o.remaining_after.checked_add(o.booked_loss) == Some(residual_remaining)`. Only `*asset` is accessed (`modifies(asset)`).",
+  "last_updated": "2026-11-20T12:09:49.194349+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_settle_kf_stale_cohort_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K03.nopanic: for all in-range arguments, no execution of `V16Core::kernel_settle_kf_stale_cohort(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T12:09:49.088186+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_settle_kf_stale_cohort_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K03.contract: for every in-range `asset`, `side` and `leg_kf_epoch_snap: u64` (no `requires`), if `V16Core::kernel_settle_kf_stale_cohort(..)` returns `Ok((a, epoch))`, then `epoch` is `side`'s `kf_epoch_*`, the stale count of `side` is decremented (`wrapping_sub(1)`) exactly when `leg_kf_epoch_snap` is below that epoch, the other stale count, both stored position counts and both epochs are unchanged, and every other field equals `asset`'s; if it returns `Err(_)`, then `leg_kf_epoch_snap` is above `side`'s epoch, or below it with that side's stale count `0`.",
+  "last_updated": "2026-11-20T12:09:48.974966+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_mark_kf_stale_cohorts_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K02.nopanic: for all in-range arguments, no execution of `V16Core::kernel_mark_kf_stale_cohorts(..)` panics.",
+  "last_updated": "2026-11-20T12:09:48.868011+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_mark_kf_stale_cohorts_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K02.contract: for every in-range `asset: AssetStateV16`, `long_changed`, `short_changed` and `cohort_epoch: u64` (no `requires`), if `V16Core::kernel_mark_kf_stale_cohorts(..)` returns `Ok(a)`, then each changed side's `kf_epoch_*` is `cohort_epoch` and its `stale_account_count_*` is `asset.stored_pos_count_*`, unchanged sides keep both, the stored position counts are unchanged and every other field equals `asset`'s (`kf_cohort_frame_eq`); if it returns `Err(_)`, then `(long_changed && cohort_epoch <= asset.kf_epoch_long) || (short_changed && cohort_epoch <= asset.kf_epoch_short)`.",
+  "last_updated": "2026-11-20T12:09:48.761701+00:00"
+ },
+ {
+  "name": "Spec.KernelC.apply_bankruptcy_residual_chunk_to_loss_side_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K26.nopanic on revision `c030aa40`: for every in-range `*asset: AssetStateV16` (46 fields) owned by the caller and all `u128` amounts, no execution of `V16Core::apply_bankruptcy_residual_chunk_to_loss_side(..)` panics. This includes arithmetic overflow and division by zero in `social_loss_book_split`.",
+  "last_updated": "2026-11-20T12:09:40.507206+00:00"
+ },
+ {
+  "name": "Spec.KernelC.apply_bankruptcy_residual_chunk_to_loss_side_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K26.contract on revision `c030aa40` (46-field `AssetStateV16`): for every in-range `*asset` owned by the caller, `opp`, `engine_chunk` and `residual_remaining: u128` (no `requires`), suppose `V16Core::apply_bankruptcy_residual_chunk_to_loss_side(asset, ..)` returns. Then the caller gets `*asset` back, and its new value differs from the old one at most in the loss side's `b_*_num` and `social_loss_remainder_*_num`. In particular `raw_basis_sum_long_q` and `raw_basis_sum_short_q` are unchanged. On every path the loss side's B-index has not decreased, and the other side's B-index and remainder are unchanged. If the result is `Ok(Some(o))`, then `o.explicit_loss == 0`, `o.booked_loss == engine_chunk`, `o.delta_b > 0` and `o.remaining_after.checked_add(o.booked_loss) == Some(residual_remaining)`. Only `*asset` is accessed (`modifies(asset)`).",
+  "last_updated": "2026-11-20T12:09:40.396250+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_settle_kf_stale_cohort_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K03.nopanic on revision `c030aa40`: for every in-range `asset: AssetStateV16` (46 fields), `side` and `leg_kf_epoch_snap: u64`, no execution of `V16Core::kernel_settle_kf_stale_cohort(..)` panics.",
+  "last_updated": "2026-11-20T12:09:40.281181+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_settle_kf_stale_cohort_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K03.contract on revision `c030aa40` (46-field `AssetStateV16`): for every in-range `asset`, `side` and `leg_kf_epoch_snap: u64` (no `requires`), if `V16Core::kernel_settle_kf_stale_cohort(..)` returns `Ok((a, epoch))`, then `epoch` is the side's `kf_epoch_*`. The side's `stale_account_count_*` is decremented (`wrapping_sub(1)`) exactly when `leg_kf_epoch_snap < kf_epoch_*`. Stored counts and KF epochs are unchanged, and every other field equals `asset`'s (`kf_cohort_frame_eq`, covering `raw_basis_sum_long_q` and `raw_basis_sum_short_q`). If it returns `Err(_)`, then `leg_kf_epoch_snap > kf_epoch_*`, or `leg_kf_epoch_snap < kf_epoch_*` with `stale_account_count_* == 0`, for that side.",
+  "last_updated": "2026-11-20T12:09:40.158943+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_mark_kf_stale_cohorts_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K02.nopanic on revision `c030aa40`: for every in-range `asset: AssetStateV16` (46 fields) and `cohort_epoch: u64`, no execution of `V16Core::kernel_mark_kf_stale_cohorts(..)` panics.",
+  "last_updated": "2026-11-20T12:09:40.047544+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_mark_kf_stale_cohorts_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K02.contract on revision `c030aa40` (46-field `AssetStateV16`): for every in-range `asset: AssetStateV16`, `long_changed`, `short_changed` and `cohort_epoch: u64` (no `requires`), if `V16Core::kernel_mark_kf_stale_cohorts(..)` returns `Ok(a)`, then each changed side's `kf_epoch_*` is `cohort_epoch` and its `stale_account_count_*` is `asset.stored_pos_count_*`, unchanged sides keep both, the stored position counts are unchanged and every other field equals `asset`'s (`kf_cohort_frame_eq`, which covers `raw_basis_sum_long_q` and `raw_basis_sum_short_q`). If it returns `Err(_)`, then `(long_changed && cohort_epoch <= asset.kf_epoch_long) || (short_changed && cohort_epoch <= asset.kf_epoch_short)`.",
+  "last_updated": "2026-11-20T12:09:39.936469+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_clear_leg_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K34.nopanic (revision `c030aa40`): for every in-range input (no `requires`), no execution of `V16Core::kernel_clear_leg(..)` (including its call to `kernel_normalize_social_loss_carry`) panics.",
+  "last_updated": "2026-11-20T12:08:23.188003+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_clear_leg_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K34.contract (revision `c030aa40`): for every in-range `leg`, `asset` and `clear_effective_oi_q: u128` (no `requires`), if `V16Core::kernel_clear_leg(..)` returns `Ok(a)`, then `a` is the record the `ensures` describes. On `leg.side`, `stored_pos_count_*` falls by one, and `pending_obligation_count_*` falls by one if `leg.basis_pos_q == 0 && leg.loss_weight != 0`. Unless the leg predates a side reset (`mode_* == ResetPending && leg.epoch_snap.checked_add(1) == Some(epoch_*)`), also: `oi_eff_*_q` falls by `clear_effective_oi_q`, `raw_basis_sum_*_q` by `leg.basis_pos_q.unsigned_abs()`, `loss_weight_sum_*` by `leg.loss_weight`, and the side's social-loss dust and explicit unallocated loss are folded with `leg.b_rem` as in the clause. Every other field is unchanged.",
+  "last_updated": "2026-11-20T12:08:23.073686+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_attach_leg_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K35.contract (revision `c030aa40`): for every in-range `asset`, `side`, `loss_weight: u128`, `asset_index_u32: u32` and `basis_pos_q: i128` with `basis_pos_q != 0 && basis_pos_q > i128::MIN` (the `requires`), if `V16Core::kernel_attach_leg(..)` returns `Ok((a, l))`, then `l` is exactly the leg the `ensures` lists (active, `asset_index_u32`, `asset.market_id`, `side`, `basis_pos_q`, `loss_weight`, `b_rem == 0`, not stale, and the side's `a_*`, `k_*`, `f_*_num`, `kf_epoch_*`, `b_*_num`, `epoch_*` snapshots), `l.a_basis == ADL_ONE`, and `a` equals `asset` except that on `side` `oi_eff_*_q` and `raw_basis_sum_*_q` grow by `basis_pos_q.unsigned_abs()`, `loss_weight_sum_*` by `loss_weight` and `stored_pos_count_*` by 1.",
+  "last_updated": "2026-11-20T12:05:00.701442+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_attach_leg_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K35.nopanic (revision `c030aa40`): for every in-range input with `basis_pos_q != 0 && basis_pos_q > i128::MIN`, no execution of `V16Core::kernel_attach_leg(..)` (including its call to `add_open_interest_for_new_position`) panics.",
+  "last_updated": "2026-11-20T11:34:42.971133+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_retain_leg_as_pending_obligation_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K32.nopanic (revision `c030aa40`): for every in-range input (no `requires`), no execution of `V16Core::kernel_retain_leg_as_pending_obligation(..)` panics.",
+  "last_updated": "2026-11-20T11:24:34.763921+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_retain_leg_as_pending_obligation_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K32.contract (revision `c030aa40`): for every in-range `leg`, `asset` and `retained_effective_oi_q: u128` (no `requires`), if `V16Core::kernel_retain_leg_as_pending_obligation(..)` returns `Ok((l, a))`, then `l.active`, and `l` is `leg` with `basis_pos_q == 0`. The record `a` is `asset` except on `leg.side`: `oi_eff_*_q == asset.oi_eff_*_q.wrapping_sub(retained_effective_oi_q)`, `raw_basis_sum_*_q == asset.raw_basis_sum_*_q.wrapping_sub(leg.basis_pos_q.unsigned_abs())` and `pending_obligation_count_* == asset.pending_obligation_count_*.wrapping_add(1)`.",
+  "last_updated": "2026-11-20T11:24:34.646125+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_resize_leg_same_side_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K07.nopanic (revision `c030aa40`): for every in-range input with `new_signed != 0`, no execution of `V16Core::kernel_resize_leg_same_side(..)` (including its calls to `adjust_u128`) panics.",
+  "last_updated": "2026-11-20T11:20:51.049661+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_resize_leg_same_side_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K07.contract (revision `c030aa40`): for every in-range input with `new_signed != 0` (the `requires`), if `V16Core::kernel_resize_leg_same_side(leg, asset, new_signed, new_weight, preserve_pending_obligation_weight, old_effective_abs, new_effective_abs)` returns `Ok((l, a))`, then `l` is `leg` with `basis_pos_q == new_signed` and `loss_weight == (if preserve_pending_obligation_weight { leg.loss_weight } else { new_weight })`. And `a` is `asset` except on `leg.side`: `oi_eff_*_q == asset.oi_eff_*_q.wrapping_sub(old_effective_abs).wrapping_add(new_effective_abs)`, `raw_basis_sum_*_q == asset.raw_basis_sum_*_q.wrapping_sub(leg.basis_pos_q.unsigned_abs()).wrapping_add(new_signed.unsigned_abs())`, and unless the flag is set `loss_weight_sum_* == asset.loss_weight_sum_*.wrapping_sub(leg.loss_weight).wrapping_add(new_weight)`. This is every clause of the `ensures`.",
+  "last_updated": "2026-11-20T11:20:50.935579+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_raw_basis_after_adl_reduction_progress",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K60.progress (revision `c030aa40`): for all `u128` arguments with `raw_sum <= 2 * MAX_OI_SIDE_Q`, if `V16Core::kernel_raw_basis_after_adl_reduction(raw, e, e2, oi, raw_sum)` returns `Ok(next_raw)`, then `1 <= next_raw < raw`, `oi - (e - e2) <= (raw_sum - raw) + next_raw` in exact integer arithmetic, and `oi == raw_sum` implies `next_raw == e2`. No other precondition (in particular not `raw <= raw_sum`) is assumed.",
+  "last_updated": "2026-11-20T10:58:33.230344+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_raw_basis_after_adl_reduction_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K60.nopanic (revision `c030aa40`): for all `u128` arguments with `raw_basis_sum_q <= ADL_ONE && raw_abs_q <= raw_basis_sum_q`, no execution of `V16Core::kernel_raw_basis_after_adl_reduction(..)` panics, including by arithmetic overflow (the `-`, `+` and `checked_mul` steps) or division or remainder by zero.",
+  "last_updated": "2026-11-20T10:58:33.083012+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_raw_basis_after_adl_reduction_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K60.contract (revision `c030aa40`): for all `u128` arguments with `raw_basis_sum_q <= ADL_ONE && raw_abs_q <= raw_basis_sum_q` (the `requires`), if `V16Core::kernel_raw_basis_after_adl_reduction(raw_abs_q, effective_abs_q, next_effective_abs_q, oi_eff_q, raw_basis_sum_q)` returns `Ok(next_raw)`, then with `reduce_q = effective_abs_q.wrapping_sub(next_effective_abs_q)`, `oi_after = oi_eff_q.wrapping_sub(reduce_q)` and `other_raw = raw_basis_sum_q.wrapping_sub(raw_abs_q)`: `next_effective_abs_q != 0`, `next_effective_abs_q < effective_abs_q <= oi_eff_q <= raw_basis_sum_q`, `1 <= next_raw < raw_abs_q`, `oi_after <= other_raw.wrapping_add(next_raw)`, and `oi_eff_q != raw_basis_sum_q || next_raw == next_effective_abs_q`. The `Err` arm is `true`.",
+  "last_updated": "2026-11-20T10:58:32.966099+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_side_adl_index_exposure",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K59.exposure (revision `c030aa40`): for all `u128` values `oi`, `raw_sum`, `a` with `raw_sum <= 2 * MAX_OI_SIDE_Q`, if `V16Core::kernel_side_adl_index(oi, raw_sum, a)` returns `Ok(A)` with `raw_sum > 0` and `oi > 0`, then `A * raw_sum <= ADL_ONE * oi < (A + 1) * raw_sum` in exact integer arithmetic.",
+  "last_updated": "2026-11-20T10:58:32.849822+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_side_adl_index_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K59.nopanic (revision `c030aa40`): for all `u128` values `oi_eff_q`, `raw_basis_sum_q`, `current_a` with `raw_basis_sum_q <= ADL_ONE`, no execution of `V16Core::kernel_side_adl_index(..)` panics, including by arithmetic overflow or division by zero.",
+  "last_updated": "2026-11-20T10:58:32.703353+00:00"
+ },
+ {
+  "name": "Spec.KernelC.kernel_side_adl_index_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K59.contract (revision `c030aa40`): for all `u128` values `oi_eff_q`, `raw_basis_sum_q`, `current_a` with `raw_basis_sum_q <= ADL_ONE` (the `requires`), if `V16Core::kernel_side_adl_index(..)` returns `Ok(a)` then: `a == current_a` when `raw_basis_sum_q == 0`; otherwise `oi_eff_q <= raw_basis_sum_q`, `1 <= a <= ADL_ONE`, `(a == ADL_ONE) == (oi_eff_q == raw_basis_sum_q)`, `oi_eff_q == 0 || a.wrapping_mul(raw_basis_sum_q) <= ADL_ONE.wrapping_mul(oi_eff_q)`, `ADL_ONE.wrapping_mul(oi_eff_q) < a.wrapping_add(1).wrapping_mul(raw_basis_sum_q)` and `oi_eff_q != 0 || a == 1`; if it returns `Err(e)` then `e == V16Error::InvalidLeg`, `raw_basis_sum_q != 0` and `oi_eff_q > raw_basis_sum_q`.",
+  "last_updated": "2026-11-20T10:58:32.513588+00:00"
+ },
+ {
+  "name": "Spec.WideMath.G5_split_loses_lt_one",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "G5. For weights with `w1 + w2 = W` (exact sum) and `W != 0`, and any `X`: if `mul_div_floor_u256(X, w1, W)` returns `r1` and then `mul_div_floor_u256(X, w2, W)` returns `r2`, then `val(r1) + val(r2)` is `val(X)` or `val(X) - 1`.",
+  "last_updated": "2026-11-20T09:50:00.533552+00:00"
+ },
+ {
+  "name": "Spec.WideMath.G4_share_le_whole",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "G4. For `val(d) != 0` and `val(b) <= val(d)`: if `mul_div_floor_u256(a, b, d)` returns `x`, then `val(x) <= val(a)`.",
+  "last_updated": "2026-11-20T09:50:00.356960+00:00"
+ },
+ {
+  "name": "Spec.WideMath.G3_monotone",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "G3. For `val(d) != 0` and `val(a) <= val(a')`: if `mul_div_floor_u256(a, b, d)` returns `x` and then `mul_div_floor_u256(a', b, d)` returns `x'`, then `val(x) <= val(x')`; and the same for `mul_div_ceil_u256`.",
+  "last_updated": "2026-11-20T09:50:00.182243+00:00"
+ },
+ {
+  "name": "Spec.WideMath.G2_floor_ceil_bracket",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "G2. For `val(d) != 0`: if `mul_div_floor_u256(a, b, d)` returns `x` then `val(x) * val(d) <= val(a)*val(b)`, and if `mul_div_ceil_u256(a, b, d)` returns `y` then `val(a)*val(b) <= val(y) * val(d)` (each half holds whenever that call returns).",
+  "last_updated": "2026-11-20T09:50:00.006603+00:00"
+ },
+ {
+  "name": "Spec.WideMath.G1_ceil_minus_floor",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "G1. For `val(d) != 0`: if `mul_div_floor_u256(a, b, d)` returns `x` and then `mul_div_ceil_u256(a, b, d)` returns `y`, then `val(y) - val(x)` is `0` when `val(d)` divides `val(a)*val(b)` and `1` otherwise.",
+  "last_updated": "2026-11-20T09:49:59.842775+00:00"
+ },
+ {
+  "name": "Spec.WideMath.E5_wide_signed_mul_div_floor_from_k_pair_panics",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "E5, exact panic conditions (asked for every caller of `abs_u256`). With `F = floor(abs_basis * (k_now - k_then) / den)`: every execution of `wide_signed_mul_div_floor_from_k_pair(abs_basis, k_then, k_now, den)` panics exactly when `den = 0` or `|F| >= 2^127` (so the representable result `i128::MIN` is also refused); otherwise no execution panics and, if it returns, the result is `F`. Since `|k_now - k_then| < 2^128`, the difference is never `I256::MIN` and the assertion of `abs_u256` is never reached.",
+  "last_updated": "2026-11-20T09:49:06.754103+00:00"
+ },
+ {
+  "name": "Spec.WideMath.E5_wide_signed_mul_div_floor_from_k_pair",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "E5. `wide_signed_mul_div_floor_from_k_pair(abs_basis, k_then, k_now, den)`: every execution with `den = 0` panics; for `den != 0`, if the call returns `x`, then `x = floor(abs_basis * (k_now - k_then) / den)` with the exact integer difference `k_now - k_then`.",
+  "last_updated": "2026-11-20T09:49:06.566097+00:00"
+ },
+ {
+  "name": "Spec.WideMath.E4_wide_signed_mul_div_floor_panics",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "E4, exact panic conditions (asked for every caller of `abs_u256`). Every execution of `wide_signed_mul_div_floor(abs_basis, k_diff, denominator)` panics exactly when `WsmdPanics A k D` holds; otherwise no execution panics and, if it returns, the result is the two's-complement wrap of `F = floor(A*k/D)` into `I256` (equal to `F` when `F` is in range; for `k > 0` and `2^255 <= F < 2^256` it is `F - 2^256`). The function's own `assert!(k_diff != I256::MIN)` fires before `abs_u256` is called, so the assertion of `abs_u256` is never reached.",
+  "last_updated": "2026-11-20T09:49:06.382630+00:00"
+ },
+ {
+  "name": "Spec.WideMath.E4_wide_signed_mul_div_floor",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "E4. With `F = floor(val(abs_basis) * sval(k_diff) / val(denominator))`: every execution of `wide_signed_mul_div_floor(abs_basis, k_diff, denominator)` with `val(denominator) = 0` panics; for `val(denominator) != 0`, if the call returns `x` and `F` lies in `[-2^255, 2^255)`, then `sval(x) = F`.",
+  "last_updated": "2026-11-20T09:49:06.213228+00:00"
+ },
+ {
+  "name": "Spec.WideMath.E3_floor_div_signed_conservative_i128",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "E3. `floor_div_signed_conservative_i128(n, d)`: every execution panics exactly when `d = 0` or (`n = i128::MIN` and `d = 1`); otherwise no execution panics and, if it returns, the result is `floor(n/d)`.",
+  "last_updated": "2026-11-20T09:49:06.045779+00:00"
+ },
+ {
+  "name": "Spec.WideMath.E2_floor_div_signed_conservative_panics",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "E2. For `val(d) != 0`: no execution of `floor_div_signed_conservative(n, d)` panics unless `sval(n) = -2^255` and `val(d) = 1`, and the result is `floor(sval(n)/val(d))`; for `sval(n) = -2^255`, `val(d) = 1` every execution panics (the result `2^255` is not representable; `checked_neg` of `I256::MIN` fails). The exception is exact. `abs_u256` is called only for `sval(n) >= 0`, so its `I256::MIN` assertion is never reached by this function.",
+  "last_updated": "2026-11-20T09:49:05.863444+00:00"
+ },
+ {
+  "name": "Spec.WideMath.E1_floor_div_signed_conservative",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "E1. `floor_div_signed_conservative(n, d)`: every execution with `val(d) = 0` panics; for `val(d) != 0`, if the call returns `x`, then `sval(x) = floor(sval(n)/val(d))`. (Its exact panic conditions for `val(d) != 0` are E2.)",
+  "last_updated": "2026-11-20T09:49:05.698679+00:00"
+ },
+ {
+  "name": "wide_signed_mul_div_floor.no_return_when_f_ge_2_255",
+  "status_name": "REFUTED",
+  "unchecked": false,
+  "description": "E4b (as stated in the spec file). `wide_signed_mul_div_floor` does not return when `F = floor(val(abs_basis) * sval(k_diff) / val(denominator)) >= 2^255`.",
+  "last_updated": "2026-11-20T09:48:38.064024+00:00"
+ },
+ {
+  "name": "Spec.WideMath.F4_wide_mul_div_ceil_u128_or_over_i128max",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "F4. `wide_mul_div_ceil_u128_or_over_i128max(a, b, d)`: every execution panics exactly when `d = 0`; otherwise no execution panics and, if it returns, the result is `Ok(c)` with `c = ceil(a*b/d)` when `c <= i128::MAX`, and `Err(OverI128Magnitude)` otherwise.",
+  "last_updated": "2026-11-20T09:25:08.016757+00:00"
+ },
+ {
+  "name": "Spec.WideMath.F3_wide_mul_div_floor_u128",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "F3. `wide_mul_div_floor_u128(a, b, d)`: every execution panics exactly when `d = 0` or `floor(a*b/d) >= 2^128` (the product is formed exactly); otherwise no execution panics and, if it returns, the result is `floor(a*b/d)`.",
+  "last_updated": "2026-11-20T09:25:07.853207+00:00"
+ },
+ {
+  "name": "Spec.WideMath.F2_mul_div_ceil_u128",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "F2. `mul_div_ceil_u128(a, b, d)`: every execution panics exactly when `d = 0` or `a*b >= 2^128`; otherwise no execution panics and, if it returns, the result is `ceil(a*b/d)`.",
+  "last_updated": "2026-11-20T09:25:07.674605+00:00"
+ },
+ {
+  "name": "Spec.WideMath.F1_mul_div_floor_u128",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "F1. `mul_div_floor_u128(a, b, d)`: every execution panics exactly when `d = 0` or `a*b >= 2^128`; otherwise no execution panics and, if it returns, the result is `floor(a*b/d)`.",
+  "last_updated": "2026-11-20T09:25:07.511994+00:00"
+ },
+ {
+  "name": "Spec.WideMath.D7_checked_mul_div_ceil_u256",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "D7. `checked_mul_div_ceil_u256(a, b, d)`: no execution panics; if it returns, the result is `Some(c)` with `val(c) = ceil(val(a)*val(b)/val(d))` exactly when `val(d) != 0` and that ceiling is below `2^256`, and `None` otherwise.",
+  "last_updated": "2026-11-20T09:22:43.547172+00:00"
+ },
+ {
+  "name": "Spec.WideMath.D6_mul_div_ceil_u256",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "D6. `mul_div_ceil_u256(a, b, d)`: every execution panics exactly when `val(d) = 0` or `ceil(val(a)*val(b)/val(d)) >= 2^256`; otherwise no execution panics and, if it returns, the result is `ceil(val(a)*val(b)/val(d))`.",
+  "last_updated": "2026-11-20T09:22:43.360325+00:00"
+ },
+ {
+  "name": "Spec.WideMath.D5_mul_div_floor_u256_with_rem",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "D5. `mul_div_floor_u256_with_rem(a, b, d)`: every execution panics exactly when `val(d) = 0` or `floor(val(a)*val(b)/val(d)) >= 2^256`; otherwise no execution panics and, if it returns `(q, r)`, then `val(a)*val(b) = val(q)*val(d) + val(r)` and `val(r) < val(d)`.",
+  "last_updated": "2026-11-20T09:22:43.189042+00:00"
+ },
+ {
+  "name": "Spec.WideMath.D4_mul_div_floor_u256",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "D4. `mul_div_floor_u256(a, b, d)`: every execution panics exactly when `val(d) = 0` or `floor(val(a)*val(b)/val(d)) >= 2^256`; otherwise no execution panics and, if it returns, the result is `floor(val(a)*val(b)/val(d))` (the product is formed exactly in 512 bits).",
+  "last_updated": "2026-11-20T09:22:43.020658+00:00"
+ },
+ {
+  "name": "Spec.WideMath.C3_ceil_div_positive_checked",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "C3. `ceil_div_positive_checked(n, d)`: every execution with `val(d) = 0` panics; for `val(d) != 0` no execution panics and, if it returns, the result is `ceil(val(n)/val(d))` (the `checked_add` overflow is unreachable because the ceiling never exceeds `val(n)`).",
+  "last_updated": "2026-11-20T09:22:42.857003+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B9_div_rem_operators",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B9 (`/` and `%` parts). For all `U256` values `a`, `b`: if `val(b) != 0`, no execution of `a / b` (resp. `a % b`) panics and the result is `floor(val(a)/val(b))` (resp. `val(a) mod val(b)`), i.e. the value of the checked form; if `val(b) = 0` (exactly when the checked form is `None`), every execution panics.",
+  "last_updated": "2026-11-20T09:22:42.692863+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B4_checked_div_rem",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B4. For all `U256` values `a`, `b`: no execution of `a.checked_div(b)` or `a.checked_rem(b)` panics; they return `None` exactly when `val(b) = 0`, and otherwise `Some` of `floor(val(a)/val(b))` and `Some` of `val(a) mod val(b)` respectively.",
+  "last_updated": "2026-11-20T09:22:42.468331+00:00"
+ },
+ {
+  "name": "Spec.WideMath.D3_checked_div_rem_nonzero",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "D3 (nonzero divisor half). For every `self` and every `den` with `val(den) != 0`, with `Q = floor(val(self)/val(den))` and `R = val(self) mod val(den)`: no execution of `U512::checked_div_rem_by_u256(self, den)` panics, and if it returns, the result is `Some((q, r))` with `val(q) = Q`, `val(r) = R` exactly when `Q < 2^256`, and `None` exactly when `Q >= 2^256`. The zero-divisor half is `checked-div-rem-by-u256-zero-spec` (proved).",
+  "last_updated": "2026-11-20T09:21:21.302845+00:00"
+ },
+ {
+  "name": "Spec.WideMath.C2_div_rem_u256_value",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "C2. For every `num` and every `den` with `val(den) != 0`, if `div_rem_u256(num, den)` returns `(q, r)`, then `val(num) = val(q) * val(den) + val(r)` and `val(r) < val(den)` (and no execution panics).",
+  "last_updated": "2026-11-20T09:06:23.834558+00:00"
+ },
+ {
+  "name": "Spec.WideMath.C1_div_rem_u256_nonzero_no_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "C1 (nonzero divisor half). For every `num` and every `den` with `val(den) != 0`, no execution of `div_rem_u256(num, den)` panics. Together with the proved zero-divisor half (`div-rem-u256-zero-spec`: every execution with `val(den) = 0` panics), this gives \"panics exactly when `val(den) = 0`\".",
+  "last_updated": "2026-11-20T09:06:23.657008+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A6_i256_constants",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A6, constant part: `I256::ZERO`, `ONE`, `MINUS_ONE`, `MAX` and `MIN` have `sval` `0`, `1`, `-1`, `2^255 - 1` and `-2^255`, observed through a harness that compiles the unchanged `src/wide_math.rs` and returns each constant from a function; no execution of those functions panics.",
+  "last_updated": "2026-11-20T08:29:15.111824+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A2_u256_constants",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A2, constant part: `U256::ZERO`, `U256::ONE` and `U256::MAX` have values `0`, `1` and `2^256 - 1`, observed through a harness that compiles the unchanged `src/wide_math.rs` and returns each constant from a function; no execution of those functions panics.",
+  "last_updated": "2026-11-20T08:29:14.925668+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A6_i256_sign",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A6, method part: `I256::is_zero`, `is_negative`, `is_positive` and `signum` agree with the sign of `sval(x)` (`signum` returns `-1`, `0` or `1`), and no execution panics.",
+  "last_updated": "2026-11-20T07:45:28.859328+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A2_u256_is_zero",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A2, method part: `x.is_zero()` returns `true` exactly when `val(x) = 0`, and no execution panics.",
+  "last_updated": "2026-11-20T07:45:28.760552+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A7_abs_u256_min_panics",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "`I256::MIN.abs_u256()`: every execution panics, because the `assert!(self != Self::MIN, ...)` in the body fails. So the call never returns normally, and in particular never returns `2^255`.",
+  "last_updated": "2026-11-20T07:45:10.931211+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A7_i256_abs_u256",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A7. For every `x : I256`, including `I256::MIN`: if `x.abs_u256()` returns, the result is the `U256` with `val = |sval(x)|`. As agreed, this is a property about returned values and says nothing about inputs on which the call panics. On `I256::MIN` the call never returns: every execution panics (row `a7-abs-u256-min-panics`), so for that input the clause \"(value `2^255`)\" holds only vacuously. For every other `x`, no execution panics (row `a7-abs-u256-not-min`).",
+  "last_updated": "2026-11-20T07:44:42.794269+00:00"
+ },
+ {
+  "name": "Spec.WideMath.D8_saturating_mul",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "D8. `saturating_mul_u256_u64(a, b)` returns the `U256` of value `min(val(a) * b, 2^256 - 1)`; `saturating_mul_u128_u64(a, b)` returns `min(a * b, 2^128 - 1)`. Neither panics.",
+  "last_updated": "2026-11-20T07:05:27.252603+00:00"
+ },
+ {
+  "name": "Spec.WideMath.E6_i256_checked",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "E6. `I256::checked_add`, `checked_sub` and `checked_neg` return `Some` of the exact integer result exactly when it lies in `[-2^255, 2^255)`, otherwise `None`; `I256::checked_mul_i256` returns `Some` of the exact product exactly when it lies in that range, otherwise `None`; `I256::saturating_add` returns the exact sum clamped to that range. None of them panics. The `checked_mul_i256` part assumes the documented behaviour of `PartialOrd::gt` on `U256` (`GtU256Contract`).",
+  "last_updated": "2026-11-20T07:05:27.137755+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B9_operators",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B9 (operators `+ - * << >> & | += -=` of `U256`): `a + b`, `a - b`, `a * b` return the B1/B2/B3 value and no execution panics when the checked form is `Some`, and every execution panics when it is `None`; `a << n`, `a >> n`, `a & b`, `a | b` return the B7/B8 values and no execution panics; `a += b` / `a -= b` store the B1/B2 value into `a` (no panic) when the checked form is `Some` and every execution panics when it is `None`. `/` and `%` are not covered here.",
+  "last_updated": "2026-11-20T07:05:26.995468+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B8_bitwise",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B8. `a.bitand(b)` and `a.bitor(b)` return the `U256` whose value is the bitwise AND / OR of `val(a)` and `val(b)`. Neither panics.",
+  "last_updated": "2026-11-20T07:05:26.849160+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B7_shifts",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B7. For every `u32` shift amount `n`: `a.shl(n)` returns the `U256` of value `(val(a) * 2^n) mod 2^256` for `n < 256` and `0` for `n >= 256`; `a.shr(n)` returns the `U256` of value `floor(val(a) / 2^n)` for `n < 256` and `0` for `n >= 256`. Neither panics.",
+  "last_updated": "2026-11-20T07:05:26.706232+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B6_saturating",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B6. `a.saturating_add(b)` returns the `U256` of value `min(val(a) + val(b), 2^256 - 1)`; `a.saturating_sub(b)` returns the `U256` of value `max(val(a) - val(b), 0)`. Neither panics.",
+  "last_updated": "2026-11-20T07:05:26.599531+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B5_overflowing",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B5. `a.overflowing_add(b)` returns `((val(a) + val(b)) mod 2^256, carry)` with `carry` true exactly when the sum is at least `2^256`; `a.overflowing_sub(b)` returns `((val(a) - val(b)) mod 2^256, borrow)` with `borrow` true exactly when `val(a) < val(b)`. Neither panics.",
+  "last_updated": "2026-11-20T07:05:26.487582+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B3_checked_mul",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B3. `a.checked_mul(b)` returns `Some(c)` with `val(c) = val(a) * val(b)` exactly when that product is below `2^256`, otherwise `None`, and never panics.",
+  "last_updated": "2026-11-20T07:05:26.387359+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B2_checked_sub",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B2. `a.checked_sub(b)` returns `Some(c)` with `val(c) = val(a) - val(b)` exactly when `val(a) >= val(b)`, otherwise `None`, and never panics.",
+  "last_updated": "2026-11-20T07:05:26.282582+00:00"
+ },
+ {
+  "name": "Spec.WideMath.B1_checked_add",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "B1. `a.checked_add(b)` returns `Some(c)` with `val(c) = val(a) + val(b)` exactly when that sum is below `2^256`, otherwise `None`, and never panics.",
+  "last_updated": "2026-11-20T07:05:26.177068+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A7_abs_u256_not_min",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A7 restricted to `x != I256::MIN`: `x.abs_u256()` returns the `U256` with `val = |sval(x)|` and never panics.",
+  "last_updated": "2026-11-20T07:05:26.022827+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A4_u256_eq_ord",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A4. The derived `<U256 as PartialEq>::eq` returns `true` exactly when `val(a) = val(b)`; `<U256 as Ord>::cmp` returns the order of `val(a)` and `val(b)`; `<U256 as PartialOrd>::partial_cmp` returns `Some` of that order. None of them panics.",
+  "last_updated": "2026-11-20T07:05:25.918215+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A3_u256_try_into_u128",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A3. `x.try_into_u128()` returns `Some(val(x))` exactly when `val(x) < 2^128`, otherwise `None`, and never panics.",
+  "last_updated": "2026-11-20T07:05:25.809319+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A1_u256_representation",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A1. `U256::new(lo, hi)` returns the `U256` with `val = lo + 2^128*hi`; `x.lo()` and `x.hi()` return the low and high 128 bits of `val(x)` (and give the borrowed `x` back); `U256::from_u128(v)` and `U256::from_u64(v)` return the `U256` with `val = v`. No execution of these calls panics.",
+  "last_updated": "2026-11-20T07:05:25.608569+00:00"
+ },
+ {
+  "name": "Spec.WideMath.F5_fee_debt",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "F5. `fee_debt_u128_checked(x)` returns `-x` for `x < 0` (including `2^127` for `i128::MIN`) and `0` otherwise, and never panics.",
+  "last_updated": "2026-11-20T06:39:15.454883+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A8_i256_from_raw",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A8. `I256::from_raw_u256(v)` reinterprets the limbs: its `sval` is `val(v)` if `val(v) < 2^255`, else `val(v) - 2^256`. `I256::from_u256_or_overflow(v)` returns `Some` of that `I256` exactly when `val(v) < 2^255`, otherwise `None`. Neither panics.",
+  "last_updated": "2026-11-20T06:39:15.351273+00:00"
+ },
+ {
+  "name": "Spec.WideMath.A5_i256_conversions",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "A5. `I256::from_i128(v)` and `I256::from_u128(v)` return the `I256` with `sval = v`; `x.try_into_i128()` returns `Some(sval(x))` exactly when `sval(x)` fits in `i128`, otherwise `None`. None of them panics.",
+  "last_updated": "2026-11-20T06:39:15.121149+00:00"
+ },
+ {
+  "name": "Spec.Kernel.retire_terminal_unbudgeted_insurance_delta_generic_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K56.nopanic: for every instance of the generic `MarketGroupV16ViewMut::<'a, T>::retire_terminal_unbudgeted_insurance_delta(..)` (any `T`) and all `u128` arguments, the call does not panic.",
+  "last_updated": "2026-11-20T05:08:49.117153+00:00"
+ },
+ {
+  "name": "Spec.Kernel.retire_terminal_unbudgeted_insurance_delta_generic_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K56.contract: for every instance of the generic `MarketGroupV16ViewMut::<'a, T>::retire_terminal_unbudgeted_insurance_delta(vault, insurance, budget_remaining, source_reserved_atoms)` (any `T`) and all `u128` arguments, if the call returns `Ok((retired, next_vault, next_insurance))`, then:\n- `retired == vault`, `next_vault == 0` and `next_insurance == 0`;\n- `insurance <= vault`, `budget_remaining == 0` and `source_reserved_atoms == 0`.\n\nAn `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T05:08:49.021475+00:00"
+ },
+ {
+  "name": "Spec.Kernel.apply_total_delta_generic_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K50.nopanic: for every instance of the generic `MarketGroupV16ViewMut::<'a, T>::apply_total_delta(total, old, new)` (any `T`) and all `u128` arguments, the call does not panic. That includes arithmetic overflow.",
+  "last_updated": "2026-11-20T05:08:48.923825+00:00"
+ },
+ {
+  "name": "Spec.Kernel.apply_total_delta_generic_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K50.contract: for every instance of the generic `MarketGroupV16ViewMut::<'a, T>::apply_total_delta(total, old, new)` (any `T`) and all `u128` arguments (no `requires`), if the call returns `Ok(t)`, then `(t as i128).wrapping_sub(total as i128) == (new as i128).wrapping_sub(old as i128)`. An `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T05:08:48.816592+00:00"
+ },
+ {
+  "name": "Spec.Kernel.credit_backing_provider_earnings_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K51.nopanic: for all `u128` arguments, no execution of `MarketGroupV16ViewMut::credit_backing_provider_earnings_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T04:22:52.886288+00:00"
+ },
+ {
+  "name": "Spec.Kernel.credit_backing_provider_earnings_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K51.contract: for all `u128` arguments (no `requires`), if `MarketGroupV16ViewMut::credit_backing_provider_earnings_delta(vault, c_tot, insurance, earnings_total, bucket_earnings, amount)` returns `Ok((et, be))`, then `et == earnings_total.wrapping_add(amount)`, `be == bucket_earnings.wrapping_add(amount)` and `c_tot.wrapping_add(insurance) + et <= vault` (outer `+` exact); an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T04:22:52.789435+00:00"
+ },
+ {
+  "name": "Spec.Kernel.set_domain_insurance_budget_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K53.nopanic: for all `u128` arguments with `spent <= old_budget && spent <= new_budget`, no execution of `MarketGroupV16ViewMut::set_domain_insurance_budget_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T04:19:06.543608+00:00"
+ },
+ {
+  "name": "Spec.Kernel.set_domain_insurance_budget_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K53.contract: for all `u128` arguments with `spent <= old_budget && spent <= new_budget` (the `requires`), if `MarketGroupV16ViewMut::set_domain_insurance_budget_delta(total_remaining, insurance_limit, old_budget, spent, new_budget)` returns `Ok(t)`, then, with `old_remaining = old_budget.wrapping_sub(spent)` and `new_remaining = new_budget.wrapping_sub(spent)`, `t == total_remaining + (new_remaining - old_remaining)` if `new_remaining >= old_remaining` and `t == total_remaining - (old_remaining - new_remaining)` otherwise (exact), and `t <= insurance_limit`; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T04:19:06.445099+00:00"
+ },
+ {
+  "name": "Spec.Kernel.set_domain_insurance_spent_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K52.nopanic: for all `u128` arguments with `old_spent <= budget && new_spent <= budget`, no execution of `MarketGroupV16ViewMut::set_domain_insurance_spent_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T04:19:06.350446+00:00"
+ },
+ {
+  "name": "Spec.Kernel.set_domain_insurance_spent_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K52.contract: for all `u128` arguments with `old_spent <= budget && new_spent <= budget` (the `requires`), if `MarketGroupV16ViewMut::set_domain_insurance_spent_delta(total_remaining, insurance, budget, old_spent, new_spent)` returns `Ok(t)`, then, with `old_remaining = budget.wrapping_sub(old_spent)` and `new_remaining = budget.wrapping_sub(new_spent)`, `t == total_remaining + (new_remaining - old_remaining)` if `new_remaining >= old_remaining` and `t == total_remaining - (old_remaining - new_remaining)` otherwise (exact), and `t <= insurance`; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T04:19:06.241787+00:00"
+ },
+ {
+  "name": "Spec.Kernel.credit_account_from_insurance_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K55.nopanic: for all `u128` arguments, no execution of `MarketGroupV16ViewMut::credit_account_from_insurance_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T04:05:05.396849+00:00"
+ },
+ {
+  "name": "Spec.Kernel.credit_account_from_insurance_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K55.contract: for all `u128` arguments (no `requires`), if `MarketGroupV16ViewMut::credit_account_from_insurance_delta(insurance, budget_remaining, c_tot, capital, amount)` returns `Ok((i, c, cap))`, then `i == insurance.wrapping_sub(amount)`, `c == c_tot.wrapping_add(amount)`, `cap == capital.wrapping_add(amount)` and `i >= budget_remaining`; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T04:05:05.289900+00:00"
+ },
+ {
+  "name": "Spec.Kernel.withdraw_domain_insurance_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K54.nopanic: for all `u128` arguments, no execution of `MarketGroupV16ViewMut::withdraw_domain_insurance_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T04:05:05.173751+00:00"
+ },
+ {
+  "name": "Spec.Kernel.withdraw_domain_insurance_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K54.contract: for all `u128` arguments (no `requires`), if `MarketGroupV16ViewMut::withdraw_domain_insurance_delta(vault, insurance, source_reserved_atoms, budget, spent, domain_reserved_atoms, amount)` returns `Ok((v, i, b))`, then `v`, `i`, `b` are `vault`, `insurance`, `budget` `.wrapping_sub(amount)`, `amount <= insurance.saturating_sub(source_reserved_atoms)` and `amount <= budget.saturating_sub(spent).saturating_sub(domain_reserved_atoms)`; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T04:05:05.055818+00:00"
+ },
+ {
+  "name": "Spec.Kernel.apply_backing_provider_earnings_withdraw_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K01.nopanic: for all `u128` arguments, no execution of `apply_backing_provider_earnings_withdraw(..)` panics, including by arithmetic overflow (the unchecked `bucket_earnings - amount`).",
+  "last_updated": "2026-11-20T02:39:05.326241+00:00"
+ },
+ {
+  "name": "Spec.Kernel.apply_backing_provider_earnings_withdraw_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K01.contract: for every `vault`, `bucket_earnings` and `amount: u128` (no `requires`), if `apply_backing_provider_earnings_withdraw(..)` returns `Ok((v, e))`, then `v == vault.wrapping_sub(amount)` and `e == bucket_earnings.wrapping_sub(amount)`; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T02:39:05.234211+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_advance_leg_b_snap_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K30.nopanic: for all in-range arguments, no execution of `V16Core::kernel_advance_leg_b_snap(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T02:35:38.771238+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_advance_leg_b_snap_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K30.contract: for every in-range `leg`, `delta_b`, `new_remainder` and `remaining_after` (no `requires`), if `V16Core::kernel_advance_leg_b_snap(..)` returns `Ok(l)`, then `l.b_snap == leg.b_snap.wrapping_add(delta_b)`, `l.b_snap >= leg.b_snap`, `l.b_rem == new_remainder`, `l.b_stale == (remaining_after != 0)`, and the other thirteen fields of `l` equal those of `leg`; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T02:35:38.677624+00:00"
+ },
+ {
+  "name": "Spec.Kernel.debit_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K49.nopanic: for every in-range `*self` owned by the caller, `class` and `amount: u128`, no execution of `TokenValueFlowProofV16::debit(self, class, amount)` panics, including by an out-of-bounds index or arithmetic overflow.",
+  "last_updated": "2026-11-20T02:35:09.470527+00:00"
+ },
+ {
+  "name": "Spec.Kernel.debit_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K49.contract: for every in-range `*self: TokenValueFlowProofV16` owned by the caller, `class` and `amount: u128` (no `requires`), if `TokenValueFlowProofV16::debit(self, class, amount)` returns `Ok(())`, then `self.debits[class as usize] == old(self.debits[class as usize]).wrapping_add(amount)`. Only `*self` is accessed (`modifies(self)`).",
+  "last_updated": "2026-11-20T02:35:09.311002+00:00"
+ },
+ {
+  "name": "Spec.Kernel.first_actionable_slot_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K19.nopanic: for every `flags: [bool; 16]`, no execution of `V16Core::first_actionable_slot(flags)` panics, including by arithmetic overflow or an out-of-bounds index.",
+  "last_updated": "2026-11-20T02:35:08.814241+00:00"
+ },
+ {
+  "name": "Spec.Kernel.first_actionable_slot_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K19.contract: for every `flags: [bool; 16]` (no `requires`), if `V16Core::first_actionable_slot(flags)` returns `Some(i)`, then `i < 16`, `flags[i]` holds and no earlier slot `j < i` is set; if it returns `None`, no slot is set.",
+  "last_updated": "2026-11-20T02:35:08.697468+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_accumulate_batch_trade_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K10.nopanic: for all in-range arguments, no execution of `V16Core::kernel_accumulate_batch_trade(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T02:30:01.497196+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_accumulate_batch_trade_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K10.contract: for every in-range `outcome`, flags and `applied` (no `requires`), if `V16Core::kernel_accumulate_batch_trade(..)` returns `Ok((o, ri, lhsc, shsc))`, then `o.fill_count == outcome.fill_count.wrapping_add(1)`, `o.fee_a`, `o.fee_b`, `o.notional` are the `wrapping_add` of the old values and `applied`'s, and `ri`, `lhsc`, `shsc` are the ORs of the passed flags with `applied`'s; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T02:30:01.382125+00:00"
+ },
+ {
+  "name": "Spec.Kernel.build_trade_request_guard_summary_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K21.nopanic: for all in-range arguments, no execution of `V16Core::build_trade_request_guard_summary(..)` panics, including inside `i128::unsigned_abs`.",
+  "last_updated": "2026-11-20T02:30:01.282604+00:00"
+ },
+ {
+  "name": "Spec.Kernel.build_trade_request_guard_summary_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K21.contract: for every `request: TradeRequestV16`, `max_market_slots: u32` and `max_trading_fee_bps: u64` (no `requires`), the summary `s` returned by `V16Core::build_trade_request_guard_summary(..)` has `s.asset_configured == (request.asset_index < max_market_slots)`, `s.size_nonzero == (request.size_q != 0)`, `s.size_in_cap == (request.size_q.unsigned_abs() <= MAX_TRADE_SIZE_Q)`, `s.price_nonzero == (request.exec_price != 0)`, `s.price_in_range == (request.exec_price <= MAX_ORACLE_PRICE)` and `s.fee_bps_in_cap == (request.fee_bps <= max_trading_fee_bps)`.",
+  "last_updated": "2026-11-20T02:30:01.189349+00:00"
+ },
+ {
+  "name": "Spec.Kernel.select_auto_crank_plan_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K20.nopanic: for all arguments, no execution of `V16Core::select_auto_crank_plan(..)` panics.",
+  "last_updated": "2026-11-20T02:25:57.818644+00:00"
+ },
+ {
+  "name": "Spec.Kernel.select_auto_crank_plan_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K20.contract: for every `summary`, `b_stale_slot`, `liq_slot`, `refresh_asset` and `recovery_reason` (no `requires`), the plan returned by `V16Core::select_auto_crank_plan(..)` satisfies every arm of the `ensures`: `NoAction` only if `!summary.is_actionable()`, `DeclareRecovery { reason }` only if `expired_close || recovery_eligible` with `reason == recovery_reason`, never `FinalizeRecovery`, and each other plan only under its documented priority conditions, carrying exactly the supplied slot or asset.",
+  "last_updated": "2026-11-20T02:25:57.695733+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_insurance_lien_impair_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K47.nopanic: for every in-range `reservation`, `source` and `amount: u128`, no execution of `V16Core::prepare_insurance_lien_impair_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T02:00:48.240559+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_insurance_lien_impair_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K47.contract: for every in-range `reservation`, `source` and `amount: u128` (no `requires`), if `V16Core::prepare_insurance_lien_impair_delta(..)` returns `Ok((r, s))`, then either `amount == 0` and both are returned unchanged, or the valid liened insurance of the reservation and of the source drop by `amount` (`wrapping_sub`), their impaired liened insurance rises by `amount` (`wrapping_add`), and the reservation's insurance credit reserved is unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T02:00:48.118741+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_impair_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K42.nopanic: for every in-range `bucket`, `source` and `amount: u128`, no execution of `V16Core::prepare_counterparty_lien_impair_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T02:00:47.798462+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_impair_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K42.contract: for every in-range `bucket`, `source` and `amount: u128` (no `requires`), if `V16Core::prepare_counterparty_lien_impair_delta(..)` returns `Ok((b, s))`, then either `amount == 0` and both are returned unchanged, or the bucket's valid liened backing drops by `amount` and its impaired liened backing rises by `amount`, its fresh unliened backing is unchanged, the source's valid liened backing and fresh reserved backing drop by `amount`, its impaired liened backing rises by `amount` and its spent backing is unchanged (all `wrapping_*`); an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T02:00:47.694889+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_source_positive_claim_bound_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K06.nopanic: for every in-range `source`, `claim_bound_num` and `exact_claim_num: u128` satisfying the `requires`, no execution of `V16Core::prepare_source_positive_claim_bound_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T02:00:47.241818+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_source_positive_claim_bound_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K06.contract: for every in-range `source`, `claim_bound_num` and `exact_claim_num: u128` with `exact_claim_num <= claim_bound_num` (the `requires`), if `V16Core::prepare_source_positive_claim_bound_delta(..)` returns `Ok(s)`, then `s.positive_claim_bound_num == source.positive_claim_bound_num.wrapping_add(claim_bound_num)`, `s.exact_positive_claim_num == source.exact_positive_claim_num.wrapping_add(exact_claim_num)`, and fresh reserved backing, valid liened backing, spent backing and the credit rate are unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T02:00:47.105587+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_impaired_lien_retirement_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K43.nopanic: for every in-range `bucket`, `source` and `amount: u128`, no execution of `V16Core::prepare_counterparty_impaired_lien_retirement_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:34:13.139111+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_impaired_lien_retirement_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K43.contract: for every in-range `bucket`, `source` and `amount: u128` (no `requires`), if `V16Core::prepare_counterparty_impaired_lien_retirement_delta(..)` returns `Ok((b, s))`, then either `amount == 0` and both are returned unchanged, or the impaired liened backing of the bucket and of the source drop by `amount` (`wrapping_sub`) and the twelve other listed fields of the bucket and source are unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:34:13.047076+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_backing_add_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K37.nopanic: for every in-range `bucket`, `source`, `amount: u128`, `current_slot, expiry_slot: u64` (no `requires`), `V16Core::prepare_counterparty_backing_add_delta(..)` does not panic.",
+  "last_updated": "2026-11-20T01:34:12.938133+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_backing_add_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K37.contract: for every in-range `bucket`, `source`, `amount: u128`, `current_slot, expiry_slot: u64` (no `requires`), if `V16Core::prepare_counterparty_backing_add_delta(..)` returns `Ok((b, s))` then its `kani::ensures` holds: the bucket's `fresh_unliened_backing_num` and the source's `fresh_reserved_backing_num` rise by `amount` (wrapping), valid liened and spent backing are unchanged, the provider receivable and consumed liened backing do not increase and decrease by the same amount; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:34:12.844792+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_create_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K36.nopanic: for every in-range `bucket`, `source`, `current_slot: u64` and `amount: u128` (no `requires`), `V16Core::prepare_counterparty_lien_create_delta(..)` does not panic.",
+  "last_updated": "2026-11-20T01:34:12.754023+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_create_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K36.contract: for every in-range `bucket`, `source`, `current_slot: u64` and `amount: u128` (no `requires`), if `V16Core::prepare_counterparty_lien_create_delta(..)` returns `Ok((b, s))` then its `kani::ensures` holds: either `amount == 0` and both are returned unchanged, or `amount` moves from the bucket's fresh unliened backing (wrapping sub) to its valid liened backing (wrapping add), the source's valid liened backing rises by `amount` (wrapping), and the other listed fields are unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:34:12.664230+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_consume_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K41.nopanic: for every in-range `bucket`, `source` and `amount: u128`, no execution of `V16Core::prepare_counterparty_lien_consume_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:28:40.935530+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_consume_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K41.contract: for every in-range `bucket`, `source` and `amount: u128` (no `requires`), if `V16Core::prepare_counterparty_lien_consume_delta(..)` returns `Ok((b, s))`, then the bucket's valid liened backing drops by `amount` and its consumed liened backing rises by `amount`, its fresh unliened backing is unchanged, the source's valid liened backing and fresh reserved backing drop by `amount`, and its spent backing and provider receivable rise by `amount` (all `wrapping_*`); an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:28:40.819721+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_terminal_release_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K40.nopanic: for every in-range `bucket`, `source` and `amount: u128`, no execution of `V16Core::prepare_counterparty_lien_terminal_release_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:28:40.703243+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_terminal_release_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K40.contract: for every in-range `bucket`, `source` and `amount: u128` (no `requires`), if `V16Core::prepare_counterparty_lien_terminal_release_delta(..)` returns `Ok((b, s))`, then either `amount == 0` and both are returned unchanged, or `amount` moves from the bucket's valid liened backing (`wrapping_sub`) to its fresh unliened backing (`wrapping_add`), the source's valid liened backing drops by `amount` (`wrapping_sub`), and the bucket's consumed liened backing and the source's fresh reserved backing, spent backing and provider receivable are unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:28:40.612810+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_release_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K39.nopanic: for every in-range `bucket`, `source`, `current_slot: u64` and `amount: u128`, no execution of `V16Core::prepare_counterparty_lien_release_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:28:40.518494+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_lien_release_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K39.contract: for every in-range `bucket`, `source`, `current_slot: u64` and `amount: u128` (no `requires`), if `V16Core::prepare_counterparty_lien_release_delta(..)` returns `Ok((b, s))`, then either `amount == 0` and both are returned unchanged, or `amount` moves from the bucket's valid liened backing (`wrapping_sub`) to its fresh unliened backing (`wrapping_add`), the source's valid liened backing drops by `amount` (`wrapping_sub`), and the bucket's consumed liened backing and the source's fresh reserved backing, spent backing and provider receivable are unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:28:40.417706+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_backing_withdraw_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K38.nopanic: for every in-range `bucket: BackingBucketV16`, `source: SourceCreditStateV16` and `amount: u128` (no `requires`), `V16Core::prepare_counterparty_backing_withdraw_delta(bucket, source, amount)` does not panic.",
+  "last_updated": "2026-11-20T01:28:40.325566+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_counterparty_backing_withdraw_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K38.contract: for every in-range `bucket: BackingBucketV16`, `source: SourceCreditStateV16` and `amount: u128` (no `requires`), if `V16Core::prepare_counterparty_backing_withdraw_delta(bucket, source, amount)` returns `Ok((b, s))` then its `kani::ensures` holds: either `amount == 0` and both are returned unchanged, or `b.fresh_unliened_backing_num == bucket.fresh_unliened_backing_num.wrapping_sub(amount)`, `s.fresh_reserved_backing_num == source.fresh_reserved_backing_num.wrapping_sub(amount)` and the liened, spent and receivable fields are unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:28:40.230597+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_insurance_lien_terminal_release_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K46.nopanic: for every in-range `reservation`, `source` and `amount: u128`, no execution of `V16Core::prepare_insurance_lien_terminal_release_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:16:55.548738+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_insurance_lien_terminal_release_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K46.contract: for every in-range `reservation`, `source` and `amount: u128` (no `requires`), if `V16Core::prepare_insurance_lien_terminal_release_delta(..)` returns `Ok((r, s))`, then either `amount == 0` and both are returned unchanged, or, with `vr = if reservation.valid_liened_insurance_num < amount { reservation.valid_liened_insurance_num } else { amount }` and `ir = amount.wrapping_sub(vr)`, the valid liened insurance of the reservation and of the source drop by `vr`, their impaired liened insurance drops by `ir`, and their insurance credit reserved drops by `amount` (all `wrapping_sub`); an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:16:55.432257+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_insurance_lien_release_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K45.nopanic: for every in-range `reservation`, `source` and `amount: u128`, no execution of `V16Core::prepare_insurance_lien_release_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:16:55.309248+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_insurance_lien_release_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K45.contract: for every in-range `reservation`, `source` and `amount: u128` (no `requires`), if `V16Core::prepare_insurance_lien_release_delta(..)` returns `Ok((r, s))`, then either `amount == 0` and both are returned unchanged, or the valid liened insurance of the reservation and of the source drop by `amount` (`wrapping_sub`) and the reservation's insurance credit reserved and impaired liened insurance and the source's insurance credit reserved and fresh reserved backing are unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:16:55.206362+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_insurance_lien_create_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K44.nopanic: for every in-range `reservation`, `source` and `amount: u128`, no execution of `V16Core::prepare_insurance_lien_create_delta(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:16:55.082802+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_insurance_lien_create_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K44.contract: for every in-range `reservation: InsuranceCreditReservationV16`, `source` and `amount: u128` (no `requires`), if `V16Core::prepare_insurance_lien_create_delta(..)` returns `Ok((r, s))`, then either `amount == 0` and both are returned unchanged, or the valid liened insurance of the reservation and of the source rise by `amount` (`wrapping_add`) and the reservation's insurance credit reserved and impaired liened insurance and the source's fresh reserved backing and spent backing are unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:16:54.981637+00:00"
+ },
+ {
+  "name": "Spec.Kernel.health_requirements_from_base_and_target_lag_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K48.nopanic: for all four `u128` arguments, no execution of `V16Core::health_requirements_from_base_and_target_lag(..)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:13:51.456467+00:00"
+ },
+ {
+  "name": "Spec.Kernel.health_requirements_from_base_and_target_lag_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K48.contract: for all `base_initial`, `base_maintenance`, `risk_notional`, `target_lag_penalty: u128` (no `requires`), if `V16Core::health_requirements_from_base_and_target_lag(..)` returns `Ok((im, mm, rn))`, then `im == base_initial.wrapping_add(target_lag_penalty)`, `mm == base_maintenance.wrapping_add(target_lag_penalty)` and `rn == risk_notional.wrapping_add(target_lag_penalty)`; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:13:51.334259+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_source_positive_claim_burn_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K05.nopanic: for every in-range `source` and `face_burn_num: u128` satisfying the `requires`, no execution of `V16Core::prepare_source_positive_claim_burn_delta(source, face_burn_num)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:13:51.231279+00:00"
+ },
+ {
+  "name": "Spec.Kernel.prepare_source_positive_claim_burn_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K05.contract: for every in-range `source` and `face_burn_num: u128` with `source.exact_positive_claim_num <= source.positive_claim_bound_num && face_burn_num <= source.positive_claim_bound_num` (the `requires`), if `V16Core::prepare_source_positive_claim_burn_delta(source, face_burn_num)` returns `Ok(s)`, then `s.positive_claim_bound_num == source.positive_claim_bound_num.wrapping_sub(face_burn_num)`, `s.exact_positive_claim_num == source.exact_positive_claim_num.wrapping_sub(face_burn_num.min(source.exact_positive_claim_num))`, and the other ten fields are unchanged; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:13:51.132972+00:00"
+ },
+ {
+  "name": "Spec.Kernel.available_backing_num_for_source_credit_state_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K04.nopanic: for every in-range `state: SourceCreditStateV16` (no `requires`), no execution of `V16Core::available_backing_num_for_source_credit_state(state)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T01:13:51.024139+00:00"
+ },
+ {
+  "name": "Spec.Kernel.available_backing_num_for_source_credit_state_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K04.contract: for every in-range `state: SourceCreditStateV16` (no `requires`), if `V16Core::available_backing_num_for_source_credit_state(state)` returns `Ok(a)`, then `fresh_reserved_backing_num >= valid_liened_backing_num`, `insurance_credit_reserved_num >= valid_liened_insurance_num.wrapping_add(impaired_liened_insurance_num)`, and `a == fresh_reserved_backing_num.wrapping_sub(valid_liened_backing_num) + (insurance_credit_reserved_num - valid_liened_insurance_num - impaired_liened_insurance_num)` (outer `+`/`-` exact); an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-20T01:13:50.902157+00:00"
+ },
+ {
+  "name": "Spec.Kernel.asset_restart_next_counters_u64_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K57.nopanic: for any `u64` arguments, no execution of `MarketGroupV16ViewMut::<'_, u64>::asset_restart_next_counters(..)` panics, including by arithmetic overflow. A counter at `u64::MAX` yields `Err(V16Error::CounterOverflow)` instead.",
+  "last_updated": "2026-11-20T00:00:31.926125+00:00"
+ },
+ {
+  "name": "Spec.Kernel.trade_signed_size_deltas_u64_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K58.nopanic: for any `i128` `size_q`, including `i128::MIN`, no execution of `MarketGroupV16ViewMut::<'_, u64>::trade_signed_size_deltas(size_q)` panics, including by arithmetic overflow.",
+  "last_updated": "2026-11-20T00:00:13.899627+00:00"
+ },
+ {
+  "name": "Spec.Kernel.trade_signed_size_deltas_u64_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K58.contract: for any `i128` `size_q`, if `MarketGroupV16ViewMut::<'_, u64>::trade_signed_size_deltas(size_q)` returns, the result is either `Ok((abs, long_d, short_d))` with `abs == size_q.unsigned_abs()`, `abs <= MAX_TRADE_SIZE_Q`, `long_d == size_q`, `short_d == -size_q`, `long_d + short_d == 0` and `size_q != 0`, or some `Err(_)`.",
+  "last_updated": "2026-11-20T00:00:13.768789+00:00"
+ },
+ {
+  "name": "Spec.Kernel.asset_restart_next_counters_u64_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K57.contract: for any `u64` arguments `next_market_id_before`, `activation_count_before`, `asset_set_epoch_before` and `risk_epoch_before`, if `MarketGroupV16ViewMut::<'_, u64>::asset_restart_next_counters(..)` returns, the result is either `Ok((m, a, ase, re))` with `m == next_market_id_before.wrapping_add(1)`, `a == activation_count_before.wrapping_add(1)`, `ase == asset_set_epoch_before.wrapping_add(1)` and `re == risk_epoch_before.wrapping_add(1)`, or some `Err(_)`.",
+  "last_updated": "2026-11-19T23:50:43.798766+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_recovery_pending_obligation_release_allowed_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K33.nopanic: for every `lifecycle` and `opposite_stored_count, opposite_pending_count: u64` (no `requires`), no execution of `V16Core::kernel_recovery_pending_obligation_release_allowed(..)` panics. Same read-only-constant condition as K33.contract.",
+  "last_updated": "2026-11-19T22:17:12.187941+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_recovery_pending_obligation_release_allowed_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K33.contract: for every `lifecycle: AssetLifecycleV16` and `opposite_stored_count, opposite_pending_count: u64` (no `requires`), if `V16Core::kernel_recovery_pending_obligation_release_allowed(..)` returns, it is `Ok(allowed)` with `allowed == (lifecycle != AssetLifecycleV16::Recovery || opposite_stored_count == opposite_pending_count)`, or `Err(_)` with `opposite_pending_count > opposite_stored_count` (its `kani::ensures`). Condition: the promoted constant `&AssetLifecycleV16::Recovery` that the body compares against is present in read-only memory, as it is in the compiled crate.",
+  "last_updated": "2026-11-19T22:17:12.050255+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_cert_is_current_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K22.nopanic: for every in-range `cert`, epochs and `account_bitmap` (no `requires`), no execution of `V16Core::kernel_cert_is_current(..)` panics.",
+  "last_updated": "2026-11-19T22:17:11.877719+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_cert_is_current_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K22.contract: for every in-range `cert: HealthCertV16`, `oracle_epoch, funding_epoch, risk_epoch, asset_set_epoch: u64` and `account_bitmap: V16ActiveBitmap` (`[u64; 1]`; no `requires`), if `V16Core::kernel_cert_is_current(..)` returns, the result equals `cert.valid && cert.cert_oracle_epoch == oracle_epoch && cert.cert_funding_epoch == funding_epoch && cert.cert_risk_epoch == risk_epoch && cert.cert_asset_set_epoch == asset_set_epoch && cert.active_bitmap_at_cert == account_bitmap` (its `kani::ensures`).",
+  "last_updated": "2026-11-19T22:17:11.739183+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_reduce_position_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K18.nopanic: for all in-range `pre_basis_signed`, `side` and `requested` satisfying its `kani::requires`, no execution of `V16Core::kernel_reduce_position_delta(..)` panics.",
+  "last_updated": "2026-11-19T22:14:57.915161+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_reduce_position_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K18.contract: for all `pre_basis_signed: i128`, `side: SideV16` and `requested: u128` with `pre_basis_signed > i128::MIN` and `pre_basis_signed >= 0` for `Long` / `<= 0` for `Short` (its `kani::requires`), if `V16Core::kernel_reduce_position_delta(..)` returns, it is `Ok((reduce_q, delta))` with `reduce_q == min(requested, |pre|)`, `reduce_q <= |pre|`, `new.unsigned_abs() == |pre| - reduce_q` for `new = pre_basis_signed.wrapping_add(delta)`, `new.unsigned_abs() <= |pre|`, a full close giving `new == 0`, and strict progress when `|pre| > 0 && requested > 0` (its `kani::ensures`), or an `Err(_)`.",
+  "last_updated": "2026-11-19T22:14:57.764152+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_classify_position_delta_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K16.nopanic: for all `current, new: i128` (no `requires`), no execution of `V16Core::kernel_classify_position_delta(current, new)` panics.",
+  "last_updated": "2026-11-19T22:14:57.615586+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_classify_position_delta_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K16.contract: for all `current, new: i128` (no `requires`), if `V16Core::kernel_classify_position_delta(current, new)` returns a route, then `Attach` implies `current == 0`; `Clear` implies `current != 0 && new == 0`; `Flip` implies `current != 0 && new != 0 && current.signum() != new.signum()`; `Resize` implies `current != 0 && new != 0 && current.signum() == new.signum()` (its `kani::ensures`).",
+  "last_updated": "2026-11-19T22:14:57.462652+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_trade_side_oi_cap_gate_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K17.nopanic: for all four `u128` side OI values (no `requires`), no execution of `V16Core::kernel_trade_side_oi_cap_gate(..)` panics.",
+  "last_updated": "2026-11-19T22:11:20.920073+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_trade_side_oi_cap_gate_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K17.contract: for all `oi_long_before_q, oi_short_before_q, oi_long_after_q, oi_short_after_q: u128` (no `requires`), if `V16Core::kernel_trade_side_oi_cap_gate(..)` returns, it is `Ok(())` where each side satisfies `after <= MAX_OI_SIDE_Q || after <= before`, or `Err(e)` where `e == V16Error::InvalidLeg` and some side has `after > MAX_OI_SIDE_Q && after > before` (its `kani::ensures`; `MAX_OI_SIDE_Q = 100_000_000_000_000`).",
+  "last_updated": "2026-11-19T22:11:20.745689+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_bresidual_step_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K27.nopanic: for all in-range `residual_remaining`, `booked` and `resolved` satisfying its `kani::requires`, no execution of `V16Core::kernel_bresidual_step(..)` panics.",
+  "last_updated": "2026-11-19T22:11:20.567678+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_bresidual_step_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K27.contract: for all `residual_remaining: u128`, in-range `booked: Option<BResidualBookingOutcomeV16>` and `resolved: bool` satisfying its `kani::requires` (a `Some(o)` has `o.booked_loss.checked_add(o.explicit_loss).and_then(|v| v.checked_add(o.remaining_after)) == Some(residual_remaining)`), if `V16Core::kernel_bresidual_step(..)` returns a step, every `BResidualStepV16::Outcome(o)` result satisfies that same conservation equation (its `kani::ensures`).",
+  "last_updated": "2026-11-19T22:11:20.313192+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_social_loss_chunk_cap_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K25.nopanic: for all `residual_remaining, public_chunk_cap: u128` (no `requires`), no execution of `V16Core::kernel_social_loss_chunk_cap(..)` panics.",
+  "last_updated": "2026-11-19T22:11:20.139967+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_social_loss_chunk_cap_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K25.contract: for all `residual_remaining, public_chunk_cap: u128` (no `requires`), if `V16Core::kernel_social_loss_chunk_cap(..)` returns `r`, then `r == if residual_remaining < public_chunk_cap { residual_remaining } else { public_chunk_cap }`, `r <= residual_remaining` and `r <= public_chunk_cap` (its `kani::ensures`).",
+  "last_updated": "2026-11-19T22:11:19.975622+00:00"
+ },
+ {
+  "name": "Spec.Kernel.actionable_summary_from_signals_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K23.nopanic: for all eight `bool` signals (no `requires`), no execution of `V16Core::actionable_summary_from_signals(..)` panics.",
+  "last_updated": "2026-11-19T22:11:19.790570+00:00"
+ },
+ {
+  "name": "Spec.Kernel.actionable_summary_from_signals_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K23.contract: for all eight `bool` signals (no `requires`), if `V16Core::actionable_summary_from_signals(stale, b_stale, pending_close, expired_close, liquidatable, source_liens_releasable, recovery_eligible, resolved_winner)` returns `r`, each field of `r` equals the signal of the same name (its `kani::ensures`).",
+  "last_updated": "2026-11-19T22:11:19.642281+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_open_close_snapshot_is_stale_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K24.nopanic: for all `originating_leg_active: bool` and `originating_asset_slot, drift_reference_slot: u64` (no `requires`), no execution of `V16Core::kernel_open_close_snapshot_is_stale(..)` panics.",
+  "last_updated": "2026-11-19T22:03:52.904708+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_open_close_snapshot_is_stale_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K24.contract: for all `originating_leg_active: bool` and `originating_asset_slot, drift_reference_slot: u64` (no `requires`), if `V16Core::kernel_open_close_snapshot_is_stale(..)` returns, the result equals `originating_leg_active && originating_asset_slot > drift_reference_slot` (its `kani::ensures`).",
+  "last_updated": "2026-11-19T22:03:52.763655+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_resolved_payout_step_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K13.nopanic: for all `claimable, vault: u128`, `V16Core::kernel_resolved_payout_step(claimable, vault)` does not panic; in particular the overflow-checked `vault - payout` never overflows.",
+  "last_updated": "2026-11-19T21:50:01.395657+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_resolved_payout_step_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K13.contract: for all `claimable, vault: u128`, if `V16Core::kernel_resolved_payout_step(claimable, vault)` returns `(payout, new_vault)`, then `payout == min(claimable, vault)`, `payout <= claimable`, `payout <= vault`, `new_vault == vault - payout` and `new_vault.wrapping_add(payout) == vault` (its `kani::ensures`).",
+  "last_updated": "2026-11-19T21:50:01.253541+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_consume_insurance_layer_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K12.nopanic: for all `domain_available, insurance, spent: u128` and `pnl: i128` with `pnl < 0 && pnl > i128::MIN`, `V16Core::kernel_consume_insurance_layer(..)` does not panic.",
+  "last_updated": "2026-11-19T21:50:01.121756+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_consume_insurance_layer_contract",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K12.contract: for all `domain_available, insurance, spent: u128` and `pnl: i128` with `pnl < 0 && pnl > i128::MIN`, if `V16Core::kernel_consume_insurance_layer(..)` returns `Ok((used, new_insurance, new_spent, new_pnl))` then every conjunct of its `kani::ensures` holds (`used == min(|pnl|, domain_available)`, `new_insurance == insurance - used`, `new_spent == spent + used`, `new_pnl == pnl + used`, `new_pnl <= 0`, ...); an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-19T21:50:00.998037+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_forfeit_residual_step_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K28.nopanic: for all `residual_remaining`, `booking_capacity: u128` (no `requires`), `V16Core::kernel_forfeit_residual_step(..)` does not panic.",
+  "last_updated": "2026-11-19T21:49:50.157503+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_normalize_social_loss_carry_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K31.nopanic: for all `remainder`, `dust`, `explicit_loss: u128` (no `requires`), `V16Core::kernel_normalize_social_loss_carry(..)` does not panic (the overflow-checked `total - SOCIAL_LOSS_DEN` runs only when `total >= SOCIAL_LOSS_DEN`).",
+  "last_updated": "2026-11-19T21:49:50.005489+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_retain_terminal_source_haircut_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K15.nopanic: for all `positive_pnl`, `reserved_pnl`, `source_attributed_face`, `converted: u128` (no `requires`), `V16Core::kernel_retain_terminal_source_haircut(..)` does not panic (both overflow-checked subtractions are guarded).",
+  "last_updated": "2026-11-19T21:49:49.844356+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_released_pnl_conversion_partition_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K14.nopanic: for all `positive_face`, `converted`, `source_face_burn: u128` and `retain_haircut_face: bool` (no `requires`), `V16Core::kernel_released_pnl_conversion_partition(..)` does not panic (the checked `source_face_burn - converted` cannot overflow).",
+  "last_updated": "2026-11-19T21:49:49.695470+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_initial_margin_gate_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K08.nopanic: for every in-range `cert: HealthCertV16` (no `requires`), `V16Core::kernel_initial_margin_gate(cert)` does not panic.",
+  "last_updated": "2026-11-19T21:49:49.545615+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_locked_margin_gate_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K09.nopanic: for all `capital, certified_initial_req: u128` and `pnl, fee_credits: i128` with `pnl > i128::MIN && fee_credits > i128::MIN && capital < 1u128 << 100`, `V16Core::kernel_locked_margin_gate(capital, pnl, fee_credits, certified_initial_req)` does not panic.",
+  "last_updated": "2026-11-19T21:49:49.414612+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_settle_resolved_pnl_after_booking_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K29.nopanic: for all `pnl: i128` with `pnl < 0 && pnl > i128::MIN` and all `booked_loss, explicit_loss: u128`, `V16Core::kernel_settle_resolved_pnl_after_booking(pnl, booked_loss, explicit_loss)` does not panic.",
+  "last_updated": "2026-11-19T21:49:49.284732+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_settle_principal_nopanic",
+  "status_name": "PROVED",
+  "unchecked": true,
+  "description": "K11.nopanic: for all `capital, c_tot: u128` and `pnl: i128` with `pnl <= 0 && pnl > i128::MIN`, `V16Core::kernel_settle_principal(capital, c_tot, pnl)` does not panic.",
+  "last_updated": "2026-11-19T21:49:49.112576+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_forfeit_residual_step_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K28.contract: for all `residual_remaining`, `booking_capacity: u128` (no `requires`), if `V16Core::kernel_forfeit_residual_step(..)` returns `r: ForfeitResidualStepV16`, then `NoResidual` implies `residual_remaining == 0`, `Book` implies `residual_remaining != 0 && booking_capacity != 0`, and `CommitRecovery` implies `residual_remaining != 0 && booking_capacity == 0`.",
+  "last_updated": "2026-11-19T21:31:46.524823+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_normalize_social_loss_carry_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K31.contract: for all `remainder`, `dust`, `explicit_loss: u128` (no `requires`), if `V16Core::kernel_normalize_social_loss_carry(..)` returns, then with `total = remainder.wrapping_add(dust)` either it is `Ok((next_dust, next_explicit))` with `remainder < SOCIAL_LOSS_DEN`, `dust < SOCIAL_LOSS_DEN`, `next_dust == if total >= SOCIAL_LOSS_DEN { total.wrapping_sub(SOCIAL_LOSS_DEN) } else { total }`, `next_explicit == explicit_loss.saturating_add(if total >= SOCIAL_LOSS_DEN { 1 } else { 0 })`, `next_dust < SOCIAL_LOSS_DEN` and `next_explicit >= explicit_loss`; or it is `Err(_)` with `remainder >= SOCIAL_LOSS_DEN || dust >= SOCIAL_LOSS_DEN`.",
+  "last_updated": "2026-11-19T21:29:13.139934+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_retain_terminal_source_haircut_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K15.contract: for all `positive_pnl`, `reserved_pnl`, `source_attributed_face`, `converted: u128` (no `requires`), if `V16Core::kernel_retain_terminal_source_haircut(..)` returns, then either it is `Ok(next_reserved)` with `reserved_pnl <= positive_pnl`, `source_attributed_face <= positive_pnl - reserved_pnl`, `converted <= source_attributed_face`, `next_reserved <= positive_pnl - converted` and `(positive_pnl - converted) - next_reserved == (positive_pnl - reserved_pnl) - source_attributed_face`; or it is `Err(_)` with `reserved_pnl > positive_pnl || source_attributed_face > positive_pnl.saturating_sub(reserved_pnl) || converted > source_attributed_face`.",
+  "last_updated": "2026-11-19T21:20:51.319715+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_released_pnl_conversion_partition_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K14.contract: for all `positive_face`, `converted`, `source_face_burn: u128` and `retain_haircut_face: bool` (no `requires`), if `V16Core::kernel_released_pnl_conversion_partition(..)` returns, then either it is `Ok((pnl_debit, retained_haircut_face))` with `converted <= source_face_burn <= positive_face`, `pnl_debit <= positive_face`, the wrapping round-trip identity, and (if `retain_haircut_face`) `pnl_debit == converted`, `retained_haircut_face == source_face_burn - converted` and the three-part wrapping sum equals `positive_face`, else `pnl_debit == source_face_burn` and `retained_haircut_face == 0`; or it is `Err(_)` with `converted > source_face_burn || source_face_burn > positive_face`.",
+  "last_updated": "2026-11-19T21:17:00.997838+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_initial_margin_gate_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K08.contract: for every in-range `cert: HealthCertV16` (no `requires`), if `V16Core::kernel_initial_margin_gate(cert)` returns, then with `admit = cert.valid && cert.certified_equity >= 0 && (cert.certified_equity as u128) >= cert.certified_initial_req`, the result is `Ok(())` exactly when `admit` holds and an `Err(_)` exactly when it does not.",
+  "last_updated": "2026-11-19T21:12:29.298064+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_locked_margin_gate_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K09.contract: for all `capital, certified_initial_req: u128` and `pnl, fee_credits: i128` with `pnl > i128::MIN && fee_credits > i128::MIN && capital < 1u128 << 100`, if `V16Core::kernel_locked_margin_gate(capital, pnl, fee_credits, certified_initial_req)` returns `Ok(())` then, with `equity = (capital as i128).wrapping_add(if pnl < 0 { pnl } else { 0 }).wrapping_sub(fee_credits.unsigned_abs() as i128)`, `equity >= 0 && (equity as u128) >= certified_initial_req`; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-19T21:08:32.038490+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_settle_resolved_pnl_after_booking_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K29.contract: for all `pnl: i128` with `pnl < 0 && pnl > i128::MIN` and all `booked_loss, explicit_loss: u128`, if `V16Core::kernel_settle_resolved_pnl_after_booking(pnl, booked_loss, explicit_loss)` returns `Ok(new_pnl)` then, with `loss = pnl.unsigned_abs()` and `cleared = booked_loss.saturating_add(explicit_loss).min(loss)`, `new_pnl == pnl + (cleared as i128)`, `new_pnl <= 0`, `new_pnl >= pnl` and `new_pnl.unsigned_abs() == loss - cleared`; an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-19T21:02:37.699263+00:00"
+ },
+ {
+  "name": "Spec.Kernel.kernel_settle_principal_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "K11.contract: for all `capital, c_tot: u128` and `pnl: i128` with `pnl <= 0 && pnl > i128::MIN`, if `V16Core::kernel_settle_principal(capital, c_tot, pnl)` returns `Ok((paid, new_capital, new_c_tot, new_pnl))` then every conjunct of its `kani::ensures` holds (`paid == min(capital, |pnl|)`, `new_capital == capital - paid`, `new_c_tot == c_tot - paid`, both `wrapping_add` conservation equalities, `new_pnl == pnl + (paid as i128)`, `new_pnl <= 0`); an `Err(_)` result is allowed.",
+  "last_updated": "2026-11-19T20:58:47.960255+00:00"
+ },
+ {
+  "name": "Spec.WideMath.checked_div_rem_by_u256_zero_spec",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "The private `U512::checked_div_rem_by_u256(self, den)` never returns normally when `val(den) = 0` (i.e. `den` is `U256::ZERO`), for every `self`; the only possible outcome is a panic.",
+  "last_updated": "2026-11-19T15:42:14.749480+00:00"
+ },
+ {
+  "name": "Spec.WideMath.div_rem_u256_zero_spec",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "`div_rem_u256(num, den)` never returns normally when `val(den) = 0` (i.e. `den` is `U256::ZERO`), for every `num`; the only possible outcome is a panic.",
+  "last_updated": "2026-11-19T15:42:14.621472+00:00"
+ },
+ {
+  "name": "Spec.WideMath.mul_u256_spec",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "D2: for all `a, b: U256`, the private `U512::mul_u256(a, b)` never panics, and when it returns, the result `U512` has `val = val(a) * val(b)` exactly.",
+  "last_updated": "2026-11-19T15:42:14.352475+00:00"
+ },
+ {
+  "name": "Spec.WideMath.widening_mul_u128_spec",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "D1: for all `a, b: u128`, the private `widening_mul_u128(a, b)` never panics, and when it returns, the result `(lo, hi)` satisfies `lo + 2^128 * hi = a * b` exactly.",
+  "last_updated": "2026-11-19T15:42:14.239593+00:00"
+ }
+]

@@ -1,0 +1,17 @@
+New task on the same project, starting a new layer. The file aristotle/wide_math_callsites_spec.md is uploaded with this task. It lists the 22 places where src/v16.rs (engine revision c030aa40, the revision the project now holds) calls a function of src/wide_math.rs, each with the callee's exact panic condition, which your arithmetic tasks proved (labels D5, D7, E3, E5, F3).
+
+The spec file's first section states what else src/v16.rs uses from wide_math.rs: a fixed list of U256 constructors, checked_* methods and comparisons, established by a build of the crate against a stand-in module and covered by your results A1 to A4 and B1 to B4. That section needs no proof in this task; if you see src/v16.rs use a wide_math item outside that list and outside the five functions below, say so.
+
+The claim of this layer: at no call site can the callee's panic condition hold. Eight sites call checked_mul_div_ceil_u256, which never panics (D7), and need nothing. Please prove the other fourteen sites and the six supporting pieces, as the spec file states them, in this order, and record each finished property before starting the next, so finished results are kept if the task stops early.
+
+Step 1, the ten sites of class "local" (P01, P03, P04, P05, P06, P09, P17, P20, P21, P22): for all inputs and all states, no execution of the enclosing function reaches the call with arguments in the callee's panic condition. The spec file gives the reason I expect for each; check it against the source and say so if the real reason is different.
+
+Step 2, the two sites of class "leg" (P13, P14) under the precondition that validate_active_leg(leg) returns Ok(()), and then PL1 and PL2, which say that every caller in a default build passes such a leg.
+
+Step 3, the two sites of class "ledger" (P07, P15) under the stated precondition on the ledger's payout rate, and then the ledger-rate invariant in the four pieces PR1, PR2, PR3, PR4.
+
+PL2, PR2, PR3 and PR4 are statements about every function that calls or writes something. For those, list in the summary the functions you found (callers, or writers of the field) and how each one satisfies the statement, so the enumeration can be checked against the source. If the enumeration is too large to prove in one task, prove the pieces that are local (PR1, PL1 and the fourteen sites) and report the rest as open with the list of functions still to be examined.
+
+A reachable panic condition at any site is the result to report: give the state and the inputs. Do not add a precondition silently; if a site needs more than the spec file states, say exactly what and why.
+
+Verify the deployed function bodies: no cfg(kani), default features, this crate's release profile (overflow-checks = true). List every library function whose documented behaviour a proof assumes instead of covering by proof.
