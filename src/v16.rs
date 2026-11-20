@@ -23366,6 +23366,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// value-neutral: it requires every live amount to be zero, moves no tokens, selects no
     /// recipient, and only rewrites the two domains' audit counters to their empty shape. The
     /// wrapper gates it on the asset's backing authority, whose provider history it clears.
+    /// A bucket of the asset that lapsed with nothing in it is rewritten to the empty bucket
+    /// on the way, as retirement does.
     pub fn canonicalize_spent_backing_history_not_atomic(
         &mut self,
         asset_index: usize,
@@ -23382,6 +23384,18 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         for side in [SideV16::Long, SideV16::Short] {
             let domain = self.insurance_domain_index(asset_index, side)?;
             let bucket = self.backing_bucket_for_domain(domain)?;
+            // A bucket that lapsed with nothing in it differs from the empty bucket only in
+            // its status and expiry slot, and the emptiness check at the end accepts only the
+            // empty one. Retirement rewrites such a bucket, but retirement is refused while
+            // the other domain still has the history this transition clears, so without this
+            // an asset with one lapsed, unused bucket and one matched history could be
+            // neither cleared, retired nor restarted until its backing authority deposited an
+            // atom into the lapsed domain and took it out again.
+            let normalized = V16Core::kernel_retirement_backing_normalization(bucket);
+            if normalized != bucket {
+                self.set_backing_bucket_for_domain(domain, normalized)?;
+            }
+            let bucket = normalized;
             let source = self.source_credit_for_domain_shape(domain)?;
             if bucket.consumed_liened_backing_num == 0 && source.provider_receivable_num == 0 {
                 continue;
