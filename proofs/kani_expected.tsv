@@ -1,0 +1,3 @@
+--features fuzz	352	none
+--features fuzz,closure	373	`composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom`
+--features fuzz,contracts -Z function-contracts	394	`composition_clear_leg_value_conservation`

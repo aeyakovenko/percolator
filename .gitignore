@@ -43,6 +43,10 @@ test-ledger/
 # Generated Kani proof output (per-harness logs, audit sweeps) — never tracked.
 kani_*
 *.kani.log
+# The rule above is for Kani's log directories. The proof tooling has scripts and reports
+# with the same prefix, and those are tracked.
+!proofs/kani_*
+!proofs/specs/kani_*
 scripts/__pycache__/
 **/__pycache__/
 *.pyc
