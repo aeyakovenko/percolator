@@ -94,7 +94,7 @@ Source-checkable counts in this checkout:
 
 | Class | Count |
 | --- | ---: |
-| Plain Kani proofs in `tests/proofs_v16.rs` | 354 |
+| Plain Kani proofs in `tests/proofs_v16.rs` | 357 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
 | Plain Kani proofs in `src/v16_proofs.rs` | 44 |
 | Function-contract proofs in `src/v16_proofs.rs` | 68 |
@@ -231,7 +231,7 @@ On engine `d1fa39f6`, Kani 0.66.0, with the three commands of "Run Kani":
 | `--features fuzz,closure` | 373 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
 | `--features fuzz,contracts -Z function-contracts` | 394 | `composition_clear_leg_value_conservation` |
 
-The table is from full runs. Since then 15 proofs were added and verified one by one: 15 with `--features fuzz`, 13 in the closure run, 13 in the contracts run (still being checked: 2 in the closure run, 2 in the contracts run). `proofs/kani_added.tsv` lists
+The table is from full runs. Since then 18 proofs were added and verified one by one: 18 with `--features fuzz`, 13 in the closure run, 13 in the contracts run (still being checked: 5 in the closure run, 5 in the contracts run). `proofs/kani_added.tsv` lists
 them with their verdict in each run; add the ones marked verified to the numbers above.
 
 A whole run takes one and a half to two hours on a 64-core machine at

@@ -23096,3 +23096,109 @@ fn proof_v16_force_asset_recovery_is_idempotent() {
         &markets[0].engine
     ));
 }
+
+// The public crank in a Recovery market, for an account with no leg: it finalizes Recovery. For
+// every slot that is not behind the clock the market becomes Resolved at that slot and the
+// loss-stale flag is cleared; no value field, no asset slot and nothing in the account changes.
+// A slot behind the clock is refused without mutation. This is the first proof that runs the
+// auto-crank dispatcher; its Live-mode branches lead into the refresh and the liquidation.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_auto_crank_finalizes_recovery_for_a_flat_account_without_moving_value() {
+    let now_slot: u64 = kani::any();
+    let resolved_close_fee_rate_per_slot: u128 = kani::any();
+    let (mut header, mut markets, mut account_header) = one_market_view_fixture();
+    header.mode = 2; // Recovery
+    let current_slot = header.current_slot.get();
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let a0 = account_header;
+
+    let result = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut account = PortfolioV16ViewMut::new(&mut account_header);
+        market.permissionless_auto_crank_not_atomic(
+            &mut account,
+            percolator::v16::AutoCrankWorkV16 {
+                now_slot,
+                observations: &[],
+                resolved_close_fee_rate_per_slot,
+            },
+        )
+    };
+
+    kani::cover!(result.is_ok(), "Recovery is finalized");
+    kani::cover!(result.is_err(), "a slot behind the clock is refused");
+    let mut h1 = h0;
+    if now_slot >= current_slot {
+        assert_eq!(
+            result,
+            Ok(percolator::v16::AutoCrankResultV16 {
+                selected: AutoCrankPlanV16::FinalizeRecovery,
+                outcome: percolator::v16::AutoCrankOutcomeV16::RecoveryResolved,
+            })
+        );
+        h1.mode = 1; // Resolved
+        h1.resolved_slot = V16PodU64::new(now_slot);
+        h1.current_slot = V16PodU64::new(now_slot);
+        h1.loss_stale_active = 0;
+    } else {
+        assert_eq!(result, Err(V16Error::Stale));
+    }
+    assert!(kani_eq_market_group_v16_header_account(&h1, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+    assert!(kani_eq_portfolio_account_v16_account(&a0, &account_header));
+}
+
+/// The resolved-surplus withdrawal in a market of the given mode, on the one-asset fixture.
+fn resolved_surplus_withdrawal_is_rejected_without_mutation(mode: u8) {
+    let domain: usize = kani::any();
+    let amount: u128 = kani::any();
+    let (mut header, mut markets) = one_market_only_fixture();
+    header.mode = mode;
+    let h0 = header;
+    let s0 = markets[0].engine;
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .withdraw_resolved_counterparty_backing_surplus_not_atomic(domain, amount);
+
+    kani::cover!(
+        domain < 2,
+        "a configured domain is refused for the market mode"
+    );
+    // One asset has two domains (long and short); any other index is not a domain.
+    assert_eq!(
+        result,
+        Err(if domain < 2 {
+            V16Error::LockActive
+        } else {
+            V16Error::InvalidLeg
+        })
+    );
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+}
+
+// Resolved backing surplus exists only in a Resolved market: in a Live market the withdrawal is
+// refused for every domain and amount, without mutation.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_surplus_withdrawal_in_a_live_market_is_rejected_without_mutation() {
+    resolved_surplus_withdrawal_is_rejected_without_mutation(0);
+}
+
+// And in a market in Recovery.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_resolved_surplus_withdrawal_in_a_recovery_market_is_rejected_without_mutation() {
+    resolved_surplus_withdrawal_is_rejected_without_mutation(2);
+}
