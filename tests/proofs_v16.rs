@@ -20915,8 +20915,9 @@ fn proof_v16_frame_budget_credit_touches_only_declared_state() {
 }
 
 // backing-deposit frame: exactly {vault, source_fresh_backing_total_num} on
-// the header, {backing_long bucket, source_credit_long fresh_reserved} on
-// the slot — nothing else anywhere.
+// the header, {backing_long bucket, source_credit_long fresh_reserved, the
+// provider's principal and its protection floor} on the slot — nothing else
+// anywhere.
 #[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
@@ -20957,6 +20958,11 @@ fn proof_v16_frame_backing_deposit_touches_only_declared_state() {
     src.credit_epoch += 1;
     src.credit_rate_num = CREDIT_RATE_SCALE;
     es.source_credit_long = SourceCreditStateV16Account::from_runtime(&src);
+    // what the provider put in is its principal, and protected until a claim takes it.
+    es.provider_principal_long_num =
+        V16PodU128::new(s0.provider_principal_long_num.get() + amt_num);
+    es.provider_protection_floor_long_num =
+        V16PodU128::new(s0.provider_protection_floor_long_num.get() + amt_num);
     assert!(kani_eq_engine_asset_slot_v16_account(
         &es,
         &markets[0].engine
