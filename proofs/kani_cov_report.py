@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""kani_cov_report.py <engine worktree> <rev> <kani target dir with kanicov_* results> > specs/kani_coverage_<rev>.md
+"""kani_cov_report.py <engine worktree> <rev> <source> [<source> ...] > specs/kani_coverage_<rev>.md
+A source is a Kani target directory with kanicov_* results (`*_kaniraw.json`) or the log of a
+`cargo kani --coverage -Z source-coverage` run, which prints the same regions per harness
+("Source-based code coverage results:"). The log is the fallback: Kani 0.66 can panic while it
+saves the result files (cov_session.rs, an unwrap on a harness that has no results), and then only
+the log has them.
 Which deployed engine code no Kani harness EXECUTES. Reads the per-harness results of Kani's
 source-based coverage (`*_kaniraw.json`: code regions with COVERED / UNCOVERED), maps each region of
 src/v16.rs to the engine function that contains it, and reports per function: the harnesses that
@@ -10,7 +15,8 @@ assumptions; it says nothing about what the harness asserts."""
 import sys, os, re, json, glob, collections
 here = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, here)
 from rs_scan import scan
-wt, rev, tdir = sys.argv[1], sys.argv[2], sys.argv[3]
+wt, rev, sources = sys.argv[1], sys.argv[2], sys.argv[3:]
+tdir = ", ".join(os.path.basename(x.rstrip("/")) for x in sources)
 src_path = os.path.join(wt, "src/v16.rs")
 src = open(src_path).read()
 # deployed functions with their line spans
@@ -27,29 +33,56 @@ def fn_at(l):
     for a, b, name, mut in fns:
         if a <= l <= b and (best is None or a >= best[0]): best = (a, b, name, mut)
     return best
-raws = glob.glob(os.path.join(tdir, "**", "*_kaniraw.json"), recursive=True)
 covered_lines = collections.defaultdict(set)     # fn key -> lines covered
 seen_lines = collections.defaultdict(set)        # fn key -> lines that appear in some harness
 harnesses_cov = collections.defaultdict(set)     # fn key -> harnesses covering
 harnesses_seen = collections.defaultdict(set)
 names = set()
-for raw in raws:
-    h = re.sub(r"_kaniraw\.json$", "", os.path.basename(raw))
-    m = re.search(r"\d+(proof_v16_[a-z0-9_]+|[a-z][a-z0-9_]+)$", h)
-    h = m.group(1) if m else h
-    names.add(h)
-    data = json.load(open(raw)).get("data", {})
-    for path, regions in data.items():
-        if not path.endswith("src/v16.rs"): continue
-        for r in regions:
-            (l0, _), (l1, _) = r["region"]["start"], r["region"]["end"]
-            f = fn_at(l0)
-            if f is None: continue
-            key = (f[0], f[2])
-            lines = set(range(l0, l1 + 1)) & set(range(f[0], f[1] + 1))
-            seen_lines[key] |= lines; harnesses_seen[key].add(h)
-            if r["status"] == "COVERED":
-                covered_lines[key] |= lines; harnesses_cov[key].add(h)
+def region(h, path, l0, l1, status):
+    if not path.endswith("src/v16.rs"): return
+    f = fn_at(l0)
+    if f is None: return
+    key = (f[0], f[2])
+    lines = set(range(l0, l1 + 1)) & set(range(f[0], f[1] + 1))
+    seen_lines[key] |= lines; harnesses_seen[key].add(h)
+    if status == "COVERED":
+        covered_lines[key] |= lines; harnesses_cov[key].add(h)
+ENTRY = re.compile(r"^(\S.*?) \((.*)\)\s*$")
+REGION = re.compile(r"^ \* (\d+):\d+ - (\d+):\d+ (COVERED|UNCOVERED)\s*$")
+for source in sources:
+    if os.path.isdir(source):
+        for raw in glob.glob(os.path.join(source, "**", "*_kaniraw.json"), recursive=True):
+            h = re.sub(r"_kaniraw\.json$", "", os.path.basename(raw))
+            m = re.search(r"\d+(proof_v16_[a-z0-9_]+|[a-z][a-z0-9_]+)$", h)
+            h = m.group(1) if m else h
+            names.add(h)
+            for path, regions in json.load(open(raw)).get("data", {}).items():
+                for r in regions:
+                    region(h, path, r["region"]["start"][0], r["region"]["end"][0], r["status"])
+        continue
+    # a log: one block per harness, from "Source-based code coverage results:" to "Verification Time:"
+    block, inside, n_block = [], False, 0
+    def flush():
+        global n_block
+        if not block: return
+        n_block += 1
+        h = next((fn for path, fn, _ in block if "tests/" in path and fn.split("::")[-1].startswith("proof_")), None)
+        h = (h.split("::")[-1] if h else f"{os.path.basename(source)}#{n_block}")
+        names.add(h)
+        for path, fn, regs in block:
+            for l0, l1, st in regs: region(h, path, l0, l1, st)
+    for line in open(source, errors="replace"):
+        if line.startswith("Source-based code coverage results:"):
+            flush(); block, inside = [], True; continue
+        if not inside: continue
+        if line.startswith("Verification Time:"):
+            flush(); block, inside = [], False; continue
+        m = REGION.match(line)
+        if m and block:
+            block[-1][2].append((int(m.group(1)), int(m.group(2)), m.group(3))); continue
+        m = ENTRY.match(line)
+        if m: block.append((m.group(1), m.group(2), []))
+    flush()
 rows = []
 for a, b, name, mut in fns:
     key = (a, name)
@@ -61,8 +94,8 @@ print(f"""# What no Kani harness executes (engine revision {rev})
 Generated by `kani_cov_report.py` from Kani's source-based coverage of {len(names)} harnesses
 (`cargo kani --coverage -Z source-coverage`, results under `{tdir}`).
 A region counts as covered when some execution of some harness reaches it. Coverage says nothing
-about what that harness asserts, so this is a lower bound on the gap, and an exact one: a function
-listed here is executed by no harness of this run.
+about what that harness asserts, so the real gap is at least this: a function listed here is
+executed by no harness of this run.
 
 {len(never)} of the {len(rows)} deployed functions of `src/v16.rs` are executed by no harness
 ({sum(r[2] for r in never)} of {sum(r[2] for r in rows)} lines); {sum(1 for r in never if r[3])} of the {sum(1 for r in rows if r[3])} that change state.
