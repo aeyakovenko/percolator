@@ -2933,6 +2933,166 @@ fn contract_check_kernel_initial_margin_source_credit_needed() {
     );
 }
 
+// Full-domain contract check of the liquidation-deficit kernel: with negative
+// equity the deficit is the shortfall below zero, otherwise what the maintenance
+// requirement exceeds the equity by, and it is zero exactly when the equity is
+// non-negative and covers the requirement. Every certificate writer calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_certified_liq_deficit)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_certified_liq_deficit() {
+    let equity: i128 = kani::any();
+    let maintenance_req: u128 = kani::any();
+    let _ = V16Core::kernel_certified_liq_deficit(equity, maintenance_req);
+}
+
+// Full-domain contract check of the incremental-certificate kernel: each of the
+// three requirements is the old total less the changed leg's old contribution
+// plus its new one, and the call fails exactly when a contribution exceeds its
+// total or a new total would not fit. Production
+// (recertify_account_after_trade_delta, after every single-fill trade) calls
+// this for the arithmetic.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_cert_requirements_after_leg_delta)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_cert_requirements_after_leg_delta() {
+    let certified_initial_req: u128 = kani::any();
+    let certified_maintenance_req: u128 = kani::any();
+    let certified_worst_case_loss: u128 = kani::any();
+    let old_initial: u128 = kani::any();
+    let new_initial: u128 = kani::any();
+    let old_maintenance: u128 = kani::any();
+    let new_maintenance: u128 = kani::any();
+    let old_notional: u128 = kani::any();
+    let new_notional: u128 = kani::any();
+    let _ = V16Core::kernel_cert_requirements_after_leg_delta(
+        certified_initial_req,
+        certified_maintenance_req,
+        certified_worst_case_loss,
+        old_initial,
+        new_initial,
+        old_maintenance,
+        new_maintenance,
+        old_notional,
+        new_notional,
+    );
+}
+
+// Full-domain contract check of the residual-reward-credit kernel: the credit
+// is min(crystallized - spent, principal); the trader's spent total and the
+// counterparty's received total rise by exactly the credit, so spent never
+// exceeds crystallized; the errors are exactly a spent total above the
+// crystallized one and a received total that would not fit. Production
+// (transfer_account_residual_reward_credit, on every risk-increasing fill)
+// calls this for the arithmetic.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_residual_reward_credit)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_residual_reward_credit() {
+    let crystallized: u128 = kani::any();
+    let spent: u128 = kani::any();
+    let received: u128 = kani::any();
+    let principal_atoms: u128 = kani::any();
+    let _ = V16Core::kernel_residual_reward_credit(crystallized, spent, received, principal_atoms);
+}
+
+// Full-domain contract check of the PnL-totals increase kernel: the exact total
+// rises by the increase and the bound total by the scaled increase, and the
+// call fails exactly when one of the two would not fit. Production
+// (set_account_pnl_inner, the one writer of an account's PnL) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_pnl_totals_after_increase)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_pnl_totals_after_increase() {
+    let pnl_pos_tot: u128 = kani::any();
+    let pnl_pos_bound_tot_num: u128 = kani::any();
+    let increase: u128 = kani::any();
+    let increase_num: u128 = kani::any();
+    let _ = V16Core::kernel_pnl_totals_after_increase(
+        pnl_pos_tot,
+        pnl_pos_bound_tot_num,
+        increase,
+        increase_num,
+    );
+}
+
+// Full-domain contract check of the PnL-totals decrease kernel: the bound total
+// falls by the scaled decrease but never below the new exact total in scaled
+// units, and the matured total is capped by the new exact total. Production
+// (set_account_pnl_inner) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_pnl_bounds_after_decrease)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_pnl_bounds_after_decrease() {
+    let pnl_pos_bound_tot_num: u128 = kani::any();
+    let decrease_num: u128 = kani::any();
+    let exact_min_num: u128 = kani::any();
+    let pnl_matured_pos_tot: u128 = kani::any();
+    let new_pnl_pos_tot: u128 = kani::any();
+    let _ = V16Core::kernel_pnl_bounds_after_decrease(
+        pnl_pos_bound_tot_num,
+        decrease_num,
+        exact_min_num,
+        pnl_matured_pos_tot,
+        new_pnl_pos_tot,
+    );
+}
+
+// Full-domain contract check of the negative-PnL account count kernel: one more
+// when the account's PnL turns negative, one fewer when it stops being negative,
+// unchanged otherwise; the errors are exactly a count at its maximum that would
+// rise and a count of zero that would fall. Production (set_account_pnl_inner)
+// calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_negative_pnl_account_count)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_negative_pnl_account_count() {
+    let count: u64 = kani::any();
+    let old_pnl: i128 = kani::any();
+    let new_pnl: i128 = kani::any();
+    let _ = V16Core::kernel_negative_pnl_account_count(count, old_pnl, new_pnl);
+}
+
+// Full-domain contract check of the kernel that starts a bankrupt-close ledger:
+// the whole loss is still to be resolved, nothing is consumed or booked, the
+// ledger is active, bound to the asset, its market id and the domain side, its
+// id is the previous id plus one and never zero, and its deadline is the current
+// slot plus the configured lifetime; the errors are exactly an asset index that
+// does not fit 32 bits and a deadline that does not fit. Production
+// (begin_close_progress_ledger) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_begin_close_ledger)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_begin_close_ledger() {
+    let previous_close_id: u64 = kani::any();
+    let asset_index: usize = kani::any();
+    let market_id: u64 = kani::any();
+    let domain_side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let gross_loss: u128 = kani::any();
+    let current_slot: u64 = kani::any();
+    let max_close_lifetime_slots: u64 = kani::any();
+    let _ = V16Core::kernel_begin_close_ledger(
+        previous_close_id,
+        asset_index,
+        market_id,
+        domain_side,
+        gross_loss,
+        current_slot,
+        max_close_lifetime_slots,
+    );
+}
+
 // ROADMAP Phase 3 (Pillar S, S-L2 insurance layer): full-domain contract check
 // of the insurance-draw kernel — used==min(|pnl|, domain_available), capped by
 // the domain budget (isolation), pool->spent conservation. Production

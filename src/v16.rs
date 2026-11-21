@@ -157,12 +157,10 @@ fn health_cert_after_capital_debit(cert: HealthCertV16, amount: u128) -> V16Resu
     }
     Ok(HealthCertV16 {
         certified_equity: next_equity,
-        certified_liq_deficit: if next_equity < 0 {
-            next_equity.unsigned_abs()
-        } else {
-            cert.certified_maintenance_req
-                .saturating_sub(next_equity as u128)
-        },
+        certified_liq_deficit: V16Core::kernel_certified_liq_deficit(
+            next_equity,
+            cert.certified_maintenance_req,
+        ),
         ..cert
     })
 }
@@ -2080,6 +2078,287 @@ impl V16Core {
             .checked_add(no_positive_equity.unsigned_abs())
             .ok_or(V16Error::ArithmeticOverflow)?;
         Ok(need_before_lien.saturating_sub(existing_lien))
+    }
+
+    /// PRODUCTION KERNEL (margin, liquidation deficit): how far a certified
+    /// account is from maintenance. With negative equity the deficit is the whole
+    /// shortfall below zero; otherwise it is what the maintenance requirement
+    /// exceeds the equity by. It is zero exactly when the equity is non-negative
+    /// and covers the maintenance requirement, which is the test every
+    /// liquidation starts with. Pure scalar and total; every place that writes a
+    /// certificate calls exactly this.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &u128| {
+        if equity < 0 {
+            *result == equity.unsigned_abs() && *result != 0
+        } else if (equity as u128) >= maintenance_req {
+            *result == 0
+        } else {
+            *result == maintenance_req - (equity as u128) && *result != 0
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_certified_liq_deficit(equity: i128, maintenance_req: u128) -> u128 {
+        if equity < 0 {
+            equity.unsigned_abs()
+        } else {
+            maintenance_req.saturating_sub(equity as u128)
+        }
+    }
+
+    /// PRODUCTION KERNEL (margin, incremental certificate): the requirements of a
+    /// certificate after one leg changes size. Each total is the old total less
+    /// the leg's old contribution plus its new one: the initial requirement, the
+    /// maintenance requirement and the worst-case loss (the notional). A leg
+    /// whose old contribution exceeds the total it is part of, or a total that
+    /// would not fit, is an error. Pure scalar;
+    /// `recertify_account_after_trade_delta` calls exactly this for the
+    /// arithmetic.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| {
+        let fits = |total: u128, old: u128, new: u128| total >= old && new <= u128::MAX - (total - old);
+        if fits(certified_initial_req, old_initial, new_initial)
+            && fits(certified_maintenance_req, old_maintenance, new_maintenance)
+            && fits(certified_worst_case_loss, old_notional, new_notional)
+        {
+            *result == Ok((
+                certified_initial_req - old_initial + new_initial,
+                certified_maintenance_req - old_maintenance + new_maintenance,
+                certified_worst_case_loss - old_notional + new_notional,
+            ))
+        } else {
+            *result == Err(V16Error::ArithmeticOverflow)
+        }
+    }))]
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kernel_cert_requirements_after_leg_delta(
+        certified_initial_req: u128,
+        certified_maintenance_req: u128,
+        certified_worst_case_loss: u128,
+        old_initial: u128,
+        new_initial: u128,
+        old_maintenance: u128,
+        new_maintenance: u128,
+        old_notional: u128,
+        new_notional: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        let initial_req = certified_initial_req
+            .checked_sub(old_initial)
+            .and_then(|v| v.checked_add(new_initial))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let maintenance_req = certified_maintenance_req
+            .checked_sub(old_maintenance)
+            .and_then(|v| v.checked_add(new_maintenance))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let worst_case_loss = certified_worst_case_loss
+            .checked_sub(old_notional)
+            .and_then(|v| v.checked_add(new_notional))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((initial_req, maintenance_req, worst_case_loss))
+    }
+
+    /// PRODUCTION KERNEL (anti-wash, residual reward credit): how much
+    /// residual-reward credit a fill moves from the trader's allowance to the
+    /// counterparty. The trader can spend only what it has crystallized and not
+    /// yet spent, and at most the initial-margin principal the fill adds:
+    /// `credit = min(crystallized - spent, principal_atoms)`. The trader's spent
+    /// total and the counterparty's received total both rise by exactly `credit`,
+    /// so spent never exceeds crystallized. Nothing changes when the credit is
+    /// zero. Pure scalar; `transfer_account_residual_reward_credit` calls exactly
+    /// this for the arithmetic.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| {
+        if principal_atoms == 0 {
+            *result == Ok((0, spent, received))
+        } else if crystallized < spent {
+            *result == Err(V16Error::CounterUnderflow)
+        } else {
+            let available = crystallized - spent;
+            let credit = if available < principal_atoms { available } else { principal_atoms };
+            if credit == 0 {
+                *result == Ok((0, spent, received))
+            } else if received > u128::MAX - credit {
+                *result == Err(V16Error::CounterOverflow)
+            } else {
+                // spent + credit <= crystallized, so it cannot overflow
+                *result == Ok((credit, spent + credit, received + credit))
+                    && spent + credit <= crystallized
+            }
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_residual_reward_credit(
+        crystallized: u128,
+        spent: u128,
+        received: u128,
+        principal_atoms: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        if principal_atoms == 0 {
+            return Ok((0, spent, received));
+        }
+        let available = crystallized
+            .checked_sub(spent)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let credit = available.min(principal_atoms);
+        if credit == 0 {
+            return Ok((0, spent, received));
+        }
+        let new_spent = spent.checked_add(credit).ok_or(V16Error::CounterOverflow)?;
+        let new_received = received
+            .checked_add(credit)
+            .ok_or(V16Error::CounterOverflow)?;
+        Ok((credit, new_spent, new_received))
+    }
+
+    /// PRODUCTION KERNEL (PnL totals, increase): the group totals of positive PnL
+    /// after one account's positive PnL rises by `increase`. The exact total rises
+    /// by `increase` and the bound total (in `BOUND_SCALE` units) by
+    /// `increase_num`, which the caller forms as `increase * BOUND_SCALE`; so a
+    /// bound that covered the exact total before still covers it. Pure scalar;
+    /// `set_account_pnl_inner` calls exactly this for the arithmetic.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128)>| {
+        if pnl_pos_tot > u128::MAX - increase || pnl_pos_bound_tot_num > u128::MAX - increase_num {
+            *result == Err(V16Error::ArithmeticOverflow)
+        } else {
+            *result == Ok((pnl_pos_tot + increase, pnl_pos_bound_tot_num + increase_num))
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_pnl_totals_after_increase(
+        pnl_pos_tot: u128,
+        pnl_pos_bound_tot_num: u128,
+        increase: u128,
+        increase_num: u128,
+    ) -> V16Result<(u128, u128)> {
+        let new_pnl_pos_tot = pnl_pos_tot
+            .checked_add(increase)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let new_bound_num = pnl_pos_bound_tot_num
+            .checked_add(increase_num)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((new_pnl_pos_tot, new_bound_num))
+    }
+
+    /// PRODUCTION KERNEL (PnL totals, decrease): the bound total and the matured
+    /// total after the exact total of positive PnL has fallen to
+    /// `new_pnl_pos_tot`. The bound falls by `decrease_num` but never below
+    /// `exact_min_num`, the new exact total in `BOUND_SCALE` units (formed by the
+    /// caller), so it still covers the exact total; the matured total is capped
+    /// by the new exact total. Pure scalar and total; `set_account_pnl_inner`
+    /// calls exactly this for the arithmetic.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &(u128, u128)| {
+        let lowered = if pnl_pos_bound_tot_num > decrease_num { pnl_pos_bound_tot_num - decrease_num } else { 0 };
+        result.0 == (if lowered > exact_min_num { lowered } else { exact_min_num })
+            // the bound still covers the exact total, and never rises above what it was
+            // unless the exact total needs it
+            && result.0 >= exact_min_num
+            && (result.0 <= pnl_pos_bound_tot_num || result.0 == exact_min_num)
+            && result.1 == (if pnl_matured_pos_tot < new_pnl_pos_tot { pnl_matured_pos_tot } else { new_pnl_pos_tot })
+            && result.1 <= new_pnl_pos_tot
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_pnl_bounds_after_decrease(
+        pnl_pos_bound_tot_num: u128,
+        decrease_num: u128,
+        exact_min_num: u128,
+        pnl_matured_pos_tot: u128,
+        new_pnl_pos_tot: u128,
+    ) -> (u128, u128) {
+        let next_bound_num = pnl_pos_bound_tot_num.saturating_sub(decrease_num);
+        (
+            next_bound_num.max(exact_min_num),
+            pnl_matured_pos_tot.min(new_pnl_pos_tot),
+        )
+    }
+
+    /// PRODUCTION KERNEL (PnL totals, sign count): the number of accounts with
+    /// negative PnL after one account's PnL goes from `old_pnl` to `new_pnl`: one
+    /// more when it turns negative, one fewer when it stops being negative, the
+    /// same otherwise. Pure scalar; `set_account_pnl_inner` calls exactly this.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u64>| {
+        if old_pnl >= 0 && new_pnl < 0 {
+            if count == u64::MAX { *result == Err(V16Error::CounterOverflow) } else { *result == Ok(count + 1) }
+        } else if old_pnl < 0 && new_pnl >= 0 {
+            if count == 0 { *result == Err(V16Error::CounterUnderflow) } else { *result == Ok(count - 1) }
+        } else {
+            *result == Ok(count)
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_negative_pnl_account_count(
+        count: u64,
+        old_pnl: i128,
+        new_pnl: i128,
+    ) -> V16Result<u64> {
+        match (old_pnl < 0, new_pnl < 0) {
+            (false, true) => count.checked_add(1).ok_or(V16Error::CounterOverflow),
+            (true, false) => count.checked_sub(1).ok_or(V16Error::CounterUnderflow),
+            _ => Ok(count),
+        }
+    }
+
+    /// PRODUCTION KERNEL (bankrupt close, ledger start): the close ledger that
+    /// opens when an account's uncovered loss `gross_loss` starts to be resolved
+    /// against one loss domain. The whole loss is still to be resolved
+    /// (`residual_remaining == gross_loss`), nothing is consumed, spent or booked
+    /// yet, the ledger is active and not finalized, its id is the previous id plus
+    /// one (never zero), it is bound to the asset, its market id and the domain
+    /// side, and it must finish within the configured lifetime from the current
+    /// slot. Pure; `begin_close_progress_ledger` calls exactly this.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<CloseProgressLedgerV16>| {
+        if asset_index > u32::MAX as usize {
+            *result == Err(V16Error::InvalidLeg)
+        } else if current_slot > u64::MAX - max_close_lifetime_slots {
+            *result == Err(V16Error::ArithmeticOverflow)
+        } else {
+            match result {
+                Ok(ledger) => ledger.active
+                    && !ledger.finalized
+                    && !ledger.canceled
+                    && ledger.close_id == (if previous_close_id == u64::MAX { u64::MAX } else { previous_close_id + 1 })
+                    && ledger.close_id != 0
+                    && ledger.asset_index as usize == asset_index
+                    && ledger.market_id == market_id
+                    && ledger.domain_side == domain_side
+                    && ledger.gross_loss_at_close_start == gross_loss
+                    && ledger.residual_remaining == gross_loss
+                    && ledger.drift_reference_slot == current_slot
+                    && ledger.max_close_slot == current_slot + max_close_lifetime_slots
+                    && ledger.support_consumed == 0
+                    && ledger.junior_face_burned == 0
+                    && ledger.insurance_spent == 0
+                    && ledger.b_loss_booked == 0
+                    && ledger.explicit_loss_assigned == 0
+                    && ledger.quantity_adl_applied_q == 0
+                    && ledger.drift_consumed == 0,
+                Err(_) => false,
+            }
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_begin_close_ledger(
+        previous_close_id: u64,
+        asset_index: usize,
+        market_id: u64,
+        domain_side: SideV16,
+        gross_loss: u128,
+        current_slot: u64,
+        max_close_lifetime_slots: u64,
+    ) -> V16Result<CloseProgressLedgerV16> {
+        let close_id = previous_close_id.saturating_add(1).max(1);
+        Ok(CloseProgressLedgerV16 {
+            active: true,
+            finalized: false,
+            close_id,
+            asset_index: u32::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?,
+            market_id,
+            domain_side,
+            gross_loss_at_close_start: gross_loss,
+            drift_reference_slot: current_slot,
+            max_close_slot: current_slot
+                .checked_add(max_close_lifetime_slots)
+                .ok_or(V16Error::ArithmeticOverflow)?,
+            residual_remaining: gross_loss,
+            ..CloseProgressLedgerV16::EMPTY
+        })
     }
 
     /// PRODUCTION KERNEL (value safety, roadmap S-L2 insurance layer): the
@@ -14555,27 +14834,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         lp: &mut PortfolioV16ViewMut<'_>,
         principal_atoms: u128,
     ) -> V16Result<u128> {
-        if principal_atoms == 0 {
-            return Ok(0);
-        }
-        let crystallized = trader.header.residual_crystallized_loss_atoms_total.get();
-        let spent = trader.header.residual_spent_principal_atoms_total.get();
-        let available = crystallized
-            .checked_sub(spent)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let credit = available.min(principal_atoms);
+        // PRODUCTION KERNEL: the reward-credit core (what the trader may still
+        // spend, capped by the principal, and the equal rise of both totals).
+        let (credit, spent, received) = V16Core::kernel_residual_reward_credit(
+            trader.header.residual_crystallized_loss_atoms_total.get(),
+            trader.header.residual_spent_principal_atoms_total.get(),
+            lp.header.residual_received_atoms_total.get(),
+            principal_atoms,
+        )?;
         if credit == 0 {
             return Ok(0);
         }
-        trader.header.residual_spent_principal_atoms_total =
-            V16PodU128::new(spent.checked_add(credit).ok_or(V16Error::CounterOverflow)?);
-        lp.header.residual_received_atoms_total = V16PodU128::new(
-            lp.header
-                .residual_received_atoms_total
-                .get()
-                .checked_add(credit)
-                .ok_or(V16Error::CounterOverflow)?,
-        );
+        trader.header.residual_spent_principal_atoms_total = V16PodU128::new(spent);
+        lp.header.residual_received_atoms_total = V16PodU128::new(received);
         Ok(credit)
     }
 
@@ -14777,20 +15048,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             } else {
                 None
             };
-            self.header.pnl_pos_tot = V16PodU128::new(
-                self.header
-                    .pnl_pos_tot
-                    .get()
-                    .checked_add(increase)
-                    .ok_or(V16Error::ArithmeticOverflow)?,
-            );
-            self.header.pnl_pos_bound_tot_num = V16PodU128::new(
-                self.header
-                    .pnl_pos_bound_tot_num
-                    .get()
-                    .checked_add(increase_num)
-                    .ok_or(V16Error::ArithmeticOverflow)?,
-            );
+            // PRODUCTION KERNEL: the exact and the bound total rise together.
+            let (pnl_pos_tot, pnl_pos_bound_tot_num) = V16Core::kernel_pnl_totals_after_increase(
+                self.header.pnl_pos_tot.get(),
+                self.header.pnl_pos_bound_tot_num.get(),
+                increase,
+                increase_num,
+            )?;
+            self.header.pnl_pos_tot = V16PodU128::new(pnl_pos_tot);
+            self.header.pnl_pos_bound_tot_num = V16PodU128::new(pnl_pos_bound_tot_num);
             if let Some(domain) = increase_domain {
                 self.ensure_account_source_claim_market_id(account, domain)?;
                 let source = account.source_domain_mut_or_insert(domain)?;
@@ -14836,47 +15102,32 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     .checked_sub(decrease)
                     .ok_or(V16Error::CounterUnderflow)?,
             );
-            let next_bound_num = self
-                .header
-                .pnl_pos_bound_tot_num
-                .get()
-                .saturating_sub(decrease_num);
             let exact_min_num = V16Core::bound_num_from_amount(self.header.pnl_pos_tot.get())?;
-            self.header.pnl_pos_bound_tot_num = V16PodU128::new(next_bound_num.max(exact_min_num));
-            self.header.pnl_matured_pos_tot = V16PodU128::new(
-                self.header
-                    .pnl_matured_pos_tot
-                    .get()
-                    .min(self.header.pnl_pos_tot.get()),
-            );
+            // PRODUCTION KERNEL: the bound falls but still covers the exact total;
+            // the matured total is capped by it.
+            let (pnl_pos_bound_tot_num, pnl_matured_pos_tot) =
+                V16Core::kernel_pnl_bounds_after_decrease(
+                    self.header.pnl_pos_bound_tot_num.get(),
+                    decrease_num,
+                    exact_min_num,
+                    self.header.pnl_matured_pos_tot.get(),
+                    self.header.pnl_pos_tot.get(),
+                );
+            self.header.pnl_pos_bound_tot_num = V16PodU128::new(pnl_pos_bound_tot_num);
+            self.header.pnl_matured_pos_tot = V16PodU128::new(pnl_matured_pos_tot);
         }
         self.header.pnl_pos_bound_tot = V16PodU128::new(V16Core::amount_from_bound_num(
             self.header.pnl_pos_bound_tot_num.get(),
         )?);
 
-        let old_negative = account.header.pnl.get() < 0;
-        let new_negative = new_pnl < 0;
-        match (old_negative, new_negative) {
-            (false, true) => {
-                self.header.negative_pnl_account_count = V16PodU64::new(
-                    self.header
-                        .negative_pnl_account_count
-                        .get()
-                        .checked_add(1)
-                        .ok_or(V16Error::CounterOverflow)?,
-                );
-            }
-            (true, false) => {
-                self.header.negative_pnl_account_count = V16PodU64::new(
-                    self.header
-                        .negative_pnl_account_count
-                        .get()
-                        .checked_sub(1)
-                        .ok_or(V16Error::CounterUnderflow)?,
-                );
-            }
-            _ => {}
-        }
+        // PRODUCTION KERNEL: the count of accounts with negative PnL follows the
+        // sign of this account's PnL.
+        self.header.negative_pnl_account_count =
+            V16PodU64::new(V16Core::kernel_negative_pnl_account_count(
+                self.header.negative_pnl_account_count.get(),
+                account.header.pnl.get(),
+                new_pnl,
+            )?);
         Self::sync_unattributed_loss_lock(account, new_pnl)?;
         account.header.pnl = V16PodI128::new(new_pnl);
         account.header.health_cert.valid = 0;
@@ -16610,11 +16861,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             certified_equity: equity,
             certified_initial_req: initial_req,
             certified_maintenance_req: maintenance_req,
-            certified_liq_deficit: if equity < 0 {
-                equity.unsigned_abs()
-            } else {
-                maintenance_req.saturating_sub(equity as u128)
-            },
+            certified_liq_deficit: V16Core::kernel_certified_liq_deficit(equity, maintenance_req),
             certified_worst_case_loss: worst_case_loss,
             cert_oracle_epoch: self.header.oracle_epoch.get(),
             cert_funding_epoch: self.header.funding_epoch.get(),
@@ -16830,11 +17077,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             certified_equity: equity,
             certified_initial_req: initial_req,
             certified_maintenance_req: maintenance_req,
-            certified_liq_deficit: if equity < 0 {
-                equity.unsigned_abs()
-            } else {
-                maintenance_req.saturating_sub(equity as u128)
-            },
+            certified_liq_deficit: V16Core::kernel_certified_liq_deficit(equity, maintenance_req),
             certified_worst_case_loss: worst_case_loss,
             cert_oracle_epoch: self.header.oracle_epoch.get(),
             cert_funding_epoch: self.header.funding_epoch.get(),
@@ -19997,26 +20240,17 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         if self.pending_domain_loss_barrier_count(asset_index, domain_side)? != 0 {
             return Err(V16Error::LockActive);
         }
-        let close_id = current.close_id.saturating_add(1).max(1);
         let asset = self.asset_state(asset_index)?;
-        let ledger = CloseProgressLedgerV16 {
-            active: true,
-            finalized: false,
-            close_id,
-            asset_index: u32::try_from(asset_index).map_err(|_| V16Error::InvalidLeg)?,
-            market_id: asset.market_id,
+        // PRODUCTION KERNEL: the ledger a bankrupt close starts with.
+        let ledger = V16Core::kernel_begin_close_ledger(
+            current.close_id,
+            asset_index,
+            asset.market_id,
             domain_side,
-            gross_loss_at_close_start: gross_loss,
-            drift_reference_slot: self.header.current_slot.get(),
-            max_close_slot: self
-                .header
-                .current_slot
-                .get()
-                .checked_add(self.header.config.max_bankrupt_close_lifetime_slots.get())
-                .ok_or(V16Error::ArithmeticOverflow)?,
-            residual_remaining: gross_loss,
-            ..CloseProgressLedgerV16::EMPTY
-        };
+            gross_loss,
+            self.header.current_slot.get(),
+            self.header.config.max_bankrupt_close_lifetime_slots.get(),
+        )?;
         account.header.close_progress = CloseProgressLedgerV16Account::from_runtime(&ledger);
         let count = self.pending_domain_loss_barrier_count(asset_index, domain_side)?;
         self.set_pending_domain_loss_barrier_count(
@@ -20916,13 +21150,8 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let equity = self.account_haircut_equity(&account.as_view())?;
-        let certified_liq_deficit = if equity < 0 {
-            equity.unsigned_abs()
-        } else {
-            existing
-                .certified_maintenance_req
-                .saturating_sub(equity as u128)
-        };
+        let certified_liq_deficit =
+            V16Core::kernel_certified_liq_deficit(equity, existing.certified_maintenance_req);
         let cert = HealthCertV16 {
             certified_equity: equity,
             certified_initial_req: existing.certified_initial_req,
@@ -20988,27 +21217,22 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             config.maintenance_margin_bps,
             config.min_nonzero_mm_req,
         )?;
-        let initial_req = existing
-            .certified_initial_req
-            .checked_sub(old_initial)
-            .and_then(|v| v.checked_add(new_initial))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let maintenance_req = existing
-            .certified_maintenance_req
-            .checked_sub(old_maintenance)
-            .and_then(|v| v.checked_add(new_maintenance))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let worst_case_loss = existing
-            .certified_worst_case_loss
-            .checked_sub(old_notional)
-            .and_then(|v| v.checked_add(new_notional))
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        // PRODUCTION KERNEL: the certificate's requirements after this leg's
+        // change (old contribution out, new contribution in).
+        let (initial_req, maintenance_req, worst_case_loss) =
+            V16Core::kernel_cert_requirements_after_leg_delta(
+                existing.certified_initial_req,
+                existing.certified_maintenance_req,
+                existing.certified_worst_case_loss,
+                old_initial,
+                new_initial,
+                old_maintenance,
+                new_maintenance,
+                old_notional,
+                new_notional,
+            )?;
         let equity = self.account_haircut_equity(&account.as_view())?;
-        let certified_liq_deficit = if equity < 0 {
-            equity.unsigned_abs()
-        } else {
-            maintenance_req.saturating_sub(equity as u128)
-        };
+        let certified_liq_deficit = V16Core::kernel_certified_liq_deficit(equity, maintenance_req);
         let cert = HealthCertV16 {
             certified_equity: equity,
             certified_initial_req: initial_req,

@@ -97,8 +97,8 @@ Source-checkable counts in this checkout:
 | Plain Kani proofs in `tests/proofs_v16.rs` | 362 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
 | Plain Kani proofs in `src/v16_proofs.rs` | 44 |
-| Function-contract proofs in `src/v16_proofs.rs` | 71 |
-| Production `kernel_*` helpers in `src/v16.rs` | 44 |
+| Function-contract proofs in `src/v16_proofs.rs` | 78 |
+| Production `kernel_*` helpers in `src/v16.rs` | 51 |
 | Public `*_not_atomic` engine APIs in `src/v16.rs` | 63 |
 
 Spot-check the inventory directly:
