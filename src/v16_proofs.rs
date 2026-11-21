@@ -3392,6 +3392,24 @@ fn contract_check_canonical_accrual_price_step_v16() {
     );
 }
 
+// Contract check of the bankruptcy-residual step kernel. BOUNDED BINDING
+// (flagged): the B index is within 255 of its maximum and every other input
+// ranges over 8 bits, so the 256-bit arithmetic of the fallback runs on small
+// values. The contract is stated for all inputs.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_bankruptcy_residual_step_capacity)]
+#[kani::unwind(8)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_bankruptcy_residual_step_capacity() {
+    let _ = V16Core::kernel_bankruptcy_residual_step_capacity(
+        u128::MAX - kani::any::<u8>() as u128,
+        kani::any::<u8>() as u128,
+        kani::any::<u8>() as u128,
+        kani::any::<u8>() as u128,
+        kani::any::<u8>() as u128,
+    );
+}
+
 // Contract check of the B-settlement step kernel. BOUNDED BINDING (flagged): the
 // B index values, the remainder, the weight and both atom limits range over 16
 // bits (64 bits did not finish in 20 minutes); the divisions by the weight and by SOCIAL_LOSS_DEN put a full-width check
