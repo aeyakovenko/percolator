@@ -3478,6 +3478,131 @@ fn contract_check_kernel_accrual_index_update() {
     );
 }
 
+// INV-045, an asset with no effective open interest. With neither side's
+// effective open interest nonzero, a segment of either accrual path is neither
+// price-move nor funding active, whatever the rest of the asset state and the
+// segment's length, price and rate: the accrual does not apply the price-move
+// cap (a move there marks no effective position) and the funding amount it
+// books is zero. Both accrual paths (`accrue_asset_to_not_atomic`,
+// `accrue_asset_path_to_not_atomic`) take their activity from this rule.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_unexposed_accrual_segment_moves_no_equity() {
+    let mut old: AssetStateV16 = kani::any();
+    old.oi_eff_long_q = 0;
+    old.oi_eff_short_q = 0;
+    let segment_dt: u64 = kani::any();
+    let effective_price: u64 = kani::any();
+    let funding_rate_e9: i128 = kani::any();
+    let activity = V16Core::accrual_activity_for_asset_segment(
+        old,
+        segment_dt,
+        effective_price,
+        funding_rate_e9,
+    );
+    assert!(!activity.price_move_active);
+    assert!(!activity.funding_active);
+    assert!(!activity.equity_active);
+    assert_eq!(
+        V16Core::kernel_accrual_funding_num(
+            funding_rate_e9,
+            segment_dt,
+            effective_price,
+            activity.funding_active,
+        ),
+        Ok(0)
+    );
+}
+
+// INV-045, an asset with effective open interest. A segment that moves the
+// effective price of an asset with effective open interest on either side is
+// equity active, so the single-segment accrual runs the price-move cap
+// (`kernel_accrual_price_move_within_cap`) before it books the move.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_exposed_price_move_is_equity_active() {
+    let old: AssetStateV16 = kani::any();
+    kani::assume(old.oi_eff_long_q != 0 || old.oi_eff_short_q != 0);
+    let segment_dt: u64 = kani::any();
+    let effective_price: u64 = kani::any();
+    kani::assume(effective_price != old.effective_price);
+    let funding_rate_e9: i128 = kani::any();
+    let activity = V16Core::accrual_activity_for_asset_segment(
+        old,
+        segment_dt,
+        effective_price,
+        funding_rate_e9,
+    );
+    assert!(activity.price_move_active);
+    assert!(activity.equity_active);
+}
+
+// INV-045, an asset with no effective open interest. An index update with a
+// zero funding amount, the amount the accrual books for a segment that is not
+// funding active, leaves both funding indices where they were: full width, for
+// every K and F index, A index and price move. Only the K indices can move.
+// Closure layer: there the kernel runs without its `ensures` clause, which the
+// contracts layer would assert here too and which restates the K products (the
+// reason its own contract check is bounded).
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_index_update_without_funding_leaves_funding_indices() {
+    let k_long: i128 = kani::any();
+    let k_short: i128 = kani::any();
+    let f_long: i128 = kani::any();
+    let f_short: i128 = kani::any();
+    let a_long: u128 = kani::any();
+    let a_short: u128 = kani::any();
+    let price_delta: i128 = kani::any();
+    if let Ok((_, _, fl, fs)) = V16Core::kernel_accrual_index_update(
+        k_long,
+        k_short,
+        f_long,
+        f_short,
+        a_long,
+        a_short,
+        price_delta,
+        0,
+    ) {
+        assert_eq!(fl, f_long);
+        assert_eq!(fs, f_short);
+    }
+}
+
+// INV-045, the residue of engine issue #132. In every state the per-asset scan
+// admits, a side that still holds raw basis but no effective open interest has
+// the minimum A index, 1, so its legs carry at most `raw_basis_sum / ADL_ONE`
+// quantity units in all. (`kernel_side_adl_index`, which every transition that
+// changes a side's open interest or raw basis runs, has the same property in
+// its contract.)
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_scan_side_with_basis_and_no_open_interest_has_unit_a_index() {
+    let raw_basis_sum_q: u128 = kani::any();
+    let a_side: u128 = kani::any();
+    let loss_weight_sum: u128 = kani::any();
+    let mode: SideModeV16 = kani::any();
+    kani::assume(raw_basis_sum_q != 0);
+    let coherent = MarketGroupV16View::<'_, u64>::side_adl_totals_are_coherent(
+        0,
+        raw_basis_sum_q,
+        a_side,
+        loss_weight_sum,
+        mode,
+    );
+    kani::cover!(
+        coherent,
+        "a coherent side holds raw basis without open interest"
+    );
+    if coherent {
+        assert_eq!(a_side, 1);
+    }
+}
+
 // Contract check of the bankruptcy-residual step kernel. BOUNDED BINDING
 // (flagged): the B index is within 255 of its maximum and every other input
 // ranges over 8 bits, so the 256-bit arithmetic of the fallback runs on small
