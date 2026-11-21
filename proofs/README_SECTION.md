@@ -39,8 +39,7 @@ On engine `{{REV}}`, Kani 0.66.0, with the three commands of "Run Kani":
 |---|---|---|
 {{KANI_ROWS}}
 
-The table is from full runs. {{KANI_ADDED}} `proofs/kani_added.tsv` lists
-them with their verdict in each run; add the ones marked verified to the numbers above.
+{{KANI_BASIS}}{{KANI_ADDED}}
 
 A whole run takes one and a half to two hours on a 64-core machine at
 `-j 12 --output-format terse`. Run them one after the other: the two harnesses without a verdict

@@ -1,0 +1,12 @@
+New task on the same project. The engine sources are uploaded again at revision a3efa566 (the files listed with this task replace the earlier ones; the other files are unchanged since d1fa39f6). The specification files under aristotle/ are those of d1fa39f6 and are not needed for this task.
+
+Since d1fa39f6 the engine has started to move the logic of its methods into pure kernels (associated functions of V16Core with a `kani::ensures` contract). Kani verifies almost all of them for every input. This task is about the one it cannot verify at full width: `V16Core::kernel_b_settlement_chunk` in src/v16.rs. It computes one bounded step of a leg's share of a bankruptcy residual, and divides by the leg's weight and by SOCIAL_LOSS_DEN (10^24); Kani's check of its contract finishes only for inputs of up to 16 bits. Earlier proofs stay valid; please do not redo them.
+
+Prove, for every input (all six parameters range over the whole of u128), about the deployed function body (no cfg(kani), default features, this crate's release profile with overflow-checks = true):
+
+- KB.contract: the function satisfies its `ensures` clause (the `#[cfg_attr(all(kani, feature = "contracts"), kani::ensures(...))]` attribute right above it). In words: on Ok, `target >= b_snap`, `delta_b <= target - b_snap`, `remaining_after == target - b_snap - delta_b`; when `delta_b != 0` the step charges at most `limit = min(chunk_atoms, endpoint_loss_atom_budget)` whole atoms, its remainder is below SOCIAL_LOSS_DEN, and `loss_weight * delta_b + b_rem == loss * SOCIAL_LOSS_DEN + new_remainder` exactly (no overflow on either side); when `delta_b == 0` the call is the no-op for `target == b_snap` (loss 0, remainder unchanged). On Err the error is RecoveryRequired or ArithmeticOverflow.
+- KB.nopanic: no execution of the function panics.
+- KB.progress: if the call returns Ok with `target > b_snap`, then `delta_b >= 1`. (Every step that is not refused settles some of the move, so repeated steps terminate.)
+- KB.refusals: state exactly when the call returns RecoveryRequired and when ArithmeticOverflow, as conditions on the six inputs.
+
+If the ensures clause is wrong for some input, a counterexample (the six values) is the most useful result. Record each finished property before starting the next. In the summary, list for each property its status and anything it assumes about library functions (u128 division and remainder, checked arithmetic).

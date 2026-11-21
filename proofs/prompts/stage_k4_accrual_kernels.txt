@@ -1,0 +1,21 @@
+New task on the same project. The engine sources are uploaded again at revision 46b93e82 (the files listed with this task replace the earlier ones). Earlier proofs stay valid; please do not redo them, and use them freely as lemmas (in particular E3 for `floor_div_signed_conservative_i128` and the results of the previous task).
+
+The targets are three new associated functions of `V16Core` in src/v16.rs that hold the per-segment arithmetic of a market's accrual (both accrual entry points, `accrue_asset_to_not_atomic` and `accrue_asset_path_to_not_atomic`, call them), and the existing `V16Core::kernel_adl_scaled_accrual_index_deltas` that the third one calls. Each carries a `kani::ensures` contract (the `cfg_attr` right above it); model checking covers those contracts only for small or near-extreme inputs (the wide products put full-width checks beyond it). Prove each property for every input over the whole types, about the deployed function bodies (no cfg(kani), default features, this crate's release profile with overflow-checks = true). Exact integers throughout; `FD = FUNDING_DEN` (10^9).
+
+Part 1. The oracle bound of one accrual segment: `kernel_accrual_price_move_within_cap(old_price, new_price, max_price_move_bps_per_slot, segment_dt)`.
+- KA.contract: it satisfies its ensures clause.
+- KA.nopanic: no execution panics.
+(The single-segment accrual calls it for every segment in which equity moves; with KA.contract, an accrual that returns `Ok` never moved the effective price by more than `max_price_move_bps_per_slot * segment_dt / MAX_MARGIN_BPS` of the old price, whatever price was reported.)
+
+Part 2. The funding amount of one segment: `kernel_accrual_funding_num(funding_rate_e9, segment_dt, effective_price, funding_active)`.
+- KN.contract: it satisfies its ensures clause.
+- KN.nopanic: no execution panics.
+
+Part 3. The K/F index update of one segment: `kernel_accrual_index_update(k_long, k_short, f_long, f_short, a_long, a_short, price_delta, funding_num)`, which adds the deltas of `kernel_adl_scaled_accrual_index_deltas(price_delta, funding_num, a_long, a_short)` to the four indices.
+- KI.contract: it satisfies its ensures clause.
+- KI.nopanic: neither function panics on any input.
+- KI.floors: if it returns `Ok((kl, ks, fl, fs))`, then `fl - f_long == floor(-funding_num * a_long / FD)` and `fs - f_short == floor(funding_num * a_short / FD)` (exact, rounded toward minus infinity), in both branches of the function (whether or not `funding_num` is a multiple of `FD`).
+- KI.funding_conserves: if it returns `Ok((kl, ks, fl, fs))` with `a_long >= 1` and `a_short >= 1`, write `dl = fl - f_long` and `ds = fs - f_short`. Then `dl * a_short + ds * a_long <= 0` and `dl * a_short + ds * a_long > -(a_long + a_short)`. (Per unit of effective position, `dl / a_long` on the long side and `ds / a_short` on the short side: funding moves value from the paying side to the receiving side and never creates any; the receiving side gets at most what the paying side pays, and the difference is less than one index unit per side.) If `funding_num` is a multiple of `FD`, then `dl * a_short + ds * a_long == 0`.
+- KI.mark_to_market: if it returns `Ok((kl, ks, fl, fs))` and `a_long == a_short`, then `(kl - k_long) + (ks - k_short) == 0` (mark to market moves value between the sides and creates none).
+
+Record each finished property before starting the next. If a contract is false for some input, a counterexample (the input values) is the most useful result; then state and prove the corrected property and go on. In the summary, list for each property its status and anything it assumes about library functions.

@@ -20,9 +20,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # and the engine source is the checkout itself (which must be at LANDED_REV); the program source comes
 # from a checkout of percolator-prog at WRAPPER_REV, named by LEDGER_WRAPPER_SRC.
 _here = os.path.dirname(os.path.abspath(__file__))
-_frozen = os.path.join(_here, "src_d1fa39f6/v16.rs")
+_frozen = os.path.join(_here, "src_cb78f1f0/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_78ad2c53/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_1074d728/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -37,7 +37,12 @@ NEW_REV = "c030aa40"            # the #449 engine change, master from 2026-11-20
 # a changed or new callee, or a changed type, and src/wide_math.rs is identical. The entry-point
 # pieces proved for NEW_REV do have to be established again (REESTABLISH): their text is unchanged,
 # but they are methods over, or build, a type that gained fields.
-LANDED_REV = "d1fa39f6"
+# Rolled 2026-11-21 to cb78f1f0, the first two batches of the refactor that moves the logic of the
+# engine's methods into pure kernels (specs/changed_since_c030aa40_at_cb78f1f0.md and
+# specs/changed_since_d1fa39f6_at_cb78f1f0.md: no listed kernel changed; only private methods changed,
+# and ten kernels K64 to K73 are new, each verified by Kani for every input).
+PREV_LANDED_REV = "d1fa39f6"
+LANDED_REV = "cb78f1f0"
 REESTABLISH = {"T09.header", "T38.header"}
 # Kernels whose proof has to be made again for NEW_REV: specs/changed_since_add1d027_at_c030aa40.md
 # (changed_fns.py: own text, callees by name, changed types). Every other kernel, its callees and its
@@ -119,7 +124,14 @@ kernels["K59"] = "kernel_side_adl_index"                    # new in the #449 en
 kernels["K60"] = "kernel_raw_basis_after_adl_reduction"     # new in the #449 engine change
 kernels["K61"] = "kernel_provider_protection_num"            # new in LANDED_REV (provider-protection floor)
 kernels["K62"] = "kernel_provider_protection_floor_observe"  # new in LANDED_REV
-kernels["K63"] = "kernel_provider_protection_floor_shift"    # new in LANDED_REV
+kernels["K63"] = "kernel_provider_protection_floor_shift"    # new in d1fa39f6
+# new in cb78f1f0 (refactor batches 1-2), all verified by Kani for every input
+REFACTOR_KERNELS = {}
+for _line in read("specs/kernel_contracts_list_cb78f1f0.tsv").splitlines():
+    _f = _line.split("\t")
+    if len(_f) >= 2 and int(_f[0][1:]) >= 64:
+        REFACTOR_KERNELS[_f[0]] = _f[1]
+        kernels[_f[0]] = _f[1]
 changed_by_449 = {"K07", "K32", "K34", "K35"}
 for k, fn in kernels.items():
     note = ""
@@ -128,7 +140,9 @@ for k, fn in kernels.items():
     if k in ("K59", "K60"):
         note = " (new in the #449 engine change; Kani covers an 8-bit grid only)"
     if k in ("K61", "K62", "K63"):
-        note = f" (new in engine {LANDED_REV}; its Kani contract check verifies for all inputs)"
+        note = f" (new in engine {PREV_LANDED_REV}; its Kani contract check verifies for all inputs)"
+    if k in REFACTOR_KERNELS:
+        note = f" (new in engine {LANDED_REV}: logic moved out of a method; its Kani contract check verifies for all inputs)"
     gate = cfg_gate(fn)
     piece(f"{k}.contract", "K kernel", fn, f"`{fn}` satisfies its requires/ensures contract for every input{note}", "Aristotle")
     piece(f"{k}.nopanic", "K kernel", fn, f"no execution of `{fn}` panics under its requires", "Aristotle")
@@ -473,7 +487,7 @@ start = wsrc.index("pub enum Instruction")
 body = wsrc[start:wsrc.index("\n    }\n", start)]
 variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # what the instruction census found per instruction (wrapper_census.py -> specs/wrapper_shape_census_<rev>.md)
-WRAPPER_REV = "78ad2c53"
+WRAPPER_REV = "1074d728"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -667,6 +681,27 @@ for p in props:
         pieces[pid]["status"] = "attempted, open"
         pieces[pid]["evidence"] = f"{p['name']}: batch t1 was stopped before this one finished"
 
+# Kernels of the refactor that Kani checks only for bounded inputs and Aristotle proved at full width.
+# kernel_b_settlement_chunk (refactor batch 6, revision a3efa566, task k1): pieces exist only once the
+# kernel is in the landed revision; until then the proof is recorded in its summary (k1_dl/).
+K1_ROWS = {"Spec.KernelB.kernel_b_settlement_chunk_contract": "contract",
+           "Spec.KernelB.kernel_b_settlement_chunk_nopanic": "nopanic",
+           "Spec.KernelB.kernel_b_settlement_chunk_progress": "progress",
+           "Spec.KernelB.kernel_b_settlement_chunk_refusals": "refusals"}
+_k_of = {fn: k for k, fn in kernels.items()}
+if "kernel_b_settlement_chunk" in _k_of:
+    _kb = _k_of["kernel_b_settlement_chunk"]
+    for p in props:
+        suffix = K1_ROWS.get(p["name"])
+        if suffix is None:
+            continue
+        pid = f"{_kb}.{suffix}"
+        if pid not in pieces:
+            piece(pid, "K kernel", "kernel_b_settlement_chunk", f"{suffix} of the B-settlement step, for every input", "Aristotle")
+        if p["status"].startswith("PROVED"):
+            pieces[pid]["status"] = "proved, final check pending" if "unchecked" in p["status"] else "proved"
+            pieces[pid]["evidence"] = f"{p['name']} (engine a3efa566, task k1)"
+
 # The trade pilot (task s2, engine d1fa39f6): the prover's names for the pieces TF, TA, TB and TC1-TC9.
 TRADE_ROWS = {
     "Spec.Trade.tf_margin": "TF.margin", "Spec.Trade.tf_locked": "TF.locked", "Spec.Trade.tf_frame": "TF.frame",
@@ -717,6 +752,9 @@ KANI_FULL_WIDTH = {
                    "orders; any longer sequence follows by induction)",
     "K63.inverse": "proof_v16_provider_flows_move_the_floor_with_the_principal (Kani, 64-bit amounts)",
 }
+for _k, _fn in REFACTOR_KERNELS.items():
+    KANI_FULL_WIDTH[f"{_k}.contract"] = f"contract_check_{_fn} (Kani, every input)"
+    KANI_FULL_WIDTH[f"{_k}.nopanic"] = f"contract_check_{_fn} (Kani, every input; a panic would fail it)"
 for pid, ev in KANI_FULL_WIDTH.items():
     if pieces[pid]["status"] == "open":
         pieces[pid]["status"] = "verified by Kani"

@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-21 from `proof_ledger.tsv`. **181 of 624 pieces of the deployed build are done
-(171 proved by Aristotle, 10 verified by Kani); 0 of 89 charter invariants are closed.**
+Generated 2026-11-21 from `proof_ledger.tsv`. **201 of 644 pieces of the deployed build are done
+(171 proved by Aristotle, 30 verified by Kani); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -37,7 +37,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 
 | Phase | What | Proved |
 |---|---|---|
-| 1 | Arithmetic and kernels | 171 of 171 |
+| 1 | Arithmetic and kernels | 191 of 191 |
 | 2 | The engine cannot panic and keeps the header | 9 of 95 |
 | 3 | The engine keeps the whole market state | 1 of 197 |
 | 4 | The program's instructions | 0 of 56 |
@@ -64,7 +64,7 @@ fixed yet. These come first; most are decisions.
 
 ## The phases
 
-**Phase 1. Arithmetic and kernels (171 of 171).** Done for the deployed build: 161 proved by Aristotle, 10 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
+**Phase 1. Arithmetic and kernels (191 of 191).** Done for the deployed build: 161 proved by Aristotle, 30 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
 
 **Phase 2. The engine cannot panic and keeps the header (9 of 95).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
@@ -132,7 +132,7 @@ that hold the market and an account, for about 1,970 credits. The prover's own a
 pilot was still useful: it corrected three of the statements and answered a question about the
 order of the margin checks from the source.
 
-**So the plan for phases 2 to 4 has to change. Three ways forward, not decided yet:**
+**So the plan for phases 2 to 4 had to change. Of three ways forward, the owner chose the first on 2026-11-21:**
 
 1. Move the logic out of the methods into pure kernels over small records. The engine already has
    this pattern: a kernel decides, the method reads fields, calls it and writes fields. A kernel
@@ -143,6 +143,20 @@ order of the margin checks from the source.
    the runtime records, prove the invariants of the model, and tie model and code together by
    differential tests. Cheaper and weaker: the link is tested, not proved.
 3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
+
+**The refactor so far.** Engine `cb78f1f0` carries the first two batches: the arithmetic of the
+trade fee, a loss paid from capital, the initial-margin lien need, the liquidation deficit, the
+incremental certificate, the residual reward credit, the positive-PnL totals, the negative-PnL
+account count and the start of a bankrupt-close ledger is in ten kernels (K64 to K73), each
+verified by Kani for every input, and the methods only read fields, call them and write the
+results. Each batch lands only when the engine's suites pass, its differential oracles are
+byte-identical to the previous revision, all three Kani runs pass, and the program's full gate
+passes against it. Further batches (the residual, both equity measures, the gain-against-loss
+rule, the capital-backed loss, the Resolved loss booking, the account-and-domain claim burn, the
+account side of a new lien, the B-settlement step) are written and checked and go through the same
+gates. What remains is mostly loops that read and write state as they go (the loss settlement, the
+lien consumption, the refresh): there the method has to be split into a pure plan over a snapshot
+and an apply step.
 
 Meanwhile Kani closes what it can reach: since `d1fa39f6`, proofs were added for entry points no
 harness called (the gates of the trade, the rebalance and the Recovery routes, the resolved clock,
