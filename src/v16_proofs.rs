@@ -3170,6 +3170,85 @@ fn contract_check_kernel_gain_against_loss_after_support() {
     );
 }
 
+// Full-domain contract check of the capital-backed loss kernel: a new loss is
+// paid from capital that earlier losses left free, up to the new loss; capital
+// and the capital total fall and PnL rises by exactly the amount paid.
+// Production (reserve_new_capital_backed_loss_for_source_domain_not_atomic)
+// calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_capital_backed_loss_reservation)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_capital_backed_loss_reservation() {
+    let negative_before: u128 = kani::any();
+    let negative_after: u128 = kani::any();
+    let capital: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let _ = V16Core::kernel_capital_backed_loss_reservation(
+        negative_before,
+        negative_after,
+        capital,
+        c_tot,
+        pnl,
+    );
+}
+
+// Full-domain contract check of the Resolved loss-capacity kernel: after the
+// payout snapshot only the support gap; before it, everything for live funded
+// backing, otherwise the gap plus the provider receivable. Production
+// (resolved_loss_backing_capacity_num) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_resolved_loss_backing_capacity)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_resolved_loss_backing_capacity() {
+    let positive_claim_bound_num: u128 = kani::any();
+    let available_backing_num: u128 = kani::any();
+    let snapshot_captured: bool = kani::any();
+    let live_funded_bucket: bool = kani::any();
+    let provider_receivable_num: u128 = kani::any();
+    let _ = V16Core::kernel_resolved_loss_backing_capacity(
+        positive_claim_bound_num,
+        available_backing_num,
+        snapshot_captured,
+        live_funded_bucket,
+        provider_receivable_num,
+    );
+}
+
+// Full-domain contract check of the terminal provider-refill kernel: a late
+// loss in a domain with no claim and no creditor refills at most the provider
+// receivable and at most the principal not still reserved. Production
+// (book_realized_kf_loss_for_source_domain_not_atomic) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_terminal_provider_refill_capacity)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_terminal_provider_refill_capacity() {
+    let provider_receivable_num: u128 = kani::any();
+    let provider_principal_num: u128 = kani::any();
+    let fresh_reserved_backing_num: u128 = kani::any();
+    let _ = V16Core::kernel_terminal_provider_refill_capacity(
+        provider_receivable_num,
+        provider_principal_num,
+        fresh_reserved_backing_num,
+    );
+}
+
+// Full-domain contract check of the loss-split kernel: the domain takes at most
+// its capacity and the junior pool the rest; the parts add up to the loss.
+// Production (book_realized_kf_loss_for_source_domain_not_atomic) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_split_loss_at_capacity)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_split_loss_at_capacity() {
+    let backing_num: u128 = kani::any();
+    let capacity_num: u128 = kani::any();
+    let _ = V16Core::kernel_split_loss_at_capacity(backing_num, capacity_num);
+}
+
 // ROADMAP Phase 3 (Pillar S, S-L2 insurance layer): full-domain contract check
 // of the insurance-draw kernel — used==min(|pnl|, domain_available), capped by
 // the domain budget (isolation), pool->spent conservation. Production

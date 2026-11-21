@@ -2536,6 +2536,146 @@ impl V16Core {
         Ok((junior_face_burned, new_pnl))
     }
 
+    /// PRODUCTION KERNEL (K/F settlement, a newly realized loss backed by
+    /// capital): when an account's negative PnL grows from `negative_before` to
+    /// `negative_after`, the new loss is paid out of capital that earlier losses
+    /// have not already encumbered (`capital - negative_before`), up to the new
+    /// loss. The amount paid (`backing`) leaves capital and the capital total and
+    /// is added back to PnL (the loss is realized), so it can be booked as backing
+    /// for the domain the loss is owed to. Nothing changes when nothing is paid.
+    /// Pure scalar; `reserve_new_capital_backed_loss_for_source_domain_not_atomic`
+    /// calls exactly this for the arithmetic.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128, i128)>| {
+        let new_loss = if negative_after > negative_before { negative_after - negative_before } else { 0 };
+        let free = if capital > negative_before { capital - negative_before } else { 0 };
+        let backing = if new_loss < free { new_loss } else { free };
+        if backing == 0 {
+            *result == Ok((0, capital, c_tot, pnl))
+        } else if c_tot < backing {
+            *result == Err(V16Error::CounterUnderflow)
+        } else if backing > i128::MAX as u128 {
+            *result == Err(V16Error::ArithmeticOverflow)
+        } else {
+            match pnl.checked_add(backing as i128) {
+                // capital pays only what earlier losses left free, and never more than the new loss
+                Some(new_pnl) => *result == Ok((backing, capital - backing, c_tot - backing, new_pnl))
+                    && backing <= new_loss
+                    && backing + negative_before <= capital,
+                None => *result == Err(V16Error::ArithmeticOverflow),
+            }
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_capital_backed_loss_reservation(
+        negative_before: u128,
+        negative_after: u128,
+        capital: u128,
+        c_tot: u128,
+        pnl: i128,
+    ) -> V16Result<(u128, u128, u128, i128)> {
+        let new_negative_loss = negative_after.saturating_sub(negative_before);
+        if new_negative_loss == 0 {
+            return Ok((0, capital, c_tot, pnl));
+        }
+        let capital_not_already_encumbered = capital.saturating_sub(negative_before);
+        let backing = new_negative_loss.min(capital_not_already_encumbered);
+        if backing == 0 {
+            return Ok((0, capital, c_tot, pnl));
+        }
+        let new_capital = capital
+            .checked_sub(backing)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let new_c_tot = c_tot
+            .checked_sub(backing)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let backing_i128 = i128::try_from(backing).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let new_pnl = pnl
+            .checked_add(backing_i128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((backing, new_capital, new_c_tot, new_pnl))
+    }
+
+    /// PRODUCTION KERNEL (Resolved mode, how much of a late loss a domain's backing
+    /// takes): the support gap is what the domain's positive claims exceed its
+    /// available backing by. After the payout snapshot the domain takes only that
+    /// gap. Before it, a domain with live funded backing (`live_funded_bucket`: a
+    /// Fresh, unlapsed bucket holding unliened or liened principal or a provider
+    /// receivable) takes the loss in full, because that backing pays the claims;
+    /// otherwise it takes the gap plus what the provider is owed. Everything above
+    /// the result goes to the junior pool. Pure scalar;
+    /// `resolved_loss_backing_capacity_num` calls exactly this for the arithmetic.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| {
+        let gap = if positive_claim_bound_num > available_backing_num { positive_claim_bound_num - available_backing_num } else { 0 };
+        if snapshot_captured {
+            *result == Ok(gap)
+        } else if live_funded_bucket {
+            *result == Ok(u128::MAX)
+        } else if gap > u128::MAX - provider_receivable_num {
+            *result == Err(V16Error::ArithmeticOverflow)
+        } else {
+            *result == Ok(gap + provider_receivable_num)
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_resolved_loss_backing_capacity(
+        positive_claim_bound_num: u128,
+        available_backing_num: u128,
+        snapshot_captured: bool,
+        live_funded_bucket: bool,
+        provider_receivable_num: u128,
+    ) -> V16Result<u128> {
+        let support_gap_num = positive_claim_bound_num.saturating_sub(available_backing_num);
+        if snapshot_captured {
+            return Ok(support_gap_num);
+        }
+        if live_funded_bucket {
+            return Ok(u128::MAX);
+        }
+        support_gap_num
+            .checked_add(provider_receivable_num)
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// PRODUCTION KERNEL (Resolved mode, a late loss in a domain with no claim and no
+    /// creditor left): the loss refills only what the provider fronted and was not
+    /// repaid: at most the provider receivable, and at most the provider's
+    /// principal less the backing still reserved for it. Pure scalar and total;
+    /// `book_realized_kf_loss_for_source_domain_not_atomic` calls exactly this.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &u128| {
+        let out = if provider_principal_num > fresh_reserved_backing_num { provider_principal_num - fresh_reserved_backing_num } else { 0 };
+        *result == if provider_receivable_num < out { provider_receivable_num } else { out }
+            && *result <= provider_receivable_num
+            && *result <= out
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_terminal_provider_refill_capacity(
+        provider_receivable_num: u128,
+        provider_principal_num: u128,
+        fresh_reserved_backing_num: u128,
+    ) -> u128 {
+        provider_receivable_num
+            .min(provider_principal_num.saturating_sub(fresh_reserved_backing_num))
+    }
+
+    /// PRODUCTION KERNEL (Resolved mode, splitting a booked loss): the part of a
+    /// loss (`backing_num`, in `BOUND_SCALE` units) that the domain's backing takes
+    /// is at most its capacity, and the rest goes to the junior pool. The two parts
+    /// add up to the loss exactly. Pure scalar and total;
+    /// `book_realized_kf_loss_for_source_domain_not_atomic` calls exactly this; it
+    /// rounds the junior part up to whole atoms (`amount_from_bound_num`).
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &(u128, u128)| {
+        result.0 == (if backing_num < capacity_num { backing_num } else { capacity_num })
+            && result.0 + result.1 == backing_num
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_split_loss_at_capacity(
+        backing_num: u128,
+        capacity_num: u128,
+    ) -> (u128, u128) {
+        let source_backing_num = backing_num.min(capacity_num);
+        (source_backing_num, backing_num - source_backing_num)
+    }
+
     /// PRODUCTION KERNEL (value safety, roadmap S-L2 insurance layer): the
     /// insurance-draw core of negative-PnL liquidation. Draw is capped by BOTH
     /// the remaining deficit and the DOMAIN's own available insurance —
@@ -16082,39 +16222,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         negative_after: u128,
     ) -> V16Result<()> {
         self.domain_asset_side(domain)?;
-        let new_negative_loss = negative_after.saturating_sub(negative_before);
-        if new_negative_loss == 0 {
-            return Ok(());
-        }
-        let capital_not_already_encumbered =
-            account.header.capital.get().saturating_sub(negative_before);
-        let backing = new_negative_loss.min(capital_not_already_encumbered);
+        // PRODUCTION KERNEL: the new loss is paid from capital that earlier losses
+        // left free, and realized.
+        let (backing, capital, c_tot, new_pnl) = V16Core::kernel_capital_backed_loss_reservation(
+            negative_before,
+            negative_after,
+            account.header.capital.get(),
+            self.header.c_tot.get(),
+            account.header.pnl.get(),
+        )?;
         if backing == 0 {
             return Ok(());
         }
         let vault_before = self.header.vault.get();
-        account.header.capital = V16PodU128::new(
-            account
-                .header
-                .capital
-                .get()
-                .checked_sub(backing)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        self.header.c_tot = V16PodU128::new(
-            self.header
-                .c_tot
-                .get()
-                .checked_sub(backing)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        let backing_i128 = i128::try_from(backing).map_err(|_| V16Error::ArithmeticOverflow)?;
-        let new_pnl = account
-            .header
-            .pnl
-            .get()
-            .checked_add(backing_i128)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        account.header.capital = V16PodU128::new(capital);
+        self.header.c_tot = V16PodU128::new(c_tot);
         self.set_account_pnl(account, new_pnl)?;
         TokenValueFlowProofV16::account_capital_to_realized_loss(
             backing,
@@ -16211,12 +16333,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                     // The receivable counts every consumption that a loser has not
                     // replaced yet, loser-paid backing included. What the provider
                     // itself is still out is its principal less what is there.
-                    Some(
-                        source.provider_receivable_num.min(
-                            self.provider_principal_num(domain)?
-                                .saturating_sub(source.fresh_reserved_backing_num),
-                        ),
-                    )
+                    // PRODUCTION KERNEL: what the provider fronted and was not repaid.
+                    Some(V16Core::kernel_terminal_provider_refill_capacity(
+                        source.provider_receivable_num,
+                        self.provider_principal_num(domain)?,
+                        source.fresh_reserved_backing_num,
+                    ))
                 }
             } else {
                 None
@@ -16233,10 +16355,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 Some(refill_num) => refill_num,
                 None => self.resolved_loss_backing_capacity_num(domain)?,
             };
-            let source_backing_num = backing_num.min(capacity_num);
-            let residual_num = backing_num
-                .checked_sub(source_backing_num)
-                .ok_or(V16Error::CounterUnderflow)?;
+            // PRODUCTION KERNEL: the domain takes up to its capacity, the rest is junior.
+            let (source_backing_num, residual_num) =
+                V16Core::kernel_split_loss_at_capacity(backing_num, capacity_num);
             (
                 source_backing_num,
                 V16Core::amount_from_bound_num(residual_num)?,
@@ -16310,24 +16431,28 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// post-snapshot residual, so only the support gap is credited (unchanged).
     fn resolved_loss_backing_capacity_num(&self, domain: usize) -> V16Result<u128> {
         let source = self.source_credit_for_domain(domain)?;
-        let support_gap_num = source.positive_claim_bound_num.saturating_sub(
-            V16Core::available_backing_num_for_source_credit_state(source)?,
-        );
-        if decode_bool(self.header.payout_snapshot_captured)? {
-            return Ok(support_gap_num);
-        }
-        let bucket = self.backing_bucket_for_domain(domain)?;
-        if bucket.status == BackingBucketStatusV16::Fresh
-            && bucket.expiry_slot > self.header.current_slot.get()
-            && (bucket.fresh_unliened_backing_num != 0
-                || bucket.valid_liened_backing_num != 0
-                || source.provider_receivable_num != 0)
-        {
-            return Ok(u128::MAX);
-        }
-        support_gap_num
-            .checked_add(source.provider_receivable_num)
-            .ok_or(V16Error::ArithmeticOverflow)
+        let available_backing_num = V16Core::available_backing_num_for_source_credit_state(source)?;
+        let snapshot_captured = decode_bool(self.header.payout_snapshot_captured)?;
+        // The bucket is read only before the payout snapshot, as it always was.
+        let live_funded_bucket = if snapshot_captured {
+            false
+        } else {
+            let bucket = self.backing_bucket_for_domain(domain)?;
+            bucket.status == BackingBucketStatusV16::Fresh
+                && bucket.expiry_slot > self.header.current_slot.get()
+                && (bucket.fresh_unliened_backing_num != 0
+                    || bucket.valid_liened_backing_num != 0
+                    || source.provider_receivable_num != 0)
+        };
+        // PRODUCTION KERNEL: the support gap, the whole loss for live funded backing,
+        // or the gap plus the provider receivable.
+        V16Core::kernel_resolved_loss_backing_capacity(
+            source.positive_claim_bound_num,
+            available_backing_num,
+            snapshot_captured,
+            live_funded_bucket,
+            source.provider_receivable_num,
+        )
     }
 
     fn kf_target_for_leg(
