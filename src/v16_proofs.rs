@@ -3410,6 +3410,40 @@ fn contract_check_kernel_bankruptcy_residual_step_capacity() {
     );
 }
 
+// Config admission keeps every B-settlement step clear of the overflow refusal
+// (fix of 2026-11-21). For every public B chunk the config validation admits,
+// the chunk lies in 1..=MAX_VAULT_TVL, so for any endpoint budget the step's
+// largest numerator `(min(chunk, budget) + 1) * SOCIAL_LOSS_DEN - 1` fits in
+// u128. kernel_b_settlement_chunk refuses with ArithmeticOverflow exactly when
+// that numerator does not fit (proved for all inputs by the arithmetic prover),
+// so on an admitted market no account's B settlement fails that way. The kernel
+// call below, at a state with one B unit to settle, ties the bound to the code.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_admitted_public_b_chunk_keeps_b_settlement_free_of_overflow() {
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.public_b_chunk_atoms = kani::any();
+    let budget: u128 = kani::any();
+    let admitted = cfg.validate_public_user_fund().is_ok();
+    kani::cover!(admitted, "some chunk is admitted");
+    kani::cover!(!admitted, "some chunk is refused");
+    if admitted {
+        assert!(cfg.public_b_chunk_atoms >= 1 && cfg.public_b_chunk_atoms <= MAX_VAULT_TVL);
+        let limit = cfg.public_b_chunk_atoms.min(budget);
+        assert!(limit
+            .checked_add(1)
+            .and_then(|v| v.checked_mul(SOCIAL_LOSS_DEN))
+            .and_then(|v| v.checked_sub(1))
+            .is_some());
+        let step = V16Core::kernel_b_settlement_chunk(0, 0, 1, 1, cfg.public_b_chunk_atoms, budget);
+        assert!(step != Err(V16Error::ArithmeticOverflow));
+        if budget != 0 {
+            assert!(step.is_ok());
+        }
+    }
+}
+
 // Contract check of the B-settlement step kernel. BOUNDED BINDING (flagged): the
 // B index values, the remainder, the weight and both atom limits range over 16
 // bits (64 bits did not finish in 20 minutes); the divisions by the weight and by SOCIAL_LOSS_DEN put a full-width check

@@ -6588,6 +6588,13 @@ impl V16Config {
             || self.max_bankrupt_close_lifetime_slots == 0
             || self.asset_activation_cooldown_slots == 0
             || self.public_b_chunk_atoms == 0
+            // A chunk is a number of collateral atoms, so no useful chunk exceeds the
+            // largest vault. The bound also keeps `(chunk + 1) * SOCIAL_LOSS_DEN` inside
+            // u128: from 340282366920938463 atoms on, every B-settlement step of an
+            // account with a loss weight fails with ArithmeticOverflow (the condition is
+            // exact, proved for kernel_b_settlement_chunk), so a market admitted with
+            // such a chunk would freeze every position on a side after a social loss.
+            || self.public_b_chunk_atoms > MAX_VAULT_TVL
             || self.max_recovery_fallback_deviation_bps > MAX_RECOVERY_FALLBACK_DEVIATION_BPS
             || self.backing_fee_kink_util_bps == 0
             || self.backing_fee_kink_util_bps >= MAX_BACKING_FEE_UTIL_BPS
