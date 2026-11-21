@@ -3093,6 +3093,83 @@ fn contract_check_kernel_begin_close_ledger() {
     );
 }
 
+// Full-domain contract check of the junior-residual kernel: the vault less the
+// senior claims (capital total, insurance, provider earnings, recoverable
+// backing principal), zero when they reach the vault or do not fit in 128 bits.
+// Production (residual, the pool every junior claim is paid from) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_residual)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_residual() {
+    let vault: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let provider_earnings: u128 = kani::any();
+    let fresh_backing_atoms: u128 = kani::any();
+    let _ = V16Core::kernel_residual(
+        vault,
+        c_tot,
+        insurance,
+        provider_earnings,
+        fresh_backing_atoms,
+    );
+}
+
+// Full-domain contract check of the equity-without-positive-credit kernel:
+// capital less negative PnL less the fee debt, with the validation errors of
+// PnL and fee credits, and an error exactly when the result falls below
+// i128::MIN. Production (account_no_positive_credit_equity) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_no_positive_credit_equity)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_no_positive_credit_equity() {
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let fee_credits: i128 = kani::any();
+    let _ = V16Core::kernel_no_positive_credit_equity(capital, pnl, fee_credits);
+}
+
+// Full-domain contract check of the haircut-equity kernel: with PnL at or below
+// zero, capital plus PnL less the fee debt; with positive PnL, capital plus only
+// the realizable support less the fee debt (the PnL itself never counts).
+// Production (account_haircut_equity, the equity of every health certificate)
+// calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_haircut_equity)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_haircut_equity() {
+    let capital: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let fee_credits: i128 = kani::any();
+    let positive_support: u128 = kani::any();
+    let _ = V16Core::kernel_haircut_equity(capital, pnl, fee_credits, positive_support);
+}
+
+// Full-domain contract check of the kernel for a gain against an outstanding
+// loss: the burned face is the candidate, or the whole new face when the gain is
+// a Live gain without a source domain or a loss remains; the PnL is the kept
+// face less the remaining loss, so a gain keeps face only when it cures the
+// whole loss. Production (apply_signed_kf_delta_to_pnl) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_gain_against_loss_after_support)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_gain_against_loss_after_support() {
+    let new_face_support: u128 = kani::any();
+    let burn_candidate: u128 = kani::any();
+    let burn_all: bool = kani::any();
+    let remaining_loss: u128 = kani::any();
+    let _ = V16Core::kernel_gain_against_loss_after_support(
+        new_face_support,
+        burn_candidate,
+        burn_all,
+        remaining_loss,
+    );
+}
+
 // ROADMAP Phase 3 (Pillar S, S-L2 insurance layer): full-domain contract check
 // of the insurance-draw kernel — used==min(|pnl|, domain_available), capped by
 // the domain budget (isolation), pool->spent conservation. Production
