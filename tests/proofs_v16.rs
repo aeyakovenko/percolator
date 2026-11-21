@@ -23202,3 +23202,129 @@ fn proof_v16_resolved_surplus_withdrawal_in_a_live_market_is_rejected_without_mu
 fn proof_v16_resolved_surplus_withdrawal_in_a_recovery_market_is_rejected_without_mutation() {
     resolved_surplus_withdrawal_is_rejected_without_mutation(2);
 }
+
+// The terminal routes (the slab step, the claim-free recredit, the two canonicalizations) are for a
+// Resolved market that holds no claim, or for an asset that has left the live lifecycle. In a Live
+// market with an Active asset each of them is refused before it writes anything, whatever its
+// arguments. Until these proofs no harness called any of the four.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_slab_step_in_a_live_market_is_rejected_without_mutation() {
+    let authenticated_slot: u64 = kani::any();
+    let scan_start_asset_index: usize = kani::any();
+    let (mut header, mut markets) = one_market_only_fixture();
+    let h0 = header;
+    let s0 = markets[0].engine;
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .advance_terminal_slab_not_atomic(authenticated_slot, scan_start_asset_index);
+
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+}
+
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_recredit_in_a_live_market_is_rejected_without_mutation() {
+    let asset_index: usize = kani::any();
+    let (mut header, mut markets) = one_market_only_fixture();
+    let h0 = header;
+    let s0 = markets[0].engine;
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .recredit_terminal_claim_free_residual_for_asset_not_atomic(asset_index);
+
+    assert_eq!(result, Err(V16Error::LockActive));
+    assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+}
+
+/// One canonicalization route on the one-asset fixture: asset 0 is Active, index 1 is not an asset.
+/// The index is concrete in each call: a symbolic index makes the asset record that the route
+/// reads symbolic too, and with it the whole rewrite behind the gate.
+fn canonicalization_of_a_live_asset_is_rejected_without_mutation(spent_history: bool) {
+    let (mut header, mut markets) = one_market_only_fixture();
+    let h0 = header;
+    let s0 = markets[0].engine;
+    for (asset_index, expected) in [
+        (0usize, V16Error::LockActive),
+        (1usize, V16Error::InvalidLeg),
+    ] {
+        let result = {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            if spent_history {
+                market.canonicalize_spent_backing_history_not_atomic(asset_index)
+            } else {
+                market.canonicalize_retired_empty_asset_slot_not_atomic(asset_index)
+            }
+        };
+        assert_eq!(result, Err(expected));
+        assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &s0,
+            &markets[0].engine
+        ));
+    }
+}
+
+// The retired-slot canonicalization refuses an Active asset and an index that is not an asset.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_canonicalizing_the_slot_of_an_active_asset_is_rejected_without_mutation() {
+    canonicalization_of_a_live_asset_is_rejected_without_mutation(false);
+}
+
+// So does the spent-backing-history canonicalization.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_canonicalizing_the_backing_history_of_an_active_asset_is_rejected_without_mutation() {
+    canonicalization_of_a_live_asset_is_rejected_without_mutation(true);
+}
+
+// The slab step on a Resolved market that holds nothing (no portfolio, no claim, no backing, no
+// residual): for a slot that is not behind the clock and a scan that starts at the first asset it
+// reports that the market is ready to close with nothing to retire, and writes only the clock.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_terminal_slab_step_on_an_empty_resolved_market_moves_only_the_clock() {
+    let authenticated_slot: u64 = kani::any();
+    let (mut header, mut markets) = one_market_only_fixture();
+    let resolved_slot = header.current_slot.get();
+    MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .resolve_market_not_atomic(resolved_slot)
+        .unwrap();
+    let h0 = header;
+    let s0 = markets[0].engine;
+
+    let result = MarketGroupV16ViewMut::new(&mut header, &mut markets)
+        .advance_terminal_slab_not_atomic(authenticated_slot, 0);
+
+    kani::cover!(result.is_ok(), "the empty market is ready to close");
+    let mut h1 = h0;
+    if authenticated_slot >= resolved_slot {
+        assert_eq!(
+            result,
+            Ok(percolator::v16::TerminalSlabOutcomeV16::ReadyToClose { retired: 0 })
+        );
+        h1.current_slot = V16PodU64::new(authenticated_slot);
+    } else {
+        assert_eq!(result, Err(V16Error::Stale));
+    }
+    assert!(kani_eq_market_group_v16_header_account(&h1, &header));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &s0,
+        &markets[0].engine
+    ));
+}

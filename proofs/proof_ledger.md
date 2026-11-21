@@ -1,6 +1,6 @@
 # Proof ledger: the charter's invariants as provable pieces
 
-Generated 2026-11-20 by `make_ledger.py` from the live Aristotle property list. **170 of 685 pieces are proved and checked; 0 more are proved with the final check pending** (their task was stopped before its closing check).
+Generated 2026-11-21 by `make_ledger.py` from the live Aristotle property list. **170 of 685 pieces are proved and checked; 0 more are proved with the final check pending** (their task was stopped before its closing check).
 
 ## The end goal
 

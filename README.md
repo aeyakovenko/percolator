@@ -94,7 +94,7 @@ Source-checkable counts in this checkout:
 
 | Class | Count |
 | --- | ---: |
-| Plain Kani proofs in `tests/proofs_v16.rs` | 357 |
+| Plain Kani proofs in `tests/proofs_v16.rs` | 362 |
 | Plain Kani proofs in `tests/proofs_v16_arithmetic.rs` | 12 |
 | Plain Kani proofs in `src/v16_proofs.rs` | 44 |
 | Function-contract proofs in `src/v16_proofs.rs` | 68 |
@@ -186,7 +186,7 @@ FEATURES=fuzz,closure KANI_Z="" LOG_DIR=kani_closure CARGO_TARGET_DIR=target/clo
 <!-- proofs:begin (generated from proofs/README_SECTION.md and the ledger; edit that file, not this block) -->
 ## Proof Status And How To Reproduce It
 
-As of 2026-11-20, for engine `d1fa39f6` and program `78ad2c53`: **180 of 623 pieces of the deployed build are done (170 proved by Aristotle, 10 verified by Kani); 0 of 89 charter invariants are closed.**
+As of 2026-11-21, for engine `d1fa39f6` and program `78ad2c53`: **180 of 623 pieces of the deployed build are done (170 proved by Aristotle, 10 verified by Kani); 0 of 89 charter invariants are closed.**
 
 | Phase | What | Proved |
 |---|---|---|
@@ -231,7 +231,7 @@ On engine `d1fa39f6`, Kani 0.66.0, with the three commands of "Run Kani":
 | `--features fuzz,closure` | 373 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
 | `--features fuzz,contracts -Z function-contracts` | 394 | `composition_clear_leg_value_conservation` |
 
-The table is from full runs. Since then 18 proofs were added and verified one by one: 18 with `--features fuzz`, 18 in the closure run, 18 in the contracts run. `proofs/kani_added.tsv` lists
+The table is from full runs. Since then 23 proofs were added and verified one by one: 23 with `--features fuzz`, 18 in the closure run, 18 in the contracts run (still being checked: 5 in the closure run, 5 in the contracts run). `proofs/kani_added.tsv` lists
 them with their verdict in each run; add the ones marked verified to the numbers above.
 
 A whole run takes one and a half to two hours on a 64-core machine at
