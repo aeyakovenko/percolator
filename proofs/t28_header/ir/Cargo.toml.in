@@ -1,0 +1,20 @@
+[package]
+name = "t28-header-probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+percolator = { path = "../engine" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+overflow-checks = true
+panic = "abort"
+
+[features]
+corrupt-header = []
