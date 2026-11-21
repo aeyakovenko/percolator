@@ -236,7 +236,7 @@ On engine `d1fa39f6`, Kani 0.66.0, with the three commands of "Run Kani":
 | `--features fuzz,closure` | 373 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
 | `--features fuzz,contracts -Z function-contracts` | 394 | `composition_clear_leg_value_conservation` |
 
-The table is from full runs. Since then 23 proofs were added and verified one by one: 23 with `--features fuzz`, 18 in the closure run, 18 in the contracts run (still being checked: 5 in the closure run, 5 in the contracts run). `proofs/kani_added.tsv` lists
+The table is from full runs. Since then 23 proofs were added and verified one by one: 23 with `--features fuzz`, 23 in the closure run, 23 in the contracts run. `proofs/kani_added.tsv` lists
 them with their verdict in each run; add the ones marked verified to the numbers above.
 
 A whole run takes one and a half to two hours on a 64-core machine at
