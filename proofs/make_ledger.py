@@ -331,8 +331,10 @@ for pid, target, text in (
 # existing harnesses reach both (8 and 19 harnesses), so the task was cancelled and the pieces wait
 # behind the certain gaps. Each method is proved from its own body and from contracts of the
 # methods it calls; a property is closed only when the contracts it names are.
-TRADE_EVIDENCE = ("Aristotle (pilot s2, submitted 2026-11-20); no Kani harness reaches this method, so today its evidence is the engine's "
-                  "tests and fuzz and the program's stateful suites only")
+TRADE_EVIDENCE = ("Aristotle. The trade pilot (task s2, engine d1fa39f6) stated it and stopped by itself with this piece open: the "
+                  "walk of the compiled body was too expensive (the byte-level model of the 9,419-byte account, the number of `?` exits, "
+                  "and shared borrows that must be given back on every exit). Kani proves the gates of the trade entry point, not its "
+                  "body, so today the evidence is the engine's tests and fuzz and the program's stateful suites")
 for pid, target, text in (
     ("TF.margin", "finish_trade_checks_not_atomic",
      "no trade that needed initial margin from an account ends with that account below it: its certificate is valid and "
@@ -342,14 +344,24 @@ for pid, target, text in (
     ("TF.frame", "finish_trade_checks_not_atomic",
      "writes nothing unless the trade increased risk outside the locked lane; then only the fields a lien creation writes (rests on TC9)"),
     ("TF.order", "finish_trade_checks_not_atomic",
-     "the long account's certificate is still current when its margin is checked, after the short account's margin lien was created"),
+     "the long account's stored certificate can overstate its equity when its margin is checked, because the short account's margin "
+     "lien was created after it was written (answered from the source by the pilot and by a second reading, not proved); the "
+     "margin rule does not rest on that number: see TF.reserved"),
+    ("TF.reserved", "create_initial_margin_source_lien_if_needed",
+     "when it returns Ok, the account's initial requirement is covered by capital less its negative PnL and fee debt plus the "
+     "credit its own valid liens reserve (`incremental_initial_margin_source_credit_needed == 0`), and no other account's lien "
+     "can take reserved backing; so a risk-increasing trade never leaves an account with source claims below its initial "
+     "requirement, whatever its certificate says"),
     ("TA.fee", "apply_trade_after_refresh_not_atomic",
      "each account pays `min(fee, capital)`, or nothing when its PnL is negative; the fee and the notional are the stated formulas (rests on TC1)"),
     ("TA.conservation", "apply_trade_after_refresh_not_atomic",
      "applying a fill moves no token value and no PnL: `vault` and both accounts' PnL are unchanged, and each fee moves from that "
      "account's capital (and `c_tot`) to `insurance` (rests on TC1 to TC7)"),
     ("TA.positions", "apply_trade_after_refresh_not_atomic",
-     "each account's position on the traded asset becomes the planned one and its other legs are unchanged (rests on TC2, TC5)"),
+     "each account's position on the traded asset becomes the planned one and its other legs are unchanged, for a lookup whose "
+     "current position is the stored one (the pilot found the first wording false without that: a lookup with equal current and "
+     "next positions changes nothing and is not compared with the stored leg; the engine builds lookups from the account) "
+     "(rests on TC2, TC5)"),
     ("TA.gate", "apply_trade_after_refresh_not_atomic", "a side the fill grew does not end above the side cap (rests on TC8)"),
     ("TA.frame", "apply_trade_after_refresh_not_atomic",
      "writes four header fields, eight account fields and only the traded asset's slot (rests on TC1 to TC7)"),
@@ -362,9 +374,9 @@ for pid, target, text in (
      "contract: charges `min(requested, capital)` or nothing when PnL is negative; capital and `c_tot` fall and `insurance` rises by that amount; `vault` is not written"),
     ("TC2", "validate_trade_position_preflight", "contract: writes nothing; returns the lookups it was given and the risk flags computed from them"),
     ("TC3", "require_asset_risk_change_allowed", "contract: writes nothing; a risk increase needs both side indices at `ADL_ONE`"),
-    ("TC4", "begin_terminal_trade_residual_if_needed", "contract: writes only the account's close ledger and one header counter, and nothing unless a final fill closes a losing single-leg account"),
+    ("TC4", "begin_terminal_trade_residual_if_needed", "contract: writes only the account's close ledger, one header counter and one field of the traded asset's slot, and nothing unless a final fill closes a losing single-leg account"),
     ("TC5", "apply_current_position_delta_with_lookup",
-     "contract: the leg becomes the planned position, other legs are unchanged, and none of capital, PnL, `c_tot`, `insurance`, `vault` is written"),
+     "contract: the leg becomes the planned position, other legs are unchanged, none of capital, PnL, `c_tot`, `insurance`, `vault` is written, and nothing at all is written for a zero delta"),
     ("TC6", "transfer_trade_residual_reward_credit", "contract: writes only the two accounts' residual reward counters"),
     ("TC7", "recertify_account_after_trade_delta", "contract: writes only the account's certificate"),
     ("TC8", "kernel_trade_side_oi_cap_gate", "contract: the exact return condition of the side cap gate"),
@@ -686,7 +698,7 @@ for p in props:
         pieces[pid]["status"] = "in progress"
     elif st:
         pieces[pid]["status"] = "attempted, open"
-        pieces[pid]["evidence"] = f"{name}: no verdict in task s2"
+        pieces[pid]["evidence"] = f"{name}: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got)"
 if _trade_unmapped:
     print("trade rows without a ledger piece:", ", ".join(sorted(_trade_unmapped)), file=sys.stderr)
 

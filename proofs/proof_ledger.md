@@ -1,6 +1,6 @@
 # Proof ledger: the charter's invariants as provable pieces
 
-Generated 2026-11-21 by `make_ledger.py` from the live Aristotle property list. **170 of 685 pieces are proved and checked; 0 more are proved with the final check pending** (their task was stopped before its closing check).
+Generated 2026-11-21 by `make_ledger.py` from the live Aristotle property list. **171 of 686 pieces are proved and checked; 0 more are proved with the final check pending** (their task was stopped before its closing check).
 
 ## The end goal
 
@@ -71,7 +71,7 @@ checks that function by function, and `src/wide_math.rs` is identical in all thr
 | K kernel | 132 | 6 | 116 | 0 | 10 | 0 |
 | L liveness | 12 | 0 | 0 | 0 | 0 | 12 |
 | P panic sites | 29 | 0 | 9 | 0 | 0 | 20 |
-| S settlement glue | 44 | 0 | 0 | 0 | 21 | 23 |
+| S settlement glue | 45 | 0 | 1 | 0 | 20 | 24 |
 | T transition | 262 | 56 | 0 | 0 | 5 | 201 |
 | W wrapper | 50 | 0 | 0 | 0 | 0 | 50 |
 | X committed after an error | 10 | 0 | 0 | 0 | 0 | 10 |
@@ -521,27 +521,28 @@ Layer T has two pieces per entry point. `.header`: the production shape check (h
 
 | Piece | Target | Statement | Status | Evidence |
 |---|---|---|---|---|
-| TF.margin | `finish_trade_checks_not_atomic` | no trade that needed initial margin from an account ends with that account below it: its certificate is valid and `certified_equity >= certified_initial_req` at the return (rests on TC9) | in progress |  |
-| TF.locked | `finish_trade_checks_not_atomic` | in the locked lane the account also meets its initial requirement from capital and negative PnL alone, without positive credit | in progress |  |
-| TF.frame | `finish_trade_checks_not_atomic` | writes nothing unless the trade increased risk outside the locked lane; then only the fields a lien creation writes (rests on TC9) | in progress |  |
-| TF.order | `finish_trade_checks_not_atomic` | the long account's certificate is still current when its margin is checked, after the short account's margin lien was created | in progress |  |
-| TA.fee | `apply_trade_after_refresh_not_atomic` | each account pays `min(fee, capital)`, or nothing when its PnL is negative; the fee and the notional are the stated formulas (rests on TC1) | in progress |  |
-| TA.conservation | `apply_trade_after_refresh_not_atomic` | applying a fill moves no token value and no PnL: `vault` and both accounts' PnL are unchanged, and each fee moves from that account's capital (and `c_tot`) to `insurance` (rests on TC1 to TC7) | in progress |  |
-| TA.positions | `apply_trade_after_refresh_not_atomic` | each account's position on the traded asset becomes the planned one and its other legs are unchanged (rests on TC2, TC5) | in progress |  |
-| TA.gate | `apply_trade_after_refresh_not_atomic` | a side the fill grew does not end above the side cap (rests on TC8) | in progress |  |
-| TA.frame | `apply_trade_after_refresh_not_atomic` | writes four header fields, eight account fields and only the traded asset's slot (rests on TC1 to TC7) | in progress |  |
-| TA.nopanic | `apply_trade_after_refresh_not_atomic` | no execution of the body panics outside its named callees | in progress |  |
-| TB.flag | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | the scoped suspension of `loss_stale_active` never leaks: on every return after the inner call, Ok or Err, the flag has its entry value | in progress |  |
-| TB.checked | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | every Ok return follows a passing `validate_shape` and `validate_with_market` of both accounts on the final state | in progress |  |
-| TC1 | `charge_account_fee_current_not_atomic` | contract: charges `min(requested, capital)` or nothing when PnL is negative; capital and `c_tot` fall and `insurance` rises by that amount; `vault` is not written | in progress |  |
-| TC2 | `validate_trade_position_preflight` | contract: writes nothing; returns the lookups it was given and the risk flags computed from them | in progress |  |
-| TC3 | `require_asset_risk_change_allowed` | contract: writes nothing; a risk increase needs both side indices at `ADL_ONE` | in progress |  |
-| TC4 | `begin_terminal_trade_residual_if_needed` | contract: writes only the account's close ledger and one header counter, and nothing unless a final fill closes a losing single-leg account | in progress |  |
-| TC5 | `apply_current_position_delta_with_lookup` | contract: the leg becomes the planned position, other legs are unchanged, and none of capital, PnL, `c_tot`, `insurance`, `vault` is written | in progress |  |
-| TC6 | `transfer_trade_residual_reward_credit` | contract: writes only the two accounts' residual reward counters | in progress |  |
-| TC7 | `recertify_account_after_trade_delta` | contract: writes only the account's certificate | in progress |  |
-| TC8 | `kernel_trade_side_oi_cap_gate` | contract: the exact return condition of the side cap gate | in progress |  |
-| TC9 | `create_initial_margin_source_lien_if_needed` | contract: on Ok the certificate is valid; writes only capital, certificate and source domains of that account and six header fields | in progress |  |
+| TF.margin | `finish_trade_checks_not_atomic` | no trade that needed initial margin from an account ends with that account below it: its certificate is valid and `certified_equity >= certified_initial_req` at the return (rests on TC9) | attempted, open | Spec.Trade.tf_margin: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TF.locked | `finish_trade_checks_not_atomic` | in the locked lane the account also meets its initial requirement from capital and negative PnL alone, without positive credit | attempted, open | Spec.Trade.tf_locked: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TF.frame | `finish_trade_checks_not_atomic` | writes nothing unless the trade increased risk outside the locked lane; then only the fields a lien creation writes (rests on TC9) | attempted, open | Spec.Trade.tf_frame: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TF.order | `finish_trade_checks_not_atomic` | the long account's stored certificate can overstate its equity when its margin is checked, because the short account's margin lien was created after it was written (answered from the source by the pilot and by a second reading, not proved); the margin rule does not rest on that number: see TF.reserved | attempted, open | finish_trade_checks_not_atomic.order: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TF.reserved | `create_initial_margin_source_lien_if_needed` | when it returns Ok, the account's initial requirement is covered by capital less its negative PnL and fee debt plus the credit its own valid liens reserve (`incremental_initial_margin_source_credit_needed == 0`), and no other account's lien can take reserved backing; so a risk-increasing trade never leaves an account with source claims below its initial requirement, whatever its certificate says | open |  |
+| TA.fee | `apply_trade_after_refresh_not_atomic` | each account pays `min(fee, capital)`, or nothing when its PnL is negative; the fee and the notional are the stated formulas (rests on TC1) | attempted, open | apply_trade_after_refresh_not_atomic.fee: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TA.conservation | `apply_trade_after_refresh_not_atomic` | applying a fill moves no token value and no PnL: `vault` and both accounts' PnL are unchanged, and each fee moves from that account's capital (and `c_tot`) to `insurance` (rests on TC1 to TC7) | attempted, open | apply_trade_after_refresh_not_atomic.conservation: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TA.positions | `apply_trade_after_refresh_not_atomic` | each account's position on the traded asset becomes the planned one and its other legs are unchanged, for a lookup whose current position is the stored one (the pilot found the first wording false without that: a lookup with equal current and next positions changes nothing and is not compared with the stored leg; the engine builds lookups from the account) (rests on TC2, TC5) | attempted, open | apply_trade_after_refresh_not_atomic.positions: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TA.gate | `apply_trade_after_refresh_not_atomic` | a side the fill grew does not end above the side cap (rests on TC8) | attempted, open | apply_trade_after_refresh_not_atomic.gate: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TA.frame | `apply_trade_after_refresh_not_atomic` | writes four header fields, eight account fields and only the traded asset's slot (rests on TC1 to TC7) | attempted, open | apply_trade_after_refresh_not_atomic.frame: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TA.nopanic | `apply_trade_after_refresh_not_atomic` | no execution of the body panics outside its named callees | attempted, open | apply_trade_after_refresh_not_atomic.nopanic: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TB.flag | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | the scoped suspension of `loss_stale_active` never leaks: on every return after the inner call, Ok or Err, the flag has its entry value | attempted, open | Spec.Trade.tb_flag: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TB.checked | `execute_batch_with_fee_loss_stale_scoped_not_atomic` | every Ok return follows a passing `validate_shape` and `validate_with_market` of both accounts on the final state | attempted, open | Spec.Trade.tb_checked: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TC1 | `charge_account_fee_current_not_atomic` | contract: charges `min(requested, capital)` or nothing when PnL is negative; capital and `c_tot` fall and `insurance` rises by that amount; `vault` is not written | attempted, open | Spec.Trade.tc1_charge_fee: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TC2 | `validate_trade_position_preflight` | contract: writes nothing; returns the lookups it was given and the risk flags computed from them | attempted, open | Spec.Trade.tc2_preflight: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TC3 | `require_asset_risk_change_allowed` | contract: writes nothing; a risk increase needs both side indices at `ADL_ONE` | attempted, open | Spec.Trade.tc3_risk_change: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TC4 | `begin_terminal_trade_residual_if_needed` | contract: writes only the account's close ledger, one header counter and one field of the traded asset's slot, and nothing unless a final fill closes a losing single-leg account | attempted, open | Spec.Trade.tc4_terminal_residual: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TC5 | `apply_current_position_delta_with_lookup` | contract: the leg becomes the planned position, other legs are unchanged, none of capital, PnL, `c_tot`, `insurance`, `vault` is written, and nothing at all is written for a zero delta | attempted, open | Spec.Trade.tc5_position_delta: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TC6 | `transfer_trade_residual_reward_credit` | contract: writes only the two accounts' residual reward counters | attempted, open | transfer_trade_residual_reward_credit.frame: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TC7 | `recertify_account_after_trade_delta` | contract: writes only the account's certificate | attempted, open | Spec.Trade.tc7_recertify: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
+| TC8 | `kernel_trade_side_oi_cap_gate` | contract: the exact return condition of the side cap gate | proved | Spec.Trade.tc8_oi_cap_gate (engine d1fa39f6, task s2) |
+| TC9 | `create_initial_margin_source_lien_if_needed` | contract: on Ok the certificate is valid; writes only capital, certificate and source domains of that account and six header fields | attempted, open | Spec.Trade.tc9_im_lien: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got) |
 | S0.C1 | `fresh_counterparty_backing_expiry_slot` | contract: writes nothing | open |  |
 | S0.C2 | `credit_post_snapshot_residual_not_atomic` | contract: writes only `payout_snapshot` and `resolved_payout_ledger`, and nothing when the amount is zero or no snapshot is captured | open |  |
 | S0.C3.bound | `book_realized_kf_loss_for_source_domain_not_atomic` | contract: the returned junior amount is at most the amount booked | open |  |

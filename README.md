@@ -186,13 +186,13 @@ FEATURES=fuzz,closure KANI_Z="" LOG_DIR=kani_closure CARGO_TARGET_DIR=target/clo
 <!-- proofs:begin (generated from proofs/README_SECTION.md and the ledger; edit that file, not this block) -->
 ## Proof Status And How To Reproduce It
 
-As of 2026-11-21, for engine `d1fa39f6` and program `78ad2c53`: **180 of 623 pieces of the deployed build are done (170 proved by Aristotle, 10 verified by Kani); 0 of 89 charter invariants are closed.**
+As of 2026-11-21, for engine `d1fa39f6` and program `78ad2c53`: **181 of 624 pieces of the deployed build are done (171 proved by Aristotle, 10 verified by Kani); 0 of 89 charter invariants are closed.**
 
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 171 of 171 |
 | 2 | The engine cannot panic and keeps the header | 9 of 95 |
-| 3 | The engine keeps the whole market state | 0 of 196 |
+| 3 | The engine keeps the whole market state | 1 of 197 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -219,6 +219,11 @@ What the numbers do not say:
   it calls and every type it uses unchanged (`proofs/changed_fns.py`,
   `proofs/specs/changed_since_*.md`). Entry-point proofs whose types changed are listed as "to be
   established again".
+- The Aristotle proofs so far are of pure functions: the arithmetic and the kernels. The two
+  attempts on methods that hold the market and an account (a batch of small entry points and a
+  pilot on the trade) proved 3 of 32 properties. The cost was the byte-level model of the
+  9,419-byte account and the borrow bookkeeping of large bodies, not the logic.
+  `proofs/ROADMAP.md` lists the ways forward.
 - Nothing proves termination or compute bounds; those are measured.
 
 ### Expected Kani Results
@@ -307,8 +312,11 @@ prepares the export for a new engine revision.
 | `stage_b6_side_index_revision.txt` | `c030aa40` | All 20 properties proved: the two side-index kernels with their exposure and progress properties, and every kernel that the revision changed. |
 | `stage_t1_small_unchecked_entry_points.txt` | `c030aa40` | Stopped before it finished. 2 of its 11 properties proved (`advance_resolved_slot_not_atomic`, `grow_asset_slot_capacity_not_atomic`); the others have no verdict. |
 
-`stage_a0_calibration.txt` was stopped without a result. The other files in `proofs/prompts/` are
-prepared and not yet run; a task in flight is added when it is closed.
+| `stage_s2_trade_pilot.txt` | `d1fa39f6` | Stopped by itself. 21 properties of the trade stated (the margin gate, the application of one fill, the entry point, nine callee contracts): 1 proved (the side-cap gate, a kernel), 1 proved under two unverified callee assumptions, 19 open. It corrected three of the statements and answered one question from the source (`aristotle/summaries/s2.md`). |
+
+`stage_a0_calibration.txt` was stopped without a result, and a first pilot on two settlement
+methods was cancelled before it stated anything. The other files in `proofs/prompts/` are prepared
+and not yet run.
 
 Regenerate the ledger and the roadmap (the engine checkout must be at the revision the ledger
 names; `transition_kinds.py` stops if a deployed entry point changed since it was last reviewed):

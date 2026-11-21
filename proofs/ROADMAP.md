@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-21 from `proof_ledger.tsv`. **180 of 623 pieces of the deployed build are done
-(170 proved by Aristotle, 10 verified by Kani); 0 of 89 charter invariants are closed.**
+Generated 2026-11-21 from `proof_ledger.tsv`. **181 of 624 pieces of the deployed build are done
+(171 proved by Aristotle, 10 verified by Kani); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -39,7 +39,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 |---|---|---|
 | 1 | Arithmetic and kernels | 171 of 171 |
 | 2 | The engine cannot panic and keeps the header | 9 of 95 |
-| 3 | The engine keeps the whole market state | 0 of 196 |
+| 3 | The engine keeps the whole market state | 1 of 197 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -76,7 +76,7 @@ fixed yet. These come first; most are decisions.
   revision, whose market view and asset slot gained fields.
 - Exit: no engine call can panic, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (0 of 196).**
+**Phase 3. The engine keeps the whole market state (1 of 197).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -116,33 +116,46 @@ fixed yet. These come first; most are decisions.
 ## Order of work
 
 The prover goes where Kani has gaps, business logic before arithmetic (the owner's direction of
-2026-11-20). `specs/kani_gap_map_<rev>.md` measures the gap by the call graph: 62 deployed
-functions and 14 of the 50 deployed entry points are reached by no Kani harness at all. They are
-the execution of a trade (22 functions), recovery and forfeit (10), three crank steps with the
-auto-crank dispatcher (5) and the terminal routes (9). A second, softer gap is code that a harness
-reaches but may never execute (the refresh and the liquidation are reached only through harnesses
-that prove something else); Kani's coverage mode measures that and its run is the second input.
+2026-11-20). `specs/kani_gap_map_<rev>.md` measures the gap by the call graph: at `d1fa39f6`, 62
+deployed functions and 14 of the 50 deployed entry points were reached by no Kani harness: the
+execution of a trade, recovery and forfeit, three crank steps with the auto-crank dispatcher, and
+the terminal routes. The proof file itself records the trade, the full refresh and the full
+resolved close as beyond Kani's budget.
 
-1. Now: a pilot on the trade (the margin gate at its end, the application of one fill, the public
-   entry point), for the margin rule, value conservation and the exact write set. It tells what
-   such a proof costs.
-2. Then the rest of the trade (the loop over fills with the position planning, the margin lien),
-   recovery and forfeit, the crank steps, the terminal routes; then what the coverage run shows
-   Kani never executes. In parallel, new Kani harnesses for the gaps that are only omissions: each
-   goes to master when it verifies.
-3. Then the Deposit trial and the program's instructions (phase 4), and phases 5 and 6.
-4. Last: what Kani or a runtime check already covers (the header check of entry points that end
-   in it, the call sites into the arithmetic).
+**What the trade pilot showed (2026-11-21).** The first Aristotle task on that code stated 21
+properties of the trade (the margin gate, the application of one fill, the entry point, nine callee
+contracts) and stopped by itself after about 410 credits with one proved, and that one is a
+kernel. With the earlier batch on small entry points that makes 3 of 32 properties about methods
+that hold the market and an account, for about 1,970 credits. The prover's own account of the cost
+(`aristotle/summaries/s2.md`): the byte-level model of the 9,419-byte account, bodies with many
+`?` exits, and shared borrows that have to be given back on every exit. It is not the logic. The
+pilot was still useful: it corrected three of the statements and answered a question about the
+order of the margin checks from the source.
+
+**So the plan for phases 2 to 4 has to change. Three ways forward, not decided yet:**
+
+1. Move the logic out of the methods into pure kernels over small records. The engine already has
+   this pattern: a kernel decides, the method reads fields, calls it and writes fields. A kernel
+   costs about 14 credits a piece and Kani verifies it for all inputs. What remains in a method is
+   a short read-call-write shell, the only thing left to prove at the byte level. This is a
+   refactor with no change of behaviour, checked by the existing suites and oracles.
+2. Keep the code and prove a model: write each entry point's transition as a pure function over
+   the runtime records, prove the invariants of the model, and tie model and code together by
+   differential tests. Cheaper and weaker: the link is tested, not proved.
+3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
+
+Meanwhile Kani closes what it can reach: since `d1fa39f6`, proofs were added for entry points no
+harness called (the gates of the trade, the rebalance and the Recovery routes, the resolved clock,
+force recovery, the public crank finalizing Recovery, the terminal routes). Each goes to master
+when it verifies; `kani_added.tsv` lists them.
 
 Every engine change on the way costs a Kani run (about five hours) and re-proving the functions it
 touches; the comparison tool keeps that to the changed functions.
 
 ## Cost and time
 
-The 180 pieces done so far took about 2,300 prover credits, roughly 14 a piece, on small
-functions. The 443 left are mostly whole entry points and instructions. The first batch of that
-kind (eleven entry points in one task) proved two for about 1,560 credits before it was stopped, so
-there is no supported estimate for the rest yet; the trade pilot is cut smaller to get one. The
-prover runs one task at a time, so the floor is about two weeks of continuous running; with
-statements to write, refuted attempts and fixes in between, four to eight weeks is a plan, not a
-measurement.
+The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
+443 left are mostly whole entry points and instructions, and the two attempts at that kind
+proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
+there is no estimate until the way forward above is chosen: under the first one the work is the
+refactor plus kernels at the known price; under the second it is models and differential tests.
