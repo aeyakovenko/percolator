@@ -2874,6 +2874,65 @@ fn contract_check_kernel_settle_principal() {
     let _ = V16Core::kernel_settle_principal(capital, c_tot, pnl);
 }
 
+// Full-domain contract check of the fee-charge kernel: an account with negative
+// PnL pays nothing, otherwise charged == min(requested_fee, capital); capital and
+// c_tot drop and insurance rises by exactly charged; the two error cases are
+// exactly a c_tot below the charge and an insurance overflow. Production
+// (charge_account_fee_current_not_atomic: every trade fee and liquidation fee)
+// calls this for the arithmetic.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_charge_account_fee)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_charge_account_fee() {
+    let requested_fee: u128 = kani::any();
+    let pnl: i128 = kani::any();
+    let capital: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let insurance: u128 = kani::any();
+    let _ = V16Core::kernel_charge_account_fee(requested_fee, pnl, capital, c_tot, insurance);
+}
+
+// Full-domain contract check of the kernel that pays a settled K/F loss from
+// free capital: paid == min(loss, capital); capital and c_tot drop by exactly
+// paid; the two error cases are exactly a payment whose scaled credit
+// (paid * BOUND_SCALE, computed by the caller) would not fit, and a c_tot below
+// the payment. The kernel decides the first by a comparison with a constant, so
+// it holds no wide product and the check covers every input. Production
+// (pay_kf_loss_from_free_capital_not_atomic) calls this for the arithmetic.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_pay_kf_loss_from_free_capital)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_pay_kf_loss_from_free_capital() {
+    let loss: u128 = kani::any();
+    let capital: u128 = kani::any();
+    let c_tot: u128 = kani::any();
+    let _ = V16Core::kernel_pay_kf_loss_from_free_capital(loss, capital, c_tot);
+}
+
+// Full-domain contract check of the initial-margin lien-need kernel: the result
+// is the shortfall of the initial requirement over capital-side equity plus the
+// credit the account's own liens reserve, so it is zero exactly when that sum
+// covers the requirement. A risk-increasing trade creates liens until this is
+// zero (create_initial_margin_source_lien_if_needed), which is what its margin
+// rule rests on. Production (incremental_initial_margin_source_credit_needed)
+// calls this for the arithmetic.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_initial_margin_source_credit_needed)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_initial_margin_source_credit_needed() {
+    let certified_initial_req: u128 = kani::any();
+    let no_positive_equity: i128 = kani::any();
+    let existing_lien: u128 = kani::any();
+    let _ = V16Core::kernel_initial_margin_source_credit_needed(
+        certified_initial_req,
+        no_positive_equity,
+        existing_lien,
+    );
+}
+
 // ROADMAP Phase 3 (Pillar S, S-L2 insurance layer): full-domain contract check
 // of the insurance-draw kernel — used==min(|pnl|, domain_available), capped by
 // the domain budget (isolation), pool->spent conservation. Production

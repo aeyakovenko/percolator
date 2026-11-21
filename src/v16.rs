@@ -1937,6 +1937,151 @@ impl V16Core {
         Ok((paid, new_capital, new_c_tot, new_pnl))
     }
 
+    /// PRODUCTION KERNEL (value safety, fee charge): what a fee charge takes and
+    /// where it goes. An account whose PnL is negative pays no fee (its loss is
+    /// senior to the fee); otherwise it pays `charged = min(requested_fee,
+    /// capital)` out of capital. Capital and the group capital total `c_tot` drop
+    /// by exactly `charged` and insurance rises by exactly `charged`: the three
+    /// move together and no token value moves. Nothing changes when nothing is
+    /// charged. Pure scalar; `charge_account_fee_current_not_atomic` calls exactly
+    /// this for the arithmetic and writes the three results.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128, u128)>| {
+        let charged = if requested_fee == 0 || pnl < 0 {
+            0
+        } else if requested_fee < capital {
+            requested_fee
+        } else {
+            capital
+        };
+        if charged == 0 {
+            *result == Ok((0, capital, c_tot, insurance))
+        } else if c_tot < charged {
+            *result == Err(V16Error::CounterUnderflow)
+        } else if insurance > u128::MAX - charged {
+            *result == Err(V16Error::ArithmeticOverflow)
+        } else {
+            // exact debit of capital and the capital total, exact credit of insurance
+            *result == Ok((charged, capital - charged, c_tot - charged, insurance + charged))
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_charge_account_fee(
+        requested_fee: u128,
+        pnl: i128,
+        capital: u128,
+        c_tot: u128,
+        insurance: u128,
+    ) -> V16Result<(u128, u128, u128, u128)> {
+        if requested_fee == 0 || pnl < 0 {
+            return Ok((0, capital, c_tot, insurance));
+        }
+        let charged = requested_fee.min(capital);
+        if charged == 0 {
+            return Ok((0, capital, c_tot, insurance));
+        }
+        let new_capital = capital
+            .checked_sub(charged)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let new_c_tot = c_tot
+            .checked_sub(charged)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let new_insurance = insurance
+            .checked_add(charged)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((charged, new_capital, new_c_tot, new_insurance))
+    }
+
+    /// PRODUCTION KERNEL (value safety, K/F loss paid from capital): the part of a
+    /// settled loss that the account's free capital pays. `paid = min(loss,
+    /// capital)`; capital and the group capital total `c_tot` drop by exactly
+    /// `paid`. The loss domain is credited with `paid * BOUND_SCALE`, which the
+    /// caller computes with `bound_num_from_amount`; the kernel only decides, by a
+    /// comparison with a constant, that this product fits, so it holds no wide
+    /// multiplication and its contract can be checked for all inputs. Nothing
+    /// changes when nothing is paid. Pure scalar;
+    /// `pay_kf_loss_from_free_capital_not_atomic` calls exactly this for the
+    /// arithmetic.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u128, u128, u128)>| {
+        let paid = if loss < capital { loss } else { capital };
+        if paid == 0 {
+            *result == Ok((0, capital, c_tot))
+        } else if paid > u128::MAX / BOUND_SCALE {
+            // the scaled credit would not fit
+            *result == Err(V16Error::ArithmeticOverflow)
+        } else if c_tot < paid {
+            *result == Err(V16Error::CounterUnderflow)
+        } else {
+            *result == Ok((paid, capital - paid, c_tot - paid))
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_pay_kf_loss_from_free_capital(
+        loss: u128,
+        capital: u128,
+        c_tot: u128,
+    ) -> V16Result<(u128, u128, u128)> {
+        let paid = loss.min(capital);
+        if paid == 0 {
+            return Ok((0, capital, c_tot));
+        }
+        if paid > u128::MAX / BOUND_SCALE {
+            return Err(V16Error::ArithmeticOverflow);
+        }
+        let new_capital = capital
+            .checked_sub(paid)
+            .ok_or(V16Error::CounterUnderflow)?;
+        let new_c_tot = c_tot.checked_sub(paid).ok_or(V16Error::CounterUnderflow)?;
+        Ok((paid, new_capital, new_c_tot))
+    }
+
+    /// PRODUCTION KERNEL (margin, initial-margin lien need): how much source credit
+    /// an account still has to reserve to meet its initial requirement. What
+    /// already covers the requirement is the account's equity without positive
+    /// PnL (`no_positive_equity`: capital less negative PnL and fee debt, which
+    /// can be negative) plus the credit its valid liens already reserve. The
+    /// result is the shortfall, and it is zero exactly when
+    /// `no_positive_equity + existing_lien >= certified_initial_req` in the
+    /// integers: that is the statement the margin rule of a risk-increasing trade
+    /// rests on. Pure scalar; `incremental_initial_margin_source_credit_needed`
+    /// calls exactly this for the arithmetic.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| {
+        if no_positive_equity >= 0 {
+            let equity = no_positive_equity as u128;
+            if existing_lien > u128::MAX - equity {
+                *result == Err(V16Error::ArithmeticOverflow)
+            } else {
+                let covered = equity + existing_lien;
+                // the shortfall, and zero exactly when the requirement is covered
+                *result == Ok(if covered >= certified_initial_req { 0 } else { certified_initial_req - covered })
+            }
+        } else {
+            let deficit = no_positive_equity.unsigned_abs();
+            if certified_initial_req > u128::MAX - deficit {
+                *result == Err(V16Error::ArithmeticOverflow)
+            } else {
+                let need = certified_initial_req + deficit;
+                *result == Ok(if existing_lien >= need { 0 } else { need - existing_lien })
+            }
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_initial_margin_source_credit_needed(
+        certified_initial_req: u128,
+        no_positive_equity: i128,
+        existing_lien: u128,
+    ) -> V16Result<u128> {
+        if no_positive_equity >= 0 {
+            let covered = (no_positive_equity as u128)
+                .checked_add(existing_lien)
+                .ok_or(V16Error::ArithmeticOverflow)?;
+            return Ok(certified_initial_req.saturating_sub(covered));
+        }
+        let need_before_lien = certified_initial_req
+            .checked_add(no_positive_equity.unsigned_abs())
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok(need_before_lien.saturating_sub(existing_lien))
+    }
+
     /// PRODUCTION KERNEL (value safety, roadmap S-L2 insurance layer): the
     /// insurance-draw core of negative-PnL liquidation. Draw is capped by BOTH
     /// the remaining deficit and the DOMAIN's own available insurance —
@@ -12788,17 +12933,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let existing_lien = self.valid_source_lien_effective_reserved_sum(account)?;
-        if no_positive_equity >= 0 {
-            let covered = (no_positive_equity as u128)
-                .checked_add(existing_lien)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            return Ok(cert.certified_initial_req.saturating_sub(covered));
-        }
-        let need_before_lien = cert
-            .certified_initial_req
-            .checked_add(no_positive_equity.unsigned_abs())
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        Ok(need_before_lien.saturating_sub(existing_lien))
+        // PRODUCTION KERNEL: the shortfall of the initial requirement over what
+        // capital-side equity and the account's own liens already cover.
+        V16Core::kernel_initial_margin_source_credit_needed(
+            cert.certified_initial_req,
+            no_positive_equity,
+            existing_lien,
+        )
     }
 
     fn set_insurance_reservation_for_domain(
@@ -15244,29 +15385,21 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         loss: u128,
         credit: &mut KfLossDomainCreditV16,
     ) -> V16Result<u128> {
-        let paid = loss.min(account.header.capital.get());
+        // PRODUCTION KERNEL: the capital-payment core (exact paid, and the equal
+        // debit of capital and c_tot). The kernel has checked that the scaled
+        // credit below fits.
+        let (paid, capital, c_tot) = V16Core::kernel_pay_kf_loss_from_free_capital(
+            loss,
+            account.header.capital.get(),
+            self.header.c_tot.get(),
+        )?;
         if paid == 0 {
             return Ok(0);
         }
-        let paid_num = paid
-            .checked_mul(BOUND_SCALE)
-            .ok_or(V16Error::ArithmeticOverflow)?;
+        let paid_num = V16Core::bound_num_from_amount(paid)?;
         let vault_before = self.header.vault.get();
-        account.header.capital = V16PodU128::new(
-            account
-                .header
-                .capital
-                .get()
-                .checked_sub(paid)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
-        self.header.c_tot = V16PodU128::new(
-            self.header
-                .c_tot
-                .get()
-                .checked_sub(paid)
-                .ok_or(V16Error::CounterUnderflow)?,
-        );
+        account.header.capital = V16PodU128::new(capital);
+        self.header.c_tot = V16PodU128::new(c_tot);
         TokenValueFlowProofV16::account_capital_to_realized_loss(
             paid,
             vault_before,
@@ -21583,32 +21716,19 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         account: &mut PortfolioV16ViewMut<'_>,
         requested_fee: u128,
     ) -> V16Result<u128> {
-        if requested_fee == 0 || account.header.pnl.get() < 0 {
-            return Ok(0);
-        }
-        let charged = requested_fee.min(account.header.capital.get());
+        // PRODUCTION KERNEL: the fee-charge core (who pays, how much, and the exact
+        // capital / c_tot / insurance movement).
+        let (charged, capital, c_tot, insurance) = V16Core::kernel_charge_account_fee(
+            requested_fee,
+            account.header.pnl.get(),
+            account.header.capital.get(),
+            self.header.c_tot.get(),
+            self.header.insurance.get(),
+        )?;
         if charged == 0 {
             return Ok(0);
         }
         let vault_before = self.header.vault.get();
-        let capital = account
-            .header
-            .capital
-            .get()
-            .checked_sub(charged)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let c_tot = self
-            .header
-            .c_tot
-            .get()
-            .checked_sub(charged)
-            .ok_or(V16Error::CounterUnderflow)?;
-        let insurance = self
-            .header
-            .insurance
-            .get()
-            .checked_add(charged)
-            .ok_or(V16Error::ArithmeticOverflow)?;
         account.header.capital = V16PodU128::new(capital);
         self.header.c_tot = V16PodU128::new(c_tot);
         self.header.insurance = V16PodU128::new(insurance);
