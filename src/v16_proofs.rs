@@ -3392,6 +3392,92 @@ fn contract_check_canonical_accrual_price_step_v16() {
     );
 }
 
+// A u64 near zero or near u64::MAX, so that products of two of them reach both
+// the small range and the overflow refusal.
+#[cfg(all(kani, feature = "contracts"))]
+fn any_u64_near_zero_or_max() -> u64 {
+    let small = kani::any::<u8>() as u64;
+    if kani::any() {
+        small
+    } else {
+        u64::MAX - small
+    }
+}
+
+// Contract check of the accrual price-move cap. BOUNDED BINDING (flagged): the
+// two prices are 16-bit and the cap and the segment length 4-bit (96 s), which
+// reaches both the accepted move and the Recovery refusal but not the overflow
+// refusal. Full width, 16-bit prices with 8-bit cap and length, and the cap and
+// length near u64::MAX, each ran past 25 minutes (the three-way product); all
+// 8-bit takes about 4 minutes. The contract is stated for all inputs.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_accrual_price_move_within_cap)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_accrual_price_move_within_cap() {
+    let _ = V16Core::kernel_accrual_price_move_within_cap(
+        kani::any::<u16>() as u64,
+        kani::any::<u16>() as u64,
+        (kani::any::<u8>() & 15) as u64,
+        (kani::any::<u8>() & 15) as u64,
+    );
+}
+
+// Contract check of the accrual funding amount. BOUNDED BINDING (flagged): the
+// rate is near zero or near either end of i128 (8 free bits), and the segment
+// length and the price are near zero or near u64::MAX, which reaches the
+// overflow refusal of both products. The full-width check did not finish in 25
+// minutes; the contract is stated for all inputs.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_accrual_funding_num)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_accrual_funding_num() {
+    let _ = V16Core::kernel_accrual_funding_num(
+        any_index_near_zero_or_ends(),
+        any_u64_near_zero_or_max(),
+        any_u64_near_zero_or_max(),
+        kani::any(),
+    );
+}
+
+// An index value near zero or near either end of i128, so that the update's
+// overflow and i128::MIN refusals are reached.
+#[cfg(all(kani, feature = "contracts"))]
+fn any_index_near_zero_or_ends() -> i128 {
+    let offset = kani::any::<i8>() as i128;
+    match kani::any::<u8>() % 3 {
+        0 => offset,
+        1 => i128::MAX - 200 + offset,
+        _ => i128::MIN + 200 + offset,
+    }
+}
+
+// Contract check of the accrual K/F index update. BOUNDED BINDING (flagged): the
+// price move is an i8, the funding amount an i16 (both branches of its division
+// by FUNDING_DEN are reached through the multiple-of-FUNDING_DEN choice below),
+// the A indices are 8-bit, and the four indices sit near zero or near either end
+// of i128. The products with the A indices and the division by FUNDING_DEN put a
+// full-width check beyond the solver. The contract is stated for all inputs.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_accrual_index_update)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_accrual_index_update() {
+    let funding_num = if kani::any() {
+        kani::any::<i8>() as i128 * FUNDING_DEN as i128
+    } else {
+        kani::any::<i16>() as i128
+    };
+    let _ = V16Core::kernel_accrual_index_update(
+        any_index_near_zero_or_ends(),
+        any_index_near_zero_or_ends(),
+        any_index_near_zero_or_ends(),
+        any_index_near_zero_or_ends(),
+        kani::any::<u8>() as u128,
+        kani::any::<u8>() as u128,
+        kani::any::<i8>() as i128,
+        funding_num,
+    );
+}
+
 // Contract check of the bankruptcy-residual step kernel. BOUNDED BINDING
 // (flagged): the B index is within 255 of its maximum and every other input
 // ranges over 8 bits, so the 256-bit arithmetic of the fallback runs on small

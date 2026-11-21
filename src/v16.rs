@@ -1289,6 +1289,142 @@ impl V16Core {
         Ok((k_long, k_short, f_long, f_short))
     }
 
+    /// PRODUCTION KERNEL (accrual, the oracle bound of one segment): an equity-active
+    /// accrual segment of `segment_dt` slots may move the effective price from
+    /// `old_price` to `new_price` only if `|new_price - old_price| * MAX_MARGIN_BPS <=
+    /// max_price_move_bps_per_slot * segment_dt * old_price`; a larger move requires
+    /// Recovery, whatever price the oracle reports. Pure; the single-segment accrual
+    /// (`accrue_asset_to_not_atomic`) calls exactly this.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<()>| {
+        let lhs = (new_price.abs_diff(old_price) as u128) * (MAX_MARGIN_BPS as u128);
+        match (max_price_move_bps_per_slot as u128)
+            .checked_mul(segment_dt as u128)
+            .and_then(|v| v.checked_mul(old_price as u128))
+        {
+            None => *result == Err(V16Error::ArithmeticOverflow),
+            Some(rhs) => *result == if lhs > rhs { Err(V16Error::RecoveryRequired) } else { Ok(()) },
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_accrual_price_move_within_cap(
+        old_price: u64,
+        new_price: u64,
+        max_price_move_bps_per_slot: u64,
+        segment_dt: u64,
+    ) -> V16Result<()> {
+        let price_diff = new_price.abs_diff(old_price) as u128;
+        let lhs = price_diff
+            .checked_mul(MAX_MARGIN_BPS as u128)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let rhs = (max_price_move_bps_per_slot as u128)
+            .checked_mul(segment_dt as u128)
+            .and_then(|v| v.checked_mul(old_price as u128))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if lhs > rhs {
+            return Err(V16Error::RecoveryRequired);
+        }
+        Ok(())
+    }
+
+    /// PRODUCTION KERNEL (accrual, the funding of one segment): the per-unit funding
+    /// transfer `funding_rate_e9 * segment_dt * effective_price`, in units of
+    /// `1 / FUNDING_DEN` price units, or 0 when funding is not active in the segment.
+    /// Pure; the single-segment accrual calls it with the segment's length and the path
+    /// accrual with 1 per step (where `rate * 1` cannot overflow, so the result and the
+    /// error are those of `rate * price`).
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<i128>| {
+        if !funding_active {
+            *result == Ok(0)
+        } else {
+            match funding_rate_e9
+                .checked_mul(segment_dt as i128)
+                .and_then(|v| v.checked_mul(effective_price as i128))
+            {
+                Some(v) => *result == Ok(v),
+                None => *result == Err(V16Error::ArithmeticOverflow),
+            }
+        }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_accrual_funding_num(
+        funding_rate_e9: i128,
+        segment_dt: u64,
+        effective_price: u64,
+        funding_active: bool,
+    ) -> V16Result<i128> {
+        if !funding_active {
+            return Ok(0);
+        }
+        funding_rate_e9
+            .checked_mul(segment_dt as i128)
+            .and_then(|v| v.checked_mul(effective_price as i128))
+            .ok_or(V16Error::ArithmeticOverflow)
+    }
+
+    /// PRODUCTION KERNEL (accrual, the K/F index update of one segment): adds the
+    /// segment's index deltas to the four side indices. Mark to market is exact: the
+    /// long K index moves by `price_delta * a_long` and the short K index by
+    /// `-price_delta * a_short`. Funding is floored on each side: the long F index
+    /// moves by `floor(-funding_num * a_long / FUNDING_DEN)` and the short F index by
+    /// `floor(funding_num * a_short / FUNDING_DEN)`, so per unit of effective position
+    /// the paying side pays at least the exact transfer and the receiving side gets at
+    /// most it. No index may become i128::MIN. Pure; both accrual paths call it.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(i128, i128, i128, i128)>| match result {
+        Ok((kl, ks, fl, fs)) => {
+            let al = a_long as i128;
+            let as_ = a_short as i128;
+            let fd = FUNDING_DEN as i128;
+            a_long <= i128::MAX as u128
+                && a_short <= i128::MAX as u128
+                && *kl != i128::MIN && *ks != i128::MIN && *fl != i128::MIN && *fs != i128::MIN
+                && price_delta.checked_mul(al).and_then(|d| k_long.checked_add(d)) == Some(*kl)
+                && price_delta
+                    .checked_mul(as_)
+                    .and_then(|d| d.checked_neg())
+                    .and_then(|d| k_short.checked_add(d))
+                    == Some(*ks)
+                && match (fl.checked_sub(f_long), fs.checked_sub(f_short)) {
+                    (Some(dfl), Some(dfs)) => if funding_num % fd == 0 {
+                        Some(dfl) == (funding_num / fd).checked_mul(al).and_then(|v| v.checked_neg())
+                            && Some(dfs) == (funding_num / fd).checked_mul(as_)
+                    } else {
+                        match (funding_num.checked_mul(al).and_then(|v| v.checked_neg()), funding_num.checked_mul(as_)) {
+                            (Some(nl), Some(ns)) => dfl.checked_mul(fd).map_or(false, |lo| lo <= nl && nl - lo < fd)
+                                && dfs.checked_mul(fd).map_or(false, |lo| lo <= ns && ns - lo < fd),
+                            _ => false,
+                        }
+                    },
+                    _ => false,
+                }
+        }
+        Err(e) => *e == V16Error::ArithmeticOverflow,
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_accrual_index_update(
+        k_long: i128,
+        k_short: i128,
+        f_long: i128,
+        f_short: i128,
+        a_long: u128,
+        a_short: u128,
+        price_delta: i128,
+        funding_num: i128,
+    ) -> V16Result<(i128, i128, i128, i128)> {
+        let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
+            Self::kernel_adl_scaled_accrual_index_deltas(
+                price_delta,
+                funding_num,
+                a_long,
+                a_short,
+            )?;
+        Ok((
+            add_non_min_i128(k_long, k_delta_long)?,
+            add_non_min_i128(k_short, k_delta_short)?,
+            add_non_min_i128(f_long, funding_delta_long)?,
+            add_non_min_i128(f_short, funding_delta_short)?,
+        ))
+    }
+
     #[inline]
     fn liquidation_progress_from_scores(before: RiskScoreV16, after: RiskScoreV16) -> bool {
         after.strictly_reduces_from(before)
@@ -18350,46 +18486,44 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             if segment_dt == 0 {
                 return Err(V16Error::NonProgress);
             }
-            let price_diff = effective_price.abs_diff(old.effective_price) as u128;
-            let lhs = price_diff
-                .checked_mul(MAX_MARGIN_BPS as u128)
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            let rhs = (config.max_price_move_bps_per_slot as u128)
-                .checked_mul(segment_dt as u128)
-                .and_then(|v| v.checked_mul(old.effective_price as u128))
-                .ok_or(V16Error::ArithmeticOverflow)?;
-            if lhs > rhs {
-                return Err(V16Error::RecoveryRequired);
-            }
+            // PRODUCTION KERNEL: the price-move cap of the segment.
+            V16Core::kernel_accrual_price_move_within_cap(
+                old.effective_price,
+                effective_price,
+                config.max_price_move_bps_per_slot,
+                segment_dt,
+            )?;
             if !protective_progress_committed {
                 return Err(V16Error::NonProgress);
             }
         }
 
         let price_delta = effective_price as i128 - old.effective_price as i128;
-        let funding_num = if activity.funding_active {
-            funding_rate_e9
-                .checked_mul(segment_dt as i128)
-                .and_then(|v| v.checked_mul(effective_price as i128))
-                .ok_or(V16Error::ArithmeticOverflow)?
-        } else {
-            0
-        };
-        let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
-            V16Core::kernel_adl_scaled_accrual_index_deltas(
-                price_delta,
-                funding_num,
-                old.a_long,
-                old.a_short,
-            )?;
-        let long_kf_changed = k_delta_long != 0 || funding_delta_long != 0;
-        let short_kf_changed = k_delta_short != 0 || funding_delta_short != 0;
+        // PRODUCTION KERNELS: the segment's funding, then the K/F index update.
+        let funding_num = V16Core::kernel_accrual_funding_num(
+            funding_rate_e9,
+            segment_dt,
+            effective_price,
+            activity.funding_active,
+        )?;
+        let (k_long, k_short, f_long_num, f_short_num) = V16Core::kernel_accrual_index_update(
+            old.k_long,
+            old.k_short,
+            old.f_long_num,
+            old.f_short_num,
+            old.a_long,
+            old.a_short,
+            price_delta,
+            funding_num,
+        )?;
+        let long_kf_changed = k_long != old.k_long || f_long_num != old.f_long_num;
+        let short_kf_changed = k_short != old.k_short || f_short_num != old.f_short_num;
 
         let mut asset = old;
-        asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
-        asset.k_short = add_non_min_i128(asset.k_short, k_delta_short)?;
-        asset.f_long_num = add_non_min_i128(asset.f_long_num, funding_delta_long)?;
-        asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta_short)?;
+        asset.k_long = k_long;
+        asset.k_short = k_short;
+        asset.f_long_num = f_long_num;
+        asset.f_short_num = f_short_num;
         asset.effective_price = effective_price;
         // Canonical path accrual uses this persisted nonzero field as its stable price-cap anchor.
         // A direct price move starts a new trajectory; zero-move funding must preserve an active
@@ -18545,25 +18679,27 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             }
 
             let price_delta = step.effective_price as i128 - asset.effective_price as i128;
-            let funding_num = if activity.funding_active {
-                step.funding_rate_e9
-                    .checked_mul(step.effective_price as i128)
-                    .ok_or(V16Error::ArithmeticOverflow)?
-            } else {
-                0
-            };
-            let (k_delta_long, k_delta_short, funding_delta_long, funding_delta_short) =
-                V16Core::kernel_adl_scaled_accrual_index_deltas(
-                    price_delta,
-                    funding_num,
-                    asset.a_long,
-                    asset.a_short,
-                )?;
-
-            asset.k_long = add_non_min_i128(asset.k_long, k_delta_long)?;
-            asset.k_short = add_non_min_i128(asset.k_short, k_delta_short)?;
-            asset.f_long_num = add_non_min_i128(asset.f_long_num, funding_delta_long)?;
-            asset.f_short_num = add_non_min_i128(asset.f_short_num, funding_delta_short)?;
+            // PRODUCTION KERNELS: the step's funding (one slot), then the K/F index update.
+            let funding_num = V16Core::kernel_accrual_funding_num(
+                step.funding_rate_e9,
+                1,
+                step.effective_price,
+                activity.funding_active,
+            )?;
+            let (k_long, k_short, f_long_num, f_short_num) = V16Core::kernel_accrual_index_update(
+                asset.k_long,
+                asset.k_short,
+                asset.f_long_num,
+                asset.f_short_num,
+                asset.a_long,
+                asset.a_short,
+                price_delta,
+                funding_num,
+            )?;
+            asset.k_long = k_long;
+            asset.k_short = k_short;
+            asset.f_long_num = f_long_num;
+            asset.f_short_num = f_short_num;
             asset.effective_price = step.effective_price;
             asset.slot_last = asset
                 .slot_last
