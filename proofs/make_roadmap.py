@@ -65,8 +65,8 @@ PHASE0 = [
      "the snapshot. Order independence before the snapshot is therefore not among the things to prove."),
     ("done", "Clean baselines", "Program: no failing test since #485. Engine (percolator#271): the audit-scan fixtures are repaired "
      "and the plain proofs that cannot verify in the contracts run are compiled out of it; every Kani layer is now as on master "
-     "except the two harnesses that have no verdict there either (one per layer; alone with a four-hour limit the closure one "
-     "timed out on 2026-11-21, and the contracts one is still owed a full run)."),
+     "except the two harnesses that have no verdict there either (one per layer; each was run alone with a four-hour limit on "
+     "2026-11-21 and both timed out)."),
     ("done", "#449, #448, keeper reward during catch-up, #477, #453", "Landed 2026-11-19 and 2026-11-20."),
     ("done", "Charter consistency", "No two charter statements contradict each other (audit of 2026-11-19; the one real conflict it found, two base-unit mints against a single quote unit, was resolved by program #480 and #481)."),
 ]
