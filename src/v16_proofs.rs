@@ -3306,6 +3306,92 @@ fn contract_check_kernel_account_source_lien_delta() {
     );
 }
 
+// Full-domain contract check of the projected liquidation deficit: the
+// maintenance requirement with the leg's contribution replaced, against the
+// equity less the step's fee; with negative post-step equity, the requirement
+// plus the shortfall below zero. The liquidation sizes its close with it.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(liquidation_projected_health_deficit_from_parts)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_liquidation_projected_health_deficit_from_parts() {
+    let _ = liquidation_projected_health_deficit_from_parts(
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+}
+
+// Full-domain contract check of the open-interest increase of a new position:
+// the side's effective open interest and raw basis sum rise by the quantity,
+// its stored position count by one and its loss-weight sum by the weight; the
+// other side is untouched; an error exactly when one of them would not fit.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(add_open_interest_for_new_position)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_add_open_interest_for_new_position() {
+    let mut asset: AssetStateV16 = kani::any();
+    let side = if kani::any() {
+        SideV16::Long
+    } else {
+        SideV16::Short
+    };
+    let _ = add_open_interest_for_new_position(&mut asset, side, kani::any(), kani::any());
+}
+
+// Full-domain contract checks of the two stranded-loser-backing kernels: the
+// backing losers paid into a domain beyond its provider's principal and its
+// claims, and the part of it owed to the twin domain, at most what the twin's
+// claims and provider are still owed. Production
+// (stranded_loser_backing_owed_to_twin_num) calls both.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_stranded_loser_backing_num)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_stranded_loser_backing_num() {
+    let _ = V16Core::kernel_stranded_loser_backing_num(kani::any(), kani::any(), kani::any());
+}
+
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_stranded_backing_owed_to_twin)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_stranded_backing_owed_to_twin() {
+    let _ = V16Core::kernel_stranded_backing_owed_to_twin(
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+}
+
+// Contract check of the oracle price step: a step moves the
+// effective price toward the target, never past it, by at most
+// (anchor * cap + carried remainder) / MAX_MARGIN_BPS, and carries the exact
+// remainder; an unexposed asset jumps to the target. This is the per-step bound
+// on what any reported price can do to the effective price.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(canonical_accrual_price_step_v16)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_canonical_accrual_price_step_v16() {
+    // BOUNDED BINDING (flagged): prices, the cap and the remainder range over 8 bits.
+    // The division by MAX_MARGIN_BPS put wider checks beyond the solver (a 16-bit cap
+    // with 64-bit prices did not finish in 25 minutes). The contract is stated for all
+    // inputs and is a target for the arithmetic prover.
+    let _ = canonical_accrual_price_step_v16(
+        kani::any::<u8>() as u64,
+        kani::any::<u8>() as u64,
+        kani::any::<u8>() as u64,
+        kani::any::<u8>() as u64,
+        kani::any(),
+        kani::any::<u8>() as u16,
+    );
+}
+
 // Contract check of the B-settlement step kernel. BOUNDED BINDING (flagged): the
 // B index values, the remainder, the weight and both atom limits range over 16
 // bits (64 bits did not finish in 20 minutes); the divisions by the weight and by SOCIAL_LOSS_DEN put a full-width check

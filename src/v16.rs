@@ -499,6 +499,30 @@ fn liquidation_partial_search_hi(
     Ok(old_abs_q.saturating_sub(floor_exit_q))
 }
 
+/// How far an account would still be from maintenance after a liquidation step:
+/// the certificate's maintenance requirement with the leg's old contribution
+/// replaced by its new one, against the certified equity less the fee the step
+/// charges. With negative post-step equity the distance is the whole maintenance
+/// requirement plus the shortfall below zero; otherwise what the requirement
+/// exceeds the equity by. The liquidation sizes its close with it.
+#[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<u128>| {
+    let post_maintenance = certified_maintenance_req
+        .checked_sub(old_leg_maintenance)
+        .and_then(|v| v.checked_add(new_leg_maintenance));
+    let post_equity = if charged_fee > i128::MAX as u128 {
+        None
+    } else {
+        certified_equity.checked_sub(charged_fee as i128)
+    };
+    match (post_maintenance, post_equity) {
+        (Some(m), Some(e)) if e < 0 => match m.checked_add(e.unsigned_abs()) {
+            Some(d) => *result == Ok(d),
+            None => *result == Err(V16Error::ArithmeticOverflow),
+        },
+        (Some(m), Some(e)) => *result == Ok(if m > e as u128 { m - e as u128 } else { 0 }),
+        _ => *result == Err(V16Error::ArithmeticOverflow),
+    }
+}))]
 fn liquidation_projected_health_deficit_from_parts(
     certified_equity: i128,
     certified_maintenance_req: u128,
@@ -617,6 +641,45 @@ fn liquidation_engine_close_request_q(
     }
 }
 
+/// A new position of `abs_q` on `side` adds itself to that side's totals: the
+/// effective open interest and the raw basis sum rise by `abs_q`, the stored
+/// position count by one and the loss-weight sum by `loss_weight`. The other side
+/// and every other field of the asset are untouched. (The side cap is checked on
+/// the net result of both legs of a trade, by `kernel_trade_side_oi_cap_gate`.)
+#[cfg_attr(all(kani, feature = "contracts"), kani::modifies(asset))]
+#[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<()>| {
+    let (oi, count, raw, weight) = match side {
+        SideV16::Long => (old(asset.oi_eff_long_q), old(asset.stored_pos_count_long), old(asset.raw_basis_sum_long_q), old(asset.loss_weight_sum_long)),
+        SideV16::Short => (old(asset.oi_eff_short_q), old(asset.stored_pos_count_short), old(asset.raw_basis_sum_short_q), old(asset.loss_weight_sum_short)),
+    };
+    let fits = oi.checked_add(abs_q).is_some()
+        && count.checked_add(1).is_some()
+        && raw.checked_add(abs_q).is_some()
+        && weight.checked_add(loss_weight).is_some();
+    let other_side_unchanged = match side {
+        SideV16::Long => asset.oi_eff_short_q == old(asset.oi_eff_short_q)
+            && asset.stored_pos_count_short == old(asset.stored_pos_count_short)
+            && asset.raw_basis_sum_short_q == old(asset.raw_basis_sum_short_q)
+            && asset.loss_weight_sum_short == old(asset.loss_weight_sum_short),
+        SideV16::Short => asset.oi_eff_long_q == old(asset.oi_eff_long_q)
+            && asset.stored_pos_count_long == old(asset.stored_pos_count_long)
+            && asset.raw_basis_sum_long_q == old(asset.raw_basis_sum_long_q)
+            && asset.loss_weight_sum_long == old(asset.loss_weight_sum_long),
+    };
+    let this_side = match side {
+        SideV16::Long => (asset.oi_eff_long_q, asset.stored_pos_count_long, asset.raw_basis_sum_long_q, asset.loss_weight_sum_long),
+        SideV16::Short => (asset.oi_eff_short_q, asset.stored_pos_count_short, asset.raw_basis_sum_short_q, asset.loss_weight_sum_short),
+    };
+    match result {
+        Ok(()) => fits
+            && other_side_unchanged
+            && this_side.0 == oi + abs_q
+            && this_side.1 == count + 1
+            && this_side.2 == raw + abs_q
+            && this_side.3 == weight + loss_weight,
+        Err(_) => !fits,
+    }
+}))]
 fn add_open_interest_for_new_position(
     asset: &mut AssetStateV16,
     side: SideV16,
@@ -2719,6 +2782,51 @@ impl V16Core {
             .checked_sub(burn_num.min(source.exact_positive_claim_num))
             .ok_or(V16Error::CounterUnderflow)?;
         Ok((account_claim_bound_num, source))
+    }
+
+    /// PRODUCTION KERNEL (stranded loser backing, this domain's side): the backing
+    /// that losers paid into a domain beyond everything it owes: its fresh reserved
+    /// backing less the provider's principal less the claims on it. With no
+    /// position on the asset unsettled, every gain is a registered claim, so this
+    /// amount has no owner in the domain. Pure scalar and total;
+    /// `stranded_loser_backing_owed_to_twin_num` calls exactly this.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &u128| {
+        let after_principal = if fresh_reserved_backing_num > provider_principal_num { fresh_reserved_backing_num - provider_principal_num } else { 0 };
+        *result == if after_principal > positive_claim_bound_num { after_principal - positive_claim_bound_num } else { 0 }
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_stranded_loser_backing_num(
+        fresh_reserved_backing_num: u128,
+        provider_principal_num: u128,
+        positive_claim_bound_num: u128,
+    ) -> u128 {
+        fresh_reserved_backing_num
+            .saturating_sub(provider_principal_num)
+            .saturating_sub(positive_claim_bound_num)
+    }
+
+    /// PRODUCTION KERNEL (stranded loser backing, the twin's side): what of the
+    /// stranded backing goes to the twin domain: at most what the twin's claims and
+    /// its provider are still owed by losers (its claims plus its provider's
+    /// principal, less the backing it already holds). Pure scalar and total;
+    /// `stranded_loser_backing_owed_to_twin_num` calls exactly this.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &u128| {
+        let owed_total = twin_positive_claim_bound_num.saturating_add(twin_provider_principal_num);
+        let twin_owed = if owed_total > twin_fresh_reserved_backing_num { owed_total - twin_fresh_reserved_backing_num } else { 0 };
+        *result == if stranded_num < twin_owed { stranded_num } else { twin_owed }
+            && *result <= stranded_num
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_stranded_backing_owed_to_twin(
+        stranded_num: u128,
+        twin_positive_claim_bound_num: u128,
+        twin_provider_principal_num: u128,
+        twin_fresh_reserved_backing_num: u128,
+    ) -> u128 {
+        let twin_owed_num = twin_positive_claim_bound_num
+            .saturating_add(twin_provider_principal_num)
+            .saturating_sub(twin_fresh_reserved_backing_num);
+        stranded_num.min(twin_owed_num)
     }
 
     /// PRODUCTION KERNEL (B settlement, one bounded step of a leg's share of a
@@ -7751,6 +7859,43 @@ pub struct AccrualStepV16 {
 /// of compounding the cap at caller-selected transaction boundaries. The remainder is the
 /// numerator left after division by `MAX_MARGIN_BPS`; carrying it across calls prevents permanent
 /// low-price target pinning.
+/// The bound this step puts on the oracle: one step moves the effective price toward the
+/// target, never past it, by at most `(cap_anchor * max_change_bps + remainder_before) /
+/// MAX_MARGIN_BPS`, and carries the exact remainder of that division (below `MAX_MARGIN_BPS`). An
+/// unexposed asset (no open interest) jumps to the target; nothing moves when the price is at the
+/// target or the cap is zero. Summed over steps, the movement therefore never exceeds
+/// `cap_anchor * max_change_bps * steps / MAX_MARGIN_BPS`, whatever prices the oracle reports.
+#[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(u64, u16)>| {
+    let valid = current != 0 && target != 0 && cap_anchor != 0
+        && current <= MAX_ORACLE_PRICE && target <= MAX_ORACLE_PRICE && cap_anchor <= MAX_ORACLE_PRICE
+        && (remainder_before_bps_num as u64) < MAX_MARGIN_BPS;
+    if !valid {
+        *result == Err(V16Error::InvalidConfig)
+    } else if !exposed {
+        *result == Ok((target, 0))
+    } else if current == target || max_change_bps == 0 {
+        *result == Ok((current, 0))
+    } else {
+        // the allowance of this step, in units of 1 / MAX_MARGIN_BPS
+        let allowance = (cap_anchor as u128) * (max_change_bps as u128) + remainder_before_bps_num as u128;
+        let distance = if current > target { current - target } else { target - current } as u128;
+        match result {
+            // the target is reached only when the allowance covers the distance
+            Ok((next, 0)) if *next == target => distance * (MAX_MARGIN_BPS as u128) <= allowance,
+            // otherwise the price moves toward the target by the whole allowance in whole units,
+            // never past it, and the fraction is carried
+            Ok((next, rem)) => {
+                let moved = if *next > current { *next - current } else { current - *next } as u128;
+                // a move smaller than one unit leaves the price where it is
+                (moved == 0 || (*next > current) == (target > current))
+                    && moved < distance
+                    && (*rem as u64) < MAX_MARGIN_BPS
+                    && moved * (MAX_MARGIN_BPS as u128) + *rem as u128 == allowance
+            }
+            Err(_) => false,
+        }
+    }
+}))]
 pub fn canonical_accrual_price_step_v16(
     current: u64,
     target: u64,
@@ -11283,19 +11428,23 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         let (asset_index, side) = self.domain_asset_side(domain)?;
         let twin = self.insurance_domain_index(asset_index, opposite_side(side))?;
         let source = self.source_credit_for_domain_shape(domain)?;
-        let stranded_num = source
-            .fresh_reserved_backing_num
-            .saturating_sub(self.provider_principal_num(domain)?)
-            .saturating_sub(source.positive_claim_bound_num);
+        // PRODUCTION KERNEL: loser-paid backing beyond everything the domain owes.
+        let stranded_num = V16Core::kernel_stranded_loser_backing_num(
+            source.fresh_reserved_backing_num,
+            self.provider_principal_num(domain)?,
+            source.positive_claim_bound_num,
+        );
         if stranded_num == 0 {
             return Ok(0);
         }
         let twin_source = self.source_credit_for_domain_shape(twin)?;
-        let twin_owed_num = twin_source
-            .positive_claim_bound_num
-            .saturating_add(self.provider_principal_num(twin)?)
-            .saturating_sub(twin_source.fresh_reserved_backing_num);
-        Ok(stranded_num.min(twin_owed_num))
+        // PRODUCTION KERNEL: up to what the twin's claims and provider are still owed.
+        Ok(V16Core::kernel_stranded_backing_owed_to_twin(
+            stranded_num,
+            twin_source.positive_claim_bound_num,
+            self.provider_principal_num(twin)?,
+            twin_source.fresh_reserved_backing_num,
+        ))
     }
 
     /// Whether a stored position on `domain`'s asset, on either side, has not
