@@ -173,6 +173,8 @@ on any tree measured so far and count as unverified, not as passing:
 `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom`
 in the closure run and `composition_clear_leg_value_conservation` in the
 contracts run.
+Run alone with a four-hour limit on `d1fa39f6` (2026-11-21), the closure one
+timed out as well. The contracts one has not yet had a full four hours alone.
 
 For long audits, the shell runners in `scripts/` run harnesses in isolation and
 kill stray Kani/CBMC processes between proofs:
