@@ -2721,6 +2721,92 @@ impl V16Core {
         Ok((account_claim_bound_num, source))
     }
 
+    /// PRODUCTION KERNEL (B settlement, one bounded step of a leg's share of a
+    /// bankruptcy residual): the side's B index has moved from the leg's snapshot
+    /// `b_snap` to `target`; the leg owes `loss_weight` times the move, in units of
+    /// `1 / SOCIAL_LOSS_DEN` of an atom, plus its carried remainder `b_rem`. One step
+    /// settles at most `limit = min(chunk_atoms, endpoint_loss_atom_budget)` whole
+    /// atoms: it takes the largest move `delta_b` whose loss stays within `limit`,
+    /// charges `loss = (loss_weight * delta_b + b_rem) / SOCIAL_LOSS_DEN` and
+    /// carries the remainder. A step that cannot settle anything (no weight, no
+    /// budget, a remainder already above the limit, or no whole move within it)
+    /// asks for Recovery instead of looping. A target behind the snapshot is also
+    /// a Recovery case. Pure scalar; `account_b_settlement_chunk_from_leg` calls
+    /// exactly this. The divisions put a full-width check beyond Kani; the
+    /// contract is asserted wherever a Kani proof reaches this kernel, and it is a
+    /// target for the arithmetic prover.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<AccountBSettlementChunkV16>| match result {
+        Ok(chunk) => {
+            let limit = if chunk_atoms < endpoint_loss_atom_budget { chunk_atoms } else { endpoint_loss_atom_budget };
+            target >= b_snap
+                && chunk.delta_b <= target - b_snap
+                && chunk.remaining_after == target - b_snap - chunk.delta_b
+                && (chunk.delta_b == 0
+                    // a step with something to settle makes progress and stays within the limit
+                    || (chunk.loss <= limit
+                        && chunk.new_remainder < SOCIAL_LOSS_DEN
+                        && loss_weight
+                            .checked_mul(chunk.delta_b)
+                            .and_then(|v| v.checked_add(b_rem))
+                            == chunk.loss.checked_mul(SOCIAL_LOSS_DEN).and_then(|v| v.checked_add(chunk.new_remainder))))
+                && (chunk.delta_b != 0 || (target == b_snap && chunk.loss == 0 && chunk.new_remainder == b_rem))
+        }
+        Err(e) => *e == V16Error::RecoveryRequired || *e == V16Error::ArithmeticOverflow,
+    }))]
+    #[inline(always)]
+    pub(crate) fn kernel_b_settlement_chunk(
+        b_snap: u128,
+        b_rem: u128,
+        loss_weight: u128,
+        target: u128,
+        chunk_atoms: u128,
+        endpoint_loss_atom_budget: u128,
+    ) -> V16Result<AccountBSettlementChunkV16> {
+        if target < b_snap {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let b_remaining = target - b_snap;
+        if b_remaining == 0 {
+            return Ok(AccountBSettlementChunkV16 {
+                delta_b: 0,
+                loss: 0,
+                new_remainder: b_rem,
+                remaining_after: 0,
+            });
+        }
+        if loss_weight == 0 || endpoint_loss_atom_budget == 0 {
+            return Err(V16Error::RecoveryRequired);
+        }
+        // Both limits are collateral atoms. Convert that atom budget to the
+        // corresponding B-index delta exactly once through loss_weight below.
+        let limit = chunk_atoms.min(endpoint_loss_atom_budget);
+        let max_num = limit
+            .checked_add(1)
+            .and_then(|v| v.checked_mul(SOCIAL_LOSS_DEN))
+            .and_then(|v| v.checked_sub(1))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        if b_rem > max_num {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let max_delta_by_loss = (max_num - b_rem) / loss_weight;
+        let delta_b = b_remaining.min(max_delta_by_loss);
+        if delta_b == 0 {
+            return Err(V16Error::RecoveryRequired);
+        }
+        let num = loss_weight
+            .checked_mul(delta_b)
+            .and_then(|v| v.checked_add(b_rem))
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        let loss = num / SOCIAL_LOSS_DEN;
+        let new_remainder = num % SOCIAL_LOSS_DEN;
+        Ok(AccountBSettlementChunkV16 {
+            delta_b,
+            loss,
+            new_remainder,
+            remaining_after: b_remaining - delta_b,
+        })
+    }
+
     /// PRODUCTION KERNEL (source liens, the account's side of a new lien): a lien of
     /// `required_face_num` face backed by `required_backing_num` from one backing
     /// source raises the account's liened face and its reserved effective credit,
@@ -17673,55 +17759,15 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         target: u128,
         endpoint_loss_atom_budget: u128,
     ) -> V16Result<AccountBSettlementChunkV16> {
-        if target < leg.b_snap {
-            return Err(V16Error::RecoveryRequired);
-        }
-        let b_remaining = target - leg.b_snap;
-        if b_remaining == 0 {
-            return Ok(AccountBSettlementChunkV16 {
-                delta_b: 0,
-                loss: 0,
-                new_remainder: leg.b_rem,
-                remaining_after: 0,
-            });
-        }
-        if leg.loss_weight == 0 || endpoint_loss_atom_budget == 0 {
-            return Err(V16Error::RecoveryRequired);
-        }
-        // Both limits are collateral atoms. Convert that atom budget to the
-        // corresponding B-index delta exactly once through loss_weight below.
-        let limit = self
-            .header
-            .config
-            .public_b_chunk_atoms
-            .get()
-            .min(endpoint_loss_atom_budget);
-        let max_num = limit
-            .checked_add(1)
-            .and_then(|v| v.checked_mul(SOCIAL_LOSS_DEN))
-            .and_then(|v| v.checked_sub(1))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        if leg.b_rem > max_num {
-            return Err(V16Error::RecoveryRequired);
-        }
-        let max_delta_by_loss = (max_num - leg.b_rem) / leg.loss_weight;
-        let delta_b = b_remaining.min(max_delta_by_loss);
-        if delta_b == 0 {
-            return Err(V16Error::RecoveryRequired);
-        }
-        let num = leg
-            .loss_weight
-            .checked_mul(delta_b)
-            .and_then(|v| v.checked_add(leg.b_rem))
-            .ok_or(V16Error::ArithmeticOverflow)?;
-        let loss = num / SOCIAL_LOSS_DEN;
-        let new_remainder = num % SOCIAL_LOSS_DEN;
-        Ok(AccountBSettlementChunkV16 {
-            delta_b,
-            loss,
-            new_remainder,
-            remaining_after: b_remaining - delta_b,
-        })
+        // PRODUCTION KERNEL: one bounded step of the leg's share of a residual.
+        V16Core::kernel_b_settlement_chunk(
+            leg.b_snap,
+            leg.b_rem,
+            leg.loss_weight,
+            target,
+            self.header.config.public_b_chunk_atoms.get(),
+            endpoint_loss_atom_budget,
+        )
     }
 
     fn account_b_settlement_chunk(

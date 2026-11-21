@@ -3306,6 +3306,27 @@ fn contract_check_kernel_account_source_lien_delta() {
     );
 }
 
+// Contract check of the B-settlement step kernel. BOUNDED BINDING (flagged): the
+// B index values, the remainder, the weight and both atom limits range over 16
+// bits (64 bits did not finish in 20 minutes); the divisions by the weight and by SOCIAL_LOSS_DEN put a full-width check
+// beyond the solver. The contract (a step with something to settle charges at
+// most the limit, carries an exact remainder, and makes progress) is stated for
+// all inputs. Production (account_b_settlement_chunk_from_leg) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_b_settlement_chunk)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_b_settlement_chunk() {
+    let _ = V16Core::kernel_b_settlement_chunk(
+        kani::any::<u16>() as u128,
+        kani::any::<u16>() as u128,
+        kani::any::<u16>() as u128,
+        kani::any::<u16>() as u128,
+        kani::any::<u16>() as u128,
+        kani::any::<u16>() as u128,
+    );
+}
+
 // ROADMAP Phase 3 (Pillar S, S-L2 insurance layer): full-domain contract check
 // of the insurance-draw kernel — used==min(|pnl|, domain_available), capped by
 // the domain budget (isolation), pool->spent conservation. Production
