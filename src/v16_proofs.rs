@@ -3249,6 +3249,63 @@ fn contract_check_kernel_split_loss_at_capacity() {
     let _ = V16Core::kernel_split_loss_at_capacity(backing_num, capacity_num);
 }
 
+// Full-domain contract check of the claim-burn mirror kernel: the account's
+// claim and the domain's bound total fall by the same amount, the exact total by
+// as much of it as it holds, and nothing else in the domain's record changes.
+// Production (decrement_account_source_claim_for_domain_not_atomic) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_burn_account_source_claim)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_burn_account_source_claim() {
+    let account_claim_bound_num: u128 = kani::any();
+    let source: SourceCreditStateV16 = kani::any();
+    let burn_num: u128 = kani::any();
+    let _ = V16Core::kernel_burn_account_source_claim(account_claim_bound_num, source, burn_num);
+}
+
+// Full-domain contract check of the account side of a new source-credit lien:
+// the liened face, the reserved effective credit and the liened face and backing
+// of the chosen backing source rise by exactly the lien's amounts; the first
+// counterparty backing starts the fee clock; nothing else in the record changes.
+// Production (apply_account_source_credit_lien_delta) calls this.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_account_source_lien_delta)]
+#[kani::unwind(20)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_account_source_lien_delta() {
+    let u = || V16PodU128::new(kani::any());
+    let source = PortfolioSourceDomainV16Account {
+        domain: V16PodU32::new(kani::any()),
+        source_claim_market_id: V16PodU64::new(kani::any()),
+        source_claim_bound_num: u(),
+        source_claim_liened_num: u(),
+        source_claim_counterparty_liened_num: u(),
+        source_claim_insurance_liened_num: u(),
+        source_lien_effective_reserved: u(),
+        source_lien_counterparty_backing_num: u(),
+        source_lien_insurance_backing_num: u(),
+        source_lien_fee_last_slot: V16PodU64::new(kani::any()),
+        source_claim_impaired_num: u(),
+        source_lien_impaired_effective_reserved: u(),
+        source_lien_capital_at_risk_fee_revenue: u(),
+        source_lien_impaired_capital_at_risk_fee_revenue: u(),
+    };
+    let backing_source = if kani::any() {
+        SourceCreditBackingSourceV16::Counterparty
+    } else {
+        SourceCreditBackingSourceV16::Insurance
+    };
+    let _ = V16Core::kernel_account_source_lien_delta(
+        source,
+        backing_source,
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+}
+
 // ROADMAP Phase 3 (Pillar S, S-L2 insurance layer): full-domain contract check
 // of the insurance-draw kernel — used==min(|pnl|, domain_available), capped by
 // the domain budget (isolation), pool->spent conservation. Production
