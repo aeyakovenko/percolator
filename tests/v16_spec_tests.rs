@@ -1290,6 +1290,29 @@ fn v16_view_deposit_and_withdraw_are_the_tested_paths() {
 }
 
 #[test]
+fn v16_deposit_t28_header_success_paths_and_vault_cap() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut portfolio = account_fixture(1, 2);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let mut account = PortfolioV16ViewMut::new(&mut portfolio);
+
+    market.validate_shape().unwrap();
+    for amount in [0, MAX_VAULT_TVL] {
+        market.deposit_not_atomic(&mut account, amount).unwrap();
+        market.validate_shape().unwrap();
+        assert_eq!(market.header.vault.get(), amount);
+        assert_eq!(market.header.c_tot.get(), amount);
+        assert_eq!(account.header.capital.get(), amount);
+    }
+
+    // The arithmetic fits u128. The final header check rejects the excess.
+    assert_eq!(
+        market.deposit_not_atomic(&mut account, 1),
+        Err(V16Error::InvalidConfig)
+    );
+}
+
+#[test]
 fn v16_funding_counter_layout_canary_places_fields_before_fee_state() {
     let width = core::mem::size_of::<V16PodU128>();
 

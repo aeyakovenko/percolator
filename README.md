@@ -120,6 +120,9 @@ cargo test --features fuzz
 `cargo test --features fuzz` includes the reference-model and property tests
 that discharge the wide-arithmetic helper assumptions used by the Kani proofs.
 
+The [deposit header check](proofs/t28_header/README.md) covers the zero and positive
+paths of `T28.header` with Lean and compiler probes for Linux and Solana SBF.
+
 ## Run Kani
 
 Install once:
