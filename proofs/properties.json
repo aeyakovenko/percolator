@@ -1,5 +1,54 @@
 [
  {
+  "name": "scaled_adl_delta_fast.p21_no_e3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P21, `scaled_adl_delta_fast` (class local): for all inputs, no execution reaches the call `floor_div_signed_conservative_i128(numerator, POS_SCALE)` with arguments in its E3 panic condition. Reason: `d = POS_SCALE = 10^6 > 1`.",
+  "last_updated": "2026-11-22T23:19:08.838693+00:00"
+ },
+ {
+  "name": "scaled_adl_delta_fast.p20_no_e3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P20, `scaled_adl_delta_fast` (class local): for all inputs, no execution reaches the call `floor_div_signed_conservative_i128(numerator, den)` with arguments in its E3 panic condition. Reason: `den = ADL_ONE.checked_mul(POS_SCALE)? = 10^21 > 1`.",
+  "last_updated": "2026-11-22T23:19:08.778492+00:00"
+ },
+ {
+  "name": "V16Core::kernel_adl_scaled_accrual_index_deltas.p06_no_e3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P06, `V16Core::kernel_adl_scaled_accrual_index_deltas` (class local): for all inputs, no execution reaches the second call `floor_div_signed_conservative_i128(.., FUNDING_DEN)` (the short side) with arguments in its E3 panic condition. Reason: `d = FUNDING_DEN = 10^9 > 1`. The call occurs only in the branch where `funding_num % FUNDING_DEN != 0`, after the P05 call has returned.",
+  "last_updated": "2026-11-22T23:19:08.718662+00:00"
+ },
+ {
+  "name": "V16Core::kernel_adl_scaled_accrual_index_deltas.p05_no_e3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P05, `V16Core::kernel_adl_scaled_accrual_index_deltas` (class local): for all `price_delta`, `funding_num: i128`, `a_long`, `a_short: u128`, no execution reaches the first call `floor_div_signed_conservative_i128(f_long_num, FUNDING_DEN)` with arguments in its E3 panic condition (`d = 0`, or `n = i128::MIN` and `d = 1`). Reason: `d = FUNDING_DEN = 10^9 > 1`. The call occurs only in the branch where `funding_num % FUNDING_DEN != 0`.",
+  "last_updated": "2026-11-22T23:19:08.656863+00:00"
+ },
+ {
+  "name": "V16Core::crystallize_source_lien_fee_for_effective.p04_no_f3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P04, `V16Core::crystallize_source_lien_fee_for_effective(source: &mut PortfolioSourceDomainV16Account, impaired_effective: u128)` (class local): for every `impaired_effective` and every account `*source` (arbitrary field contents), no execution reaches the call `wide_mul_div_floor_u128(live_fee, impaired_effective, live_effective)` with arguments in its F3 panic condition. Reason, as the spec states: the call is reached only when `0 < impaired_effective < live_effective`, so the quotient is at most `live_fee`.",
+  "last_updated": "2026-11-22T23:14:46.648799+00:00"
+ },
+ {
+  "name": "f_snap_after_settlement.p22_no_d5_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P22, `f_snap_after_settlement(abs_basis, a_basis, f_snap, f_now, f_delta)` (class local): for all inputs, no execution reaches the call `mul_div_floor_u256_with_rem(..)` with arguments in its D5 panic condition. Reason, as the spec states: on the path to the call `abs_basis != 0` (early return otherwise) and `d = U256::from_u128(abs_basis)`, while `a`, `b` come from `u128` values, so `a*b < 2^256`.",
+  "last_updated": "2026-11-22T23:11:03.800777+00:00"
+ },
+ {
+  "name": "trade_notional_floor.p17_no_d5_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P17, `trade_notional_floor(size_q: u128, exec_price: u64)` (class local): for all inputs, no execution reaches the call `mul_div_floor_u256_with_rem(U256::from_u128(size_q), U256::from_u128(exec_price as u128), U256::from_u128(POS_SCALE))` with arguments in its D5 panic condition (`val(d) = 0` or `floor(val(a)*val(b)/val(d)) >= 2^256`). Reason, as the spec states: `d = POS_SCALE = 10^6`, and `a`, `b` come from `u128` values, so `a*b < 2^256`.",
+  "last_updated": "2026-11-22T23:11:03.738167+00:00"
+ },
+ {
   "name": "MarketGroupV16ViewMut::resolved_receipt_claimable_against_ledger.p15_no_f3_panic",
   "status_name": "PROVED",
   "unchecked": false,

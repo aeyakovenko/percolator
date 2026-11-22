@@ -18,3 +18,5 @@ proof_no_overflow_kernel_resolved_receipt_can_still_gain_wide_stubbed	-	verified
 proof_no_overflow_backing_utilization_fee_quote_atoms_for_lien_wide_stubbed	-	verified	-
 proof_resolved_payout_rate_recompute_leaves_a_rate_at_most_one	-	verified	-
 proof_decoded_active_leg_is_valid_for_any_loss_weight	-	verified	-
+proof_no_overflow_liquidation_projected_healthy_after_close_stubbed	-	verified	-
+proof_no_overflow_min_abs_q_for_risk_notional_at_least_wide_stubbed	-	verified	-

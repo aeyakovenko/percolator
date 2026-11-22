@@ -417,6 +417,40 @@ for _fn, _rs in sorted(_po_sites.items()):
     pieces[_pid]["evidence"] = ("rule R1, loop counters bounded by their own loop guard (po_rules.py on engine "
                                 f"{LANDED_REV}): " + "; ".join(f"line {_r['line']} ({_r['reason']})" for _r in _rs))
 
+# Batch 18 (engine 19f76585, whose src/v16.rs is 71076137's): Kani proofs in the closure layer, every input symbolic, no
+# assumption. The PO harnesses call one function each, so Kani's overflow checks cover every operation it runs.
+B18_KANI_REV = "19f76585"
+B18_KANI = {
+    "PO.liquidation_projected_healthy_after_close": "proof_no_overflow_liquidation_projected_healthy_after_close_stubbed",
+    "PO.min_abs_q_for_risk_notional_at_least": "proof_no_overflow_min_abs_q_for_risk_notional_at_least_wide_stubbed",
+}
+B18_WHAT = {
+}
+B18_STUBS = {
+    "proof_no_overflow_liquidation_projected_healthy_after_close_stubbed": ['liquidation_leg_maintenance_requirement', 'liquidation_risk_notional_ceil', 'liquidation_fee_for_close', 'liquidation_projected_health_deficit_from_parts'],
+    "proof_no_overflow_min_abs_q_for_risk_notional_at_least_wide_stubbed": ['U256::checked_mul', 'U256::checked_div', 'U256::try_into_u128'],
+}
+B18_STUB_WHY = {
+    "U256::checked_mul": "arbitrary result (wide math never panics: A1-G5)",
+    "U256::checked_div": "arbitrary result (wide math never panics: A1-G5)",
+    "U256::try_into_u128": "arbitrary result (wide math never panics: A1-G5)",
+    "wide_mul_div_floor_u128": "arbitrary result (wide math never panics: A1-G5)",
+    "V16Core::backing_utilization_rate_e9_for_source_state": "arbitrary result (its own operations are its own piece)",
+    "loss_weight_for_basis": "a deterministic stand-in (PL1 is structural: it holds for any deterministic loss weight)",
+    "liquidation_leg_maintenance_requirement": "arbitrary result (its own operations are its own piece)",
+    "liquidation_risk_notional_ceil": "arbitrary result (its own no-overflow piece is proved, batch 14)",
+    "liquidation_fee_for_close": "arbitrary result (its own no-overflow piece is proved, batch 14)",
+    "liquidation_projected_health_deficit_from_parts": "arbitrary result (its own operations are its own piece)",
+}
+for _pid, _h in B18_KANI.items():
+    assert _pid in pieces, f"{_pid}: no such piece (the census or the ledger changed?)"
+    pieces[_pid]["status"] = "verified by Kani"
+    _st = B18_STUBS.get(_h) or []
+    pieces[_pid]["evidence"] = (f"{_h} (Kani, closure layer, every input symbolic, no assumption"
+                                + (f"; {B18_WHAT[_pid]}" if _pid in B18_WHAT else "")
+                                + ("; stubbed: " + "; ".join(f"{x}: {B18_STUB_WHY[x]}" for x in _st) if _st else "")
+                                + f"), engine {B18_KANI_REV}")
+
 # TR: the real class of layer T, split into statements local to the header and one account
 for pid, text in (
     ("TR.a", "H2, H3: every flag write is 0, 1 or `encode_bool(..)`; `recovery_reason` is written only by `from_runtime(Some(reason))`"),
