@@ -18453,6 +18453,31 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidConfig);
         }
+        self.accrue_asset_to_admitted_not_atomic(
+            config,
+            asset_index,
+            now_slot,
+            effective_price,
+            funding_rate_e9,
+            protective_progress_committed,
+        )
+    }
+
+    /// The single-segment accrual after its prologue: `config` is the decoded market config,
+    /// the market is Live, and the asset index, the price and the funding rate passed the
+    /// entry point's guard. Only `accrue_asset_to_not_atomic` calls it. It is a function of its
+    /// own so that a proof can stand in for it and show that the prologue, which only reads,
+    /// refuses every price outside the oracle range (INV-045, clause C0).
+    #[inline(always)]
+    fn accrue_asset_to_admitted_not_atomic(
+        &mut self,
+        config: V16Config,
+        asset_index: usize,
+        now_slot: u64,
+        effective_price: u64,
+        funding_rate_e9: i128,
+        protective_progress_committed: bool,
+    ) -> V16Result<AccrueAssetOutcomeV16> {
         self.require_asset_accruable(asset_index)?;
         let old = self.asset_state(asset_index)?;
         if now_slot < old.slot_last {
@@ -18594,6 +18619,29 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::InvalidConfig);
         }
+        self.accrue_asset_path_to_admitted_not_atomic(
+            config,
+            asset_index,
+            now_slot,
+            raw_oracle_target_price,
+            steps,
+            protective_progress_committed,
+        )
+    }
+
+    /// The path accrual after its prologue, as `accrue_asset_to_admitted_not_atomic` is for the
+    /// single-segment accrual: the market is Live and the asset index, the target price and the
+    /// slot passed the entry point's guard. Only `accrue_asset_path_to_not_atomic` calls it.
+    #[inline(always)]
+    fn accrue_asset_path_to_admitted_not_atomic(
+        &mut self,
+        config: V16Config,
+        asset_index: usize,
+        now_slot: u64,
+        raw_oracle_target_price: u64,
+        steps: &[AccrualStepV16],
+        protective_progress_committed: bool,
+    ) -> V16Result<AccrueAssetOutcomeV16> {
         self.require_asset_accruable(asset_index)?;
         let mut asset = self.asset_state(asset_index)?;
         let k_long_before = asset.k_long;

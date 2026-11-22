@@ -3572,6 +3572,240 @@ fn proof_index_update_without_funding_leaves_funding_indices() {
     }
 }
 
+// INV-045, clause C0 of the closure map, for every price: neither accrual entry point accepts a
+// price of 0 or above MAX_ORACLE_PRICE, and the refusal comes in the prologue, which only reads
+// (the config, the mode, the asset count and, on the path, the market clock), so the market is
+// left as it was. The body after the prologue is a function of its own
+// (`accrue_asset_to_admitted_not_atomic`, `accrue_asset_path_to_admitted_not_atomic`) and is
+// replaced here by a stand-in that fails the proof if it is ever called; the solver then does not
+// encode it. (With the body in, the guard stays undecided for a symbolic price and the encoding
+// ran out of memory: tests/proofs_v16.rs checks three concrete prices against the whole
+// function.) One Live market with one active asset; the asset index, slot, funding rate, steps
+// and flag are symbolic. The second proof shows the guard is exact: with the other inputs
+// admitted, every price from 1 to MAX_ORACLE_PRICE reaches the body.
+#[cfg(all(kani, feature = "closure"))]
+fn stand_in_accrual_body_never_called<'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _config: V16Config,
+    _asset_index: usize,
+    _now_slot: u64,
+    _effective_price: u64,
+    _funding_rate_e9: i128,
+    _protective_progress_committed: bool,
+) -> V16Result<AccrueAssetOutcomeV16>
+where
+    'a: 'a, // early-bound, as the method's lifetime is (Kani counts it as a generic parameter)
+{
+    kani::assert(
+        false,
+        "a price outside the oracle range reached the accrual body",
+    );
+    Err(V16Error::InvalidConfig)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stand_in_path_accrual_body_never_called<'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _config: V16Config,
+    _asset_index: usize,
+    _now_slot: u64,
+    _raw_oracle_target_price: u64,
+    _steps: &[AccrualStepV16],
+    _protective_progress_committed: bool,
+) -> V16Result<AccrueAssetOutcomeV16>
+where
+    'a: 'a, // early-bound, as the method's lifetime is (Kani counts it as a generic parameter)
+{
+    kani::assert(
+        false,
+        "a price outside the oracle range reached the path accrual body",
+    );
+    Err(V16Error::InvalidConfig)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stand_in_accrual_body_reached<'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _config: V16Config,
+    _asset_index: usize,
+    _now_slot: u64,
+    _effective_price: u64,
+    _funding_rate_e9: i128,
+    _protective_progress_committed: bool,
+) -> V16Result<AccrueAssetOutcomeV16>
+where
+    'a: 'a, // early-bound, as the method's lifetime is (Kani counts it as a generic parameter)
+{
+    // the prologue never returns NonProgress: this value says the body was called
+    Err(V16Error::NonProgress)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stand_in_path_accrual_body_reached<'a, T>(
+    _market: &mut MarketGroupV16ViewMut<'a, T>,
+    _config: V16Config,
+    _asset_index: usize,
+    _now_slot: u64,
+    _raw_oracle_target_price: u64,
+    _steps: &[AccrualStepV16],
+    _protective_progress_committed: bool,
+) -> V16Result<AccrueAssetOutcomeV16>
+where
+    'a: 'a, // early-bound, as the method's lifetime is (Kani counts it as a generic parameter)
+{
+    Err(V16Error::NonProgress)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn kani_one_live_asset_market() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0).unwrap();
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    {
+        let mut v = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        v.activate_empty_market_not_atomic(0, 100, 1).unwrap();
+    }
+    (header, markets)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_to_admitted_not_atomic,
+    stand_in_accrual_body_never_called
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_path_to_admitted_not_atomic,
+    stand_in_path_accrual_body_never_called
+)]
+fn proof_accrual_prologue_refuses_every_price_outside_the_oracle_range() {
+    let (mut header, mut markets) = kani_one_live_asset_market();
+    let price: u64 = kani::any();
+    kani::assume(price == 0 || price > MAX_ORACLE_PRICE);
+    let asset_index: usize = kani::any();
+    let now_slot: u64 = kani::any();
+    let funding_rate_e9: i128 = kani::any();
+    let committed: bool = kani::any();
+    let steps = [AccrualStepV16 {
+        effective_price: kani::any(),
+        funding_rate_e9: kani::any(),
+        price_move_remainder_before_bps_num: kani::any(),
+        price_move_remainder_after_bps_num: kani::any(),
+    }];
+    let step_count: usize = kani::any();
+    kani::assume(step_count <= 1);
+    let path: bool = kani::any();
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = if path {
+        market.accrue_asset_path_to_not_atomic(
+            asset_index,
+            now_slot,
+            price,
+            &steps[..step_count],
+            committed,
+        )
+    } else {
+        market.accrue_asset_to_not_atomic(asset_index, now_slot, price, funding_rate_e9, committed)
+    };
+    assert!(matches!(result, Err(V16Error::InvalidConfig)));
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &market.markets[0].engine
+    ));
+    kani::cover!(path, "path accrual refused");
+    kani::cover!(!path && price == 0, "single-segment accrual refuses 0");
+    kani::cover!(
+        !path && price == u64::MAX,
+        "single-segment accrual refuses u64::MAX"
+    );
+}
+
+// The same refusal for every header: the header is arbitrary bytes, so the config and the mode
+// may not even decode. Whatever they hold, a price outside the oracle range ends in an error
+// before the body and the market is left as it was.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_to_admitted_not_atomic,
+    stand_in_accrual_body_never_called
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_path_to_admitted_not_atomic,
+    stand_in_path_accrual_body_never_called
+)]
+fn proof_accrual_prologue_refuses_every_price_outside_the_oracle_range_for_every_header() {
+    let bytes: [u8; core::mem::size_of::<MarketGroupV16HeaderAccount>()] = kani::any();
+    let mut header: MarketGroupV16HeaderAccount = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut header).copy_from_slice(&bytes);
+    let mut markets = [Market::new(0u64, EngineAssetSlotV16Account::default())];
+    let price: u64 = kani::any();
+    kani::assume(price == 0 || price > MAX_ORACLE_PRICE);
+    let asset_index: usize = kani::any();
+    let now_slot: u64 = kani::any();
+    let path: bool = kani::any();
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = if path {
+        market.accrue_asset_path_to_not_atomic(asset_index, now_slot, price, &[], kani::any())
+    } else {
+        market.accrue_asset_to_not_atomic(asset_index, now_slot, price, kani::any(), kani::any())
+    };
+    assert!(result.is_err());
+    assert!(kani_eq_market_group_v16_header_account(
+        &header_before,
+        market.header
+    ));
+    assert!(kani_eq_engine_asset_slot_v16_account(
+        &slot_before,
+        &market.markets[0].engine
+    ));
+    kani::cover!(
+        matches!(result, Err(V16Error::InvalidConfig)),
+        "the guard itself refused"
+    );
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_to_admitted_not_atomic,
+    stand_in_accrual_body_reached
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::accrue_asset_path_to_admitted_not_atomic,
+    stand_in_path_accrual_body_reached
+)]
+fn proof_accrual_prologue_admits_every_price_inside_the_oracle_range() {
+    let (mut header, mut markets) = kani_one_live_asset_market();
+    let price: u64 = kani::any();
+    kani::assume(price >= 1 && price <= MAX_ORACLE_PRICE);
+    let now_slot: u64 = kani::any();
+    kani::assume(now_slot >= header.current_slot.get());
+    let path: bool = kani::any();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = if path {
+        market.accrue_asset_path_to_not_atomic(0, now_slot, price, &[], kani::any())
+    } else {
+        market.accrue_asset_to_not_atomic(0, now_slot, price, 0, kani::any())
+    };
+    assert!(matches!(result, Err(V16Error::NonProgress)));
+    kani::cover!(
+        path && price == MAX_ORACLE_PRICE,
+        "path accrual admits MAX_ORACLE_PRICE"
+    );
+    kani::cover!(!path && price == 1, "single-segment accrual admits 1");
+}
+
 // INV-045, the residue of engine issue #132. In every state the per-asset scan
 // admits, a side that still holds raw basis but no effective open interest has
 // the minimum A index, 1, so its legs carry at most `raw_basis_sum / ADL_ONE`

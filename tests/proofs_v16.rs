@@ -1186,7 +1186,9 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
 // of 0 from becoming a mark. (The check is the first one after the config and the mode are read; no
 // write precedes it in either function.) The prices are the boundary values 0, MAX_ORACLE_PRICE + 1
 // and u64::MAX, each concrete: with a symbolic price the guard stays undecided and the whole accrual
-// body is encoded, which ran out of memory at 24 GB. Everything else is symbolic.
+// body is encoded, which ran out of memory at 24 GB. Everything else is symbolic. Every other price is
+// covered in src/v16_proofs.rs (`proof_accrual_prologue_refuses_every_price_outside_the_oracle_range`
+// and its companions), which replace the body after the prologue by a stand-in.
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
