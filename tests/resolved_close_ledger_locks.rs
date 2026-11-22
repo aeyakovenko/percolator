@@ -19,7 +19,7 @@ use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
     PortfolioAccountV16Account, PortfolioLegV16, PortfolioV16ViewMut, ProvenanceHeaderV16,
     ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, SideV16, TradeRequestV16, V16Config,
-    V16Error, BOUND_SCALE, POS_SCALE, PUBLIC_B_CHUNK_ATOMS,
+    V16Error, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, PUBLIC_B_CHUNK_ATOMS,
 };
 
 const PRICE: u64 = 1_000_000;
@@ -466,12 +466,89 @@ fn lev_maker_gain(trader_side: SideV16) -> u128 {
     LEV_TRADER_CAPITAL + lev_unpaid_loss(trader_side)
 }
 
-/// The maker of the leveraged book is paid whole up to the precision of the
-/// resolved payout rate: claims are bounded in units of 1 / BOUND_SCALE atom, so
-/// up to one part in BOUND_SCALE of a claim (under one atom in the normal book,
-/// a few thousand atoms here) stays in the vault as dust. Never more than whole.
-fn lev_paid_whole(paid: u128, whole: u128) -> bool {
-    paid <= whole && whole - paid <= whole / BOUND_SCALE + 1
+/// Whole atoms of source backing the market still holds after every claim on
+/// it was realized, over both source domains of the asset.
+fn leftover_source_backing(book: &Book) -> u128 {
+    let engine = &book.markets[0].engine;
+    [engine.source_credit_long, engine.source_credit_short]
+        .iter()
+        .map(|state| {
+            let state = state.try_to_runtime().unwrap();
+            assert_eq!(state.positive_claim_bound_num, 0, "no claim left");
+            state.fresh_reserved_backing_num / BOUND_SCALE
+        })
+        .sum()
+}
+
+/// The maker of the leveraged book is paid whole, the last few thousand atoms
+/// one backing horizon late. Resolved close converts the maker's source-backed
+/// gain at the domain's credit rate, which is floored to 1 / CREDIT_RATE_SCALE,
+/// so the conversion can leave up to `claim / CREDIT_RATE_SCALE + 1` atoms of
+/// the loser's backing in the domain (2,688 with a long trader and 3,955 with a
+/// short one when the Live crank began the close; none when resolved close
+/// began it). The junior residual leaves fresh source backing out, so the first
+/// payout is short by exactly that leftover. Once the backing bucket has lapsed,
+/// expiring it releases the leftover into the junior pool and raises the payout
+/// rate, and the maker's next close pays it as a top-up: the maker ends paid
+/// whole and the vault empty.
+#[track_caller]
+fn assert_lev_maker_paid_whole_after_backing_expiry(
+    book: &mut Book,
+    payouts: &mut [u128],
+    whole: u128,
+    case: &str,
+) {
+    let leftover = leftover_source_backing(book);
+    let paid = payouts[MAKER];
+    assert!(paid <= whole, "{case}: maker payout {paid} of {whole}");
+    assert_eq!(
+        whole - paid,
+        leftover,
+        "{case}: first payout short by the leftover backing"
+    );
+    assert_eq!(
+        book.vault(),
+        leftover,
+        "{case}: the vault holds the leftover"
+    );
+    let claim = whole - LEV_MAKER_CAPITAL + 1;
+    assert!(
+        leftover <= claim / CREDIT_RATE_SCALE + 1,
+        "{case}: leftover {leftover} over the rate precision of a {claim} claim"
+    );
+    if leftover == 0 {
+        return;
+    }
+    let engine = &book.markets[0].engine;
+    let buckets = [engine.backing_long, engine.backing_short].map(|b| b.try_to_runtime().unwrap());
+    for (domain, bucket) in buckets.iter().enumerate() {
+        if bucket.fresh_unliened_backing_num == 0 {
+            continue;
+        }
+        let lapsed = bucket.expiry_slot;
+        assert!(
+            lapsed > book.header.current_slot.get(),
+            "{case}: still fresh"
+        );
+        assert_eq!(
+            book.market(|m| m.expire_source_backing_bucket_not_atomic(domain, lapsed - 1)),
+            Err(V16Error::Stale),
+            "{case}: domain {domain} expires only once lapsed"
+        );
+        book.market(|m| m.advance_resolved_slot_not_atomic(lapsed))
+            .unwrap();
+        book.market(|m| m.expire_source_backing_bucket_not_atomic(domain, lapsed))
+            .unwrap();
+    }
+    assert_eq!(leftover_source_backing(book), 0, "{case}: backing released");
+    assert_eq!(
+        book.close(MAKER),
+        Ok(ResolvedCloseOutcomeV16::Closed { payout: leftover }),
+        "{case}: top-up"
+    );
+    payouts[MAKER] += leftover;
+    assert_eq!(payouts[MAKER], whole, "{case}: maker paid whole");
+    assert_eq!(book.vault(), 0, "{case}: vault empty");
 }
 
 fn lev_bankrupt_trader(trader_side: SideV16) -> Book {
@@ -703,7 +780,7 @@ fn resolved_close_finalizes_a_partly_booked_close_the_owner_repaid() {
             assert_eq!(book.ledger(TRADER).b_loss_booked, CHUNK, "{case}");
             book.deposit(TRADER, unpaid - CHUNK + 5);
             book.resolve();
-            let payouts = book.drain(&order).unwrap_or_else(|e| panic!("{case}: {e}"));
+            let mut payouts = book.drain(&order).unwrap_or_else(|e| panic!("{case}: {e}"));
             let ledger = book.ledger(TRADER);
             assert!(
                 ledger.active && ledger.finalized && !ledger.canceled,
@@ -721,10 +798,11 @@ fn resolved_close_finalizes_a_partly_booked_close_the_owner_repaid() {
             assert_eq!(book.charged_to_others(TRADER), CHUNK, "{case}");
             let maker_whole = LEV_MAKER_CAPITAL + lev_maker_gain(trader_side) - CHUNK;
             assert_eq!(payouts[TRADER], 5, "{case}");
-            assert!(
-                lev_paid_whole(payouts[MAKER], maker_whole),
-                "{case}: maker payout {} of {maker_whole}",
-                payouts[MAKER]
+            assert_lev_maker_paid_whole_after_backing_expiry(
+                &mut book,
+                &mut payouts,
+                maker_whole,
+                &case,
             );
             book.assert_settled(&payouts);
         }
@@ -754,16 +832,17 @@ fn resolved_close_finalizes_its_own_chunked_close_the_owner_repaid() {
         assert_eq!(book.pending_residual(TRADER), unpaid - CHUNK, "{case}");
         assert!(book.leg(TRADER).active, "{case}");
         book.deposit(TRADER, unpaid - CHUNK + 5);
-        let payouts = book
+        let mut payouts = book
             .drain(&[TRADER, MAKER])
             .unwrap_or_else(|e| panic!("{case}: {e}"));
         assert_eq!(book.charged_to_others(TRADER), CHUNK, "{case}");
         let maker_whole = LEV_MAKER_CAPITAL + lev_maker_gain(trader_side) - CHUNK;
         assert_eq!(payouts[TRADER], 5, "{case}");
-        assert!(
-            lev_paid_whole(payouts[MAKER], maker_whole),
-            "{case}: maker payout {} of {maker_whole}",
-            payouts[MAKER]
+        assert_lev_maker_paid_whole_after_backing_expiry(
+            &mut book,
+            &mut payouts,
+            maker_whole,
+            &case,
         );
         book.assert_settled(&payouts);
     }
