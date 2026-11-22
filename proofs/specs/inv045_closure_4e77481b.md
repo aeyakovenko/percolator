@@ -71,7 +71,14 @@ The statement does not yet say what the charter says, so C8 stays open:
   source of the initial prices, P1 covers every configured asset, two engine writers no instruction reaches, the slab is
   also zeroed by capacity growth and by CloseSlab).
 
-None of this is a loss of funds: initial and maintenance margin and the health certificate charge the whole adverse gap
-between the mark and the raw target (`target_lag_penalty`), whatever speed the mark moves at. The charter wording of
+Margin charges the whole adverse gap between the mark and the raw target at once (`target_lag_penalty` in the
+initial and maintenance requirements and the health certificate), so a new adverse target makes the exposed side
+liquidatable immediately. What the envelope adds is time to liquidate before the mark moves. The anchor kept after a
+staged target shortens that time: the mark can cover the gap to the staged target in one slot. Admission sizes
+maintenance for a move of `max_price_move_bps_per_slot * max_accrual_dt_slots` of the notional. By reading, the
+program stages its own mark average, which follows the engine's mark while reports are fresh and then moves by at
+most that window per trade, so a staged target would stay within one window of the mark; this is not yet shown end
+to end, so whether a staged target can cost a liquidatable position more than margin covers is an open safety
+question, not settled wording. The charter wording of
 the first two points is the owner's decision; after it, the changed clauses get a new independent read. The reader's
 report and the author's check are kept with the review notes (`review/inv045-read-2026-11-22/`).

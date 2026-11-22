@@ -145,7 +145,8 @@ md.append("Every proof of this ledger was made with overflow checks on: Kani alw
           "`+`, `-`, `*`, shift or negation that no proved no-panic piece of the function itself covers.\n")
 md.append(f"**Count.** {n_ops} such operations in {len(rows)} deployed functions of `src/v16.rs`; "
           f"{sum(len(r[2]) for r in cov_rows)} of them in {len(cov_rows)} kernels whose no-panic piece is proved or "
-          f"verified; **{sum(len(r[2]) for r in open_rows)} in {len(open_rows)} functions are open pieces (PO.*)**. "
+          f"verified; **{sum(len(r[2]) for r in open_rows)} in {len(open_rows)} functions are pieces of the ledger (PO.*)**, "
+          "open until a proof closes them (the ledger has each one's status). "
           f"Not counted: {div_sites} divisions and remainders (checked in every build, so the proofs' model and the "
           f"deployed build agree on them), {outside} operations outside deployed functions, and `src/wide_math.rs` "
           "(the arithmetic layer proved the exact panic condition of each of its functions; the P pieces state that no "
@@ -167,7 +168,7 @@ md.append("**What is already proved and depends on this.** A proved \"if it retu
 md.append("**The program.** Its own arithmetic is checked in the deployed build: an overflow aborts the "
           "transaction, which no safety statement has to exclude. A liveness statement (an instruction that must "
           "succeed) has to show it does not happen, as it shows for every other error.\n")
-md.append("## Open pieces\n\n| Piece | Line | Operations | Operators |\n|---|---|---|---|")
+md.append("## The pieces (status in the ledger)\n\n| Piece | Line | Operations | Operators |\n|---|---|---|---|")
 for q, line, ss, cov in open_rows:
     ops = collections.Counter(op for _, op, _ in ss)
     md.append(f"| `PO.{q}` | {line} | {len(ss)} (lines {', '.join(str(l) for l, _, _ in ss)}) | "
