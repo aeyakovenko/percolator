@@ -4703,3 +4703,162 @@ fn closure_leg_teardown_removes_zero_effective_oi_only_on_an_exhausted_side() {
         }
     }
 }
+
+// Batch 14: the engine's unchecked arithmetic (the proof ledger's PO pieces). The deployed
+// program builds the engine without overflow checks (its release profile checks only the
+// program's own code), so an overflowing `+`, `-`, `*`, shift or negation in the engine would
+// continue with a wrapped value. Kani checks every such operation it executes. Each proof below
+// calls one engine function with every input symbolic and no assumption, so it shows that no
+// operation the function runs overflows, whatever its caller passes. Closure layer (the records
+// that derive `kani::Arbitrary` do so there); the records that do not are built field by field.
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_close_progress_ledger_for_overflow() -> CloseProgressLedgerV16 {
+    CloseProgressLedgerV16 {
+        active: kani::any(),
+        finalized: kani::any(),
+        canceled: kani::any(),
+        close_id: kani::any(),
+        asset_index: kani::any(),
+        market_id: kani::any(),
+        domain_side: kani::any(),
+        gross_loss_at_close_start: kani::any(),
+        drift_reference_slot: kani::any(),
+        max_close_slot: kani::any(),
+        support_consumed: kani::any(),
+        junior_face_burned: kani::any(),
+        insurance_spent: kani::any(),
+        b_loss_booked: kani::any(),
+        explicit_loss_assigned: kani::any(),
+        quantity_adl_applied_q: kani::any(),
+        drift_consumed: kani::any(),
+        residual_remaining: kani::any(),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_liquidation_risk_notional_ceil() {
+    let r = liquidation_risk_notional_ceil(kani::any(), kani::any());
+    kani::cover!(matches!(r, Ok(n) if n > 0));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(2)]
+fn proof_no_overflow_active_bitmap_is_empty() {
+    let bitmap: V16ActiveBitmap = kani::any();
+    let empty = active_bitmap_is_empty(bitmap);
+    kani::cover!(empty);
+    kani::cover!(!empty);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(2)]
+fn proof_no_overflow_active_bitmap_count_ones() {
+    let bitmap: V16ActiveBitmap = kani::any();
+    let n = active_bitmap_count_ones(bitmap);
+    kani::cover!(n as usize == V16_MAX_PORTFOLIO_ASSETS_N);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_source_claim_domain_first_burn_partition() {
+    let (source_burn, rest) = V16Core::source_claim_domain_first_burn_partition(kani::any(), kani::any());
+    kani::cover!(source_burn > 0 && rest > 0);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_kernel_settle_positive_face_after_support() {
+    let r = V16Core::kernel_settle_positive_face_after_support(kani::any(), kani::any(), kani::any());
+    kani::cover!(matches!(r, Ok((pnl, burned)) if pnl > 0 && burned > 0));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_kernel_principal_cure_close_ledger() {
+    let r = V16Core::kernel_principal_cure_close_ledger(any_close_progress_ledger_for_overflow(), kani::any());
+    kani::cover!(matches!(r, Ok((_, true))));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_prepare_counterparty_backing_expiry_delta() {
+    let bucket: BackingBucketV16 = kani::any();
+    let source: SourceCreditStateV16 = kani::any();
+    let r = V16Core::prepare_counterparty_backing_expiry_delta(bucket, source, kani::any());
+    kani::cover!(r.is_ok());
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_target_effective_lag_adverse_delta() {
+    let side: SideV16 = kani::any();
+    let d = V16Core::target_effective_lag_adverse_delta(side, kani::any(), kani::any());
+    kani::cover!(d > 0);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_liquidation_fee_for_close() {
+    let r = liquidation_fee_for_close(kani::any(), kani::any(), kani::any(), kani::any(), kani::any());
+    kani::cover!(matches!(r, Ok(f) if f > 0));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_adjust_u128() {
+    let r = adjust_u128(kani::any(), kani::any(), kani::any());
+    kani::cover!(r.is_ok());
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_apply_total_delta_u64() {
+    // An associated function of the view that does not involve the view's type parameter.
+    let r = MarketGroupV16ViewMut::<'static, u8>::apply_total_delta_u64(kani::any(), kani::any(), kani::any());
+    kani::cover!(r.is_ok());
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_dynamic_asset_slot_capacity_from_account_len() {
+    // The subtraction `account_len - header_len` and its guard do not involve the slot type: the
+    // header length is the size of the header alone. The program instantiates its own slot type.
+    let r = MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len::<u8>(kani::any());
+    kani::cover!(matches!(r, Ok(n) if n > 0));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(18)]
+fn proof_no_overflow_insert_account_kf_settlement_plan_entry() {
+    let mut plan: [Option<u64>; V16_MAX_PORTFOLIO_ASSETS_N] = kani::any();
+    let r = insert_account_kf_settlement_plan_entry(&mut plan, kani::any(), kani::any());
+    kani::cover!(matches!(r, Ok(n) if n > 1));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::unwind(18)]
+fn proof_no_overflow_token_value_flow_validate() {
+    let flow: TokenValueFlowProofV16 = kani::any();
+    let r = flow.validate();
+    kani::cover!(r.is_ok());
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_kernel_advance_close_ledger() {
+    let r = V16Core::kernel_advance_close_ledger(
+        any_close_progress_ledger_for_overflow(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+    kani::cover!(matches!(r, Ok(l) if l.residual_remaining > 0));
+}
