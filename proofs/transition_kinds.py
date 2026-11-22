@@ -27,12 +27,12 @@ import re, hashlib
 
 # name -> (class, body fingerprint, note). Fingerprint: first 12 hex digits of sha256 of the body text.
 REVIEWED = {
-    "accrue_asset_path_to_not_atomic": ("local", "16113c661a32",
+    "accrue_asset_path_to_not_atomic": ("local", "6580ff37f46d",
         "writes `current_slot = now_slot` after refusing `now_slot < current_slot`, and `slot_last = asset.slot_last <= now_slot`; "
-        "`loss_stale_active` from `encode_bool`. Ends in the audit-only scan"),
-    "accrue_asset_to_not_atomic": ("local", "583d2cb21547",
+        "`loss_stale_active` from `encode_bool`. Ends in the audit-only scan Re-read 2026-11-21 at 80f8f0b4: refactor batch 9 moved the segment arithmetic into kernels; the header writes are unchanged"),
+    "accrue_asset_to_not_atomic": ("local", "7ef7181cce46",
         "writes `current_slot = max(current_slot, now_slot)` and `slot_last = asset.slot_last <= now_slot`; `loss_stale_active` from "
-        "`encode_bool`. Ends in the audit-only scan"),
+        "`encode_bool`. Ends in the audit-only scan Re-read 2026-11-21 at 80f8f0b4: refactor batch 9 moved the segment arithmetic into kernels; the header writes are unchanged"),
     "activate_empty_asset_slot_not_atomic": ("local", "5696ea1a3a3b", "a call to T05"),
     "activate_empty_market_slot_not_atomic": ("local", "ca33cea3425e",
         "header-account method: writes `next_market_id`, `current_slot`, `asset_activation_count`, `last_asset_activation_slot` and two epochs"),

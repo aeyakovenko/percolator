@@ -188,13 +188,13 @@ FEATURES=fuzz,closure KANI_Z="" LOG_DIR=kani_closure CARGO_TARGET_DIR=target/clo
 <!-- proofs:begin (generated from proofs/README_SECTION.md and the ledger; edit that file, not this block) -->
 ## Proof Status And How To Reproduce It
 
-As of 2026-11-21, for engine `cb78f1f0` and program `1074d728`: **201 of 644 pieces of the deployed build are done (171 proved by Aristotle, 30 verified by Kani); 0 of 89 charter invariants are closed.**
+As of 2026-11-22, for engine `80f8f0b4` and program `ebcded58`: **252 of 704 pieces of the deployed build are done (189 proved by Aristotle, 63 verified by Kani); 0 of 89 charter invariants are closed.**
 
 | Phase | What | Proved |
 |---|---|---|
-| 1 | Arithmetic and kernels | 191 of 191 |
+| 1 | Arithmetic and kernels | 238 of 245 |
 | 2 | The engine cannot panic and keeps the header | 9 of 95 |
-| 3 | The engine keeps the whole market state | 1 of 197 |
+| 3 | The engine keeps the whole market state | 5 of 203 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -214,7 +214,7 @@ What the numbers do not say:
 - No charter invariant is closed yet. A proved piece is a piece of an invariant.
 - No Kani proof executes a trade, and the proof file records the trade, the full account refresh
   and the full resolved close as beyond the solver budget (a resolved close of a flat account is
-  proved). `proofs/specs/kani_gap_map_cb78f1f0.md` lists what no harness reaches. That code is where
+  proved). `proofs/specs/kani_gap_map_80f8f0b4.md` lists what no harness reaches. That code is where
   the Aristotle work is aimed now.
 - An Aristotle proof is about one function at one revision. A proof made on an earlier revision
   counts for this one only when a function-by-function comparison shows the function, everything
@@ -230,23 +230,26 @@ What the numbers do not say:
 
 ### Expected Kani Results
 
-On engine `cb78f1f0`, Kani 0.66.0, with the three commands of "Run Kani":
+On engine `80f8f0b4`, Kani 0.66.0, with the three commands of "Run Kani":
 
 | Run | Verified | Without a verdict |
 |---|---|---|
 | `--features fuzz` | 375 | none |
 | `--features fuzz,closure` | 396 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
-| `--features fuzz,contracts -Z function-contracts` | 427 | `composition_clear_leg_value_conservation` |
+| `--features fuzz,contracts -Z function-contracts` | 448 | `composition_clear_leg_value_conservation` |
 
-How the table was obtained for this revision. The closure run is a full run on `cb78f1f0`. For the
-other two runs, the shared machine's memory did not allow full runs, so on `cb78f1f0` every
-harness that can reach a function changed or added since `d1fa39f6` was run (`proofs/kani_reach.py`
-over the call graph, which can only over-approximate what a harness reaches; `proofs/changed_fns.py`
-for what changed; outside `src/v16.rs` the two revisions differ only by added harnesses, and no
-type changed): 45 harnesses with `--features fuzz` and 54 with the contracts command, all
-verified, together with 201 further harnesses of the first command that were run before the
-machine got busy. Every other harness runs only code identical to `d1fa39f6`'s, where it was
-verified in full runs; the numbers above count both.
+How the table was obtained for this revision. The runs were made on the batch's commit before it
+was rebased onto a documentation-only commit of master; `src/`, `tests/` and the Cargo files of that
+commit are identical to `80f8f0b4`'s. Every harness that can reach a function changed or added since
+`cb78f1f0` was run on that code (`proofs/kani_reach.py` over the
+call graph, which can only over-approximate what a harness reaches; `proofs/changed_fns.py` for what
+changed; outside `src/v16.rs` the revisions differ only by added harnesses and a test file, and no
+type changed): 110 harnesses with `--features fuzz` and 123 with the contracts command (21 of them
+new), all verified. The affected harnesses of the closure run are harnesses of the first command on
+identical code, apart from the one without a verdict, as before. The change to config admission is
+not counted as reaching a harness: no harness gives the validation a public B chunk above
+`MAX_VAULT_TVL`. Every other harness runs only code identical to `cb78f1f0`'s, where it verified;
+the numbers above count both. Since then 5 proofs were added and verified one by one: 1 with `--features fuzz`, 1 in the closure run, 3 in the contracts run. `proofs/kani_added.tsv` lists them with their verdict in each run; add the ones marked verified to the numbers above.
 
 A whole run takes one and a half to two hours on a 64-core machine at
 `-j 12 --output-format terse`. Run them one after the other: the two harnesses without a verdict
@@ -258,7 +261,7 @@ What the suite reaches and what it executes:
 python3 proofs/kani_reach.py .                                        # functions no harness can reach
 python3 proofs/kani_reach.py . --paths liquidate_account_not_atomic   # a call path from a harness
 cargo kani --tests --features fuzz --coverage -Z source-coverage      # which code the harnesses execute
-python3 proofs/kani_cov_report.py . cb78f1f0 target/kani               # report from those results
+python3 proofs/kani_cov_report.py . 80f8f0b4 target/kani               # report from those results
 ```
 
 ### Reproduce The Aristotle Proofs

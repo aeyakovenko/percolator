@@ -25,7 +25,7 @@ evid = {i for i, k in kind_of.items() if k in ("process", "compute")}
 PH = [
     ("1", "Arithmetic and kernels", lambda i: re.match(r"[A-G]\d", i) is not None and not i.startswith("G.") or i.startswith("K")),
     ("2", "The engine cannot panic and keeps the header", lambda i: i.startswith("P") or re.match(r"T\d+\.header$", i) is not None or i.startswith("TR.") or i.startswith("X")),
-    ("3", "The engine keeps the whole market state", lambda i: re.match(r"T\d+\.(scan|account|mirror)$", i) is not None or re.match(r"S\d+\.", i) is not None or re.match(r"T[FAB]\.|TC\d+$", i) is not None or i in ("G.M", "G.other")),
+    ("3", "The engine keeps the whole market state", lambda i: re.match(r"T\d+\.(scan|account|mirror)$", i) is not None or re.match(r"S\d+\.", i) is not None or re.match(r"T[FAB]\.|TC\d+$", i) is not None or i.startswith("AC.") or i in ("G.M", "G.other")),
     ("4", "The program's instructions", lambda i: re.match(r"W\d", i) is not None or i in ("G.C", "G.init", "G.reach", "Y.runtime", "Y.spl", "Y.oracle")),
     ("5", "Each safety and history invariant closed", lambda i: i in kind_of and i not in live and i not in evid),
     ("6", "Liveness", lambda i: i.startswith("L") or i in live),
@@ -213,19 +213,24 @@ order of the margin checks from the source.
    differential tests. Cheaper and weaker: the link is tested, not proved.
 3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
 
-**The refactor so far.** Engine `cb78f1f0` carries the first two batches: the arithmetic of the
+**The refactor so far.** Engine `80f8f0b4` carries batches 1 to 9: the arithmetic of the
 trade fee, a loss paid from capital, the initial-margin lien need, the liquidation deficit, the
-incremental certificate, the residual reward credit, the positive-PnL totals, the negative-PnL
-account count and the start of a bankrupt-close ledger is in ten kernels (K64 to K73), each
-verified by Kani for every input, and the methods only read fields, call them and write the
-results. Each batch lands only when the engine's suites pass, its differential oracles are
-byte-identical to the previous revision, all three Kani runs pass, and the program's full gate
-passes against it. Further batches (the residual, both equity measures, the gain-against-loss
-rule, the capital-backed loss, the Resolved loss booking, the account-and-domain claim burn, the
-account side of a new lien, the B-settlement step) are written and checked and go through the same
-gates. What remains is mostly loops that read and write state as they go (the loss settlement, the
-lien consumption, the refresh): there the method has to be split into a pure plan over a snapshot
-and an apply step.
+incremental certificate, the residual reward credit, the PnL totals and bounds, the start of a
+bankrupt-close ledger, the residual, both equity measures, the gain-against-loss rule, the
+capital-backed loss, the Resolved loss booking, the terminal refill, the loss split, the claim burn,
+the account side of a new lien, the stranded loser backing, one B-settlement step, one
+bankruptcy-residual step and the accrual's price cap, funding and K/F index update is in kernels
+K64 to K93; the methods only read fields, call them and write the results. Kani verifies fourteen
+of the twenty batch 3-9 kernels for every input; the other six it checks for bounded inputs, and the
+prover proves them at full width (K91, K93 done; K88 done, final check pending; K76 to K78 written,
+not yet run). Each batch lands only when the engine's suites pass, its differential oracles are
+byte-identical to the previous revision, the Kani harnesses that can reach the changed code verify,
+and the program's full gate passes against it. The work also found and fixed one admission hole:
+a market could be created with a public B chunk large enough that every B-settlement step on a side
+overflowed after a social loss, freezing its positions; admission now refuses a chunk above
+MAX_VAULT_TVL. What remains is mostly loops that read and write state as they go (the loss
+settlement, the lien consumption, the refresh): there the method has to be split into a pure plan
+over a snapshot and an apply step.
 
 Meanwhile Kani closes what it can reach: since `d1fa39f6`, proofs were added for entry points no
 harness called (the gates of the trade, the rebalance and the Recovery routes, the resolved clock,

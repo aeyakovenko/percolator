@@ -20,9 +20,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # and the engine source is the checkout itself (which must be at LANDED_REV); the program source comes
 # from a checkout of percolator-prog at WRAPPER_REV, named by LEDGER_WRAPPER_SRC.
 _here = os.path.dirname(os.path.abspath(__file__))
-_frozen = os.path.join(_here, "src_cb78f1f0/v16.rs")
+_frozen = os.path.join(_here, "src_80f8f0b4/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_1074d728/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_ebcded58/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -41,8 +41,14 @@ NEW_REV = "c030aa40"            # the #449 engine change, master from 2026-11-20
 # engine's methods into pure kernels (specs/changed_since_c030aa40_at_cb78f1f0.md and
 # specs/changed_since_d1fa39f6_at_cb78f1f0.md: no listed kernel changed; only private methods changed,
 # and ten kernels K64 to K73 are new, each verified by Kani for every input).
-PREV_LANDED_REV = "d1fa39f6"
-LANDED_REV = "cb78f1f0"
+PREV_LANDED_REV = "d1fa39f6"   # the revision K61-K63 are new in
+CB_REV = "cb78f1f0"            # refactor batches 1-2: K64-K73
+# Rolled 2026-11-21 to 80f8f0b4: refactor batches 3-9 (K74-K93, of which fourteen are verified by Kani for every
+# input and six only for bounded inputs, with their full-width proofs by Aristotle: K91 task k1, K93 task k2, K88
+# task k3, K76-K78 task k4) and config admission refusing a public B chunk above MAX_VAULT_TVL.
+# specs/changed_since_cb78f1f0_at_80f8f0b4.md: no listed kernel changed; its flag on K35 is a false positive (the
+# callee add_open_interest_for_new_position gained only a cfg(kani) contract attribute; the deployed text is equal).
+LANDED_REV = "80f8f0b4"
 REESTABLISH = {"T09.header", "T38.header"}
 # Kernels whose proof has to be made again for NEW_REV: specs/changed_since_add1d027_at_c030aa40.md
 # (changed_fns.py: own text, callees by name, changed types). Every other kernel, its callees and its
@@ -125,9 +131,11 @@ kernels["K60"] = "kernel_raw_basis_after_adl_reduction"     # new in the #449 en
 kernels["K61"] = "kernel_provider_protection_num"            # new in LANDED_REV (provider-protection floor)
 kernels["K62"] = "kernel_provider_protection_floor_observe"  # new in LANDED_REV
 kernels["K63"] = "kernel_provider_protection_floor_shift"    # new in d1fa39f6
-# new in cb78f1f0 (refactor batches 1-2), all verified by Kani for every input
+# new in cb78f1f0 (refactor batches 1-2, K64-K73) and in 80f8f0b4 (batches 3-9, K74-K93)
 REFACTOR_KERNELS = {}
-for _line in read("specs/kernel_contracts_list_cb78f1f0.tsv").splitlines():
+# Kani checks these only for bounded inputs (specs/kernel_contracts_spec_80f8f0b4.md); the prover proves them at full width
+BOUNDED_KERNELS = {"K76", "K77", "K78", "K88", "K91", "K93"}
+for _line in read("specs/kernel_contracts_list_80f8f0b4.tsv").splitlines():
     _f = _line.split("\t")
     if len(_f) >= 2 and int(_f[0][1:]) >= 64:
         REFACTOR_KERNELS[_f[0]] = _f[1]
@@ -142,7 +150,11 @@ for k, fn in kernels.items():
     if k in ("K61", "K62", "K63"):
         note = f" (new in engine {PREV_LANDED_REV}; its Kani contract check verifies for all inputs)"
     if k in REFACTOR_KERNELS:
-        note = f" (new in engine {LANDED_REV}: logic moved out of a method; its Kani contract check verifies for all inputs)"
+        _rev = CB_REV if int(k[1:]) <= 73 else LANDED_REV
+        if k in BOUNDED_KERNELS:
+            note = f" (new in engine {_rev}; its Kani contract check covers bounded inputs only, the full-width proof is the prover's)"
+        else:
+            note = f" (new in engine {_rev}; its Kani contract check verifies for all inputs)"
     gate = cfg_gate(fn)
     piece(f"{k}.contract", "K kernel", fn, f"`{fn}` satisfies its requires/ensures contract for every input{note}", "Aristotle")
     piece(f"{k}.nopanic", "K kernel", fn, f"no execution of `{fn}` panics under its requires", "Aristotle")
@@ -487,7 +499,7 @@ start = wsrc.index("pub enum Instruction")
 body = wsrc[start:wsrc.index("\n    }\n", start)]
 variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # what the instruction census found per instruction (wrapper_census.py -> specs/wrapper_shape_census_<rev>.md)
-WRAPPER_REV = "1074d728"
+WRAPPER_REV = "ebcded58"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -654,7 +666,7 @@ if os.path.exists(cf):
             pid, src_note = line.rstrip("\n").split("\t")
             confirmed[pid] = src_note
 for pid, src_note in confirmed.items():
-    if pieces[pid]["status"] == "proved, final check pending":
+    if pid in pieces and pieces[pid]["status"] == "proved, final check pending":
         pieces[pid]["status"] = "proved"
         pieces[pid]["evidence"] += f"; final check confirmed in {src_note}"
 
@@ -681,26 +693,129 @@ for p in props:
         pieces[pid]["status"] = "attempted, open"
         pieces[pid]["evidence"] = f"{p['name']}: batch t1 was stopped before this one finished"
 
-# Kernels of the refactor that Kani checks only for bounded inputs and Aristotle proved at full width.
-# kernel_b_settlement_chunk (refactor batch 6, revision a3efa566, task k1): pieces exist only once the
-# kernel is in the landed revision; until then the proof is recorded in its summary (k1_dl/).
-K1_ROWS = {"Spec.KernelB.kernel_b_settlement_chunk_contract": "contract",
-           "Spec.KernelB.kernel_b_settlement_chunk_nopanic": "nopanic",
-           "Spec.KernelB.kernel_b_settlement_chunk_progress": "progress",
-           "Spec.KernelB.kernel_b_settlement_chunk_refusals": "refusals"}
+# Kernels of the refactor that Kani checks only for bounded inputs and Aristotle proved at full width
+# (tasks k1 on a3efa566, k2 on f24a561c, k3 on bfd4d0c4; the functions are textually unchanged in LANDED_REV).
+BOUNDED_ROWS = {
+    "Spec.KernelB.kernel_b_settlement_chunk_contract": ("kernel_b_settlement_chunk", "contract", "k1", "a3efa566", None),
+    "Spec.KernelB.kernel_b_settlement_chunk_nopanic": ("kernel_b_settlement_chunk", "nopanic", "k1", "a3efa566", None),
+    "Spec.KernelB.kernel_b_settlement_chunk_progress": ("kernel_b_settlement_chunk", "progress", "k1", "a3efa566",
+        "a step with something to settle makes progress"),
+    "Spec.KernelB.kernel_b_settlement_chunk_refusals": ("kernel_b_settlement_chunk", "refusals", "k1", "a3efa566",
+        "the exact conditions of its RecoveryRequired and ArithmeticOverflow refusals"),
+    "Spec.Accrual.canonical_accrual_price_step_v16_contract": ("canonical_accrual_price_step_v16", "contract", "k2", "f24a561c", None),
+    "Spec.Accrual.canonical_accrual_price_step_v16_nopanic": ("canonical_accrual_price_step_v16", "nopanic", "k2", "f24a561c", None),
+    "Spec.Accrual.canonical_accrual_price_step_v16_envelope": ("canonical_accrual_price_step_v16", "envelope", "k2", "f24a561c",
+        "over any chain of steps toward a fixed target, the price moves at most n * cap_anchor * max_change_bps + r0 basis-point units "
+        "and never past the target"),
+    "Spec.Accrual.canonical_accrual_price_step_v16_reaches_of_valid": ("canonical_accrual_price_step_v16", "reaches", "k2", "f24a561c",
+        "the price reaches the target once the allowance covers the distance"),
+    "Spec.KR.kernel_bankruptcy_residual_step_capacity_contract": ("kernel_bankruptcy_residual_step_capacity", "contract", "k3", "bfd4d0c4", None),
+    "Spec.KR.kernel_bankruptcy_residual_step_capacity_nopanic": ("kernel_bankruptcy_residual_step_capacity", "nopanic", "k3", "bfd4d0c4", None),
+    "Spec.KR.kernel_bankruptcy_residual_step_capacity_fits": ("kernel_bankruptcy_residual_step_capacity", "fits", "k3", "bfd4d0c4",
+        "booking the returned step never overflows the B index"),
+    "Spec.KR.kernel_bankruptcy_residual_step_capacity_zero": ("kernel_bankruptcy_residual_step_capacity", "zero", "k3", "bfd4d0c4",
+        "the step is 0 exactly when booking one atom would overflow the B index"),
+    "Spec.KR.kernel_bankruptcy_residual_step_capacity_books": ("kernel_bankruptcy_residual_step_capacity", "books", "k3", "bfd4d0c4",
+        "under the shape facts and the chunk bound, a nonzero step is always booked (no Recovery while the index has room)"),
+}
+FUNDING_ROWS = {  # task k3: the funding snapshot carried between settlements (settlement glue, not a listed kernel)
+    "Spec.KF.scaled_adl_delta_fast_delta": ("KF.delta", "scaled_adl_delta_fast",
+        "the fast funding delta is the exact floor of abs_basis * (now - then) / (a_basis * POS_SCALE)"),
+    "Spec.KF.f_snap_after_settlement_nopanic": ("KF.nopanic", "f_snap_after_settlement", "no execution panics"),
+    "Spec.KF.f_snap_after_settlement_carry_of_pos": ("KF.carry", "f_snap_after_settlement",
+        "with the exact delta, the unpaid remainder is worth less than one atom and is never a debt"),
+    "Spec.KF.f_snap_after_settlement_ok_exact": ("KF.ok", "f_snap_after_settlement",
+        "with the exact delta, the exact set of inputs it refuses (its self-check never fires)"),
+    "Spec.KF.f_snap_after_settlement_cadence": ("KF.cadence", "f_snap_after_settlement",
+        "settling in n steps never credits an account more or charges it less than settling once, and the difference is "
+        "bounded by the rounding of each step (exact when abs_basis divides den)"),
+}
 _k_of = {fn: k for k, fn in kernels.items()}
-if "kernel_b_settlement_chunk" in _k_of:
-    _kb = _k_of["kernel_b_settlement_chunk"]
-    for p in props:
-        suffix = K1_ROWS.get(p["name"])
-        if suffix is None:
-            continue
-        pid = f"{_kb}.{suffix}"
+for p in props:
+    row = BOUNDED_ROWS.get(p["name"])
+    if row is not None and row[0] in _k_of:
+        fn, suffix, task, rev, statement = row
+        pid = f"{_k_of[fn]}.{suffix}"
         if pid not in pieces:
-            piece(pid, "K kernel", "kernel_b_settlement_chunk", f"{suffix} of the B-settlement step, for every input", "Aristotle")
+            piece(pid, "K kernel", fn, f"`{fn}`: {statement}, for every input", "Aristotle")
         if p["status"].startswith("PROVED"):
             pieces[pid]["status"] = "proved, final check pending" if "unchecked" in p["status"] else "proved"
-            pieces[pid]["evidence"] = f"{p['name']} (engine a3efa566, task k1)"
+            pieces[pid]["evidence"] = f"{p['name']} (engine {rev}, task {task}; the function is unchanged in {LANDED_REV})"
+        continue
+    frow = FUNDING_ROWS.get(p["name"])
+    if frow is not None:
+        pid, fn, statement = frow
+        if pid not in pieces:
+            piece(pid, "S settlement glue", fn, f"`{fn}`: {statement}", "Aristotle")
+        if p["status"].startswith("PROVED"):
+            pieces[pid]["status"] = "proved, final check pending" if "unchecked" in p["status"] else "proved"
+            pieces[pid]["evidence"] = f"{p['name']} (engine bfd4d0c4, task k3; the function is unchanged in {LANDED_REV})"
+# A closing task's final check of these pieces (the listing keeps the cancelled task's "unchecked" flag):
+# confirmed_final_checks.tsv is read above, before these pieces exist, so apply it again here.
+for _pid, _src in confirmed.items():
+    if _pid in pieces and pieces[_pid]["status"] == "proved, final check pending":
+        pieces[_pid]["status"] = "proved"
+        pieces[_pid]["evidence"] += f"; final check confirmed in {_src}"
+# Config admission keeps every B-settlement step clear of its overflow refusal (Kani, every chunk and budget),
+# which with K91.refusals means no admitted market can freeze positions that way.
+if "kernel_b_settlement_chunk" in _k_of:
+    _pid = f"{_k_of['kernel_b_settlement_chunk']}.admission"
+    piece(_pid, "K kernel", "validate_public_user_fund_shape",
+          "every public B chunk that config admission accepts keeps the B-settlement step's largest numerator inside u128, so "
+          "(with the exact refusal conditions) no admitted market's B settlement fails with ArithmeticOverflow", "Kani")
+    pieces[_pid]["status"] = "verified by Kani"
+    pieces[_pid]["evidence"] = f"proof_admitted_public_b_chunk_keeps_b_settlement_free_of_overflow (Kani, every chunk and budget), engine {LANDED_REV}"
+# INV-045 (reworded in program a406ce3b): what one accrual segment does with and without effective open
+# interest. Kani lemmas in engine c65bb9a1 (src/v16_proofs.rs, refactor batch 10: proofs only, the deployed code is
+# LANDED_REV's); the effective-price writers are listed in specs/inv045_effective_price_writers_80f8f0b4.md.
+for _pid, _target, _text, _proof, _over in [
+    ("AC.unexposed", "accrual_activity_for_asset_segment",
+     "with no effective open interest on either side, a segment of either accrual path is neither price-move nor "
+     "funding active, and the funding amount it books is zero",
+     "proof_unexposed_accrual_segment_moves_no_equity", "every asset state, segment length, price and rate"),
+    ("AC.exposed", "accrual_activity_for_asset_segment",
+     "with effective open interest on either side, a segment that moves the effective price is equity active, so "
+     "the single-segment accrual runs the price-move cap (K76) before it books the move",
+     "proof_exposed_price_move_is_equity_active", "every asset state, segment length, price and rate"),
+    ("AC.nofunding", "kernel_accrual_index_update",
+     "a zero funding amount leaves both funding indices unchanged; only the K indices can move",
+     "proof_index_update_without_funding_leaves_funding_indices",
+     "closure layer, every K and F index, A index and price move"),
+    ("AC.residue", "side_adl_totals_are_coherent",
+     "a side the per-asset scan admits with raw basis and no effective open interest has A index 1, so its legs "
+     "carry at most raw_basis_sum / ADL_ONE quantity units (the residue of engine issue #132)",
+     "proof_scan_side_with_basis_and_no_open_interest_has_unit_a_index", "every raw basis, A index, weight and mode"),
+]:
+    piece(_pid, "S settlement glue", _target, f"`{_target}`: {_text}", "Kani")
+    pieces[_pid]["status"] = "verified by Kani"
+    pieces[_pid]["evidence"] = f"{_proof} (Kani, {_over}), engine c65bb9a1"
+piece("AC.clamp", "W wrapper", "oracle_v16::clamp_toward_engine_dt",
+      "`oracle_v16::effective_price_from_target` / `clamp_toward_engine_dt` (program): the crank's price is the clamp "
+      "when the asset has effective open interest and the target when it has none; with a nonzero anchor and target "
+      "the clamp lies between them and moves at most anchor * cap * dt / 10000, the bound the engine's price-move cap "
+      "enforces; a trade-reported price goes through the same clamp", "Aristotle")
+pieces["AC.clamp"]["evidence"] = ("queued: Aristotle task k4 Part 4 (KC.nopanic, KC.envelope, KC.reaches, KC.select) on the "
+                                  f"verbatim functions of program {WRAPPER_REV}; model checking gave no verdict, even for "
+                                  "16-bit caps and segment lengths")
+# C7 of the closure map: one jump and any chain of steps to the same price move the K indices alike
+_k78 = _k_of.get("kernel_accrual_index_update")
+if _k78 is not None:
+    piece(f"{_k78}.path", "K kernel", "kernel_accrual_index_update",
+          "`kernel_accrual_index_update`: on Ok the K indices move by exactly price_delta * a_long and "
+          "-(price_delta * a_short), and two successive updates with the same A indices move them by the sum of the "
+          "price deltas, so a jump and any chain of steps to the same price leave the same K, for every input", "Aristotle")
+    pieces[f"{_k78}.path"]["evidence"] = "queued: Aristotle task k4 (KI.path)"
+# C0 of the closure map: the price range both accrual entry points accept
+piece("AC.price_range", "S settlement glue", "accrue_asset_to_not_atomic",
+      "`accrue_asset_to_not_atomic` and `accrue_asset_path_to_not_atomic` refuse the prices 0, MAX_ORACLE_PRICE + 1 and "
+      "u64::MAX with InvalidConfig and leave the header and the asset slot unchanged (so a raw target of 0 is never "
+      "accepted as a mark); the guard is the single comparison `price == 0 || price > MAX_ORACLE_PRICE`, so every "
+      "price above the range takes the same branch", "Kani")
+# bounded evidence (three concrete prices, one fixture): by the ledger's rule it stays open
+pieces["AC.price_range"]["evidence"] = ("bounded Kani check proof_v16_public_accrual_refuses_a_price_outside_the_oracle_range_and_writes_nothing "
+                                        "(the prices 0, MAX_ORACLE_PRICE + 1 and u64::MAX; every slot, funding rate, flag and "
+                                        "step slice of up to one step; one-market fixture), engine 3f56c204; every price and "
+                                        "every market state is not machine-checked")
 
 # The trade pilot (task s2, engine d1fa39f6): the prover's names for the pieces TF, TA, TB and TC1-TC9.
 TRADE_ROWS = {
@@ -753,6 +868,8 @@ KANI_FULL_WIDTH = {
     "K63.inverse": "proof_v16_provider_flows_move_the_floor_with_the_principal (Kani, 64-bit amounts)",
 }
 for _k, _fn in REFACTOR_KERNELS.items():
+    if _k in BOUNDED_KERNELS:
+        continue
     KANI_FULL_WIDTH[f"{_k}.contract"] = f"contract_check_{_fn} (Kani, every input)"
     KANI_FULL_WIDTH[f"{_k}.nopanic"] = f"contract_check_{_fn} (Kani, every input; a panic would fail it)"
 for pid, ev in KANI_FULL_WIDTH.items():
@@ -789,6 +906,16 @@ extra = {  # pieces the coverage matrix names only in words
     "INV-030": group("D"), "INV-038": group("G"), "INV-083": group("ABCDEF"), "INV-085": group("ABCDEF"),
     "INV-048": ["K59.contract", "K59.nopanic"], "INV-051": ["K59.contract", "K59.nopanic", "K60.contract", "K60.nopanic"],
 }
+for _inv, _ids in {"INV-045": ["K76.contract", "K76.nopanic", "K93.contract", "K93.nopanic", "K93.envelope", "K93.reaches"],
+                   "INV-052": ["KF.cadence", "KF.carry", "KF.delta"],
+                   "INV-071": ["K88.contract", "K88.zero", "K88.books"],
+                   "INV-073": ["K88.books", "K91.refusals", "K91.admission"]}.items():
+    extra[_inv] = extra.get(_inv, []) + [i for i in _ids if i in pieces]
+extra["INV-045"] = extra.get("INV-045", []) + [i for i in ("AC.unexposed", "AC.exposed", "AC.nofunding", "AC.residue",
+                                                         "AC.clamp", "AC.price_range") if i in pieces]
+if "kernel_accrual_index_update" in _k_of:
+    extra["INV-045"] += [i for i in (f"{_k_of['kernel_accrual_index_update']}.contract",
+                                     f"{_k_of['kernel_accrual_index_update']}.path") if i in pieces]
 liveness = {"INV-046", "INV-057", "INV-069", "INV-071", "INV-072", "INV-073", "INV-078", "INV-082"}
 invariants = []
 for line in read("coverage_matrix.md").splitlines():
@@ -833,7 +960,7 @@ for v in invariants:
 
 def counts(ids):
     concrete = [i for i in ids if not i.endswith("*")]
-    done = sum(1 for i in concrete if pieces[i]["status"] == "proved")
+    done = sum(1 for i in concrete if pieces[i]["status"] in ("proved", "verified by Kani"))  # as the roadmap's DONE
     return done, len(concrete)
 
 # ---------------------------------------------------------------- write
@@ -928,7 +1055,7 @@ md.append("Layer T has two pieces per entry point. `.header`: the production sha
           "that only audit builds run; every entry point carries a real proof for it.\n")
 md.append("## Each invariant and its pieces\n")
 md.append("`T*`, `W*` and `L*` mean every piece of that layer applies (frame obligations included).\n")
-md.append("| Invariant | Kind | Pieces | Kernel and arithmetic pieces proved | Closed |\n|---|---|---|---|---|")
+md.append("| Invariant | Kind | Pieces | Pieces done (proved, or verified by Kani) | Closed |\n|---|---|---|---|---|")
 for v in invariants:
     done, n = counts(v["ids"])
     ids = v["ids"]

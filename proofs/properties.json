@@ -1,206 +1,430 @@
 [
  {
+  "name": "Spec.Clamp.effective_price_select",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KC.select: for all inputs, if `oracle_v16::effective_price_from_target(anchor, target, max_change_bps, dt_slots, exposed)` returns, it returns the value `clamp_toward_engine_dt(anchor, target, max_change_bps, dt_slots)` computes when `exposed`, and `target` otherwise; stated with `clampModel`, the transcription of `clamp_toward_engine_dt`'s body, together with the fact that `clamp_toward_engine_dt` itself returns `clampModel(..)`.",
+  "last_updated": "2026-11-22T02:09:33.560297+00:00"
+ },
+ {
+  "name": "Spec.Clamp.clamp_reaches",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KC.reaches: for all `u64` inputs with `p_last > 0`, `target > 0` and `|target - p_last| * 10000 <= p_last * cap_bps * dt_slots` (exact integers), if `oracle_v16::clamp_toward_engine_dt(p_last, target, cap_bps, dt_slots)` returns, it returns `target`.",
+  "last_updated": "2026-11-22T02:09:33.478802+00:00"
+ },
+ {
+  "name": "Spec.Clamp.clamp_envelope",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KC.envelope: for all `u64` inputs with `p_last > 0` and `target > 0`, if `r = oracle_v16::clamp_toward_engine_dt(p_last, target, cap_bps, dt_slots)` returns, then `min(p_last, target) <= r <= max(p_last, target)` and `|r - p_last| * 10000 <= p_last * cap_bps * dt_slots` (exact integers).",
+  "last_updated": "2026-11-22T02:09:33.400877+00:00"
+ },
+ {
+  "name": "Spec.Clamp.clamp_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KC.nopanic: for all `u64` inputs (and `bool` flag), neither `oracle_v16::clamp_toward_engine_dt(p_last, target, cap_bps, dt_slots)` nor `oracle_v16::effective_price_from_target(anchor, target, max_change_bps, dt_slots, exposed)` panics (built on its own as a one-module library crate, release profile, `overflow-checks = true`).",
+  "last_updated": "2026-11-22T02:09:33.320714+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_index_update_contract",
+  "status_name": "REFUTED",
+  "unchecked": false,
+  "description": "KI.contract (as written): for all inputs, if `V16Core::kernel_accrual_index_update(k_long, k_short, f_long, f_short, a_long, a_short, price_delta, funding_num)` returns, its result satisfies the `kani::ensures` clause above the function, literally (including `dfl.checked_mul(fd).map_or(false, ..)` and `dfs.checked_mul(fd).map_or(false, ..)` in the branch where `funding_num` is not a multiple of `fd`).",
+  "last_updated": "2026-11-22T01:56:19.398334+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_index_update_path",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KI.path: (1) if `V16Core::kernel_accrual_index_update(..)` returns `Ok((kl, ks, fl, fs))`, then `kl - k_long == price_delta * a_long` and `ks - k_short == -(price_delta * a_short)` (exact integers); (2) for two successive calls with the same `a_long` and `a_short`, the second starting from the first one's results, with price deltas `d1` then `d2` and any funding amounts, if both return `Ok`, the K indices after the second are `k_long + (d1 + d2) * a_long` and `k_short - (d1 + d2) * a_short`.",
+  "last_updated": "2026-11-22T01:54:01.974186+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_index_update_mark_to_market",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KI.mark_to_market: if `V16Core::kernel_accrual_index_update(..)` returns `Ok((kl, ks, fl, fs))` and `a_long == a_short`, then `(kl - k_long) + (ks - k_short) == 0` (exact integers).",
+  "last_updated": "2026-11-22T01:54:01.891229+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_index_update_funding_conserves",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KI.funding_conserves: if `V16Core::kernel_accrual_index_update(..)` returns `Ok((kl, ks, fl, fs))` with `a_long >= 1` and `a_short >= 1`, then with `dl = fl - f_long` and `ds = fs - f_short`: `dl * a_short + ds * a_long <= 0` and `dl * a_short + ds * a_long > -(a_long + a_short)`; and if `funding_num` is a multiple of `FD`, `dl * a_short + ds * a_long == 0` (exact integers).",
+  "last_updated": "2026-11-22T01:54:01.816462+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_index_update_floors",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KI.floors: if `V16Core::kernel_accrual_index_update(..)` returns `Ok((kl, ks, fl, fs))`, then `fl - f_long == floor(-funding_num * a_long / FD)` and `fs - f_short == floor(funding_num * a_short / FD)` (exact integers, rounded toward minus infinity, `FD = FUNDING_DEN = 10^9`), in both branches of the function.",
+  "last_updated": "2026-11-22T01:53:34.817225+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_index_update_nopanic",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KI.nopanic: for all inputs of their Rust types, neither `V16Core::kernel_accrual_index_update(..)` nor `V16Core::kernel_adl_scaled_accrual_index_deltas(price_delta, funding_num, a_long, a_short)` panics.",
+  "last_updated": "2026-11-22T01:53:34.735136+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_index_update_contract_exact",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KI.contract (corrected): for all inputs, if `V16Core::kernel_accrual_index_update(..)` returns, its result satisfies the `kani::ensures` clause with the two products `dfl * fd` and `dfs * fd` taken as exact integers (`dfl * fd <= nl < dfl * fd + fd` and `dfs * fd <= ns < dfs * fd + fd`) instead of `checked_mul`s that must fit in `i128`; every other conjunct (ranges, no `i128::MIN`, exact K updates, the multiple-of-`fd` branch, `Err(e)` only with `e == ArithmeticOverflow`) is literal.",
+  "last_updated": "2026-11-22T01:53:34.661953+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_funding_num_nopanic",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KN.nopanic: for all inputs, no execution of `V16Core::kernel_accrual_funding_num(funding_rate_e9, segment_dt, effective_price, funding_active)` panics.",
+  "last_updated": "2026-11-22T01:53:04.355735+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_funding_num_contract",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KN.contract: for all inputs, if `V16Core::kernel_accrual_funding_num(funding_rate_e9, segment_dt, effective_price, funding_active)` returns, its result satisfies the `kani::ensures` clause above the function: `Ok(0)` when `!funding_active`; otherwise `Ok(funding_rate_e9 * segment_dt * effective_price)` when both `i128` `checked_mul`s succeed, and `Err(ArithmeticOverflow)` when either overflows.",
+  "last_updated": "2026-11-22T01:53:04.277736+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_price_move_within_cap_nopanic",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KA.nopanic: for all `u64` inputs, no execution of `V16Core::kernel_accrual_price_move_within_cap(old_price, new_price, max_price_move_bps_per_slot, segment_dt)` panics.",
+  "last_updated": "2026-11-22T01:53:04.203681+00:00"
+ },
+ {
+  "name": "Spec.Seg.kernel_accrual_price_move_within_cap_contract",
+  "status_name": "IN_PROGRESS",
+  "unchecked": false,
+  "description": "KA.contract: for all `u64` inputs, if `V16Core::kernel_accrual_price_move_within_cap(old_price, new_price, max_price_move_bps_per_slot, segment_dt)` returns, its result satisfies the `kani::ensures` clause above the function: `Err(ArithmeticOverflow)` when `max_price_move_bps_per_slot * segment_dt * old_price` does not fit in `u128`, otherwise `Err(RecoveryRequired)` when `|new_price - old_price| * MAX_MARGIN_BPS` exceeds that product, and `Ok(())` when it does not.",
+  "last_updated": "2026-11-22T01:53:04.083471+00:00"
+ },
+ {
   "name": "finish_trade_checks_not_atomic.order",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TF.order (question), `finish_trade_checks_not_atomic`: whether creating the short account's lien (`create_initial_margin_source_lien_if_needed(short_account)`) can change anything the long account's certificate was computed from, so that a fresh certification of the long account after it would give a lower `certified_equity` or a higher `certified_initial_req` than the stored certificate that `ensure_initial_margin` then checks. Answer to be stated precisely: what the certificate depends on, and what the short lien creation writes.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tf_margin",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TF.margin, `MarketGroupV16ViewMut::<'_, ()>::finish_trade_checks_not_atomic`: for all inputs and all well-formed starting states, if the call returns `Ok(())`, then each account whose `long_requires_initial_margin` / `short_requires_initial_margin` argument is true has, at the return, a valid `health_cert` with `certified_equity >= 0` and `certified_equity >= certified_initial_req`. Proved from the function body, assuming TC9 (`create_initial_margin_source_lien_if_needed`) and the contracts of `ensure_initial_margin` / `ensure_no_positive_credit_initial_margin` (which wrap the `kernel_initial_margin_gate` / `kernel_locked_margin_gate` checks) as hypotheses.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tf_locked",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TF.locked, `finish_trade_checks_not_atomic`: if `locked` is true and the call returns `Ok(())`, then each account whose `*_requires_initial_margin` argument is true has, at the return, `capital + min(pnl, 0) - |fee_credits| >= certified_initial_req`, with that left side not negative (fields at the return). Proved from the function body, assuming TC9 and the contracts of `ensure_initial_margin` / `ensure_no_positive_credit_initial_margin` (the latter wraps `kernel_locked_margin_gate`).",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tf_frame",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TF.frame, `finish_trade_checks_not_atomic`: on an `Ok(())` return, (a) when `risk_increasing` is false or `locked` is true nothing at all was written (header, market slots, the view's `protection_observed`, both accounts); (b) in every case neither account has a written field other than `capital`, `health_cert` and `source_domains`, and the header has no written field other than `backing_provider_earnings_total`, `c_tot`, `risk_epoch`, `source_claim_bound_total_num`, `source_fresh_backing_total_num` and `source_insurance_credit_reserved_total_atoms`. Proved from the body assuming TC9 and the `ensure_*` margin contracts.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tc9_im_lien",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC9, `create_initial_margin_source_lien_if_needed(account)`: on `Ok(())` the account's `health_cert` is valid at the return; it writes no account field other than `capital`, `health_cert` and `source_domains`, and no header field other than `backing_provider_earnings_total`, `c_tot`, `risk_epoch`, `source_claim_bound_total_num`, `source_fresh_backing_total_num` and `source_insurance_credit_reserved_total_atoms` (market slots are not constrained, as in the stated TC9). It is not passed the other account, so it cannot write it. Deep contract: attempted only after everything else.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tc7_recertify",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC7, `recertify_account_after_trade_delta(account, asset_index, old_abs_q, new_abs_q, price)` (takes `&self`): writes nothing in the market (header, slots, `protection_observed`), and in the account at most `health_cert`.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "transfer_trade_residual_reward_credit.frame",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC6, `MarketGroupV16ViewMut::<'_, ()>::transfer_trade_residual_reward_credit(long_account, short_account, &trade_preflight, asset_index)` (takes `&self`): writes nothing in the market (header, slots, `protection_observed`), and in the two accounts at most `residual_received_atoms_total` and `residual_spent_principal_atoms_total`; the `trade_preflight` it borrows is unchanged (and given back if it panics).",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tc5_position_delta",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC5 (strengthened), `apply_current_position_delta_with_lookup(account, asset_index, delta_q, lookup)`: on `Ok(())` it has written no header field other than `resolved_payout_blocker_count` and `risk_epoch`, no account field other than `active_bitmap`, `health_cert`, `legs` and `liquidation_lock`, and no market slot other than the slot of `asset_index`; with `delta_q != 0` the account's signed raw position on `asset_index` is `lookup.next_q` afterwards and its legs on other assets are unchanged; with `delta_q == 0` nothing at all is written. Deep contract: attempted only after everything else.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tc4_terminal_residual",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC4 (strengthened), `begin_terminal_trade_residual_if_needed(account, asset_index, lookup, is_final_batch_fill, attributable_asset_before_refresh)`: on `Ok(())` it has written no header field other than `resolved_payout_blocker_count`, no account field other than `close_progress`, and no market slot other than the slot of `asset_index`; and nothing at all when `is_final_batch_fill` is false, when `lookup.current_q == 0` or `lookup.next_q != 0`, or when `account.header.pnl >= 0`.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tc3_risk_change",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC3, `require_asset_risk_change_allowed(asset_index, risk_increasing)` (takes `&self`): writes nothing; with `risk_increasing` true it returns `Ok(())` only if the slot of `asset_index` exists and its asset's stored `a_long` and `a_short` both equal `ADL_ONE`.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tc2_preflight",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC2, `validate_trade_position_preflight(&long_view, &short_view, request, long_lookup, short_lookup)` (takes `&self`): writes nothing, and on `Ok(p)`: `p.long_lookup == long_lookup`, `p.short_lookup == short_lookup`, `p.long_old_abs_q == |long_lookup.current_effective_q|`, `p.long_new_abs_q == |long_lookup.next_effective_q|`, the same for short, and `p.risk_increasing` is true exactly when `|next_effective_q| > |current_effective_q|` for at least one of the two lookups.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tc1_charge_fee",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC1, `MarketGroupV16ViewMut::<'_, ()>::charge_account_fee_current_not_atomic(account, requested_fee)`, proved from its body (no callee contract), in the no-panic form (`np = true`: no execution panics): if it returns `Ok(charged)`, then `charged == 0` if `requested_fee == 0` or `account.header.pnl < 0`, else `min(requested_fee, account.header.capital)`; if `charged == 0` nothing is written; otherwise exactly `capital` (lowered by `charged`), `m.header.c_tot` (lowered by `charged`, with `charged <= c_tot`), `m.header.insurance` (raised by `charged`) and `health_cert.valid` (set to 0) are written; `vault`, the market slots and all else are not.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tb_flag",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TB.flag, `execute_batch_with_fee_loss_stale_scoped_not_atomic(long_account, short_account, requests)` with `execute_batch_with_fee_after_tail_validation_not_atomic` treated as an opaque call (any writes to the market and the two accounts, `Ok` or `Err`, described by an arbitrary relation `\u03a8`). Every return, `Ok` or `Err`, is either an `Err` before the opaque call with nothing written, or comes after it; then, for the value `ignore` of `ignore_unrelated_loss_stale`: if `ignore` is true the opaque call started with `loss_stale_active == 0` and the state left has `loss_stale_active == f0` (its value at entry), everything else being the opaque call's final state; if `ignore` is false the entry point itself wrote nothing (in particular not the flag). `ignore` is true exactly when `f0 == 1`, `requests` is non-empty and `can_ignore_unrelated_loss_stale_for_trade` returned `Ok(true)` for the asset of every request (the loop stops at the first `Ok(false)`). Covers returns only; panics are not constrained.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.Trade.tb_checked",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TB.checked, `execute_batch_with_fee_loss_stale_scoped_not_atomic`: every `Ok` return is preceded, on the final state, by an `Ok` return of `validate_shape()` and of `validate_with_market` for both accounts, with no write in between: the final state satisfies whatever an `Ok` return of those validators guarantees (arbitrary relations `\u0398`, `\u039b` given by their contracts).",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.positions",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.positions, `apply_trade_after_refresh_not_atomic`, with an added precondition: for each account and its lookup `lk` from `position_lookups`, if `lk.next_q != lk.current_q` or the account's signed raw position on `request.asset_index` at entry already equals `lk.current_q`, then on an `Ok` return the account's signed raw position on `request.asset_index` is `lk.next_q` (an absent or inactive leg, or an active leg with raw basis 0, counts as 0) and its legs on every other asset are unchanged. Assumes TC2, TC5 and the other callee contracts.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.nopanic",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.nopanic, `apply_trade_after_refresh_not_atomic`: if every called method satisfies its contract and does not panic, no execution of the function panics (it may return `Err`). The body has no arithmetic operator or indexing of its own; its only arithmetic is `checked_sub(..).ok_or(..)` and `?` propagation, which return `Err` instead of panicking.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.gate",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.gate, `apply_trade_after_refresh_not_atomic`: on an `Ok` return the slot of `request.asset_index` exists before and after, and for each side the effective open interest after the call (`oi_eff_long_q`, `oi_eff_short_q` of that slot) is at most `MAX_OI_SIDE_Q` or at most its value at entry (the value read before the two position changes). This is exactly what `kernel_trade_side_oi_cap_gate` (TC8/K17) guarantees between the two reads of the asset state; nothing after the second read writes the slot. Assumes the callee contracts.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.frame",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.frame, `apply_trade_after_refresh_not_atomic`: an `Ok` call writes no header field other than `c_tot`, `insurance`, `resolved_payout_blocker_count` and `risk_epoch`; no account field other than `active_bitmap`, `capital`, `close_progress`, `health_cert`, `legs`, `liquidation_lock`, `residual_received_atoms_total` and `residual_spent_principal_atoms_total`; and no market slot other than the slot of `request.asset_index`. Assumes TC1-TC7 (TC4 strengthened to also write no slot other than that of `asset_index`; TC5 strengthened to write nothing when `delta_q == 0`) and the other callee contracts.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.fee",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.fee, `MarketGroupV16ViewMut::<'_, ()>::apply_trade_after_refresh_not_atomic`: with `fee = checked_fee_bps(trade_fee_notional_ceil(|request.size_q|, request.exec_price), request.fee_bps)` (as mathematical functions: the ceiling of `|size_q| * exec_price / POS_SCALE`, then the fee in basis points), every `Ok(outcome)` return has `outcome.fee_a == 0` if `fee == 0` or `L.header.pnl < 0`, else `min(fee, L.header.capital)` (values at entry), the same for `outcome.fee_b` with `S`, hence both `<= fee`; and `outcome.notional == floor(|request.size_q| * request.exec_price / POS_SCALE)`. Proved from the function body assuming the callee contracts TC1-TC8 and the contracts of `trade_notional_floor`, `trade_fee_notional_ceil`, `checked_fee_bps`, `asset_state` and `effective_abs_q_for_raw_basis` (and K58 `trade_signed_size_deltas`).",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.conservation",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.conservation, `apply_trade_after_refresh_not_atomic`: on an `Ok(outcome)` return, `m'.header.vault == m.header.vault`; `outcome.fee_a + outcome.fee_b <= m.header.c_tot`, `m'.header.c_tot == m.header.c_tot - outcome.fee_a - outcome.fee_b` and `m'.header.insurance == m.header.insurance + outcome.fee_a + outcome.fee_b`; `L'.header.capital == L.header.capital - outcome.fee_a`, `S'.header.capital == S.header.capital - outcome.fee_b` (no underflow); `L'.header.pnl == L.header.pnl` and `S'.header.pnl == S.header.pnl`. Assumes the callee contracts TC1-TC8 (and those of the fee/notional helpers, `asset_state`, `effective_abs_q_for_raw_basis`).",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "register_empty_materialized_portfolio_not_atomic.h_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T47 `MarketGroupV16ViewMut::<'_, ()>::register_empty_materialized_portfolio_not_atomic(account)`: for every market view satisfying H and every 9419-byte `PortfolioV16View` account, if the call returns `Ok(())`, then the only header field written is `materialized_portfolio_count` (raised by one), the market slots and the portfolio account are unchanged, and H holds afterwards.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.LayerT.t33_header",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T33 `finalize_side_reset_not_atomic(asset_index, side)` (on `MarketGroupV16ViewMut<'_, ()>`): for every market view satisfying H and all arguments, if the call returns `Ok(())`, then either the header is unchanged (side already `Normal`) or the only header fields written are `resolved_payout_blocker_count` (through `set_asset_state`) and `risk_epoch` (raised by one); the slice of market slots keeps its length; and H holds afterwards.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "deregister_empty_materialized_portfolio_not_atomic.h_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T29 `MarketGroupV16ViewMut::<'_, ()>::deregister_empty_materialized_portfolio_not_atomic(account)`: for every market view satisfying H and every 9419-byte `PortfolioV16View` account, if the call returns `Ok(())`, then the only header field written is `materialized_portfolio_count` (lowered by one), the market slots and the portfolio account are unchanged, and H holds afterwards.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "advance_terminal_slab_not_atomic.scan_progress.h_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T10 `MarketGroupV16ViewMut::<'_, ()>::advance_terminal_slab_not_atomic(authenticated_slot, scan_start_asset_index)`, `ScanProgress` returns. For every market view satisfying H and all arguments, if the call returns `Ok(TerminalSlabOutcomeV16::ScanProgress { .. })`, then the only header field written is `current_slot` (now `authenticated_slot`). The market slots are unchanged, and H holds afterwards.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "activate_empty_market_slot_not_atomic.market.hh_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T05 `MarketGroupV16HeaderAccount::activate_empty_market_slot_not_atomic::<Market<()>>(asset_index, slot, authenticated_price, now_slot)`: makes the same claim as the `EngineAssetSlotV16Account` instance. On `Ok(())`, `now_slot >=` the old `current_slot`, and only the six activation fields of the header are written (`asset_slot_capacity` and `config` are unchanged). Hh holds afterwards.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "activate_empty_market_slot_not_atomic.engine_slot.hh_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T05 `MarketGroupV16HeaderAccount::activate_empty_market_slot_not_atomic::<EngineAssetSlotV16Account>(asset_index, slot, authenticated_price, now_slot)`: for every header account satisfying Hh (all fields in range), every 1365-byte slot and all `u32`/`u64` arguments, if the call returns `Ok(())`, then `now_slot >=` the old `current_slot`; the header left behind differs only in `next_market_id`, `asset_activation_count`, `asset_set_epoch`, `risk_epoch` (each raised by one) and `current_slot`, `last_asset_activation_slot` (both now `now_slot`), so `asset_slot_capacity` and `config` are unchanged; and Hh holds of it.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "activate_empty_asset_slot_not_atomic.hh_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T03 `MarketGroupV16HeaderAccount::activate_empty_asset_slot_not_atomic(asset_index, slot, authenticated_price, now_slot)` calls T05 at `EngineAssetSlotV16Account`. On `Ok(())`, `now_slot >=` the old `current_slot`, and only the six activation fields of the header are written (`asset_slot_capacity` and `config` are unchanged). Hh holds afterwards.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.LayerT.t02_header",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T02 `accrue_asset_to_not_atomic(asset_index, now_slot, effective_price, funding_rate_e9, protective_progress_committed)` (on `MarketGroupV16ViewMut<'_, ()>`): for every market view satisfying H and all arguments, if the call returns `Ok(_)`, then the only header fields written are `current_slot` (now `max(current_slot, now_slot)`), `slot_last` (now at most `now_slot`), `loss_stale_active` (now 0 or 1), `oracle_epoch`, `funding_epoch` and `resolved_payout_blocker_count`; the slice keeps its length; and H holds afterwards. No assumption beyond H at entry.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
  },
  {
   "name": "Spec.LayerT.t01_header",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T01 `accrue_asset_path_to_not_atomic(asset_index, now_slot, raw_oracle_target_price, steps, protective_progress_committed)` (on `MarketGroupV16ViewMut<'_, ()>`): for every market view satisfying H and all arguments, if the call returns `Ok(_)`, then `now_slot` was at least the old `current_slot`, and the only header fields written are `current_slot` (now `now_slot`), `slot_last` (now at most `now_slot`), `loss_stale_active` (now 0 or 1), `oracle_epoch`, `funding_epoch` and `resolved_payout_blocker_count`; the slice keeps its length; the steps are unchanged; and H holds afterwards.",
-  "last_updated": "2026-11-21T15:28:21.639709+00:00"
+  "last_updated": "2026-11-22T01:36:24.914175+00:00"
+ },
+ {
+  "name": "Spec.KR.kernel_bankruptcy_residual_step_capacity_books",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KR.books: assume `weight_sum <= SOCIAL_LOSS_DEN`, `rem < SOCIAL_LOSS_DEN` and `chunk_atoms <= MAX_VAULT_TVL`. If `V16Core::kernel_bankruptcy_residual_step_capacity(b_now, weight_sum, rem, residual_remaining, chunk_atoms)` returns `Ok(c)` with `c > 0`, then for every `AssetStateV16` whose side-`opp` fields (`b_long_num`, `loss_weight_sum_long`, `social_loss_remainder_long_num` for `Long`, the `_short` fields for `Short`) are `b_now`, `weight_sum`, `rem`, the call `V16Core::apply_bankruptcy_residual_chunk_to_loss_side(&mut asset, opp, c, residual_remaining)` does not panic and returns `Ok(Some(o))` with `o.booked_loss == c`, `o.delta_b >= 1` and `o.remaining_after == residual_remaining - c`.",
+  "last_updated": "2026-11-22T01:28:06.450283+00:00"
+ },
+ {
+  "name": "Spec.KR.kernel_bankruptcy_residual_step_capacity_zero",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KR.zero: for `u128` inputs with `residual_remaining > 0`, `weight_sum > 0` and `chunk_atoms > 0`, `V16Core::kernel_bankruptcy_residual_step_capacity(b_now, weight_sum, rem, residual_remaining, chunk_atoms)` does not panic and returns `Ok(0)` exactly when `floor((SOCIAL_LOSS_DEN + rem) / weight_sum) > u128::MAX - b_now`.",
+  "last_updated": "2026-11-22T01:28:06.362006+00:00"
+ },
+ {
+  "name": "Spec.KR.kernel_bankruptcy_residual_step_capacity_fits",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KR.fits: for all `u128` inputs, `V16Core::kernel_bankruptcy_residual_step_capacity(b_now, weight_sum, rem, residual_remaining, chunk_atoms)` does not panic, and if it returns `Ok(c)` with `c > 0` then `floor((c * SOCIAL_LOSS_DEN + rem) / weight_sum) <= u128::MAX - b_now`.",
+  "last_updated": "2026-11-22T01:28:06.286057+00:00"
+ },
+ {
+  "name": "Spec.KR.kernel_bankruptcy_residual_step_capacity_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KR.nopanic: for all `u128` inputs, no execution of `V16Core::kernel_bankruptcy_residual_step_capacity(..)` panics, and it never returns `Err`: if it returns, the result is `Ok(c)` for a `u128` `c`.",
+  "last_updated": "2026-11-22T01:28:06.207009+00:00"
+ },
+ {
+  "name": "Spec.KR.kernel_bankruptcy_residual_step_capacity_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KR.contract: for all `u128` inputs, if `V16Core::kernel_bankruptcy_residual_step_capacity(b_now, weight_sum, rem, residual_remaining, chunk_atoms)` returns, its result satisfies the function's `kani::ensures` clause: `Ok(chunk)` with `chunk <= residual_remaining`, `chunk <= chunk_atoms` and `(residual_remaining != 0 && weight_sum != 0) || chunk == 0`, or `Err(e)` with `e == ArithmeticOverflow`.",
+  "last_updated": "2026-11-22T01:28:06.117255+00:00"
+ },
+ {
+  "name": "Spec.KF.f_snap_after_settlement_cadence",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KF.cadence: fix `abs_basis > 0` and `a_basis` with `den = a_basis * POS_SCALE <= u128::MAX`, a snapshot `s_0` and `n >= 1` index values `b_1, ..., b_n` (any order). Settle successively with `d_i = fl(s_(i-1), b_i)` and `s_i` the `Ok` result of `f_snap_after_settlement(abs_basis, a_basis, s_(i-1), b_i, d_i)`. If all `n` calls return `Ok`, then with `T = fl(s_0, b_n)`: `d_1 + ... + d_n <= T`, `(T - (d_1 + ... + d_n)) * den < den + n * abs_basis`, and the sum equals `T` when `den` is a multiple of `abs_basis`. The chain is made of calls of the function itself and the proof is by induction on `n`.",
+  "last_updated": "2026-11-22T01:28:06.046918+00:00"
+ },
+ {
+  "name": "Spec.KF.f_snap_after_settlement_ok_exact",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KF.ok, exact error condition and corrected `Ok` claim: with `abs_basis > 0`, `den = a_basis * POS_SCALE <= u128::MAX` and `f_delta == fl(f_snap, f_now)` (any `a_basis`), `f_snap_after_settlement` does not panic and returns `Err(ArithmeticOverflow)` exactly when `f_snap != f_now` and either `a_basis == 0` or, with `step = ceil(f_delta * den / abs_basis)`, `step` is outside `[-(2^127 - 1), 2^127 - 1]`, or `f_snap + step < i128::MIN`, or `f_now - (f_snap + step) > i128::MAX`; otherwise it returns `Ok(s)` with `s` an `i128`. If also `a_basis > 0` (added precondition), `|f_now - f_snap| + den <= i128::MAX` and `f_now - den >= i128::MIN`, it returns `Ok`.",
+  "last_updated": "2026-11-22T01:28:05.963564+00:00"
+ },
+ {
+  "name": "Spec.KF.f_snap_after_settlement_carry_of_pos",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KF.carry, corrected with the added precondition `a_basis > 0`: with `abs_basis > 0`, `a_basis > 0`, `den = a_basis * POS_SCALE <= u128::MAX` and `f_delta == fl(f_snap, f_now)`, `f_snap_after_settlement(abs_basis, a_basis, f_snap, f_now, f_delta)` does not panic, and if it returns `Ok(s)` then (i) `s <= f_now` and `abs_basis * (f_now - s) < den`, and (ii) `f_delta * den <= abs_basis * (s - f_snap) < f_delta * den + abs_basis`.",
+  "last_updated": "2026-11-22T01:28:05.895818+00:00"
+ },
+ {
+  "name": "Spec.KF.f_snap_after_settlement_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KF.nopanic: for all `u128` `abs_basis`, `a_basis` and `i128` `f_snap`, `f_now`, `f_delta`, no execution of `f_snap_after_settlement(abs_basis, a_basis, f_snap, f_now, f_delta)` panics. The calls into `mul_div_floor_u256_with_rem`, `U256::from_u128` and `try_into_u128` are covered by the earlier results D5, A1 and A3, whose proofs are reused for this build.",
+  "last_updated": "2026-11-22T01:28:05.828934+00:00"
+ },
+ {
+  "name": "Spec.KF.scaled_adl_delta_fast_delta",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KF.delta: for all `u128` `abs_basis_q`, `a_basis` and `i128` `then`, `now`, `scaled_adl_delta_fast(abs_basis_q, a_basis, then, now)` never panics, and if it returns `Some(x)` then `x = floor(abs_basis_q * (now - then) / (a_basis * POS_SCALE))` (rounded toward minus infinity). The call into `floor_div_signed_conservative_i128` is covered by the earlier result E3, whose proof is reused for this build.",
+  "last_updated": "2026-11-22T01:28:05.745653+00:00"
+ },
+ {
+  "name": "Spec.KF.f_snap_after_settlement_ok",
+  "status_name": "REFUTED",
+  "unchecked": false,
+  "description": "KF.ok as stated (the `Ok` part): under the hypotheses of KF.carry (`abs_basis > 0`, `den = a_basis * POS_SCALE <= u128::MAX`, `f_delta == fl(f_snap, f_now)`), if in addition `|f_now - f_snap| + den <= i128::MAX` and `f_now - den >= i128::MIN`, then `f_snap_after_settlement(abs_basis, a_basis, f_snap, f_now, f_delta)` returns `Ok`.",
+  "last_updated": "2026-11-21T19:51:18.692175+00:00"
+ },
+ {
+  "name": "Spec.KF.f_snap_after_settlement_carry",
+  "status_name": "REFUTED",
+  "unchecked": false,
+  "description": "KF.carry as stated: with `abs_basis > 0`, `den = a_basis * POS_SCALE <= u128::MAX` and `f_delta == fl(f_snap, f_now)`, if `f_snap_after_settlement(abs_basis, a_basis, f_snap, f_now, f_delta)` returns `Ok(s)` then (i) `s <= f_now` and `abs_basis * (f_now - s) < den`, and (ii) `f_delta * den <= abs_basis * (s - f_snap) < f_delta * den + abs_basis`.",
+  "last_updated": "2026-11-21T19:51:18.500845+00:00"
+ },
+ {
+  "name": "Spec.Accrual.canonical_accrual_price_step_v16_reaches_of_valid",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KP.reaches with an added precondition: under the same chain as KP.envelope (fixed `target`, `cap_anchor`, `max_change_bps`, `exposed = true`, `n` calls from `p_0: u64`, `r_0: u16`, all returning `Ok`), if `n >= 1 || r_0 < MAX_MARGIN_BPS` and `n * cap_anchor * max_change_bps + r_0 >= |target - p_0| * MAX_MARGIN_BPS`, then `p_n == target`.",
+  "last_updated": "2026-11-21T16:55:47.019347+00:00"
+ },
+ {
+  "name": "Spec.Accrual.canonical_accrual_price_step_v16_reaches",
+  "status_name": "REFUTED",
+  "unchecked": false,
+  "description": "KP.reaches (as stated): under the same chain as KP.envelope (fixed `target`, `cap_anchor`, `max_change_bps`, `exposed = true`, `n` calls from `p_0: u64`, `r_0: u16`, all returning `Ok`), if `n * cap_anchor * max_change_bps + r_0 >= |target - p_0| * MAX_MARGIN_BPS` then `p_n == target`.",
+  "last_updated": "2026-11-21T16:55:37.338923+00:00"
+ },
+ {
+  "name": "Spec.Accrual.canonical_accrual_price_step_v16_envelope",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KP.envelope: fix `target`, `cap_anchor`, `max_change_bps` (any `u64`) and `exposed = true`. For a chain of `n` calls of `canonical_accrual_price_step_v16` from price `p_0: u64` and remainder `r_0: u16`, each fed the previous call's `Ok((price, remainder))`, if all `n` calls return `Ok`, then `|p_n - p_0| * MAX_MARGIN_BPS <= n * cap_anchor * max_change_bps + r_0` in exact integers, and `p_n` lies between `p_0` and `target` inclusive. Since this holds for every `n`, it holds for every intermediate price `p_i`.",
+  "last_updated": "2026-11-21T16:55:26.355731+00:00"
+ },
+ {
+  "name": "Spec.Accrual.canonical_accrual_price_step_v16_nopanic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KP.nopanic: for every `current`, `target`, `cap_anchor`, `max_change_bps: u64`, `exposed: bool` and `remainder_before_bps_num: u16`, no execution of `canonical_accrual_price_step_v16(..)` panics (it never unwinds, including through arithmetic-overflow checks).",
+  "last_updated": "2026-11-21T16:55:16.463308+00:00"
+ },
+ {
+  "name": "Spec.Accrual.canonical_accrual_price_step_v16_contract",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "KP.contract: for every `current`, `target`, `cap_anchor`, `max_change_bps: u64`, `exposed: bool` and `remainder_before_bps_num: u16`, if `canonical_accrual_price_step_v16(..)` returns, its result is a `V16Result<(u64, u16)>` satisfying the function's `kani::ensures` clause (read in exact integers).",
+  "last_updated": "2026-11-21T16:55:08.802551+00:00"
  },
  {
   "name": "Spec.KernelB.kernel_b_settlement_chunk_refusals",

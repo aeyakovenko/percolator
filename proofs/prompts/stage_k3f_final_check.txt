@@ -1,0 +1,14 @@
+Final check only. The previous task (the funding snapshot and the bankruptcy-residual step) was cancelled after it had recorded its results, so they are marked unchecked. The uploaded sources are unchanged since that task. Please re-check, without changing their statements, the proofs of these ten properties, and record the check of each:
+
+- Spec.KF.scaled_adl_delta_fast_delta
+- Spec.KF.f_snap_after_settlement_nopanic
+- Spec.KF.f_snap_after_settlement_carry_of_pos
+- Spec.KF.f_snap_after_settlement_ok_exact
+- Spec.KF.f_snap_after_settlement_cadence
+- Spec.KR.kernel_bankruptcy_residual_step_capacity_contract
+- Spec.KR.kernel_bankruptcy_residual_step_capacity_nopanic
+- Spec.KR.kernel_bankruptcy_residual_step_capacity_fits
+- Spec.KR.kernel_bankruptcy_residual_step_capacity_zero
+- Spec.KR.kernel_bankruptcy_residual_step_capacity_books
+
+Do not start any other work. If a proof no longer checks, say which and why in one or two sentences. Then end the task with a short summary.

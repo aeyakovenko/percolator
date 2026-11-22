@@ -1,0 +1,5 @@
+proof_unexposed_accrual_segment_moves_no_equity	-	-	verified
+proof_exposed_price_move_is_equity_active	-	-	verified
+proof_scan_side_with_basis_and_no_open_interest_has_unit_a_index	-	-	verified
+proof_index_update_without_funding_leaves_funding_indices	-	verified	-
+proof_v16_public_accrual_refuses_a_price_outside_the_oracle_range_and_writes_nothing	verified	-	-

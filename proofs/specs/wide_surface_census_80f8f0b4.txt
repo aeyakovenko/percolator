@@ -1,0 +1,6 @@
+OK 80f8f0b4
+src/v16.rs sha256 15e6bb0bc536651e8f80cd92ba14023d3496164ecbcffd29b370858edd4fe672
+src/wide_math.rs sha256 5c3c47f5d99cb0dd986d8abb59fa16e2a2f03c0a26b80bca5c27242ef0281872
+shim sha256 6c4814be3b1c9345f88822a1b4a3922c32641341abee3ba065706f650890fbde
+build: cargo check --lib, default features, cargo 1.99.1 (5f94df478 2026-08-27)
+date: 2026-11-21T20:44:53Z
