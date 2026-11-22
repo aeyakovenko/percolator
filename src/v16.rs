@@ -1388,9 +1388,10 @@ impl V16Core {
                         Some(dfl) == (funding_num / fd).checked_mul(al).and_then(|v| v.checked_neg())
                             && Some(dfs) == (funding_num / fd).checked_mul(as_)
                     } else {
+                        // floor division by fd > 0; `dfl * fd` would overflow when nl is
+                        // within fd of -i128::MAX (found by the arithmetic prover, task k4)
                         match (funding_num.checked_mul(al).and_then(|v| v.checked_neg()), funding_num.checked_mul(as_)) {
-                            (Some(nl), Some(ns)) => dfl.checked_mul(fd).map_or(false, |lo| lo <= nl && nl - lo < fd)
-                                && dfs.checked_mul(fd).map_or(false, |lo| lo <= ns && ns - lo < fd),
+                            (Some(nl), Some(ns)) => dfl == nl.div_euclid(fd) && dfs == ns.div_euclid(fd),
                             _ => false,
                         }
                     },
