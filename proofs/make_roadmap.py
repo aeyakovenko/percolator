@@ -8,7 +8,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 rows = list(csv.DictReader(open(os.path.join(HERE, "proof_ledger.tsv")), delimiter="\t", quoting=csv.QUOTE_NONE))
 ND = "not in the deployed build"
 dep = [r for r in rows if r["status"] != ND]
-DONE = ("proved", "verified by Kani")   # by Aristotle, or by a Kani harness (the row names it and its input width)
+DONE = ("proved", "verified by Kani", "proved by rule")   # by Aristotle, by a Kani harness (the row names it and its
+# input width), or by a local rule checked on the source at every regen (the row names the rule and the lines)
 def sel(pred):
     ps = [r for r in dep if pred(r["id"])]
     return sum(1 for r in ps if r["status"] in DONE), len(ps)
@@ -41,6 +42,7 @@ missing = [r["id"] for r in dep if r["id"] not in seen]
 assert not missing, f"pieces in no phase: {missing[:8]}"
 total_d = sum(1 for r in dep if r["status"] in DONE)
 total_kani = sum(1 for r in dep if r["status"] == "verified by Kani")
+total_rule = sum(1 for r in dep if r["status"] == "proved by rule")
 closed = sum(1 for r in dep if r["id"] in kind_of and r["status"] == "proved")
 # decisions and fixes without which some invariant cannot be proved as written; edit by hand
 PHASE0 = [
@@ -82,7 +84,7 @@ else:
 print(f"""# Roadmap to a fully proved program
 
 Generated {now} from `proof_ledger.tsv`. **{total_d} of {len(dep)} pieces of the deployed build are done
-({total_d - total_kani} proved by Aristotle, {total_kani} verified by Kani); {closed} of {len(kind_of)} charter invariants are closed.**
+({total_d - total_kani - total_rule} proved by Aristotle, {total_kani} verified by Kani, {total_rule} proved by a local rule checked on the source; {total_d - total_rule} without the rule); {closed} of {len(kind_of)} charter invariants are closed.**
 
 ## The end goal
 

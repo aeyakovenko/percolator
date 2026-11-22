@@ -13,3 +13,8 @@ proof_no_overflow_apply_total_delta_u64	-	verified	-
 proof_no_overflow_dynamic_asset_slot_capacity_from_account_len	-	verified	-
 proof_no_overflow_insert_account_kf_settlement_plan_entry	-	verified	-
 proof_no_overflow_token_value_flow_validate	-	verified	-
+proof_no_overflow_prepare_insurance_lien_consume_delta	-	verified	-
+proof_no_overflow_kernel_resolved_receipt_can_still_gain_wide_stubbed	-	verified	-
+proof_no_overflow_backing_utilization_fee_quote_atoms_for_lien_wide_stubbed	-	verified	-
+proof_resolved_payout_rate_recompute_leaves_a_rate_at_most_one	-	verified	-
+proof_decoded_active_leg_is_valid_for_any_loss_weight	-	verified	-

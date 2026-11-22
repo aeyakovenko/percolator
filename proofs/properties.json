@@ -1,5 +1,47 @@
 [
  {
+  "name": "MarketGroupV16ViewMut::resolved_receipt_claimable_against_ledger.p15_no_f3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P15, `MarketGroupV16ViewMut::<'_, T>::resolved_receipt_claimable_against_ledger(receipt, ledger)` (class ledger), for every `T`: for every `receipt: ResolvedPayoutReceiptV16` and every `ledger: ResolvedPayoutLedgerV16` with `1 <= ledger.current_payout_rate_den` and `ledger.current_payout_rate_num <= ledger.current_payout_rate_den`, no execution reaches the call `wide_mul_div_floor_u128(receipt.terminal_positive_claim_face, ledger.current_payout_rate_num, ledger.current_payout_rate_den)` with arguments in its F3 panic condition (the quotient is at most the claim face).",
+  "last_updated": "2026-11-22T23:05:21.098316+00:00"
+ },
+ {
+  "name": "V16Core::kernel_recompute_resolved_payout_rate.pr1_rate_in_unit_interval",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "PR1, `V16Core::kernel_recompute_resolved_payout_rate(ledger)`: for every input `ledger: ResolvedPayoutLedgerV16`, the function has no undefined behaviour, and if it returns `Ok(l)` then `1 <= l.current_payout_rate_den` and `l.current_payout_rate_num <= l.current_payout_rate_den`; all other fields of `l` equal those of `ledger`.",
+  "last_updated": "2026-11-22T23:02:14.787301+00:00"
+ },
+ {
+  "name": "V16Core::kernel_resolved_receipt_can_still_gain.p07_no_f3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P07, `V16Core::kernel_resolved_receipt_can_still_gain` (class ledger): for every `ledger: ResolvedPayoutLedgerV16` with `ledger.current_payout_rate_den != 0`, every `source_fresh_backing_total_num: u128` and every `receipt: ResolvedPayoutReceiptV16`, no execution reaches the call `wide_mul_div_floor_u128(receipt.terminal_positive_claim_face, best_rate_num, ledger.current_payout_rate_den)` with arguments in its F3 panic condition. Only `current_payout_rate_den != 0` is needed (not `num <= den`): `best_rate_num = (..).min(current_payout_rate_den)`, so the quotient is at most the claim face.",
+  "last_updated": "2026-11-22T22:57:13.662698+00:00"
+ },
+ {
+  "name": "MarketGroupV16ViewMut::haircut_effective_support.p09_no_f3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P09, `MarketGroupV16ViewMut::<'_, T>::haircut_effective_support` (class local), for every `T`: for every `&self` and all `face_claim`, `residual`, `junior_bound: u128`, no execution reaches the call `wide_mul_div_floor_u128(face_claim, residual, junior_bound)` with arguments in its F3 panic condition. Reason, as the spec states: on the path to the call `junior_bound != 0` and `residual < junior_bound`, so the quotient is at most `face_claim`.",
+  "last_updated": "2026-11-22T22:55:35.626354+00:00"
+ },
+ {
+  "name": "V16Core::source_lien_fee_after_backing_release.p03_no_f3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P03, `V16Core::source_lien_fee_after_backing_release` (class local): for all `fee_revenue`, `backing_before`, `backing_after: u128`, no execution reaches the call `wide_mul_div_floor_u128(fee_revenue, backing_after, backing_before)` with arguments in its F3 panic condition. Reason, as the spec states: on the path to the call `backing_before != 0` and `backing_after < backing_before`, so the quotient is at most `fee_revenue`.",
+  "last_updated": "2026-11-22T22:39:21.238906+00:00"
+ },
+ {
+  "name": "backing_domain_fee_split_for_lien_delta_num.p01_no_f3_panic",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "P01, `backing_domain_fee_split_for_lien_delta_num` (class local): for all `lien_delta_num: u128`, `fee_bps: u16`, `insurance_share_bps: u16`, no execution reaches the call `wide_mul_div_floor_u128(total_fee, insurance_share_bps as u128, MAX_MARGIN_BPS as u128)` with arguments in its F3 panic condition (`d = 0` or `floor(a*b/d) >= 2^128`). Reason, as the spec states: `d = 10_000`, and `insurance_share_bps <= 10_000` is checked above, so the quotient is at most `total_fee`.",
+  "last_updated": "2026-11-22T22:39:21.172091+00:00"
+ },
+ {
   "name": "finish_trade_checks_not_atomic.order",
   "status_name": "IN_PROGRESS",
   "unchecked": false,

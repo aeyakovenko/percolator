@@ -188,12 +188,12 @@ FEATURES=fuzz,closure KANI_Z="" LOG_DIR=kani_closure CARGO_TARGET_DIR=target/clo
 <!-- proofs:begin (generated from proofs/README_SECTION.md and the ledger; edit that file, not this block) -->
 ## Proof Status And How To Reproduce It
 
-As of 2026-11-22, for engine `71076137` and program `e1295564`: **280 of 812 pieces of the deployed build are done (200 proved by Aristotle, 80 verified by Kani); 0 of 89 charter invariants are closed.**
+As of 2026-11-22, for engine `71076137` and program `e1295564`: **326 of 812 pieces of the deployed build are done (200 proved by Aristotle, 85 verified by Kani, 41 proved by a local rule checked on the source; 285 without the rule); 0 of 89 charter invariants are closed.**
 
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
-| 2 | The engine cannot panic or overflow and keeps the header | 24 of 193 |
+| 2 | The engine cannot panic or overflow and keeps the header | 70 of 193 |
 | 3 | The engine keeps the whole market state | 8 of 210 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
@@ -244,7 +244,7 @@ On engine `71076137`, Kani 0.66.0, with the three commands of "Run Kani":
 | `--features fuzz,closure` | 402 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
 | `--features fuzz,contracts -Z function-contracts` | 453 | `composition_clear_leg_value_conservation` |
 
-How the table was obtained for this revision. Batch 15 changes one setter of the engine (`set_asset_raw_oracle_targets_not_atomic`: a changed target restarts the price-cap anchor) and adds one proof that runs in all three runs (`proof_v16_changed_raw_target_restarts_the_cap_anchor`). The harnesses whose call graph reaches the setter (`kani_reach.py`: 4, the new proof among them, the same in each run) were run again on `71076137` in all three runs and verified. Every other harness keeps its verdict from the runs on `4e77481b` and earlier, since nothing it can reach changed; batch 14's fifteen closure proofs are listed in `kani_added.tsv`. Every harness has a verdict except the two named in the table, which have none on earlier revisions either. A harness named `proof_v16_adjust_u128_applies_exact_delta_or_fails_closed` exists in two modules and is counted twice. Since then 15 proofs were added and verified one by one: 0 with `--features fuzz`, 15 in the closure run, 0 in the contracts run. `proofs/kani_added.tsv` lists them with their verdict in each run; add the ones marked verified to the numbers above.
+How the table was obtained for this revision. Batch 15 changes one setter of the engine (`set_asset_raw_oracle_targets_not_atomic`: a changed target restarts the price-cap anchor) and adds one proof that runs in all three runs (`proof_v16_changed_raw_target_restarts_the_cap_anchor`). The harnesses whose call graph reaches the setter (`kani_reach.py`: 4, the new proof among them, the same in each run) were run again on `71076137` in all three runs and verified. Every other harness keeps its verdict from the runs on `4e77481b` and earlier, since nothing it can reach changed; batch 14's fifteen closure proofs are listed in `kani_added.tsv`. Every harness has a verdict except the two named in the table, which have none on earlier revisions either. A harness named `proof_v16_adjust_u128_applies_exact_delta_or_fails_closed` exists in two modules and is counted twice. Since then 20 proofs were added and verified one by one: 0 with `--features fuzz`, 20 in the closure run, 0 in the contracts run. `proofs/kani_added.tsv` lists them with their verdict in each run; add the ones marked verified to the numbers above.
 
 A whole run takes one and a half to two hours on a 64-core machine at
 `-j 12 --output-format terse`. Run them one after the other: the two harnesses without a verdict

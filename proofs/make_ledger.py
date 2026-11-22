@@ -359,6 +359,64 @@ for _pid, _h in PO_KANI.items():
                                 f"engine {PO_KANI_REV}; the function is unchanged in {LANDED_REV} "
                                 f"(specs/changed_since_4e77481b_at_{LANDED_REV}.md)")
 
+# Batch 16 (engine 3e615422, whose src/v16.rs is 71076137's): Kani proofs in the closure layer, every input symbolic, no
+# assumption. The PO harnesses call one function each, so Kani's overflow checks cover every operation it runs.
+B16_KANI_REV = "3e615422"
+B16_KANI = {
+    "PO.V16Core::prepare_insurance_lien_consume_delta": "proof_no_overflow_prepare_insurance_lien_consume_delta",
+    "PO.V16Core::kernel_resolved_receipt_can_still_gain": "proof_no_overflow_kernel_resolved_receipt_can_still_gain_wide_stubbed",
+    "PO.V16Core::backing_utilization_fee_quote_atoms_for_lien": "proof_no_overflow_backing_utilization_fee_quote_atoms_for_lien_wide_stubbed",
+    "PR1": "proof_resolved_payout_rate_recompute_leaves_a_rate_at_most_one",
+    "PL1": "proof_decoded_active_leg_is_valid_for_any_loss_weight",
+}
+B16_WHAT = {
+    "PR1": "for every ledger, the recompute fails or leaves 1 <= den and num <= den",
+    "PL1": "for every byte pattern of a stored leg, a leg decoded as active passes validate_active_leg",
+}
+B16_STUBS = {
+    "proof_no_overflow_prepare_insurance_lien_consume_delta": [],
+    "proof_no_overflow_kernel_resolved_receipt_can_still_gain_wide_stubbed": ['wide_mul_div_floor_u128'],
+    "proof_no_overflow_backing_utilization_fee_quote_atoms_for_lien_wide_stubbed": ['U256::checked_mul', 'U256::checked_div', 'U256::try_into_u128', 'V16Core::backing_utilization_rate_e9_for_source_state'],
+    "proof_resolved_payout_rate_recompute_leaves_a_rate_at_most_one": [],
+    "proof_decoded_active_leg_is_valid_for_any_loss_weight": ['loss_weight_for_basis'],
+}
+B16_STUB_WHY = {
+    "U256::checked_mul": "arbitrary result (wide math never panics: A1-G5)",
+    "U256::checked_div": "arbitrary result (wide math never panics: A1-G5)",
+    "U256::try_into_u128": "arbitrary result (wide math never panics: A1-G5)",
+    "wide_mul_div_floor_u128": "arbitrary result (wide math never panics: A1-G5)",
+    "V16Core::backing_utilization_rate_e9_for_source_state": "arbitrary result (its own operations are its own piece)",
+    "loss_weight_for_basis": "a deterministic stand-in (PL1 is structural: it holds for any deterministic loss weight)",
+}
+for _pid, _h in B16_KANI.items():
+    assert _pid in pieces, f"{_pid}: no such piece (the census or the ledger changed?)"
+    pieces[_pid]["status"] = "verified by Kani"
+    _st = B16_STUBS.get(_h) or []
+    pieces[_pid]["evidence"] = (f"{_h} (Kani, closure layer, every input symbolic, no assumption"
+                                + (f"; {B16_WHAT[_pid]}" if _pid in B16_WHAT else "")
+                                + ("; stubbed: " + "; ".join(f"{x}: {B16_STUB_WHY[x]}" for x in _st) if _st else "")
+                                + f"), engine {B16_KANI_REV}")
+
+# PO pieces closed by rule R1 (po_rules.py, re-checked here on the landed source at every regen): every unchecked
+# operation of the function is the statement `i += 1;` inside `while i < BOUND {` (or `while i < BOUND && .. {`), with
+# no other write to `i` in the loop, no `&mut i` and no closure naming `i` in the function, and at most one increment
+# per iteration (the last statement of the body, or followed by `continue;`). Both sides of `<` have `i`'s type, so
+# the increment runs with i < BOUND <= MAX and cannot overflow.
+PO_RULE = "R1"
+sys.path.insert(0, HERE)
+import po_rules as _po_rules
+_po_rules.selftest()   # the rule's must-accept and must-reject cases, before it classifies anything
+_po_sites = {}
+for _r in _po_rules.classify(ENGINE_SRC, os.path.join(HERE, _wrap)):
+    _po_sites.setdefault(_r["function"], []).append(_r)
+for _fn, _rs in sorted(_po_sites.items()):
+    _pid = f"PO.{_fn}"
+    if _pid not in pieces or pieces[_pid]["status"] != "open" or not all(_r["rule"] == "R1" for _r in _rs):
+        continue
+    pieces[_pid]["status"] = "proved by rule"
+    pieces[_pid]["evidence"] = ("rule R1, loop counters bounded by their own loop guard (po_rules.py on engine "
+                                f"{LANDED_REV}): " + "; ".join(f"line {_r['line']} ({_r['reason']})" for _r in _rs))
+
 # TR: the real class of layer T, split into statements local to the header and one account
 for pid, text in (
     ("TR.a", "H2, H3: every flag write is 0, 1 or `encode_bool(..)`; `recovery_reason` is written only by `from_runtime(Some(reason))`"),
@@ -1169,13 +1227,13 @@ for _p in pieces.values():
     else:
         assert _p["id"] in NOPANIC_BASIS, f"proved piece {_p['id']}: record in NOPANIC_BASIS what rules out overflow for it"
         _need = NOPANIC_BASIS[_p["id"]]
-    _open = [n for n in _need if pieces.get(n, {}).get("status") not in ("proved", "verified by Kani")]
+    _open = [n for n in _need if pieces.get(n, {}).get("status") not in ("proved", "verified by Kani", "proved by rule")]
     if _open:
         carry_exceptions.append((_p["id"], _open))
 
 def counts(ids):
     concrete = [i for i in ids if not i.endswith("*")]
-    done = sum(1 for i in concrete if pieces[i]["status"] in ("proved", "verified by Kani"))  # as the roadmap's DONE
+    done = sum(1 for i in concrete if pieces[i]["status"] in ("proved", "verified by Kani", "proved by rule"))  # as the roadmap's DONE
     return done, len(concrete)
 
 # ---------------------------------------------------------------- write
