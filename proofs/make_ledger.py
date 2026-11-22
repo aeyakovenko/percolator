@@ -322,6 +322,37 @@ for _row in read(_wrap).splitlines()[1:]:
           "check the engine's arithmetic, so an overflow there would continue with a wrapped value",
           "Kani or Aristotle (a no-panic proof, overflow checks on), or checked arithmetic that returns an error")
 
+# PO pieces closed by Kani (batch 14, engine 06cc3b91, whose src/v16.rs is 4e77481b's): each harness calls the function with
+# every input symbolic and no assumption, closure layer, so Kani's overflow checks cover every operation the call runs.
+PO_KANI_REV = "06cc3b91"
+PO_KANI = {
+    "PO.liquidation_risk_notional_ceil": "proof_no_overflow_liquidation_risk_notional_ceil",
+    "PO.active_bitmap_is_empty": "proof_no_overflow_active_bitmap_is_empty",
+    "PO.active_bitmap_count_ones": "proof_no_overflow_active_bitmap_count_ones",
+    "PO.V16Core::source_claim_domain_first_burn_partition": "proof_no_overflow_source_claim_domain_first_burn_partition",
+    "PO.V16Core::kernel_settle_positive_face_after_support": "proof_no_overflow_kernel_settle_positive_face_after_support",
+    "PO.V16Core::kernel_principal_cure_close_ledger": "proof_no_overflow_kernel_principal_cure_close_ledger",
+    "PO.V16Core::kernel_advance_close_ledger": "proof_no_overflow_kernel_advance_close_ledger",
+    "PO.V16Core::prepare_counterparty_backing_expiry_delta": "proof_no_overflow_prepare_counterparty_backing_expiry_delta",
+    "PO.V16Core::target_effective_lag_adverse_delta": "proof_no_overflow_target_effective_lag_adverse_delta",
+    "PO.liquidation_fee_for_close": "proof_no_overflow_liquidation_fee_for_close",
+    "PO.adjust_u128": "proof_no_overflow_adjust_u128",
+    "PO.MarketGroupV16ViewMut::apply_total_delta_u64": "proof_no_overflow_apply_total_delta_u64",
+    "PO.MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len": "proof_no_overflow_dynamic_asset_slot_capacity_from_account_len",
+    "PO.insert_account_kf_settlement_plan_entry": "proof_no_overflow_insert_account_kf_settlement_plan_entry",
+    "PO.TokenValueFlowProofV16::validate": "proof_no_overflow_token_value_flow_validate",
+}
+# two of them are associated functions of a generic type and run with the type parameter `u8`; the operations they
+# check do not involve it
+PO_KANI_AT_U8 = {"PO.MarketGroupV16ViewMut::apply_total_delta_u64",
+                 "PO.MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len"}
+for _pid, _h in PO_KANI.items():
+    assert _pid in pieces, f"{_pid}: no such PO piece (the census changed?)"
+    pieces[_pid]["status"] = "verified by Kani"
+    _at = (" (type parameter `u8`; the checked operations do not involve it)" if _pid in PO_KANI_AT_U8 else "")
+    pieces[_pid]["evidence"] = (f"{_h} (Kani, closure layer, every input symbolic, no assumption){_at}, "
+                                f"engine {PO_KANI_REV}")
+
 # TR: the real class of layer T, split into statements local to the header and one account
 for pid, text in (
     ("TR.a", "H2, H3: every flag write is 0, 1 or `encode_bool(..)`; `recovery_reason` is written only by `from_runtime(Some(reason))`"),

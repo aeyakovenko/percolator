@@ -30,7 +30,7 @@ position is marked at. "Envelope": a move from `p` over a segment of `dt` slots 
 | C5 unexposed, no funding | with no effective open interest on either side a segment is neither price-move nor funding active and books a zero funding amount, and a zero funding amount leaves both funding indices unchanged | AC.unexposed, AC.nofunding (Kani, every input) | done |
 | C6 unexposed, residue | a side the scan admits with raw basis and no effective open interest has A index 1; the sync kernel sets that value | AC.residue (Kani, every input); `kernel_side_adl_index` contract | done |
 | C7 unexposed, linear K | the K indices move by `A_side * price_delta` in one update, so one jump and any capped path to the same price leave the same K | K78.contract (the corrected contract) and K78.path (the two-step composition), Aristotle task k4 | done |
-| C8 composition | C0-C7 give the charter statement for every route: every route that moves the effective price of an exposed asset goes through C2 or C3; every other writer is an initialization, a copy, or an unexposed reset | this file, read against the charter by someone other than its author | open |
+| C8 composition | C0-C7 give the charter statement for every route: every route that moves the effective price of an exposed asset goes through C2 or C3; every other writer is an initialization, a copy, or an unexposed reset | this file, read against the charter by someone other than its author | open: read on 2026-11-22, the statement does not yet match the charter (see the end of this file) |
 
 ## What is left
 
@@ -40,4 +40,38 @@ position is marked at. "Envelope": a move from `p` over a segment of `dt` slots 
   and 4 of the roadmap, or the compiler: the field private to one module whose functions are the
   listed writers. The second does not cover the program as it is, because P1-P3 write the field
   through the program's own byte views of the account; they would have to call the engine instead.
-- C8: an independent read of this statement against the charter, then the composition proof.
+- C8: the statement restated after the owner's decision on the envelope's base and the trade clamp, a new
+  independent read of the changed clauses, then the composition proof.
+
+## Result of the independent read (2026-11-22)
+
+A reader other than the author (a fresh agent, given the charter, this statement, the cited pieces and the frozen
+sources of engine 4e77481b and program eb9807c5, with the author's writer list withheld until it had made its own)
+read the statement against the charter phrase by phrase. The author checked each of its findings against the source.
+The statement does not yet say what the charter says, so C8 stays open:
+
+- **The base of the envelope.** The path accrual (C3) bounds each one-slot step by `anchor * cap`, where the anchor is
+  the mark when the current target took effect (`fund_px_last`, or the mark when the path call sees the target
+  change). This is the engine's documented design: the movement is linear in elapsed slots and does not depend on how
+  the slots are split into transactions. The charter measures the envelope from the prior mark. A target staged by
+  `set_asset_raw_oracle_targets_not_atomic`, which the program's trade route uses, does not reset the anchor: measured
+  on the engine, the next one-slot move after a staged target can be `anchor / mark` times the per-target rate (100
+  times in the test, from a mark of 10,000 with an anchor of 1,000,000).
+- **The base of the trade clamp.** A reported trade price is clamped from the program's own mark average
+  (`mark_ewma_e6`), not from the engine's mark (C4's text says "mark average"; the charter says "that envelope").
+- **A paragraph without a clause.** The charter's third paragraph (funding is not independent of report cadence, with
+  its bound) has no clause here.
+- **Smaller points.** C6 must rest on the per-asset scan (part S of the global invariant) and cite K59.contract (full
+  width) instead of the 8-bit Kani check; no piece links the path body's steps to the canonical chain (the first
+  remainder of a call is the caller's when the target is unchanged); "update" is not defined; the anchor resets do not
+  test raw basis, so they need "no raw basis without stored legs" from the scan; if the Clock sysvar read failed,
+  seven handlers would take the instruction's slot (a runtime assumption).
+- **The writers.** The reader's own list and the author's agree that only the two accruals can move the mark of an
+  asset with effective open interest; the author's list has detail errors to correct (line numbers of E1 and E2, the
+  source of the initial prices, P1 covers every configured asset, two engine writers no instruction reaches, the slab is
+  also zeroed by capacity growth and by CloseSlab).
+
+None of this is a loss of funds: initial and maintenance margin and the health certificate charge the whole adverse gap
+between the mark and the raw target (`target_lag_penalty`), whatever speed the mark moves at. The charter wording of
+the first two points is the owner's decision; after it, the changed clauses get a new independent read. The reader's
+report and the author's check are kept with the review notes (`review/inv045-read-2026-11-22/`).

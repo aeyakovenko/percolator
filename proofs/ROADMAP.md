@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-22 from `proof_ledger.tsv`. **264 of 807 pieces of the deployed build are done
-(200 proved by Aristotle, 64 verified by Kani); 0 of 89 charter invariants are closed.**
+Generated 2026-11-22 from `proof_ledger.tsv`. **279 of 807 pieces of the deployed build are done
+(200 proved by Aristotle, 79 verified by Kani); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -38,7 +38,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
-| 2 | The engine cannot panic or overflow and keeps the header | 9 of 193 |
+| 2 | The engine cannot panic or overflow and keeps the header | 24 of 193 |
 | 3 | The engine keeps the whole market state | 7 of 205 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
@@ -66,7 +66,7 @@ fixed yet. These come first; most are decisions.
 
 **Phase 1. Arithmetic and kernels (248 of 248).** Done for the deployed build: 189 proved by Aristotle, 59 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
 
-**Phase 2. The engine cannot panic or overflow and keeps the header (9 of 193).**
+**Phase 2. The engine cannot panic or overflow and keeps the header (24 of 193).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
 - Every entry point preserves the header checks: 33 that end in the runtime check, 9 small ones
@@ -187,7 +187,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-543 left are mostly whole entry points and instructions, and the two attempts at that kind
+528 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.
