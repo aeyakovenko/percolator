@@ -15,11 +15,12 @@
 //! Every call goes through the public `*_not_atomic` API. A failed call is
 //! rolled back here, as the wrapper's transaction would roll it back.
 use percolator::{
-    AssetStateV16, AutoCrankOutcomeV16, AutoCrankWorkV16, CloseProgressLedgerV16,
-    EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
-    PortfolioAccountV16Account, PortfolioLegV16, PortfolioV16ViewMut, ProvenanceHeaderV16,
-    ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, SideV16, TradeRequestV16, V16Config,
-    V16Error, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, PUBLIC_B_CHUNK_ATOMS,
+    AssetStateV16, AutoCrankObservationV16, AutoCrankOutcomeV16, AutoCrankWorkV16,
+    CloseProgressLedgerV16, EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount,
+    MarketGroupV16ViewMut, PortfolioAccountV16Account, PortfolioLegV16, PortfolioV16ViewMut,
+    ProvenanceHeaderV16, ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, SideV16,
+    TradeRequestV16, V16Config, V16Error, BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE,
+    PUBLIC_B_CHUNK_ATOMS,
 };
 
 const PRICE: u64 = 1_000_000;
@@ -185,6 +186,31 @@ impl Book {
                 AutoCrankWorkV16 {
                     now_slot,
                     observations: &[],
+                    resolved_close_fee_rate_per_slot: 0,
+                },
+            )
+            .map(|result| result.outcome)
+        })
+    }
+
+    /// One step of the public permissionless crank at `now_slot` that observes
+    /// the asset, as the wrapper's crank does.
+    fn crank_observing(
+        &mut self,
+        account: usize,
+        now_slot: u64,
+    ) -> Result<AutoCrankOutcomeV16, V16Error> {
+        let observation = AutoCrankObservationV16 {
+            asset_index: 0,
+            effective_price: self.price,
+            funding_rate_e9: 0,
+        };
+        self.with(account, |m, a| {
+            m.permissionless_auto_crank_not_atomic(
+                a,
+                AutoCrankWorkV16 {
+                    now_slot,
+                    observations: &[observation],
                     resolved_close_fee_rate_per_slot: 0,
                 },
             )
@@ -487,10 +513,12 @@ fn leftover_source_backing(book: &Book) -> u128 {
 /// the loser's backing in the domain (2,688 with a long trader and 3,955 with a
 /// short one when the Live crank began the close; none when resolved close
 /// began it). The junior residual leaves fresh source backing out, so the first
-/// payout is short by exactly that leftover. Once the backing bucket has lapsed,
-/// expiring it releases the leftover into the junior pool and raises the payout
-/// rate, and the maker's next close pays it as a top-up: the maker ends paid
-/// whole and the vault empty.
+/// payout is short by exactly that leftover, and the maker's receipt stays open
+/// because backing expiry can still raise it. Once the backing bucket has
+/// lapsed, the public crank of the maker that observes the asset expires it,
+/// which releases the leftover into the junior pool and raises the payout rate,
+/// and the maker's next close pays it as a top-up: the maker ends paid whole and
+/// the vault empty.
 #[track_caller]
 fn assert_lev_maker_paid_whole_after_backing_expiry(
     book: &mut Book,
@@ -520,26 +548,29 @@ fn assert_lev_maker_paid_whole_after_backing_expiry(
         return;
     }
     let engine = &book.markets[0].engine;
-    let buckets = [engine.backing_long, engine.backing_short].map(|b| b.try_to_runtime().unwrap());
-    for (domain, bucket) in buckets.iter().enumerate() {
-        if bucket.fresh_unliened_backing_num == 0 {
-            continue;
-        }
-        let lapsed = bucket.expiry_slot;
-        assert!(
-            lapsed > book.header.current_slot.get(),
-            "{case}: still fresh"
-        );
-        assert_eq!(
-            book.market(|m| m.expire_source_backing_bucket_not_atomic(domain, lapsed - 1)),
-            Err(V16Error::Stale),
-            "{case}: domain {domain} expires only once lapsed"
-        );
-        book.market(|m| m.advance_resolved_slot_not_atomic(lapsed))
-            .unwrap();
-        book.market(|m| m.expire_source_backing_bucket_not_atomic(domain, lapsed))
-            .unwrap();
-    }
+    let lapsed = [engine.backing_long, engine.backing_short]
+        .map(|bucket| bucket.try_to_runtime().unwrap())
+        .iter()
+        .filter(|bucket| bucket.fresh_unliened_backing_num != 0)
+        .map(|bucket| bucket.expiry_slot)
+        .max()
+        .unwrap();
+    assert!(
+        lapsed > book.header.current_slot.get(),
+        "{case}: still fresh"
+    );
+    assert_eq!(
+        book.crank_observing(MAKER, lapsed - 1),
+        Err(V16Error::NonProgress),
+        "{case}: nothing to expire before the bucket lapses"
+    );
+    assert_eq!(
+        book.crank_observing(MAKER, lapsed),
+        Ok(AutoCrankOutcomeV16::ResolvedClose(
+            ResolvedCloseOutcomeV16::ProgressOnly
+        )),
+        "{case}: the crank expires the lapsed bucket"
+    );
     assert_eq!(leftover_source_backing(book), 0, "{case}: backing released");
     assert_eq!(
         book.close(MAKER),
