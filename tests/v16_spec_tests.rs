@@ -5372,7 +5372,6 @@ fn v16_b_index_headroom_exhaustion_declares_value_neutral_recovery() {
     // saturation and checks that it enters recovery without moving value.
     for residual in [1, u64::MAX as u128] {
         let (mut header, mut markets) = market_fixture(1, 100);
-        header.config.public_b_chunk_atoms = V16PodU128::new(1);
         let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
         asset.oi_eff_long_q = POS_SCALE;
         asset.oi_eff_short_q = POS_SCALE;
@@ -10538,7 +10537,6 @@ fn v16_auto_crank_progress_realizable_without_observation_for_every_class() {
             header.config.max_price_move_bps_per_slot = V16PodU64::new(500);
             header.config.max_accrual_dt_slots = V16PodU64::new(1);
             header.config.min_funding_lifetime_slots = V16PodU64::new(1);
-            header.config.public_b_chunk_atoms = V16PodU128::new(100);
             let mut long_header = account_fixture(1, 211);
             let mut short_header = account_fixture(1, 212);
             {

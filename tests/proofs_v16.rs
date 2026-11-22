@@ -75,7 +75,7 @@ use percolator::v16::{
 use percolator::{
     ADL_ONE, BOUND_SCALE, CREDIT_RATE_SCALE, FUNDING_DEN, MAX_ACCOUNT_NOTIONAL, MAX_MARGIN_BPS,
     MAX_OI_SIDE_Q, MAX_ORACLE_PRICE, MAX_POSITION_ABS_Q, MAX_TRADE_SIZE_Q, MAX_VAULT_TVL,
-    MIN_A_SIDE, POS_SCALE, SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
+    MIN_A_SIDE, POS_SCALE, PUBLIC_B_CHUNK_ATOMS, SOCIAL_LOSS_DEN, V16_ACTIVE_BITMAP_WORDS,
 };
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32]) {
@@ -246,7 +246,6 @@ fn proof_v16_b_settlement_atom_budget_clears_public_scale_gap() {
     const LOSS_WEIGHT: u128 = 19_000_000;
 
     let (mut header, mut markets, _) = one_market_view_fixture();
-    header.config.public_b_chunk_atoms = V16PodU128::new(MAX_VAULT_TVL);
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
     let leg = PortfolioLegV16 {
         active: true,
@@ -14176,17 +14175,21 @@ fn proof_v16_live_residual_booking_to_loss_bearing_side_is_bounded_and_exact() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_bankruptcy_residual_capacity_is_nonzero_and_bounded_with_headroom() {
+    // The chunk is the constant PUBLIC_B_CHUNK_ATOMS; the residual is small or
+    // just above it, so both sides of the cap are covered.
     let residual_raw: u8 = kani::any();
-    let chunk_raw: u8 = kani::any();
+    let above_chunk: bool = kani::any();
     let rem_raw: u8 = kani::any();
     kani::assume(residual_raw > 0);
-    kani::assume(chunk_raw > 0);
-    let residual = residual_raw as u128;
-    let chunk = chunk_raw as u128;
+    let chunk = PUBLIC_B_CHUNK_ATOMS;
+    let residual = if above_chunk {
+        chunk + residual_raw as u128
+    } else {
+        residual_raw as u128
+    };
     let expected = residual.min(chunk);
 
     let (mut header, mut markets, _) = one_market_view_fixture();
-    header.config.public_b_chunk_atoms = V16PodU128::new(chunk);
     let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
     asset.oi_eff_long_q = POS_SCALE;
     asset.oi_eff_short_q = POS_SCALE;
@@ -14226,7 +14229,6 @@ fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
     kani::assume((1..=8).contains(&residual_raw));
     let residual = residual_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.config.public_b_chunk_atoms = V16PodU128::new(residual);
     header.vault = V16PodU128::new(0);
     header.insurance = V16PodU128::new(0);
     account_header.pnl = V16PodI128::new(-(residual as i128));
@@ -14266,11 +14268,12 @@ fn proof_v16_liquidation_preflight_accepts_only_fully_durable_residual() {
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
 fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_recovery() {
+    // A residual above the public B chunk (the constant PUBLIC_B_CHUNK_ATOMS)
+    // cannot be booked in one step.
     let residual_raw: u8 = kani::any();
-    kani::assume((2..=8).contains(&residual_raw));
-    let residual = residual_raw as u128;
+    kani::assume((1..=7).contains(&residual_raw));
+    let residual = PUBLIC_B_CHUNK_ATOMS + residual_raw as u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
-    header.config.public_b_chunk_atoms = V16PodU128::new(residual - 1);
     header.vault = V16PodU128::new(0);
     header.insurance = V16PodU128::new(0);
     account_header.pnl = V16PodI128::new(-(residual as i128));
@@ -14295,7 +14298,7 @@ fn proof_v16_liquidation_preflight_routes_insufficient_residual_capacity_to_reco
         market.kani_preflight_liquidation_residual_durability(0, SideV16::Long, &account.as_view());
 
     kani::cover!(
-        residual > 2,
+        residual_raw > 1,
         "liquidation residual preflight proof covers nontrivial recovery residual"
     );
     assert_eq!(result, Err(V16Error::RecoveryRequired));

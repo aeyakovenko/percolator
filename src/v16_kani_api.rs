@@ -1840,7 +1840,6 @@ pub fn kani_eq_v16_config_account(a: &V16ConfigAccount, b: &V16ConfigAccount) ->
         && a.max_bankrupt_close_chunks.get() == b.max_bankrupt_close_chunks.get()
         && a.max_bankrupt_close_lifetime_slots.get() == b.max_bankrupt_close_lifetime_slots.get()
         && a.asset_activation_cooldown_slots.get() == b.asset_activation_cooldown_slots.get()
-        && a.public_b_chunk_atoms.get() == b.public_b_chunk_atoms.get()
         && a.max_recovery_fallback_deviation_bps.get()
             == b.max_recovery_fallback_deviation_bps.get()
         && a.backing_fee_base_rate_e9_per_slot.get() == b.backing_fee_base_rate_e9_per_slot.get()

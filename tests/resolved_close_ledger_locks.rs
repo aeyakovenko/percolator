@@ -19,7 +19,7 @@ use percolator::{
     EngineAssetSlotV16Account, Market, MarketGroupV16HeaderAccount, MarketGroupV16ViewMut,
     PortfolioAccountV16Account, PortfolioLegV16, PortfolioV16ViewMut, ProvenanceHeaderV16,
     ProvenanceHeaderV16Account, ResolvedCloseOutcomeV16, SideV16, TradeRequestV16, V16Config,
-    V16Error, POS_SCALE,
+    V16Error, BOUND_SCALE, POS_SCALE, PUBLIC_B_CHUNK_ATOMS,
 };
 
 const PRICE: u64 = 1_000_000;
@@ -33,25 +33,35 @@ struct Book {
     slot: u64,
     price: u64,
     deposited: u128,
+    move_bps: u64,
 }
 
 impl Book {
     /// One asset at `PRICE` (one quote atom per position atom), 10% initial
     /// and maintenance margin, at most 5% mark move per slot, and `accounts`
-    /// empty portfolios. `b_chunk_atoms` caps how much residual one call may
-    /// book (`None`: the default, which never binds here).
-    fn new(accounts: usize, b_chunk_atoms: Option<u128>) -> Self {
+    /// empty portfolios. A residual this book makes is booked in one step: the
+    /// public B chunk is `PUBLIC_B_CHUNK_ATOMS` (the largest vault).
+    fn new(accounts: usize) -> Self {
+        Self::with_margin(accounts, PRICE, 1_000, 500)
+    }
+
+    /// The same at 2% margin and at most 1% mark move per slot (admission
+    /// needs the margin above the per-slot move), opened at `LEV_PRICE`: sized
+    /// so that a bankrupt trader's unpaid loss exceeds the public B chunk, the
+    /// only way left for a bankrupt close to be booked in more than one step.
+    fn leveraged(accounts: usize) -> Self {
+        Self::with_margin(accounts, LEV_PRICE, 200, 100)
+    }
+
+    fn with_margin(accounts: usize, price: u64, margin_bps: u64, move_bps: u64) -> Self {
         let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-        cfg.initial_margin_bps = 1_000;
-        cfg.maintenance_margin_bps = 1_000;
-        cfg.max_price_move_bps_per_slot = 500;
-        if let Some(atoms) = b_chunk_atoms {
-            cfg.public_b_chunk_atoms = atoms;
-        }
+        cfg.initial_margin_bps = margin_bps;
+        cfg.maintenance_margin_bps = margin_bps;
+        cfg.max_price_move_bps_per_slot = move_bps;
         let mut header = MarketGroupV16HeaderAccount::new_dynamic([1; 32], cfg, 1, 0).unwrap();
         let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
         header
-            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, PRICE, 1)
+            .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, price, 1)
             .unwrap();
         let accounts = (0..accounts)
             .map(|seed| {
@@ -68,8 +78,9 @@ impl Book {
             markets,
             accounts,
             slot: 1,
-            price: PRICE,
+            price,
             deposited: 0,
+            move_bps,
         }
     }
 
@@ -145,10 +156,10 @@ impl Book {
         })
     }
 
-    /// Moves the oracle target and the mark by 5% (the per-slot cap) in one
-    /// slot.
+    /// Moves the oracle target and the mark by the per-slot cap (5%, or 1% in
+    /// the leveraged book) in one slot.
     fn mark(&mut self, up: bool) {
-        let delta = self.price / 20;
+        let delta = self.price * self.move_bps / 10_000;
         let price = if up {
             self.price + delta
         } else {
@@ -370,8 +381,8 @@ fn unpaid_loss(trader_side: SideV16) -> u128 {
 
 /// The trader opens 100 lots on `trader_side` at 10% margin against the well
 /// funded maker and the mark moves three 5% steps against it.
-fn bankrupt_trader(trader_side: SideV16, b_chunk_atoms: Option<u128>) -> Book {
-    let mut book = Book::new(2, b_chunk_atoms);
+fn bankrupt_trader(trader_side: SideV16) -> Book {
+    let mut book = Book::new(2);
     book.deposit(TRADER, TRADER_CAPITAL);
     book.deposit(MAKER, MAKER_CAPITAL);
     match trader_side {
@@ -387,13 +398,23 @@ fn bankrupt_trader(trader_side: SideV16, b_chunk_atoms: Option<u128>) -> Book {
 /// `bankrupt_trader`, after which the trader sells the whole position back to
 /// the maker. That trade cannot book the unpaid loss; it leaves it as a
 /// pending close on the trader with a barrier on the maker's domain.
-fn pending_close_after_terminal_trade(trader_side: SideV16, b_chunk_atoms: Option<u128>) -> Book {
-    let mut book = bankrupt_trader(trader_side, b_chunk_atoms);
+fn pending_close_after_terminal_trade(trader_side: SideV16) -> Book {
+    let book = bankrupt_trader(trader_side);
+    close_bankrupt_position(book, trader_side, OPEN_Q, unpaid_loss(trader_side))
+}
+
+/// The trader of a bankrupt `book` sells its `open_q` back to the maker, which
+/// leaves its `unpaid` loss as a pending close.
+fn close_bankrupt_position(
+    mut book: Book,
+    trader_side: SideV16,
+    open_q: u128,
+    unpaid: u128,
+) -> Book {
     match trader_side {
-        SideV16::Long => book.trade(MAKER, TRADER, OPEN_Q).unwrap(),
-        SideV16::Short => book.trade(TRADER, MAKER, OPEN_Q).unwrap(),
+        SideV16::Long => book.trade(MAKER, TRADER, open_q).unwrap(),
+        SideV16::Short => book.trade(TRADER, MAKER, open_q).unwrap(),
     }
-    let unpaid = unpaid_loss(trader_side);
     assert_eq!(
         (book.capital(TRADER), book.pnl(TRADER)),
         (0, -(unpaid as i128))
@@ -419,6 +440,66 @@ fn maker_gain(trader_side: SideV16) -> u128 {
     TRADER_CAPITAL + unpaid_loss(trader_side)
 }
 
+// The leveraged book (`Book::leveraged`): the trader opens `LEV_LOTS` lots at
+// 2% margin and the mark moves `LEV_STEPS` 1% steps against it. Its unpaid loss
+// is a little above the public B chunk (1.02e16 long, 1.14e16 short), so its
+// bankrupt close is booked in two steps, and what the first step leaves is small
+// enough for the owner to repay inside the largest vault.
+const LEV_PRICE: u64 = 100_000_000_000;
+const LEV_LOTS: u128 = 1_350_000;
+const LEV_STEPS: usize = 10;
+const LEV_TRADER_CAPITAL: u128 = LEV_LOTS * LEV_PRICE as u128 / 50; // exactly 2% of the notional
+const LEV_MAKER_CAPITAL: u128 = 5_000_000_000_000_000;
+
+fn lev_unpaid_loss(trader_side: SideV16) -> u128 {
+    let mut price = LEV_PRICE as u128;
+    for _ in 0..LEV_STEPS {
+        match trader_side {
+            SideV16::Long => price -= price / 100,
+            SideV16::Short => price += price / 100,
+        }
+    }
+    LEV_LOTS * price.abs_diff(LEV_PRICE as u128) - LEV_TRADER_CAPITAL
+}
+
+fn lev_maker_gain(trader_side: SideV16) -> u128 {
+    LEV_TRADER_CAPITAL + lev_unpaid_loss(trader_side)
+}
+
+/// The maker of the leveraged book is paid whole up to the precision of the
+/// resolved payout rate: claims are bounded in units of 1 / BOUND_SCALE atom, so
+/// up to one part in BOUND_SCALE of a claim (under one atom in the normal book,
+/// a few thousand atoms here) stays in the vault as dust. Never more than whole.
+fn lev_paid_whole(paid: u128, whole: u128) -> bool {
+    paid <= whole && whole - paid <= whole / BOUND_SCALE + 1
+}
+
+fn lev_bankrupt_trader(trader_side: SideV16) -> Book {
+    let mut book = Book::leveraged(2);
+    book.deposit(TRADER, LEV_TRADER_CAPITAL);
+    book.deposit(MAKER, LEV_MAKER_CAPITAL);
+    match trader_side {
+        SideV16::Long => book.trade(TRADER, MAKER, LEV_LOTS * LOT).unwrap(),
+        SideV16::Short => book.trade(MAKER, TRADER, LEV_LOTS * LOT).unwrap(),
+    }
+    for _ in 0..LEV_STEPS {
+        book.mark(trader_side == SHORT);
+    }
+    let unpaid = lev_unpaid_loss(trader_side);
+    assert!(unpaid > PUBLIC_B_CHUNK_ATOMS && unpaid < 2 * PUBLIC_B_CHUNK_ATOMS);
+    book
+}
+
+fn lev_pending_close_after_terminal_trade(trader_side: SideV16) -> Book {
+    let book = lev_bankrupt_trader(trader_side);
+    close_bankrupt_position(
+        book,
+        trader_side,
+        LEV_LOTS * LOT,
+        lev_unpaid_loss(trader_side),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Controls: these pass before and after the fix.
 // ---------------------------------------------------------------------------
@@ -430,7 +511,7 @@ fn control_resolved_close_books_an_unpaid_pending_close() {
     for trader_side in [LONG, SHORT] {
         for order in [[TRADER, MAKER], [MAKER, TRADER]] {
             let case = format!("trader {trader_side:?}, close order {order:?}");
-            let mut book = pending_close_after_terminal_trade(trader_side, None);
+            let mut book = pending_close_after_terminal_trade(trader_side);
             let unpaid = unpaid_loss(trader_side);
             book.resolve();
             let payouts = book.drain(&order).unwrap_or_else(|e| panic!("{case}: {e}"));
@@ -457,7 +538,7 @@ fn control_live_crank_cures_a_repaid_pending_close() {
     for trader_side in [LONG, SHORT] {
         for surplus in [0u128, 5] {
             let case = format!("trader {trader_side:?}, surplus {surplus}");
-            let mut book = pending_close_after_terminal_trade(trader_side, None);
+            let mut book = pending_close_after_terminal_trade(trader_side);
             let unpaid = unpaid_loss(trader_side);
             book.deposit(TRADER, unpaid + surplus);
             book.crank(TRADER).unwrap();
@@ -525,7 +606,7 @@ fn resolved_close_cures_a_pending_close_the_owner_repaid() {
                         "trader {trader_side:?}, surplus {surplus}, deposit after resolve \
                          {deposit_after_resolve}, close order {order:?}"
                     );
-                    let mut book = pending_close_after_terminal_trade(trader_side, None);
+                    let mut book = pending_close_after_terminal_trade(trader_side);
                     let unpaid = unpaid_loss(trader_side);
                     if !deposit_after_resolve {
                         book.deposit(TRADER, unpaid + surplus);
@@ -560,7 +641,7 @@ fn resolved_close_cures_a_pending_close_the_owner_repaid() {
 fn resolved_close_never_pays_out_over_a_pending_close() {
     for trader_side in [LONG, SHORT] {
         let case = format!("trader {trader_side:?}");
-        let mut book = pending_close_after_terminal_trade(trader_side, None);
+        let mut book = pending_close_after_terminal_trade(trader_side);
         let unpaid = unpaid_loss(trader_side);
         book.deposit(TRADER, unpaid + 5);
         book.resolve();
@@ -611,12 +692,12 @@ fn resolved_close_never_pays_out_over_a_pending_close() {
 /// Before the fix the barrier stayed up for good.
 #[test]
 fn resolved_close_finalizes_a_partly_booked_close_the_owner_repaid() {
-    const CHUNK: u128 = 1_000_000;
+    const CHUNK: u128 = PUBLIC_B_CHUNK_ATOMS;
     for trader_side in [LONG, SHORT] {
         for order in [[TRADER, MAKER], [MAKER, TRADER]] {
             let case = format!("trader {trader_side:?}, close order {order:?}");
-            let mut book = pending_close_after_terminal_trade(trader_side, Some(CHUNK));
-            let unpaid = unpaid_loss(trader_side);
+            let mut book = lev_pending_close_after_terminal_trade(trader_side);
+            let unpaid = lev_unpaid_loss(trader_side);
             book.crank(TRADER).unwrap();
             assert_eq!(book.pending_residual(TRADER), unpaid - CHUNK, "{case}");
             assert_eq!(book.ledger(TRADER).b_loss_booked, CHUNK, "{case}");
@@ -638,10 +719,10 @@ fn resolved_close_finalizes_a_partly_booked_close_the_owner_repaid() {
                 "{case}"
             );
             assert_eq!(book.charged_to_others(TRADER), CHUNK, "{case}");
-            let maker_whole = MAKER_CAPITAL + maker_gain(trader_side) - CHUNK;
+            let maker_whole = LEV_MAKER_CAPITAL + lev_maker_gain(trader_side) - CHUNK;
             assert_eq!(payouts[TRADER], 5, "{case}");
             assert!(
-                payouts[MAKER] == maker_whole || payouts[MAKER] + 1 == maker_whole,
+                lev_paid_whole(payouts[MAKER], maker_whole),
                 "{case}: maker payout {} of {maker_whole}",
                 payouts[MAKER]
             );
@@ -659,11 +740,11 @@ fn resolved_close_finalizes_a_partly_booked_close_the_owner_repaid() {
 /// remaining capital was locked along with the maker.
 #[test]
 fn resolved_close_finalizes_its_own_chunked_close_the_owner_repaid() {
-    const CHUNK: u128 = 1_000_000;
+    const CHUNK: u128 = PUBLIC_B_CHUNK_ATOMS;
     for trader_side in [LONG, SHORT] {
         let case = format!("trader {trader_side:?}");
-        let mut book = bankrupt_trader(trader_side, Some(CHUNK));
-        let unpaid = unpaid_loss(trader_side);
+        let mut book = lev_bankrupt_trader(trader_side);
+        let unpaid = lev_unpaid_loss(trader_side);
         book.resolve();
         assert_eq!(
             book.close(TRADER),
@@ -677,10 +758,10 @@ fn resolved_close_finalizes_its_own_chunked_close_the_owner_repaid() {
             .drain(&[TRADER, MAKER])
             .unwrap_or_else(|e| panic!("{case}: {e}"));
         assert_eq!(book.charged_to_others(TRADER), CHUNK, "{case}");
-        let maker_whole = MAKER_CAPITAL + maker_gain(trader_side) - CHUNK;
+        let maker_whole = LEV_MAKER_CAPITAL + lev_maker_gain(trader_side) - CHUNK;
         assert_eq!(payouts[TRADER], 5, "{case}");
         assert!(
-            payouts[MAKER] == maker_whole || payouts[MAKER] + 1 == maker_whole,
+            lev_paid_whole(payouts[MAKER], maker_whole),
             "{case}: maker payout {} of {maker_whole}",
             payouts[MAKER]
         );
@@ -698,7 +779,7 @@ fn resolved_close_cure_unblocks_every_positive_pnl_account() {
     const LOSER: usize = 3;
     for trader_side in [LONG, SHORT] {
         let case = format!("trader {trader_side:?}");
-        let mut book = Book::new(4, None);
+        let mut book = Book::new(4);
         book.deposit(TRADER, TRADER_CAPITAL);
         book.deposit(MAKER, MAKER_CAPITAL);
         book.deposit(WINNER, MAKER_CAPITAL);
@@ -773,8 +854,8 @@ const SECOND: usize = 3;
 /// loss is left as a pending close with a barrier on SECOND's side, carried by
 /// FIRST_MAKER's obligation leg and SECOND's leg in equal parts. Six 5% steps
 /// back then bankrupt SECOND.
-fn two_bankruptcies(first_side: SideV16, b_chunk_atoms: Option<u128>) -> Book {
-    let mut book = Book::new(4, b_chunk_atoms);
+fn two_bankruptcies(first_side: SideV16) -> Book {
+    let mut book = Book::new(4);
     book.deposit(FIRST, TRADER_CAPITAL);
     book.deposit(FIRST_MAKER, MAKER_CAPITAL);
     book.deposit(SECOND_MAKER, MAKER_CAPITAL);
@@ -871,7 +952,7 @@ fn permutations(items: &[usize]) -> Vec<Vec<usize>> {
 fn control_two_bankruptcies_settle_when_the_pending_close_goes_first() {
     for first_side in [LONG, SHORT] {
         let case = format!("first {first_side:?}");
-        let mut book = two_bankruptcies(first_side, None);
+        let mut book = two_bankruptcies(first_side);
         book.resolve();
         let payouts = book
             .drain(&[FIRST, SECOND, FIRST_MAKER, SECOND_MAKER])
@@ -907,7 +988,7 @@ fn control_two_bankruptcies_settle_when_the_pending_close_goes_first() {
 fn resolved_close_reopens_a_finalized_close_for_a_later_loss() {
     for first_side in [LONG, SHORT] {
         let case = format!("first {first_side:?}");
-        let mut book = two_bankruptcies(first_side, None);
+        let mut book = two_bankruptcies(first_side);
         let half = unpaid_loss(first_side) / 2;
         book.resolve();
 
@@ -986,10 +1067,15 @@ fn resolved_close_reopens_a_finalized_close_for_a_later_loss() {
     }
 }
 
-/// Whatever order the four accounts are closed in, with the residual booked
-/// in one step or in chunks, everything settles: both bankrupts leave with
-/// nothing, both makers get at least their own capital back, and all but
-/// rounding dust leaves the vault.
+/// Whatever order the four accounts are closed in, everything settles: both
+/// bankrupts leave with nothing, both makers get at least their own capital
+/// back, and all but rounding dust leaves the vault.
+///
+/// Until 2026-11-22 this also ran with a public B chunk of 1,000,000 atoms. The
+/// chunk is now the constant `PUBLIC_B_CHUNK_ATOMS` (the largest vault), and a
+/// chunked close here would need FIRST's unpaid loss above it while the account
+/// holding the same position on FIRST's side stays solvent, so more capital than
+/// a vault can hold: that variant can no longer be built.
 ///
 /// Before the fix 12 of the 24 orders ended in the lock above with unchunked
 /// booking and all 24 with chunked booking, for either side: with chunks
@@ -997,14 +1083,12 @@ fn resolved_close_reopens_a_finalized_close_for_a_later_loss() {
 #[test]
 fn two_bankruptcies_settle_in_every_close_order() {
     for first_side in [LONG, SHORT] {
-        for b_chunk_atoms in [None, Some(1_000_000)] {
-            for order in permutations(&[FIRST, FIRST_MAKER, SECOND_MAKER, SECOND]) {
-                let case = format!("first {first_side:?}, chunk {b_chunk_atoms:?}, order {order:?}");
-                let mut book = two_bankruptcies(first_side, b_chunk_atoms);
-                book.resolve();
-                let payouts = book.drain(&order).unwrap_or_else(|e| panic!("{case}: {e}"));
-                assert_two_bankruptcies_settled(&mut book, &payouts, &case);
-            }
+        for order in permutations(&[FIRST, FIRST_MAKER, SECOND_MAKER, SECOND]) {
+            let case = format!("first {first_side:?}, order {order:?}");
+            let mut book = two_bankruptcies(first_side);
+            book.resolve();
+            let payouts = book.drain(&order).unwrap_or_else(|e| panic!("{case}: {e}"));
+            assert_two_bankruptcies_settled(&mut book, &payouts, &case);
         }
     }
 }
@@ -1020,7 +1104,7 @@ fn a_later_loss_draws_insurance_through_a_new_close() {
     const INSURANCE: u128 = 10_000_000;
     for first_side in [LONG, SHORT] {
         let case = format!("first {first_side:?}");
-        let mut book = two_bankruptcies(first_side, None);
+        let mut book = two_bankruptcies(first_side);
         let half = unpaid_loss(first_side) / 2;
         let second_unpaid = second_unpaid_loss(first_side);
         assert!(second_unpaid + half < INSURANCE);

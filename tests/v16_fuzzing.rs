@@ -13,7 +13,9 @@ use percolator::{
     TradeRequestV16, V16Config, V16Error, V16PodU128, V16PodU32, V16PodU64, MAX_VAULT_TVL,
     PORTFOLIO_SOURCE_DOMAIN_CAP,
 };
-use percolator::{BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, SOCIAL_LOSS_DEN};
+use percolator::{
+    BOUND_SCALE, CREDIT_RATE_SCALE, POS_SCALE, PUBLIC_B_CHUNK_ATOMS, SOCIAL_LOSS_DEN,
+};
 use proptest::prelude::*;
 
 fn ids() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
@@ -24,7 +26,6 @@ fn fuzz_group() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
     let (market_id, _, _, _) = ids();
     let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
     cfg.max_trading_fee_bps = 10;
-    cfg.public_b_chunk_atoms = 1;
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
     let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
     header
@@ -50,7 +51,7 @@ fn v16_b_settlement_budget_is_loss_atoms_not_index_delta() {
 
     let (market_id, _, _, _) = ids();
     let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    assert_eq!(cfg.public_b_chunk_atoms, MAX_VAULT_TVL);
+    assert_eq!(PUBLIC_B_CHUNK_ATOMS, MAX_VAULT_TVL);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
     let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -134,8 +135,7 @@ fn settle_two_domain_b_loss(
     target_lien_backing: TargetLienBacking,
 ) -> TwoDomainBSettlement {
     let (market_id, _, _, owner) = ids();
-    let mut cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
-    cfg.public_b_chunk_atoms = loss.max(1);
+    let cfg = V16Config::public_user_fund_with_market_slots(2, 2, 0, 10);
     let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 2, 0).unwrap();
     let mut markets = vec![
         Market::new(0u64, EngineAssetSlotV16Account::default()),

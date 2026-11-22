@@ -1,52 +1,38 @@
-// The public B chunk is bounded by MAX_VAULT_TVL when a market is created. Without
-// the bound, a market created with a chunk of 340282366920938463 atoms or more was
-// accepted, and after a social loss on a side every B-settlement step of an account
-// on that side failed with ArithmeticOverflow, so those accounts could neither be
-// cranked nor close their positions.
+// The public B chunk, the most collateral atoms one B-settlement step moves, is the
+// constant PUBLIC_B_CHUNK_ATOMS (= MAX_VAULT_TVL). Until 2026-11-22 it was a market
+// setting: a creator could choose a chunk of 340282366920938463 atoms or more, and
+// after a social loss on a side every B-settlement step of an account on that side
+// failed with ArithmeticOverflow, so those accounts could neither be cranked nor close
+// their positions; or a chunk of one atom, so that every settlement crawled.
 use percolator::{
     AutoCrankObservationV16, AutoCrankWorkV16, EngineAssetSlotV16Account, Market,
     MarketGroupV16HeaderAccount, MarketGroupV16ViewMut, PortfolioAccountV16Account,
     PortfolioV16ViewMut, ProvenanceHeaderV16, ProvenanceHeaderV16Account, TradeRequestV16,
-    V16Config, V16Error, V16PodU128, MAX_VAULT_TVL, POS_SCALE, SOCIAL_LOSS_DEN,
+    V16Config, V16Error, V16PodU128, MAX_VAULT_TVL, POS_SCALE, PUBLIC_B_CHUNK_ATOMS,
+    SOCIAL_LOSS_DEN,
 };
 
-fn config_with_chunk(chunk: u128) -> V16Config {
-    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
-    cfg.public_b_chunk_atoms = chunk;
-    cfg
-}
-
-fn create_market(chunk: u128) -> Result<MarketGroupV16HeaderAccount, V16Error> {
-    MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], config_with_chunk(chunk), 1, 0)
+fn create_market() -> Result<MarketGroupV16HeaderAccount, V16Error> {
+    let cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    MarketGroupV16HeaderAccount::new_dynamic([1u8; 32], cfg, 1, 0)
 }
 
 #[test]
-fn a_chunk_above_the_largest_vault_is_refused() {
-    for chunk in [
-        MAX_VAULT_TVL + 1,
-        340_282_366_920_938_462,
-        340_282_366_920_938_463,
-        u128::MAX,
-    ] {
-        assert_eq!(
-            config_with_chunk(chunk).validate_public_user_fund(),
-            Err(V16Error::InvalidConfig)
-        );
-        assert_eq!(create_market(chunk).err(), Some(V16Error::InvalidConfig));
-    }
-    for chunk in [1, MAX_VAULT_TVL] {
-        assert_eq!(config_with_chunk(chunk).validate_public_user_fund(), Ok(()));
-        assert!(create_market(chunk).is_ok());
-    }
+fn the_public_b_chunk_is_the_largest_vault_and_never_overflows_a_step() {
+    assert_eq!(PUBLIC_B_CHUNK_ATOMS, MAX_VAULT_TVL);
+    // the B-settlement step's largest numerator, (chunk + 1) * SOCIAL_LOSS_DEN - 1
+    assert!((PUBLIC_B_CHUNK_ATOMS + 1)
+        .checked_mul(SOCIAL_LOSS_DEN)
+        .is_some());
 }
 
 /// Opens a long and a short position, books a social loss of 50 atoms onto the
 /// long side, cranks the long account until the engine has nothing left to do for
 /// it, and then lets it sell its position back.
-fn close_after_social_loss(chunk: u128) -> Result<(), V16Error> {
+fn close_after_social_loss() -> Result<(), V16Error> {
     let market_id = [1u8; 32];
     let owner = [4u8; 32];
-    let mut header = create_market(chunk)?;
+    let mut header = create_market()?;
     let mut markets = vec![Market::new(0u64, EngineAssetSlotV16Account::default())];
     header
         .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
@@ -92,7 +78,7 @@ fn close_after_social_loss(chunk: u128) -> Result<(), V16Error> {
     let mut long = PortfolioV16ViewMut::new(&mut long_header);
     let mut short = PortfolioV16ViewMut::new(&mut short_header);
     let now_slot = market.header.current_slot.get();
-    // One crank settles at most one chunk of the loss: 50 for a chunk of one atom.
+    // One crank settles at most one chunk of the loss, so the whole 50 atoms at once.
     for _ in 0..64 {
         let out = market.permissionless_auto_crank_not_atomic(
             &mut long,
@@ -116,19 +102,6 @@ fn close_after_social_loss(chunk: u128) -> Result<(), V16Error> {
 }
 
 #[test]
-fn an_account_on_a_side_with_a_social_loss_can_close_at_the_largest_admitted_chunk() {
-    assert_eq!(close_after_social_loss(MAX_VAULT_TVL), Ok(()));
-    assert_eq!(close_after_social_loss(1), Ok(()));
-}
-
-#[test]
-fn the_chunks_that_used_to_freeze_positions_are_refused_at_creation() {
-    assert_eq!(
-        close_after_social_loss(340_282_366_920_938_463),
-        Err(V16Error::InvalidConfig)
-    );
-    assert_eq!(
-        close_after_social_loss(u128::MAX),
-        Err(V16Error::InvalidConfig)
-    );
+fn an_account_on_a_side_with_a_social_loss_can_close() {
+    assert_eq!(close_after_social_loss(), Ok(()));
 }
