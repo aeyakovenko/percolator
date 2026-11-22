@@ -21156,8 +21156,10 @@ fn proof_v16_frame_fee_charge_touches_only_declared_state() {
     assert!(kani_eq_portfolio_account_v16_account(&ea, &account_header));
 }
 
-// oracle-target-update frame: exactly {asset.raw_oracle_target_price,
-// header.oracle_epoch}, with the epoch changing iff the target changes.
+// oracle-target-update frame: exactly {asset.raw_oracle_target_price, asset.fund_px_last,
+// header.oracle_epoch}, with the epoch changing iff the target changes and the price-cap anchor
+// restarting at the effective price iff the target changes (in this fixture the anchor already
+// equals the effective price; proof_v16_changed_raw_target_restarts_the_cap_anchor moves it).
 #[kani::proof]
 #[kani::unwind(40)]
 #[kani::solver(cadical)]
@@ -21183,11 +21185,70 @@ fn proof_v16_frame_oracle_target_update_touches_only_declared_state() {
     let mut es = s0;
     let mut asset = s0.asset.try_to_runtime().unwrap();
     asset.raw_oracle_target_price = target;
+    if changed {
+        asset.fund_px_last = asset.effective_price;
+    }
     es.asset = AssetStateV16Account::from_runtime(&asset);
     assert!(kani_eq_engine_asset_slot_v16_account(
         &es,
         &markets[0].engine
     ));
+}
+
+// INV-045 (program charter): the path accrual moves the mark toward its target by at most
+// `anchor * cap` per slot, the anchor being the mark when the current target took effect. A staged
+// target that changes therefore restarts the anchor (`fund_px_last`) at the effective price, as the
+// path accrual does when it is given a new target; a target equal to the one in force leaves the
+// asset slot as it was; a target of 0 or above MAX_ORACLE_PRICE is refused with no write. The mark,
+// the anchor, the stored target and the new target are symbolic over the whole price range (the
+// mark, the anchor and the stored target in 1..=MAX_ORACLE_PRICE, as the shape check requires of a
+// live asset); one live asset with no position.
+#[kani::proof]
+#[kani::unwind(40)]
+#[kani::solver(cadical)]
+fn proof_v16_changed_raw_target_restarts_the_cap_anchor() {
+    let target: u64 = kani::any();
+    let mark: u64 = kani::any();
+    let anchor: u64 = kani::any();
+    let stored: u64 = kani::any();
+    kani::assume(1 <= mark && mark <= MAX_ORACLE_PRICE);
+    kani::assume(1 <= anchor && anchor <= MAX_ORACLE_PRICE);
+    kani::assume(1 <= stored && stored <= MAX_ORACLE_PRICE);
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    {
+        let mut asset = markets[0].engine.asset.try_to_runtime().unwrap();
+        asset.effective_price = mark;
+        asset.fund_px_last = anchor;
+        asset.raw_oracle_target_price = stored;
+        markets[0].engine.asset = AssetStateV16Account::from_runtime(&asset);
+    }
+    let h0 = header;
+    let s0 = markets[0].engine;
+    let res = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        market.set_asset_raw_oracle_target_not_atomic(0, target)
+    };
+    if target == 0 || target > MAX_ORACLE_PRICE {
+        assert_eq!(res, Err(V16Error::InvalidConfig));
+        assert!(kani_eq_market_group_v16_header_account(&h0, &header));
+        assert!(kani_eq_engine_asset_slot_v16_account(&s0, &markets[0].engine));
+        return;
+    }
+    assert_eq!(res, Ok(()));
+    let changed = target != stored;
+    kani::cover!(changed && anchor != mark, "a changed target moves a stale anchor to the mark");
+    kani::cover!(!changed && anchor != mark, "an unchanged target keeps an anchor that differs from the mark");
+    let mut es = s0;
+    let mut expected = s0.asset.try_to_runtime().unwrap();
+    expected.raw_oracle_target_price = target;
+    if changed {
+        expected.fund_px_last = mark;
+    }
+    es.asset = AssetStateV16Account::from_runtime(&expected);
+    assert!(kani_eq_engine_asset_slot_v16_account(&es, &markets[0].engine));
+    let after = markets[0].engine.asset.try_to_runtime().unwrap();
+    assert_eq!(after.effective_price, mark);
+    assert_eq!(after.fund_px_last, if changed { mark } else { anchor });
 }
 
 // insurance->account credit frame: exactly {insurance, c_tot} on the header

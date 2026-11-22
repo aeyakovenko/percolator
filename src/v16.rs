@@ -8049,7 +8049,9 @@ pub struct AccrualStepV16 {
 ///
 /// `cap_anchor` is fixed for the lifetime of one raw-oracle target. Using that stable anchor makes
 /// the cumulative movement exactly the configured linear `max_change_bps * dt` envelope instead
-/// of compounding the cap at caller-selected transaction boundaries. The remainder is the
+/// of compounding the cap at caller-selected transaction boundaries. Every change of the target
+/// starts a new anchor at the current mark: the path accrual's when it is given a new target, and
+/// the staging setter's (`set_asset_raw_oracle_targets_not_atomic`). The remainder is the
 /// numerator left after division by `MAX_MARGIN_BPS`; carrying it across calls prevents permanent
 /// low-price target pinning.
 /// The bound this step puts on the oracle: one step moves the effective price toward the
@@ -18323,7 +18325,9 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
 
     /// Stages distinct per-asset oracle targets and validates the resulting market once. A batch
     /// is one committed observation event, so any number of changed targets advances the global
-    /// oracle epoch exactly once.
+    /// oracle epoch exactly once. A changed target restarts the asset's price-cap anchor
+    /// (`fund_px_last`) at its current effective price, as the path accrual does when it is given
+    /// a new target.
     pub fn set_asset_raw_oracle_targets_not_atomic(
         &mut self,
         targets: &[(usize, u64)],
@@ -18365,6 +18369,13 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         };
         for &(asset_index, target) in targets {
             let mut asset = self.asset_state(asset_index)?;
+            if asset.raw_oracle_target_price != target {
+                // A new target starts a new trajectory: the path accrual's price-cap anchor is the
+                // mark at which the target took effect, as when the path accrual is given the new
+                // target itself (INV-045). Kept from an earlier target, the anchor let one path step
+                // move the mark by `anchor / mark` times the per-target rate.
+                asset.fund_px_last = asset.effective_price;
+            }
             asset.raw_oracle_target_price = target;
             self.set_asset_state(asset_index, asset)?;
         }
