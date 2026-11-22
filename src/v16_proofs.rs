@@ -5052,3 +5052,77 @@ fn proof_decoded_active_leg_is_valid_for_any_loss_weight() {
     }
     kani::cover!(matches!(decoded, Ok(leg) if leg.active), "an active leg decodes");
 }
+
+// Batch 18: no-overflow proofs for the liquidation helpers and the risk-notional inverse, with the
+// helpers they call returning arbitrary values. Each stubbed callee either never panics (wide math:
+// the arithmetic layer) or has a no-overflow piece of its own, and an arbitrary value covers every
+// value it can return, so each proof covers every operation of the function itself, for every input.
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_health_cert() -> HealthCertV16 {
+    HealthCertV16 {
+        certified_equity: kani::any(),
+        certified_initial_req: kani::any(),
+        certified_maintenance_req: kani::any(),
+        certified_liq_deficit: kani::any(),
+        certified_worst_case_loss: kani::any(),
+        cert_oracle_epoch: kani::any(),
+        cert_funding_epoch: kani::any(),
+        cert_risk_epoch: kani::any(),
+        cert_asset_set_epoch: kani::any(),
+        active_bitmap_at_cert: kani::any(),
+        valid: kani::any(),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stub_any_leg_maintenance(_c: V16Config, _q: u128, _s: SideV16, _p: u64, _t: u64) -> V16Result<u128> {
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stub_any_risk_notional(_q: u128, _p: u64) -> V16Result<u128> {
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stub_any_close_fee(_n: u128, _bps: u64, _min: u128, _cap: u128, _full: bool) -> V16Result<u128> {
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stub_any_health_deficit(_e: i128, _m: u128, _om: u128, _nm: u128, _f: u128) -> V16Result<u128> {
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::stub(liquidation_leg_maintenance_requirement, stub_any_leg_maintenance)]
+#[kani::stub(liquidation_risk_notional_ceil, stub_any_risk_notional)]
+#[kani::stub(liquidation_fee_for_close, stub_any_close_fee)]
+#[kani::stub(liquidation_projected_health_deficit_from_parts, stub_any_health_deficit)]
+fn proof_no_overflow_liquidation_projected_healthy_after_close_stubbed() {
+    let r = liquidation_projected_healthy_after_close(
+        any_v16_config_for_overflow(),
+        any_health_cert(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+    kani::cover!(matches!(r, Ok(true)));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::stub(U256::checked_mul, stub_any_u256_option)]
+#[kani::stub(U256::checked_div, stub_any_u256_option)]
+#[kani::stub(U256::try_into_u128, stub_any_u128_from_u256)]
+fn proof_no_overflow_min_abs_q_for_risk_notional_at_least_wide_stubbed() {
+    let r = min_abs_q_for_risk_notional_at_least(kani::any(), kani::any());
+    kani::cover!(matches!(r, Ok(q) if q > 1));
+}
