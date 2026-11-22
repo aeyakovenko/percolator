@@ -20,9 +20,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # and the engine source is the checkout itself (which must be at LANDED_REV); the program source comes
 # from a checkout of percolator-prog at WRAPPER_REV, named by LEDGER_WRAPPER_SRC.
 _here = os.path.dirname(os.path.abspath(__file__))
-_frozen = os.path.join(_here, "src_4e77481b/v16.rs")
+_frozen = os.path.join(_here, "src_71076137/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_cd8a446a/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_e1295564/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -61,7 +61,12 @@ B39_REV = "80f8f0b4"            # refactor batches 3-9: K74-K93
 # changed, two private functions new, no listed kernel changed or reaches them; transition_kinds.4e77481b.py:
 # the two entry points re-read, classes unchanged. Kani: the harnesses that reach the change were run again in
 # all three layers with the three new proofs; every other verdict carries from batch 12's full runs.
-LANDED_REV = "4e77481b"
+# Rolled 2026-11-22 to 71076137: batch 14 (06cc3b91, fifteen no-overflow Kani proofs) and batch 15. A target staged by
+# set_asset_raw_oracle_targets_not_atomic that changes now restarts the path accrual's price-cap anchor at the effective
+# price (INV-045). specs/changed_since_4e77481b_at_71076137.md: that setter is the one function changed; no listed
+# kernel changed or reaches it; transition_kinds.71076137.py: the setter re-read, class final. Kani: the 4 harnesses
+# that reach the setter (the new proof among them) were run again in all three layers; every other verdict carries.
+LANDED_REV = "71076137"
 REESTABLISH = {"T09.header", "T38.header"}
 # Kernels whose proof has to be made again for NEW_REV: specs/changed_since_add1d027_at_c030aa40.md
 # (changed_fns.py: own text, callees by name, changed types). Every other kernel, its callees and its
@@ -148,7 +153,7 @@ kernels["K63"] = "kernel_provider_protection_floor_shift"    # new in d1fa39f6
 REFACTOR_KERNELS = {}
 # Kani checks these only for bounded inputs (specs/kernel_contracts_spec_80f8f0b4.md); the prover proves them at full width
 BOUNDED_KERNELS = {"K76", "K77", "K78", "K88", "K91", "K93"}
-for _line in read("specs/kernel_contracts_list_4e77481b.tsv").splitlines():
+for _line in read("specs/kernel_contracts_list_71076137.tsv").splitlines():
     _f = _line.split("\t")
     if len(_f) >= 2 and int(_f[0][1:]) >= 64:
         REFACTOR_KERNELS[_f[0]] = _f[1]
@@ -351,7 +356,8 @@ for _pid, _h in PO_KANI.items():
     pieces[_pid]["status"] = "verified by Kani"
     _at = (" (type parameter `u8`; the checked operations do not involve it)" if _pid in PO_KANI_AT_U8 else "")
     pieces[_pid]["evidence"] = (f"{_h} (Kani, closure layer, every input symbolic, no assumption){_at}, "
-                                f"engine {PO_KANI_REV}")
+                                f"engine {PO_KANI_REV}; the function is unchanged in {LANDED_REV} "
+                                f"(specs/changed_since_4e77481b_at_{LANDED_REV}.md)")
 
 # TR: the real class of layer T, split into statements local to the header and one account
 for pid, text in (
@@ -390,7 +396,9 @@ for pid, target, text, how in (
 # Y: what the proofs assume and what is established by evidence instead of proof
 for pid, target, text in (
     ("Y.runtime", "Solana runtime", "assumed: transaction atomicity (a failed instruction changes nothing), account ownership and signer "
-     "checks, rent and reallocation rules, the Clock sysvar, the compute meter"),
+     "checks, rent and reallocation rules, the Clock sysvar (the elapsed slots of the accruals and the price clamps come "
+     "from it; seven handlers would fall back to the instruction's slot argument if the read failed, which it does not "
+     "on-chain), the compute meter"),
     ("Y.spl", "SPL Token program", "assumed: a transfer moves exactly the amount between the named accounts or fails; mint and owner fields "
      "are as the token program wrote them"),
     ("Y.oracle", "oracle accounts", "assumed: the layouts the program parses (Pyth, Switchboard, Chainlink) are the publishers' layouts. "
@@ -560,7 +568,7 @@ start = wsrc.index("pub enum Instruction")
 body = wsrc[start:wsrc.index("\n    }\n", start)]
 variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # what the instruction census found per instruction (wrapper_census.py -> specs/wrapper_shape_census_<rev>.md)
-WRAPPER_REV = "cd8a446a"
+WRAPPER_REV = "e1295564"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -854,8 +862,8 @@ if "kernel_b_settlement_chunk" in _k_of:
     pieces[_pid]["evidence"] = f"proof_public_b_chunk_keeps_b_settlement_free_of_overflow (Kani, every budget, both sides), engine {LANDED_REV}"
 # INV-045 (reworded in program a406ce3b): what one accrual segment does with and without effective open
 # interest. Kani lemmas in engine c65bb9a1 (src/v16_proofs.rs, refactor batch 10: proofs only, the deployed code is
-# LANDED_REV's); the effective-price writers are listed in specs/inv045_effective_price_writers_4e77481b.md and the
-# clauses of the statement in specs/inv045_closure_4e77481b.md.
+# LANDED_REV's); the effective-price writers are listed in specs/inv045_effective_price_writers_71076137.md and the
+# clauses of the statement, restated after its independent read, in specs/inv045_closure_71076137.md.
 for _pid, _target, _text, _proof, _over in [
     ("AC.unexposed", "accrual_activity_for_asset_segment",
      "with no effective open interest on either side, a segment of either accrual path is neither price-move nor "
@@ -925,14 +933,16 @@ pieces["AC.price_range"]["evidence"] = (
     "replaced by a stand-in. The proofs fix one asset slot and at most one step; that covers every market state "
     "because the prologue reads only the header, the number of asset slots (in one disjunct of the guard that also "
     "holds the price test) and its arguments, never the slot's contents or the steps, and assigns nothing "
-    f"(roll_to_4e77481b.py checks this on the text), engine {LANDED_REV}")
+    f"(roll_to_4e77481b.py checks this on the text), engine 4e77481b; the entry points and the proofs are unchanged "
+    f"in {LANDED_REV} (specs/changed_since_4e77481b_at_{LANDED_REV}.md)")
 # C1 and the route half of C4 of the closure map (specs/inv045_closure_<rev>.md): checked by a scan and by the
 # program's tests, which is not a proof, so both stay open and INV-045's count shows them.
 piece("AC.writers", "S settlement glue", "the effective price",
       "every write of an asset's effective price in the deployed engine and program is one of the writers that "
-      "specs/inv045_effective_price_writers_<rev>.md lists: the two accruals, the initialization of an asset or of a "
-      "generation, the anchor reset of an asset with no position or loss state, or a copy of the asset's own price "
-      "(INV-045 clause C1)", "Aristotle")
+      "specs/inv045_effective_price_writers_<rev>.md lists: the two accruals, the initialization of an asset, of a "
+      "generation or of a slot (including the zero-fill of new capacity), the anchor reset of an asset with no position "
+      "or loss state, a copy of the asset's own price (write-backs, the canonicalization of a retired slot, the restore "
+      "after a failed write), or the terminal close of the market account (INV-045 clause C1)", "Aristotle")
 pieces["AC.writers"]["evidence"] = (
     "checked by a scan, not proved: effective_price_writers.py with specs/inv045_effective_price_writers_<rev>.tsv "
     "passes on the deployed sources (field assignments, asset-record literals, fresh records and empty slots, slot "
@@ -940,11 +950,56 @@ pieces["AC.writers"]["evidence"] = (
     "instruction (layers T and W)")
 piece("AC.trade_routes", "W wrapper", "accepted_reported_trade_price_view",
       "every trade route accepts a reported price only through `accepted_reported_trade_price_view`, which clamps it "
-      "from the mark average with `clamp_toward_engine_dt` whatever the open interest (INV-045 clause C4; the clamp "
-      "itself is AC.clamp)", "Aristotle")
+      "with `clamp_toward_engine_dt` from the program's price average (`mark_ewma_e6`) over the slots since that "
+      "average last moved, whatever the open interest (INV-045 clause C4; the clamp itself is AC.clamp)", "Aristotle")
 pieces["AC.trade_routes"]["evidence"] = (
     "test evidence, not proved: the program's composition test "
     "v16_program_mark_writer_and_trade_exit_composition_is_source_complete and a reading of both trade routes")
+# INV-045, restated after its independent read (specs/inv045_closure_71076137.md): the link from the canonical step to
+# the path body (clause C3) and the charter's funding-cadence paragraph (clause C9) are pieces of their own
+piece("AC.path_link", "S settlement glue", "accrue_asset_path_to_admitted_not_atomic",
+      "every step the path accrual books equals `canonical_accrual_price_step_v16(mark, target, anchor, cap, exposed, "
+      "remainder)`, with the anchor the charter names (`fund_px_last`, or the mark when the call is given a target "
+      "different from the stored one) and each remainder the previous step's; the first remainder of a call is the "
+      "caller's, below MAX_MARGIN_BPS, so a call can exceed `n * anchor * cap` by less than one price unit (INV-045 "
+      "clause C3)", "Kani or Aristotle (the path body against the canonical chain)")
+pieces["AC.path_link"]["evidence"] = "a reading of the path body (the restated INV-045 statement); not proved"
+piece("AC.cadence", "S settlement glue", "the funding of a fresh hybrid asset",
+      "two histories with the same target that differ only in how often the oracle report is renewed accrue funding that "
+      "differs by at most `max_abs_funding_e9_per_slot` of the notional per slot of the gap (INV-045 clause C9, the "
+      "charter's paragraph on report cadence)", "Aristotle (a two-execution statement)")
+pieces["AC.cadence"]["evidence"] = ("test evidence, not proved: the program's test "
+                                    "v16_program_funded_report_cadence_differs_only_by_modelled_funding_and_preserves_custody")
+piece("AC.walk_margin", "S settlement glue", "trade_preflight_risk_gate and target_lag_penalty",
+      "the anchor-linear walk is safe for positions: no risk-increasing trade is admitted while an exposed asset's raw "
+      "target differs from its mark, and every margin requirement (initial, maintenance, the liquidation leg, the risk "
+      "notional and the health certificate) counts the whole adverse gap between the mark and the raw target from the "
+      "slot the target changes; so a step that moves a large share of the mark late in a long walk moves it toward a "
+      "price every position is already margined at (INV-045's statement bounds the step by the cap of the mark when the "
+      "target took effect, not of the current mark)", "Kani or Aristotle (the gate and each requirement)")
+pieces["AC.walk_margin"]["evidence"] = ("a reading of the engine (trade_preflight_risk_gate; target_lag_penalty in "
+                                        "liquidation_leg_maintenance_requirement, the margin kernel and the health "
+                                        "certificate); not proved")
+piece("AC.anchor_writes", "S settlement glue", "the price-cap anchor (`fund_px_last`)",
+      "every deployed write of an asset's price-cap anchor stores the mark of the same update: the path accrual "
+      "(the mark when it is given a changed target, the mark on arrival), the single-segment accrual (its new price "
+      "when the price moved or reached the stored target), the staging setter (the mark when the target changes), "
+      "initialization and restart (the initial or authenticated price, which is the mark), the empty-asset reset, "
+      "and copies of the asset's own record; so the anchor in INV-045's bound is always a mark the asset held when its "
+      "current target took effect (AC.anchor proves the setter's case for every input)",
+      "a writer scan like AC.writers, then Kani or Aristotle per writer")
+pieces["AC.anchor_writes"]["evidence"] = "AC.anchor (Kani) covers the staging setter; the other writers are a reading"
+# INV-045: the anchor of the path accrual is the mark when the current target took effect; a staged target that changes
+# restarts it (engine 71076137, batch 15)
+piece("AC.anchor", "S settlement glue", "set_asset_raw_oracle_targets_not_atomic",
+      "a target staged by `set_asset_raw_oracle_targets_not_atomic` that differs from the stored one sets the price-cap "
+      "anchor (`fund_px_last`) to the effective price in the same write; an unchanged target leaves the asset slot as it "
+      "was; a target of 0 or above MAX_ORACLE_PRICE is refused with no write (INV-045 clause C3: the anchor is the mark "
+      "when the current target took effect, for a staged target as for one given to the path accrual)", "Kani",
+      status="verified by Kani",
+      evidence="proof_v16_changed_raw_target_restarts_the_cap_anchor (Kani, main, closure and contracts runs; every mark, "
+               "anchor, stored target and new target, the first three in 1..=MAX_ORACLE_PRICE as the shape check requires "
+               "of a live asset; one live asset with no position), engine 71076137")
 
 # The trade pilot (task s2, engine d1fa39f6): the prover's names for the pieces TF, TA, TB and TC1-TC9.
 TRADE_ROWS = {
@@ -1042,7 +1097,10 @@ for _inv, _ids in {"INV-045": ["K76.contract", "K76.nopanic", "K93.contract", "K
     extra[_inv] = extra.get(_inv, []) + [i for i in _ids if i in pieces]
 extra["INV-045"] = extra.get("INV-045", []) + [i for i in ("AC.unexposed", "AC.exposed", "AC.nofunding", "AC.residue",
                                                          "AC.clamp", "AC.price_range", "AC.writers",
-                                                         "AC.trade_routes") if i in pieces]
+                                                         "AC.trade_routes", "AC.anchor", "AC.path_link",
+                                                         "AC.cadence", "AC.walk_margin", "AC.anchor_writes",
+                                                         "K59.contract")
+                                                         if i in pieces]
 # INV-085 (proven arithmetic equals deployed arithmetic): the engine's unchecked arithmetic is where they can differ
 extra["INV-085"] = extra.get("INV-085", []) + sorted(i for i in pieces if i.startswith("PO."))
 if "kernel_accrual_index_update" in _k_of:
@@ -1208,6 +1266,8 @@ _ROLLS = [
      "contract attribute did, which the comparison does not see; its body did not)"),
     ("08e8f7f0", "4e77481b", "refactor batch 13, the accrual's price check proved for every price: no listed kernel "
      "changed; the two accrual entry points call the rest of the accrual, moved verbatim, as a function of its own"),
+    ("4e77481b", "71076137", "batch 14 (fifteen no-overflow proofs, no code change) and batch 15, a staged target restarts "
+     "the path accrual's price-cap anchor: one setter changed, no listed kernel changed or reaches it"),
 ]
 _steps = _ROLLS[:next(i for i, r in enumerate(_ROLLS) if r[1] == LANDED_REV) + 1]
 md.append(f"**Revisions.** The ledger describes engine {LANDED_REV} and program {WRAPPER_REV}, which pins it. "

@@ -188,13 +188,13 @@ FEATURES=fuzz,closure KANI_Z="" LOG_DIR=kani_closure CARGO_TARGET_DIR=target/clo
 <!-- proofs:begin (generated from proofs/README_SECTION.md and the ledger; edit that file, not this block) -->
 ## Proof Status And How To Reproduce It
 
-As of 2026-11-22, for engine `4e77481b` and program `cd8a446a`: **279 of 807 pieces of the deployed build are done (200 proved by Aristotle, 79 verified by Kani); 0 of 89 charter invariants are closed.**
+As of 2026-11-22, for engine `71076137` and program `e1295564`: **280 of 812 pieces of the deployed build are done (200 proved by Aristotle, 80 verified by Kani); 0 of 89 charter invariants are closed.**
 
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
 | 2 | The engine cannot panic or overflow and keeps the header | 24 of 193 |
-| 3 | The engine keeps the whole market state | 7 of 205 |
+| 3 | The engine keeps the whole market state | 8 of 210 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -214,7 +214,7 @@ What the numbers do not say:
 - No charter invariant is closed yet. A proved piece is a piece of an invariant.
 - No Kani proof executes a trade, and the proof file records the trade, the full account refresh
   and the full resolved close as beyond the solver budget (a resolved close of a flat account is
-  proved). `proofs/specs/kani_gap_map_4e77481b.md` lists what no harness reaches. That code is where
+  proved). `proofs/specs/kani_gap_map_71076137.md` lists what no harness reaches. That code is where
   the Aristotle work is aimed now.
 - An Aristotle proof is about one function at one revision. A proof made on an earlier revision
   counts for this one only when a function-by-function comparison shows the function, everything
@@ -232,19 +232,19 @@ What the numbers do not say:
   compute limit), so an overflow in the engine would continue with a wrapped value. A no-panic proof
   rules that out; an "if it returns" statement holds on-chain only together with the `PO.*` pieces,
   one per engine function with unchecked arithmetic
-  (`proofs/specs/engine_wrapping_arithmetic_4e77481b.md`).
+  (`proofs/specs/engine_wrapping_arithmetic_71076137.md`).
 
 ### Expected Kani Results
 
-On engine `4e77481b`, Kani 0.66.0, with the three commands of "Run Kani":
+On engine `71076137`, Kani 0.66.0, with the three commands of "Run Kani":
 
 | Run | Verified | Without a verdict |
 |---|---|---|
-| `--features fuzz` | 376 | none |
-| `--features fuzz,closure` | 401 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
-| `--features fuzz,contracts -Z function-contracts` | 452 | `composition_clear_leg_value_conservation` |
+| `--features fuzz` | 377 | none |
+| `--features fuzz,closure` | 402 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
+| `--features fuzz,contracts -Z function-contracts` | 453 | `composition_clear_leg_value_conservation` |
 
-How the table was obtained for this revision. Batch 13 changes two entry points of the engine, the accrual entry points, and adds three proofs to the closure run. The harnesses whose call graph reaches a changed or new function (`kani_reach.py`: 11, the same in each run) were run again on `4e77481b` in all three runs, together with the three new proofs, and all verified. Every other harness keeps its verdict from the full runs on `08e8f7f0` (batch 12), since nothing it can reach changed. Every harness has a verdict except the two named in the table, which have none on earlier revisions either. A harness named `proof_v16_adjust_u128_applies_exact_delta_or_fails_closed` exists in two modules and is counted twice. Since then 15 proofs were added and verified one by one: 0 with `--features fuzz`, 15 in the closure run, 0 in the contracts run. `proofs/kani_added.tsv` lists them with their verdict in each run; add the ones marked verified to the numbers above.
+How the table was obtained for this revision. Batch 15 changes one setter of the engine (`set_asset_raw_oracle_targets_not_atomic`: a changed target restarts the price-cap anchor) and adds one proof that runs in all three runs (`proof_v16_changed_raw_target_restarts_the_cap_anchor`). The harnesses whose call graph reaches the setter (`kani_reach.py`: 4, the new proof among them, the same in each run) were run again on `71076137` in all three runs and verified. Every other harness keeps its verdict from the runs on `4e77481b` and earlier, since nothing it can reach changed; batch 14's fifteen closure proofs are listed in `kani_added.tsv`. Every harness has a verdict except the two named in the table, which have none on earlier revisions either. A harness named `proof_v16_adjust_u128_applies_exact_delta_or_fails_closed` exists in two modules and is counted twice. Since then 15 proofs were added and verified one by one: 0 with `--features fuzz`, 15 in the closure run, 0 in the contracts run. `proofs/kani_added.tsv` lists them with their verdict in each run; add the ones marked verified to the numbers above.
 
 A whole run takes one and a half to two hours on a 64-core machine at
 `-j 12 --output-format terse`. Run them one after the other: the two harnesses without a verdict
@@ -256,7 +256,7 @@ What the suite reaches and what it executes:
 python3 proofs/kani_reach.py .                                        # functions no harness can reach
 python3 proofs/kani_reach.py . --paths liquidate_account_not_atomic   # a call path from a harness
 cargo kani --tests --features fuzz --coverage -Z source-coverage      # which code the harnesses execute
-python3 proofs/kani_cov_report.py . 4e77481b target/kani               # report from those results
+python3 proofs/kani_cov_report.py . 71076137 target/kani               # report from those results
 ```
 
 ### Reproduce The Aristotle Proofs

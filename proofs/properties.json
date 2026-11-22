@@ -1,206 +1,206 @@
 [
  {
   "name": "finish_trade_checks_not_atomic.order",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TF.order (question), `finish_trade_checks_not_atomic`: whether creating the short account's lien (`create_initial_margin_source_lien_if_needed(short_account)`) can change anything the long account's certificate was computed from, so that a fresh certification of the long account after it would give a lower `certified_equity` or a higher `certified_initial_req` than the stored certificate that `ensure_initial_margin` then checks. Answer to be stated precisely: what the certificate depends on, and what the short lien creation writes.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tf_margin",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TF.margin, `MarketGroupV16ViewMut::<'_, ()>::finish_trade_checks_not_atomic`: for all inputs and all well-formed starting states, if the call returns `Ok(())`, then each account whose `long_requires_initial_margin` / `short_requires_initial_margin` argument is true has, at the return, a valid `health_cert` with `certified_equity >= 0` and `certified_equity >= certified_initial_req`. Proved from the function body, assuming TC9 (`create_initial_margin_source_lien_if_needed`) and the contracts of `ensure_initial_margin` / `ensure_no_positive_credit_initial_margin` (which wrap the `kernel_initial_margin_gate` / `kernel_locked_margin_gate` checks) as hypotheses.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tf_locked",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TF.locked, `finish_trade_checks_not_atomic`: if `locked` is true and the call returns `Ok(())`, then each account whose `*_requires_initial_margin` argument is true has, at the return, `capital + min(pnl, 0) - |fee_credits| >= certified_initial_req`, with that left side not negative (fields at the return). Proved from the function body, assuming TC9 and the contracts of `ensure_initial_margin` / `ensure_no_positive_credit_initial_margin` (the latter wraps `kernel_locked_margin_gate`).",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tf_frame",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TF.frame, `finish_trade_checks_not_atomic`: on an `Ok(())` return, (a) when `risk_increasing` is false or `locked` is true nothing at all was written (header, market slots, the view's `protection_observed`, both accounts); (b) in every case neither account has a written field other than `capital`, `health_cert` and `source_domains`, and the header has no written field other than `backing_provider_earnings_total`, `c_tot`, `risk_epoch`, `source_claim_bound_total_num`, `source_fresh_backing_total_num` and `source_insurance_credit_reserved_total_atoms`. Proved from the body assuming TC9 and the `ensure_*` margin contracts.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tc9_im_lien",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC9, `create_initial_margin_source_lien_if_needed(account)`: on `Ok(())` the account's `health_cert` is valid at the return; it writes no account field other than `capital`, `health_cert` and `source_domains`, and no header field other than `backing_provider_earnings_total`, `c_tot`, `risk_epoch`, `source_claim_bound_total_num`, `source_fresh_backing_total_num` and `source_insurance_credit_reserved_total_atoms` (market slots are not constrained, as in the stated TC9). It is not passed the other account, so it cannot write it. Deep contract: attempted only after everything else.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tc7_recertify",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC7, `recertify_account_after_trade_delta(account, asset_index, old_abs_q, new_abs_q, price)` (takes `&self`): writes nothing in the market (header, slots, `protection_observed`), and in the account at most `health_cert`.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "transfer_trade_residual_reward_credit.frame",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC6, `MarketGroupV16ViewMut::<'_, ()>::transfer_trade_residual_reward_credit(long_account, short_account, &trade_preflight, asset_index)` (takes `&self`): writes nothing in the market (header, slots, `protection_observed`), and in the two accounts at most `residual_received_atoms_total` and `residual_spent_principal_atoms_total`; the `trade_preflight` it borrows is unchanged (and given back if it panics).",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tc5_position_delta",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC5 (strengthened), `apply_current_position_delta_with_lookup(account, asset_index, delta_q, lookup)`: on `Ok(())` it has written no header field other than `resolved_payout_blocker_count` and `risk_epoch`, no account field other than `active_bitmap`, `health_cert`, `legs` and `liquidation_lock`, and no market slot other than the slot of `asset_index`; with `delta_q != 0` the account's signed raw position on `asset_index` is `lookup.next_q` afterwards and its legs on other assets are unchanged; with `delta_q == 0` nothing at all is written. Deep contract: attempted only after everything else.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tc4_terminal_residual",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC4 (strengthened), `begin_terminal_trade_residual_if_needed(account, asset_index, lookup, is_final_batch_fill, attributable_asset_before_refresh)`: on `Ok(())` it has written no header field other than `resolved_payout_blocker_count`, no account field other than `close_progress`, and no market slot other than the slot of `asset_index`; and nothing at all when `is_final_batch_fill` is false, when `lookup.current_q == 0` or `lookup.next_q != 0`, or when `account.header.pnl >= 0`.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tc3_risk_change",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC3, `require_asset_risk_change_allowed(asset_index, risk_increasing)` (takes `&self`): writes nothing; with `risk_increasing` true it returns `Ok(())` only if the slot of `asset_index` exists and its asset's stored `a_long` and `a_short` both equal `ADL_ONE`.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tc2_preflight",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC2, `validate_trade_position_preflight(&long_view, &short_view, request, long_lookup, short_lookup)` (takes `&self`): writes nothing, and on `Ok(p)`: `p.long_lookup == long_lookup`, `p.short_lookup == short_lookup`, `p.long_old_abs_q == |long_lookup.current_effective_q|`, `p.long_new_abs_q == |long_lookup.next_effective_q|`, the same for short, and `p.risk_increasing` is true exactly when `|next_effective_q| > |current_effective_q|` for at least one of the two lookups.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tc1_charge_fee",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TC1, `MarketGroupV16ViewMut::<'_, ()>::charge_account_fee_current_not_atomic(account, requested_fee)`, proved from its body (no callee contract), in the no-panic form (`np = true`: no execution panics): if it returns `Ok(charged)`, then `charged == 0` if `requested_fee == 0` or `account.header.pnl < 0`, else `min(requested_fee, account.header.capital)`; if `charged == 0` nothing is written; otherwise exactly `capital` (lowered by `charged`), `m.header.c_tot` (lowered by `charged`, with `charged <= c_tot`), `m.header.insurance` (raised by `charged`) and `health_cert.valid` (set to 0) are written; `vault`, the market slots and all else are not.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tb_flag",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TB.flag, `execute_batch_with_fee_loss_stale_scoped_not_atomic(long_account, short_account, requests)` with `execute_batch_with_fee_after_tail_validation_not_atomic` treated as an opaque call (any writes to the market and the two accounts, `Ok` or `Err`, described by an arbitrary relation `\u03a8`). Every return, `Ok` or `Err`, is either an `Err` before the opaque call with nothing written, or comes after it; then, for the value `ignore` of `ignore_unrelated_loss_stale`: if `ignore` is true the opaque call started with `loss_stale_active == 0` and the state left has `loss_stale_active == f0` (its value at entry), everything else being the opaque call's final state; if `ignore` is false the entry point itself wrote nothing (in particular not the flag). `ignore` is true exactly when `f0 == 1`, `requests` is non-empty and `can_ignore_unrelated_loss_stale_for_trade` returned `Ok(true)` for the asset of every request (the loop stops at the first `Ok(false)`). Covers returns only; panics are not constrained.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Trade.tb_checked",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TB.checked, `execute_batch_with_fee_loss_stale_scoped_not_atomic`: every `Ok` return is preceded, on the final state, by an `Ok` return of `validate_shape()` and of `validate_with_market` for both accounts, with no write in between: the final state satisfies whatever an `Ok` return of those validators guarantees (arbitrary relations `\u0398`, `\u039b` given by their contracts).",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.positions",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.positions, `apply_trade_after_refresh_not_atomic`, with an added precondition: for each account and its lookup `lk` from `position_lookups`, if `lk.next_q != lk.current_q` or the account's signed raw position on `request.asset_index` at entry already equals `lk.current_q`, then on an `Ok` return the account's signed raw position on `request.asset_index` is `lk.next_q` (an absent or inactive leg, or an active leg with raw basis 0, counts as 0) and its legs on every other asset are unchanged. Assumes TC2, TC5 and the other callee contracts.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.nopanic",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.nopanic, `apply_trade_after_refresh_not_atomic`: if every called method satisfies its contract and does not panic, no execution of the function panics (it may return `Err`). The body has no arithmetic operator or indexing of its own; its only arithmetic is `checked_sub(..).ok_or(..)` and `?` propagation, which return `Err` instead of panicking.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.gate",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.gate, `apply_trade_after_refresh_not_atomic`: on an `Ok` return the slot of `request.asset_index` exists before and after, and for each side the effective open interest after the call (`oi_eff_long_q`, `oi_eff_short_q` of that slot) is at most `MAX_OI_SIDE_Q` or at most its value at entry (the value read before the two position changes). This is exactly what `kernel_trade_side_oi_cap_gate` (TC8/K17) guarantees between the two reads of the asset state; nothing after the second read writes the slot. Assumes the callee contracts.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.frame",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.frame, `apply_trade_after_refresh_not_atomic`: an `Ok` call writes no header field other than `c_tot`, `insurance`, `resolved_payout_blocker_count` and `risk_epoch`; no account field other than `active_bitmap`, `capital`, `close_progress`, `health_cert`, `legs`, `liquidation_lock`, `residual_received_atoms_total` and `residual_spent_principal_atoms_total`; and no market slot other than the slot of `request.asset_index`. Assumes TC1-TC7 (TC4 strengthened to also write no slot other than that of `asset_index`; TC5 strengthened to write nothing when `delta_q == 0`) and the other callee contracts.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.fee",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.fee, `MarketGroupV16ViewMut::<'_, ()>::apply_trade_after_refresh_not_atomic`: with `fee = checked_fee_bps(trade_fee_notional_ceil(|request.size_q|, request.exec_price), request.fee_bps)` (as mathematical functions: the ceiling of `|size_q| * exec_price / POS_SCALE`, then the fee in basis points), every `Ok(outcome)` return has `outcome.fee_a == 0` if `fee == 0` or `L.header.pnl < 0`, else `min(fee, L.header.capital)` (values at entry), the same for `outcome.fee_b` with `S`, hence both `<= fee`; and `outcome.notional == floor(|request.size_q| * request.exec_price / POS_SCALE)`. Proved from the function body assuming the callee contracts TC1-TC8 and the contracts of `trade_notional_floor`, `trade_fee_notional_ceil`, `checked_fee_bps`, `asset_state` and `effective_abs_q_for_raw_basis` (and K58 `trade_signed_size_deltas`).",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "apply_trade_after_refresh_not_atomic.conservation",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "TA.conservation, `apply_trade_after_refresh_not_atomic`: on an `Ok(outcome)` return, `m'.header.vault == m.header.vault`; `outcome.fee_a + outcome.fee_b <= m.header.c_tot`, `m'.header.c_tot == m.header.c_tot - outcome.fee_a - outcome.fee_b` and `m'.header.insurance == m.header.insurance + outcome.fee_a + outcome.fee_b`; `L'.header.capital == L.header.capital - outcome.fee_a`, `S'.header.capital == S.header.capital - outcome.fee_b` (no underflow); `L'.header.pnl == L.header.pnl` and `S'.header.pnl == S.header.pnl`. Assumes the callee contracts TC1-TC8 (and those of the fee/notional helpers, `asset_state`, `effective_abs_q_for_raw_basis`).",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "register_empty_materialized_portfolio_not_atomic.h_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T47 `MarketGroupV16ViewMut::<'_, ()>::register_empty_materialized_portfolio_not_atomic(account)`: for every market view satisfying H and every 9419-byte `PortfolioV16View` account, if the call returns `Ok(())`, then the only header field written is `materialized_portfolio_count` (raised by one), the market slots and the portfolio account are unchanged, and H holds afterwards.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.LayerT.t33_header",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T33 `finalize_side_reset_not_atomic(asset_index, side)` (on `MarketGroupV16ViewMut<'_, ()>`): for every market view satisfying H and all arguments, if the call returns `Ok(())`, then either the header is unchanged (side already `Normal`) or the only header fields written are `resolved_payout_blocker_count` (through `set_asset_state`) and `risk_epoch` (raised by one); the slice of market slots keeps its length; and H holds afterwards.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "deregister_empty_materialized_portfolio_not_atomic.h_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T29 `MarketGroupV16ViewMut::<'_, ()>::deregister_empty_materialized_portfolio_not_atomic(account)`: for every market view satisfying H and every 9419-byte `PortfolioV16View` account, if the call returns `Ok(())`, then the only header field written is `materialized_portfolio_count` (lowered by one), the market slots and the portfolio account are unchanged, and H holds afterwards.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "advance_terminal_slab_not_atomic.scan_progress.h_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T10 `MarketGroupV16ViewMut::<'_, ()>::advance_terminal_slab_not_atomic(authenticated_slot, scan_start_asset_index)`, `ScanProgress` returns. For every market view satisfying H and all arguments, if the call returns `Ok(TerminalSlabOutcomeV16::ScanProgress { .. })`, then the only header field written is `current_slot` (now `authenticated_slot`). The market slots are unchanged, and H holds afterwards.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "activate_empty_market_slot_not_atomic.market.hh_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T05 `MarketGroupV16HeaderAccount::activate_empty_market_slot_not_atomic::<Market<()>>(asset_index, slot, authenticated_price, now_slot)`: makes the same claim as the `EngineAssetSlotV16Account` instance. On `Ok(())`, `now_slot >=` the old `current_slot`, and only the six activation fields of the header are written (`asset_slot_capacity` and `config` are unchanged). Hh holds afterwards.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "activate_empty_market_slot_not_atomic.engine_slot.hh_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T05 `MarketGroupV16HeaderAccount::activate_empty_market_slot_not_atomic::<EngineAssetSlotV16Account>(asset_index, slot, authenticated_price, now_slot)`: for every header account satisfying Hh (all fields in range), every 1365-byte slot and all `u32`/`u64` arguments, if the call returns `Ok(())`, then `now_slot >=` the old `current_slot`; the header left behind differs only in `next_market_id`, `asset_activation_count`, `asset_set_epoch`, `risk_epoch` (each raised by one) and `current_slot`, `last_asset_activation_slot` (both now `now_slot`), so `asset_slot_capacity` and `config` are unchanged; and Hh holds of it.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "activate_empty_asset_slot_not_atomic.hh_preserved",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T03 `MarketGroupV16HeaderAccount::activate_empty_asset_slot_not_atomic(asset_index, slot, authenticated_price, now_slot)` calls T05 at `EngineAssetSlotV16Account`. On `Ok(())`, `now_slot >=` the old `current_slot`, and only the six activation fields of the header are written (`asset_slot_capacity` and `config` are unchanged). Hh holds afterwards.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.LayerT.t02_header",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T02 `accrue_asset_to_not_atomic(asset_index, now_slot, effective_price, funding_rate_e9, protective_progress_committed)` (on `MarketGroupV16ViewMut<'_, ()>`): for every market view satisfying H and all arguments, if the call returns `Ok(_)`, then the only header fields written are `current_slot` (now `max(current_slot, now_slot)`), `slot_last` (now at most `now_slot`), `loss_stale_active` (now 0 or 1), `oracle_epoch`, `funding_epoch` and `resolved_payout_blocker_count`; the slice keeps its length; and H holds afterwards. No assumption beyond H at entry.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.LayerT.t01_header",
-  "status_name": "FAILED",
+  "status_name": "IN_PROGRESS",
   "unchecked": false,
   "description": "T01 `accrue_asset_path_to_not_atomic(asset_index, now_slot, raw_oracle_target_price, steps, protective_progress_committed)` (on `MarketGroupV16ViewMut<'_, ()>`): for every market view satisfying H and all arguments, if the call returns `Ok(_)`, then `now_slot` was at least the old `current_slot`, and the only header fields written are `current_slot` (now `now_slot`), `slot_last` (now at most `now_slot`), `loss_stale_active` (now 0 or 1), `oracle_epoch`, `funding_epoch` and `resolved_payout_blocker_count`; the slice keeps its length; the steps are unchanged; and H holds afterwards.",
-  "last_updated": "2026-11-22T03:22:24.627942+00:00"
+  "last_updated": "2026-11-22T21:59:17.767111+00:00"
  },
  {
   "name": "Spec.Seg.kernel_accrual_index_update_contract",

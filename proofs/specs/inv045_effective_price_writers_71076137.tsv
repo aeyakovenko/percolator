@@ -1,0 +1,21 @@
+# INV-045 clause C1: every deployed function that can write an asset's effective price (engine 71076137, program e1295564
+# and its successors with the same sources). Restated from the 4e77481b table after the independent read: the rows
+# are the same functions; E3, E4 and P1 are described as the reader found them.
+# Checked by effective_price_writers.py; labels E1-E6 and P1-P3 are the rows of specs/inv045_effective_price_writers_71076137.md.
+# file	function	label	reason
+engine	accrue_asset_to_admitted_not_atomic	E1	the single-segment accrual after the prologue of accrue_asset_to_not_atomic, its only caller (price in range, checked: AC.price_range); capped by K76 when the asset has effective open interest
+engine	accrue_asset_path_to_admitted_not_atomic	E2	the path accrual after the prologue of accrue_asset_path_to_not_atomic, its only caller; each step is canonical_accrual_price_step_v16 (K93)
+engine	activate_empty_market_slot_not_atomic	E3	initialization of an empty slot at the activation's initial price
+engine	restarted_asset_slot_preserving_insurance_budget	E4	initialization of a new generation of an empty asset at the asset admin's initial price
+engine	reset_empty_asset_oracle_anchor_not_atomic	E5	re-anchor of an asset with no position or loss state in the group
+engine	canonical_retired_asset_slot	E6	copies the old asset's own price
+engine	default	fresh	`impl Default for AssetStateV16`: the fresh record (price 1); its users E3, E4, E6, P1, P3 set or copy the price
+engine	empty_for_market	fresh	`EngineAssetSlotV16Account::empty_for_market`: the empty slot (all-zero asset, price 0); used only by E4, E6, P1, P3, which overwrite its asset
+engine	from_runtime	conv	`AssetStateV16Account::from_runtime`: copies the runtime record's price into the account form
+engine	try_to_runtime	conv	`AssetStateV16Account::try_to_runtime`: copies the account's price into the runtime record
+program	init_market_account_zero_copy	P1	market creation: the initial price of every configured asset
+program	reset_empty_asset_oracle_anchor_view	P2	re-anchor of an asset with no position or loss state (and a quiet market for asset 0)
+program	canonicalize_retired_asset_slot_view	P3	copies the old asset's own price
+engine	resize_leg_same_side_at_slot	writeback	the record is kernel_resize_leg_same_side's result on the slot's own record (read at the top), then sync_side_adl_index; neither writes the price
+engine	book_bankruptcy_residual_chunk_internal	writeback	asset_mut is a copy of the slot's own record, changed by the bankruptcy-step kernel through &mut; the kernel does not write the price
+engine	begin_full_drain_reset_inner	writeback	the record is kernel_begin_full_drain_reset(self.asset_state(asset_index)?, side): the slot's own, the kernel does not write the price

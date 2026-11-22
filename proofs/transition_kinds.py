@@ -24,6 +24,10 @@ Classes:
   dispatch   chooses and calls other functions; each branch is listed
 """
 import re, hashlib
+# Re-read 2026-11-22 at engine 71076137 (batch 15): `set_asset_raw_oracle_targets_not_atomic` now sets the asset's
+# `fund_px_last` to its effective price when the staged target changes, in the same write as the target and before
+# the final `validate_shape()`; every Ok path still ends in that check, so the class stays `final` (44191266e35e ->
+# 29b4cbf1c78b).
 # Fingerprints re-read 2026-11-22 at engine 08e8f7f0 (refactor batch 12): in each of these the only change is
 # that the public B chunk argument `self.header.config.public_b_chunk_atoms.get()` became the constant
 # `PUBLIC_B_CHUNK_ATOMS` (and rustfmt reflowed the call); no Ok path gains or loses a shape check, so the
@@ -109,7 +113,8 @@ REVIEWED = {
     "retire_empty_asset_not_atomic": ("final", "bb587280a000", "both Ok arms end in the check"),
     "retire_terminal_unbudgeted_insurance_not_atomic": ("final", "33d2c6cd5d9a", "validates at entry and at exit"),
     "set_asset_raw_oracle_target_not_atomic": ("delegates", "61e861e02c69", "a call to T58"),
-    "set_asset_raw_oracle_targets_not_atomic": ("final", "44191266e35e", ""),
+    "set_asset_raw_oracle_targets_not_atomic": ("final", "29b4cbf1c78b",
+        "a changed target also restarts the price-cap anchor (`fund_px_last`, an asset field) before the check"),
     "sync_account_fee_to_slot_not_atomic": ("final", "7d6c6167c12e", "early `Ok(0)` when no fee is due, before any write"),
     "withdraw_backing_provider_earnings_not_atomic": ("final", "3276d1ee20fd", "early `Ok` for `amount == 0`"),
     "withdraw_domain_insurance_not_atomic": ("final", "55e4683b6b0a", ""),

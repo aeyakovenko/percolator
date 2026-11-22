@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-22 from `proof_ledger.tsv`. **279 of 807 pieces of the deployed build are done
-(200 proved by Aristotle, 79 verified by Kani); 0 of 89 charter invariants are closed.**
+Generated 2026-11-22 from `proof_ledger.tsv`. **280 of 812 pieces of the deployed build are done
+(200 proved by Aristotle, 80 verified by Kani); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -39,7 +39,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
 | 2 | The engine cannot panic or overflow and keeps the header | 24 of 193 |
-| 3 | The engine keeps the whole market state | 7 of 205 |
+| 3 | The engine keeps the whole market state | 8 of 210 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -84,7 +84,7 @@ fixed yet. These come first; most are decisions.
   checked arithmetic.
 - Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (7 of 205).**
+**Phase 3. The engine keeps the whole market state (8 of 210).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -157,7 +157,7 @@ order of the margin checks from the source.
    differential tests. Cheaper and weaker: the link is tested, not proved.
 3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
 
-**The refactor so far.** Engine `4e77481b` carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price): the arithmetic of the
+**The refactor so far.** Engine `71076137` carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
 trade fee, a loss paid from capital, the initial-margin lien need, the liquidation deficit, the
 incremental certificate, the residual reward credit, the PnL totals and bounds, the start of a
 bankrupt-close ledger, the residual, both equity measures, the gain-against-loss rule, the
@@ -187,7 +187,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-528 left are mostly whole entry points and instructions, and the two attempts at that kind
+532 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.

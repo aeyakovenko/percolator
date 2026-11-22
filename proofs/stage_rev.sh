@@ -17,7 +17,8 @@ while read -r f; do
   git -C "$WT" show "$REV:$f" > "engine/$f"
   files+=("engine/$f")
 done < <(git -C "$WT" diff --name-only "$BASE" "$REV")
-for s in kernel_contracts_spec transition_shape_spec header_write_sets wide_math_callsites_spec; do
+# SPECS overrides the specs staged (default: all four), e.g. when a generator is not updated for <rev>
+for s in ${SPECS:-kernel_contracts_spec transition_shape_spec header_write_sets wide_math_callsites_spec}; do
   [ -s "specs/${s}_$short.md" ] || { echo "specs/${s}_$short.md is missing" >&2; exit 4; }
   cp "specs/${s}_$short.md" "engine/aristotle/$s.md"
 done
@@ -25,6 +26,6 @@ done
 for f in src/v16.rs src/v16_kani_api.rs src/v16_proofs.rs src/wide_math.rs src/lib.rs Cargo.toml spec.md; do
   [ "$(git -C "$WT" show "$REV:$f" | sha256sum | cut -c1-64)" = "$(sha256sum "engine/$f" | cut -c1-64)" ] || { echo "engine/$f is not $short" >&2; exit 5; }
 done
-echo "staged $short over $bshort: ${#files[@]} changed files and the four specs"
+echo "staged $short over $bshort: ${#files[@]} changed files and the specs ${SPECS:-(all four)}"
 printf '%s\n' "${files[@]}" > "staged_files_$short.txt"
 echo "changed files listed in staged_files_$short.txt"

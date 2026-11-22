@@ -1,0 +1,122 @@
+function	line	operations	lines	operators	covered_by
+apply_backing_provider_earnings_withdraw	132	1	146	-x1	K01.nopanic
+active_bitmap_is_empty	249	1	255	+=x1	-
+liquidation_risk_notional_ceil	343	1	350	*x1	-
+liquidation_projected_healthy_after_close	382	1	404	-x1	-
+min_abs_q_for_risk_notional_at_least	461	1	471	-x1	-
+liquidation_engine_close_request_q	549	1	607	+x1	-
+active_bitmap_count_ones	743	1	748	+=x1	-
+V16Core::available_backing_num_for_source_credit_state	1448	2	1461,1462	-x2	K04.nopanic
+V16Core::source_claim_domain_first_burn_partition	1756	1	1761	-x1	-
+V16Core::kernel_advance_close_ledger	2043	1	2088	-x1	-
+V16Core::kernel_split_loss_at_capacity	2871	1	2876	-x1	K86.nopanic
+V16Core::kernel_bankruptcy_residual_step_capacity	2940	1	2963	-x1	K88.nopanic
+V16Core::kernel_b_settlement_chunk	3061	2	3072,3110	-x2	K91.nopanic
+V16Core::kernel_resolved_payout_step	3299	1	3301	-x1	K13.nopanic
+V16Core::kernel_settle_positive_face_after_support	3308	2	3319,3323	-x2	-
+V16Core::kernel_released_pnl_conversion_partition	3351	1	3361	-x1	K14.nopanic
+V16Core::kernel_retain_terminal_source_haircut	3384	2	3391,3397	-x2	K15.nopanic
+V16Core::kernel_resolved_receipt_can_still_gain	3453	1	3464	?x1	-
+V16Core::kernel_principal_cure_close_ledger	3487	2	3502,3503	-=x2	-
+V16Core::kernel_side_adl_index	3676	1	3692	?x1	K59.nopanic
+V16Core::kernel_raw_basis_after_adl_reduction	3785	5	3808,3809,3810,3818,3823	+x1 -x3 ?x1	K60.nopanic
+V16Core::first_actionable_slot	4005	1	4013	+=x1	K19.nopanic
+V16Core::apply_bankruptcy_residual_chunk_to_loss_side	4367	1	4416	-x1	K26.nopanic
+V16Core::kernel_normalize_social_loss_carry	4594	1	4607	-x1	K31.nopanic
+V16Core::prepare_counterparty_lien_create_delta	5198	1	5213	-=x1	K36.nopanic
+V16Core::prepare_counterparty_backing_add_delta	5241	2	5268,5269	-=x2	K37.nopanic
+V16Core::prepare_counterparty_backing_withdraw_delta	5295	2	5309,5310	-=x2	K38.nopanic
+V16Core::prepare_counterparty_backing_expiry_delta	5324	2	5342,5343	-=x2	-
+V16Core::prepare_counterparty_lien_release_delta	5532	2	5548,5553	-=x2	K39.nopanic
+V16Core::prepare_counterparty_lien_terminal_release_delta	5576	2	5587,5592	-=x2	K40.nopanic
+V16Core::prepare_counterparty_lien_consume_delta	5609	3	5623,5634,5635	-=x3	K41.nopanic
+V16Core::prepare_counterparty_impaired_lien_retirement_delta	5714	2	5731,5732	-=x2	K43.nopanic
+V16Core::prepare_insurance_lien_consume_delta	5739	5	5764,5765,5770,5771,5778	-x1 -=x4	-
+V16Core::prepare_insurance_lien_release_delta	5839	2	5853,5854	-=x2	K45.nopanic
+V16Core::prepare_insurance_lien_terminal_release_delta	5881	6	5907,5908,5909,5910,5911,5912	-=x6	K46.nopanic
+V16Core::target_effective_lag_adverse_delta	5981	2	5988,5991	-x2	-
+V16Core::backing_utilization_fee_quote_atoms_for_lien	6100	1	6119	-x1	-
+V16Config::validate_solvency_envelope_range	6433	6	6460,6473,6492,6493,6497,6498	+x3 +=x1 -x1 -=x1	-
+V16Config::validate_exact_solvency_envelope	6518	2	6627,6671	-x2	-
+PortfolioV16View::source_domain_slot	7218	1	7226	+=x1	-
+PortfolioV16ViewMut::source_domain_slot	7252	1	7268	+=x1	-
+PortfolioV16ViewMut::source_domain_slot_or_insert	7273	1	7291	+=x1	-
+PortfolioV16ViewMut::compact_source_domains	7315	7	7332,7334,7339,7347,7349,7350,7353	+=x4 -x2 -=x1	-
+PortfolioV16View::validate_with_market	7360	6	7389,7416,7426,7451,7454,7455	+=x5 -x1	-
+PortfolioV16View::validate_source_credit_shape_with_market	7467	4	7479,7495,7498,7574	+=x4	-
+PortfolioV16View::source_claim_bound_sum_num	7579	1	7586	+=x1	-
+PortfolioV16View::validate_close_progress_ledger_with_market	7595	1	7642	-x1	-
+PortfolioV16View::active_leg_slot_for_asset	7664	1	7675	+=x1	-
+PortfolioV16View::is_empty_for_dematerialization	7680	1	7719	+=x1	-
+PositionSlotMapV16::from_account	8359	1	8380	+=x1	-
+TokenValueFlowProofV16::validate	8838	5	8849,8856,8858,8863,8865	+=x1 -x4	-
+insert_account_kf_settlement_plan_entry	9117	2	9127,9132	-x1 -=x1	-
+MarketGroupV16HeaderAccount::dynamic_asset_slot_capacity_from_account_len	10314	1	10322	-x1	-
+MarketGroupV16ViewMut::apply_total_delta	11180	2	11183,11187	-x2	K50.nopanic
+MarketGroupV16ViewMut::apply_total_delta_u64	11192	2	11195,11199	-x2	-
+MarketGroupV16ViewMut::provider_protection_is_observed	11454	2	11462,11465	+x1 +=x1	-
+MarketGroupV16ViewMut::remember_provider_protection_observed	11470	2	11474,11485	+x1 +=x1	-
+MarketGroupV16ViewMut::first_lapsed_roster_source_backing_for_account_at_slot	12345	1	12376	+=x1	-
+MarketGroupV16ViewMut::first_lapsed_latent_source_backing_for_account_at_slot	12397	1	12440	+=x1	-
+MarketGroupV16ViewMut::account_source_claim_bound_sum_num	13206	1	13217	+=x1	-
+MarketGroupV16ViewMut::account_has_source_liens	13226	1	13236	+=x1	-
+MarketGroupV16ViewMut::account_has_normalizable_source_credit_lien	13241	1	13278	+=x1	-
+MarketGroupV16ViewMut::burn_account_source_lien_face_not_atomic	13520	1	13591	-x1	-
+MarketGroupV16ViewMut::burn_account_source_claim_bound_num	13752	2	13775,13790	+=x2	-
+MarketGroupV16ViewMut::burn_account_source_claim_at_slot_up_to	13799	3	13830,13845,13874	-=x3	-
+MarketGroupV16ViewMut::account_source_realizable_support	13952	3	13969,14012,14014	+=x2 -=x1	-
+MarketGroupV16ViewMut::valid_source_lien_effective_reserved_sum	14095	1	14111	+=x1	-
+MarketGroupV16ViewMut::create_and_consume_source_credit_from_counterparty_parts_not_atomic	14737	1	14756	+x1	-
+MarketGroupV16ViewMut::create_and_consume_source_credit_from_insurance_parts_not_atomic	14790	1	14816	+x1	-
+MarketGroupV16ViewMut::consume_validated_account_source_credit_not_atomic	15230	3	15259,15287,15369	+=x3	-
+MarketGroupV16ViewMut::create_account_source_credit_lien_for_effective_any_not_atomic	15489	3	15506,15526,15529	+=x2 -=x1	-
+MarketGroupV16ViewMut::create_initial_margin_source_lien_if_needed	15537	1	15559	+=x1	-
+MarketGroupV16ViewMut::set_account_pnl_inner	15887	2	15902,15951	-x2	-
+MarketGroupV16ViewMut::settle_kf_loss_before_support_not_atomic	16051	3	16092,16142,16199	+=x2 -=x1	-
+MarketGroupV16ViewMut::net_slot_face_at_par_not_atomic	16248	6	16358,16393,16394,16395,16396,16397	+=x3 -x1 -=x2	-
+MarketGroupV16ViewMut::cancel_loss_domain_face_at_par_not_atomic	16414	4	16435,16436,16437,16438	+=x2 -=x2	-
+MarketGroupV16ViewMut::pay_kf_loss_from_free_capital_not_atomic	16495	1	16537	+=x1	-
+MarketGroupV16ViewMut::place_stranded_loser_backing_after_leg_resolved_not_atomic	17334	1	17370	-=x1	-
+MarketGroupV16ViewMut::settle_stranded_loser_backing_resolved_not_atomic	17400	2	17431,17442	-x2	-
+MarketGroupV16ViewMut::reconcile_account_impaired_counterparty_liens_not_atomic	17488	1	17506	+=x1	-
+MarketGroupV16ViewMut::settle_account_kf_effects_not_atomic	17571	4	17588,17605,17612,17623	+=x4	-
+MarketGroupV16ViewMut::compute_account_health_cert_with_price_override	17642	2	17656,17696	+=x2	-
+MarketGroupV16ViewMut::refresh_account_and_certify_not_atomic	17725	6	17782,17792,17817,17820,17869,17904	+=x6	-
+MarketGroupV16ViewMut::has_b_stale_leg	17934	1	17941	+=x1	-
+MarketGroupV16ViewMut::collect_account_backing_utilization_fees_not_atomic	17978	2	17990,17999	+=x2	-
+MarketGroupV16ViewMut::settle_account_side_effects_after_kf_not_atomic	18201	1	18222	+=x1	-
+MarketGroupV16ViewMut::group_has_position_or_loss_state_for_oracle_reset	18295	1	18313	+=x1	-
+MarketGroupV16ViewMut::set_asset_raw_oracle_targets_not_atomic	18331	2	18353,18356	+=x2	-
+MarketGroupV16ViewMut::accrue_asset_to_admitted_not_atomic	18483	2	18497,18525	-x2	-
+MarketGroupV16ViewMut::accrue_asset_path_to_admitted_not_atomic	18647	2	18665,18728	-x2	-
+MarketGroupV16ViewMut::highest_risk_liquidatable_asset	19221	2	19257,19267	+=x2	-
+MarketGroupV16ViewMut::auto_crank_selected_assets	19272	2	19340,19365	+=x2	-
+MarketGroupV16ViewMut::active_leg_slot_for_asset	19679	1	19699	+=x1	-
+MarketGroupV16ViewMut::account_b_loss_bound	20086	1	20096	+=x1	-
+MarketGroupV16ViewMut::account_has_target_effective_lag	20154	1	20161	+=x1	-
+MarketGroupV16ViewMut::account_has_active_source_claim_exposure	20188	1	20206	+=x1	-
+MarketGroupV16ViewMut::account_touches_pending_domain_loss_barrier	20233	1	20245	+=x1	-
+MarketGroupV16ViewMut::account_has_loss_stale_live_leg	20364	1	20377	+=x1	-
+MarketGroupV16ViewMut::account_fee_anchor_for_loss_currentness	20399	1	20418	+=x1	-
+MarketGroupV16ViewMut::ensure_source_domain_capacity_for_new_exposure	20590	5	20601,20618,20620,20634,20637	+=x4 -x1	-
+MarketGroupV16ViewMut::reduce_matching_open_interest_for_unilateral_close	21613	1	21631	-x1	-
+MarketGroupV16ViewMut::terminal_trade_residual_asset_before_refresh	22064	1	22083	+=x1	-
+MarketGroupV16ViewMut::execute_batch_with_fee_loss_stale_scoped_not_atomic	22377	1	22397	+=x1	-
+MarketGroupV16ViewMut::execute_batch_with_fee_after_tail_validation_not_atomic	22419	4	22438,22491,22504,22526	+x1 +=x3	-
+MarketGroupV16ViewMut::resolved_bankruptcy_attribution	22555	1	22578	+=x1	-
+MarketGroupV16ViewMut::clamp_close_residual_to_account_loss	22681	1	22693	-x1	-
+MarketGroupV16ViewMut::release_account_source_credit_liens_if_unneeded_core_not_atomic	23125	7	23161,23165,23201,23202,23209,23238,23239	+=x7	-
+MarketGroupV16ViewMut::cure_and_cancel_close_with_cert_not_atomic	23347	1	23399	-x1	-
+MarketGroupV16ViewMut::sync_account_fee_to_slot_not_atomic	23431	1	23456	-x1	-
+MarketGroupV16ViewMut::realize_one_source_domain_for_resolved_close_not_atomic	23634	1	23654	+=x1	-
+MarketGroupV16ViewMut::prepare_one_source_domain_for_resolved_close_not_atomic	23918	2	23935,23982	+=x2	-
+MarketGroupV16ViewMut::expire_one_lapsed_source_backing_for_resolved_active_leg_not_atomic	23994	1	24015	+=x1	-
+MarketGroupV16ViewMut::settle_resolved_account_kf_not_atomic	24313	5	24343,24364,24393,24395,24403	+x2 +=x3	-
+MarketGroupV16ViewMut::resolved_unsettled_legs_with_a_possible_loss	24417	2	24435,24439	+=x2	-
+MarketGroupV16ViewMut::resolved_residual_can_still_be_booked	24456	1	24477	+=x1	-
+MarketGroupV16ViewMut::resolved_legs_only_wait_for_the_other_side	24516	1	24560	+=x1	-
+MarketGroupV16ViewMut::detach_solvent_active_legs_for_resolved_close	24565	2	24644,24681	+=x2	-
+PortfolioAccountV16Account::init_empty_in_place	25794	2	25817,25822	+=x2	-
+liquidation_fee_for_close	26001	1	26011	*x1	-
+adjust_u128	26061	2	26064,26068	-x2	-
+signed_position	26215	1	26221	negx1	-
