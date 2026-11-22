@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-22 from `proof_ledger.tsv`. **263 of 707 pieces of the deployed build are done
-(200 proved by Aristotle, 63 verified by Kani); 0 of 89 charter invariants are closed.**
+Generated 2026-11-22 from `proof_ledger.tsv`. **264 of 709 pieces of the deployed build are done
+(200 proved by Aristotle, 64 verified by Kani); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -39,7 +39,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
 | 2 | The engine cannot panic and keeps the header | 9 of 95 |
-| 3 | The engine keeps the whole market state | 6 of 203 |
+| 3 | The engine keeps the whole market state | 7 of 205 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -76,7 +76,7 @@ fixed yet. These come first; most are decisions.
   revision, whose market view and asset slot gained fields.
 - Exit: no engine call can panic, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (6 of 203).**
+**Phase 3. The engine keeps the whole market state (7 of 205).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -86,13 +86,18 @@ fixed yet. These come first; most are decisions.
 - Exit: every successful engine call preserves H, S, V and M.
 
 **Phase 4. The program's instructions (0 of 56).**
-- First a trial on one instruction (Deposit): whether the prover can take the program's code with
-  the Solana types in it. If not, the instruction bodies are proved as functions over account bytes
-  and the thin shell around them (account loading, signer flags, the token transfer) is covered by
-  the written runtime assumptions. This is the largest unknown on the road; the trial runs
-  as soon as the prover is free.
-- Then, per instruction: accounts, signers and bindings checked before any write; tokens moved by
-  the booked amount (part C); the global invariant preserved; errors abort.
+- The trial on one instruction (Deposit, task w0 on 2026-11-22, 34 credits) answered the largest
+  unknown on the road. The prover takes the program's code, Solana types included, from source:
+  `AccountInfo` and its `RefCell` borrows, SPL Token decoding and the engine views. Only the runtime's
+  system calls are assumed: program-address derivation, `invoke_signed`, `realloc` and `Clock::get`.
+  The cost is not the Solana types. It is the absence of undefined behaviour on every run, which every
+  result includes. So even the smallest binding property of one handler pays for the safety of
+  everything that handler reaches, its engine entry point included (`aristotle/summaries/w0.md`).
+- So the instruction properties are composed, not proved one handler at a time. First come contracts,
+  proved once: for the shared helpers (the account checks, the config read, the two views, the token
+  verifiers, the token transfer, the sequence binding) and for each engine entry point a handler calls,
+  which phases 2 and 3 produce. Then, per instruction: accounts, signers and bindings checked before
+  any write; tokens moved by the booked amount (part C); the global invariant preserved; errors abort.
 - Exit: the induction closes. The global invariant holds in every reachable state.
 
 **Phase 5. Each safety and history invariant closed (0 of 71).**
@@ -144,7 +149,7 @@ order of the margin checks from the source.
    differential tests. Cheaper and weaker: the link is tested, not proved.
 3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
 
-**The refactor so far.** Engine `80f8f0b4` carries batches 1 to 9: the arithmetic of the
+**The refactor so far.** Engine `4e77481b` carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price): the arithmetic of the
 trade fee, a loss paid from capital, the initial-margin lien need, the liquidation deficit, the
 incremental certificate, the residual reward credit, the PnL totals and bounds, the start of a
 bankrupt-close ledger, the residual, both equity measures, the gain-against-loss rule, the
@@ -156,10 +161,10 @@ of the twenty batch 3-9 kernels for every input; the other six it checks for bou
 prover has proved all six at full width (K76 to K78 in task k4, where K78's contract as written
 turned out false in a corner the code handles right and was restated). Each batch lands only when the engine's suites pass, its differential oracles are
 byte-identical to the previous revision, the Kani harnesses that can reach the changed code verify,
-and the program's full gate passes against it. The work also found and fixed one admission hole:
-a market could be created with a public B chunk large enough that every B-settlement step on a side
-overflowed after a social loss, freezing its positions; admission now refuses a chunk above
-MAX_VAULT_TVL. What remains is mostly loops that read and write state as they go (the loss
+and the program's full gate passes against it. The work also found and closed one hole: a market
+could be created with a public B chunk large enough that every B-settlement step on a side
+overflowed after a social loss, freezing its positions. Admission first refused a chunk above
+MAX_VAULT_TVL; batch 12 then made the chunk the constant MAX_VAULT_TVL, so no market chooses it. What remains is mostly loops that read and write state as they go (the loss
 settlement, the lien consumption, the refresh): there the method has to be split into a pure plan
 over a snapshot and an apply step.
 
@@ -174,7 +179,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-444 left are mostly whole entry points and instructions, and the two attempts at that kind
+445 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.

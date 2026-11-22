@@ -24,13 +24,22 @@ Classes:
   dispatch   chooses and calls other functions; each branch is listed
 """
 import re, hashlib
+# Fingerprints re-read 2026-11-22 at engine 08e8f7f0 (refactor batch 12): in each of these the only change is
+# that the public B chunk argument `self.header.config.public_b_chunk_atoms.get()` became the constant
+# `PUBLIC_B_CHUNK_ATOMS` (and rustfmt reflowed the call); no Ok path gains or loses a shape check, so the
+# classes and notes stand: close_resolved_account_not_atomic (f57730fddb08 -> cccba36151b6), liquidate_account_not_atomic (21aa120f11e4 -> c310684075d7), permissionless_auto_crank_not_atomic (9caad715062a -> f98e446c7daa), rebalance_reduce_position_not_atomic (71da8efbda88 -> 9cc9a4ae77aa), sync_account_fee_to_slot_not_atomic (25c18f09a3f6 -> 7d6c6167c12e)
 
+# Fingerprints re-read 2026-11-22 at engine 4e77481b (refactor batch 13): accrue_asset_to_not_atomic (7ef7181cce46 ->
+# acd07339a3d3) and accrue_asset_path_to_not_atomic (6580ff37f46d -> b28b41b6bf19) keep their prologue, which assigns
+# nothing, and then call accrue_asset_to_admitted_not_atomic / accrue_asset_path_to_admitted_not_atomic, private
+# #[inline(always)] functions whose bodies are, byte for byte, the rest of the old bodies (checked mechanically by
+# roll_to_4e77481b.py). The Ok paths and the header writes are the moved ones, so the classes and notes stand.
 # name -> (class, body fingerprint, note). Fingerprint: first 12 hex digits of sha256 of the body text.
 REVIEWED = {
-    "accrue_asset_path_to_not_atomic": ("local", "6580ff37f46d",
+    "accrue_asset_path_to_not_atomic": ("local", "b28b41b6bf19",
         "writes `current_slot = now_slot` after refusing `now_slot < current_slot`, and `slot_last = asset.slot_last <= now_slot`; "
         "`loss_stale_active` from `encode_bool`. Ends in the audit-only scan Re-read 2026-11-21 at 80f8f0b4: refactor batch 9 moved the segment arithmetic into kernels; the header writes are unchanged"),
-    "accrue_asset_to_not_atomic": ("local", "7ef7181cce46",
+    "accrue_asset_to_not_atomic": ("local", "acd07339a3d3",
         "writes `current_slot = max(current_slot, now_slot)` and `slot_last = asset.slot_last <= now_slot`; `loss_stale_active` from "
         "`encode_bool`. Ends in the audit-only scan Re-read 2026-11-21 at 80f8f0b4: refactor batch 9 moved the segment arithmetic into kernels; the header writes are unchanged"),
     "activate_empty_asset_slot_not_atomic": ("local", "5696ea1a3a3b", "a call to T05"),
@@ -46,7 +55,7 @@ REVIEWED = {
         "first applies retirement's normalization to the asset's two buckets (a bucket write each, no header field); every Ok path still ends in the check"),
     "charge_account_backing_fee_not_atomic": ("final", "9069fc18e03a", "early `Ok(0)` for a zero fee before any write"),
     "claim_resolved_payout_topup_not_atomic": ("final", "280710e74c82", ""),
-    "close_resolved_account_not_atomic": ("mixed", "f57730fddb08",
+    "close_resolved_account_not_atomic": ("mixed", "cccba36151b6",
         "seven Ok paths end in the check, and the return after a source preparation is checked inside the callee. The two "
         "`ProgressOnly` returns after `settle_negative_pnl_from_principal_not_atomic`, `settle_resolved_bankruptcy_negative_pnl` and "
         "`detach_solvent_active_legs_for_resolved_close` end without a check: class real. The program's CloseResolved handler "
@@ -80,9 +89,9 @@ REVIEWED = {
         "`begin_zero_oi_residue_resets`: class frame, to be confirmed from the write sets of those four functions"),
     "full_account_refresh_not_atomic": ("real", "7c033a258c1d", "a call to `refresh_account_and_certify_not_atomic`, which ends in the audit-only scan"),
     "grow_asset_slot_capacity_not_atomic": ("local", "b54736755044", "header-account method: writes `asset_slot_capacity`, `config` and two epochs"),
-    "liquidate_account_not_atomic": ("real", "21aa120f11e4", "both Ok paths end in the audit-only scan"),
+    "liquidate_account_not_atomic": ("real", "c310684075d7", "both Ok paths end in the audit-only scan"),
     "mark_asset_drain_only_not_atomic": ("final", "25fe4203a364", "`Ok` for an asset that is already DrainOnly, without a write"),
-    "permissionless_auto_crank_not_atomic": ("dispatch", "9caad715062a",
+    "permissionless_auto_crank_not_atomic": ("dispatch", "f98e446c7daa",
         "Recovery: T36 then the audit-only scan, or T53. Released obligation: T36, or `clear_leg` and `begin_zero_oi_residue_resets`, "
         "then the audit-only scan. Recovery leg: `refresh_recovery_account_from_committed_state_not_atomic` (audit-only). "
         "ReleaseSourceLiens: its core ends in the check. Refresh: T02 then `refresh_account_and_certify_not_atomic` (audit-only). "
@@ -90,7 +99,7 @@ REVIEWED = {
         "`advance_pending_close_residual_not_atomic` (audit-only); its `RecoveryRequired` error is turned into `Ok` when the call "
         "declared Recovery, which validates the shape at the declaration. DeclareRecovery: validates. CloseResolved: T09, then T32 "
         "and the check, or T15. The program's crank handler validates the shape afterwards only when the position vector changed"),
-    "rebalance_reduce_position_not_atomic": ("real", "71da8efbda88",
+    "rebalance_reduce_position_not_atomic": ("real", "9cc9a4ae77aa",
         "ends in the audit-only scan; the program's RebalanceReduce handler does not validate afterwards either (compute budget)"),
     "recredit_terminal_claim_free_residual_for_asset_not_atomic": ("final", "7254982763d3", "validates at entry and at exit"),
     "register_empty_materialized_portfolio_not_atomic": ("frame", "7e3a23af0248", "writes only `materialized_portfolio_count`"),
@@ -101,7 +110,7 @@ REVIEWED = {
     "retire_terminal_unbudgeted_insurance_not_atomic": ("final", "33d2c6cd5d9a", "validates at entry and at exit"),
     "set_asset_raw_oracle_target_not_atomic": ("delegates", "61e861e02c69", "a call to T58"),
     "set_asset_raw_oracle_targets_not_atomic": ("final", "44191266e35e", ""),
-    "sync_account_fee_to_slot_not_atomic": ("final", "25c18f09a3f6", "early `Ok(0)` when no fee is due, before any write"),
+    "sync_account_fee_to_slot_not_atomic": ("final", "7d6c6167c12e", "early `Ok(0)` when no fee is due, before any write"),
     "withdraw_backing_provider_earnings_not_atomic": ("final", "3276d1ee20fd", "early `Ok` for `amount == 0`"),
     "withdraw_domain_insurance_not_atomic": ("final", "55e4683b6b0a", ""),
     "withdraw_fresh_counterparty_backing_not_atomic": ("final", "707136688bfe",

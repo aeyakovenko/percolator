@@ -1,12 +1,1 @@
-How the table was obtained for this revision. The runs were made on the batch's commit before it
-was rebased onto a documentation-only commit of master; `src/`, `tests/` and the Cargo files of that
-commit are identical to `80f8f0b4`'s. Every harness that can reach a function changed or added since
-`cb78f1f0` was run on that code (`proofs/kani_reach.py` over the
-call graph, which can only over-approximate what a harness reaches; `proofs/changed_fns.py` for what
-changed; outside `src/v16.rs` the revisions differ only by added harnesses and a test file, and no
-type changed): 110 harnesses with `--features fuzz` and 123 with the contracts command (21 of them
-new), all verified. The affected harnesses of the closure run are harnesses of the first command on
-identical code, apart from the one without a verdict, as before. The change to config admission is
-not counted as reaching a harness: no harness gives the validation a public B chunk above
-`MAX_VAULT_TVL`. Every other harness runs only code identical to `cb78f1f0`'s, where it verified;
-the numbers above count both.
+How the table was obtained for this revision. Batch 13 changes two entry points of the engine, the accrual entry points, and adds three proofs to the closure run. The harnesses whose call graph reaches a changed or new function (`kani_reach.py`: 11, the same in each run) were run again on `4e77481b` in all three runs, together with the three new proofs, and all verified. Every other harness keeps its verdict from the full runs on `08e8f7f0` (batch 12), since nothing it can reach changed. Every harness has a verdict except the two named in the table, which have none on earlier revisions either. A harness named `proof_v16_adjust_u128_applies_exact_delta_or_fails_closed` exists in two modules and is counted twice.

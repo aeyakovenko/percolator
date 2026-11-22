@@ -1,0 +1,44 @@
+A new kind of target, as a feasibility trial with a fixed budget. Until now every target was a function of the engine crate `percolator`: pure kernels and engine methods over the engine's own account layouts. This task asks whether a handler of the Solana program itself can be verified directly: a function that takes Solana `AccountInfo`s, borrows their data through `RefCell`s, parses SPL Token accounts, derives program addresses and calls the SPL Token program through `invoke`. The answer decides how about 56 instruction-level properties will be cut. A clear negative answer early is as useful as a proof, so please stop as soon as the answer is clear.
+
+Layout. `percolator-prog/` is the program (crate root `src/v16_program.rs`, revision eb9807c5). `percolator/` is the engine crate it depends on (revision 4e77481b). The program's `src/` is unchanged. Its manifest is changed for this upload only, as its header comment says: the engine is a path dependency instead of a git revision; the default feature is `no-entrypoint`, and the Anchor dependency is removed, since only the entrypoint module uses it; and the test sections are left out. The manifest has no `[profile]` section, as in the original. So the deployed build has NO overflow checks: plain integer arithmetic wraps. Verify with that semantics, and say where a property would differ with overflow checks on.
+
+Target. `processor::handle_deposit(program_id, accounts, expected_portfolio_id, expected_sequence, amount)` in `src/v16_program.rs`, the handler of the Deposit instruction. Read it with the helpers it calls, all in the same file:
+- account checks: `account`, `expect_signer`, `expect_writable`, `expect_owner`, `verify_token_program`, `expect_portfolio_sequence_binding`;
+- market and token reads: `state::read_market_config_mode_and_capacity`, `primary_collateral_mint`, `derive_vault_authority`, `verify_user_token_account`, `verify_vault_token_account` (with `unpack_token_account` and `canonical_vault_address`), `amount_to_u64`, `require_token_balance`;
+- portfolio and market views: `ensure_portfolio_storage_for_market_slots`, `state::market_view_mut`, `reject_permissionless_resolve_matured_live_view`, `state::portfolio_view_mut_for_market_slots`, `expect_portfolio_view_account_key`, `expect_portfolio_view_owner`;
+- the engine call and the end of the handler: the engine's `MarketGroupV16ViewMut::deposit_not_atomic`, `state::advance_portfolio_matcher_sequence` and `transfer_tokens`.
+
+What may be assumed. The Solana runtime and the SPL Token program, as documented:
+- the `AccountInfo` fields are as the runtime passes them;
+- `Pubkey::find_program_address` returns the documented program address for its seeds;
+- `invoke` runs the given instruction on the given accounts and returns its result;
+- when a handler returns Err, the runtime discards every change it made to any account.
+
+State each assumption you use in the Properties row. Nothing may be assumed about the accounts themselves. The data, owner, key, lamports, signer flag and writable flag of every account are arbitrary inputs chosen by an adversary, and so are the instruction arguments.
+
+Do the steps in order. Record each result before starting the next. If a step costs much more than your Step 1 estimate, record where it stands and stop.
+
+Step 1, a feasibility report (no proof).
+- Can you work with this crate and its dependencies (solana-program 1.18, spl-token 4.0 and the rest of the manifest) on the deployed function bodies?
+- For each of the following, do you model it from its code, or must it be assumed (and with what statement)? `AccountInfo` with the `RefCell` borrows of its data and lamports; `Pubkey::find_program_address`; `spl_token::state::Account::unpack`; `solana_program::program::invoke`; the engine views built over account bytes (`state::market_view_mut`, `state::portfolio_view_mut_for_market_slots`).
+- Estimate the cost of W1 to W3.
+If the crate cannot be taken at all, say what blocks it and stop.
+
+Step 2, W1, the smallest property that goes through the account types. If `handle_deposit` returns Ok:
+- `accounts[0]` signed;
+- `accounts[1]` and `accounts[2]` are writable and owned by `program_id`;
+- `accounts[5]` has key `spl_token::ID` and is executable.
+
+Step 3, W2. If `handle_deposit` returns Ok:
+- `accounts[3]` is an initialized SPL token account: owned by the token program, of the token account length, with token owner `accounts[0].key`. Its mint is the primary collateral mint of the market config read from `accounts[1]`, and its balance before the transfer was at least `amount`.
+- `accounts[4]` is the canonical vault: the associated token account, for that mint, of the vault authority `find_program_address([b"vault", accounts[1].key], program_id)`. It is initialized, with no delegate and no close authority.
+- The portfolio stored in `accounts[2]` records `accounts[0].key` as its owner and `accounts[2].key` as its account id, and its id and matcher sequence match `expected_portfolio_id` and `expected_sequence`.
+- The market mode was Live.
+
+Step 4, W3: the tokens moved equal the value booked. If `handle_deposit` returns Ok:
+- `amount <= u64::MAX`;
+- the engine's `deposit_not_atomic` was called exactly once, on the market view of `accounts[1]` and the portfolio view of `accounts[2]`, with `amount`, and returned Ok;
+- the handler made exactly one cross-program call if `amount > 0`, and none if `amount == 0`. That call is the SPL Token Transfer of `amount` from `accounts[3]` to `accounts[4]` with authority `accounts[0]`, made after the engine call returned;
+- nothing else in the handler moves tokens or lamports.
+
+Verify the deployed function bodies: release profile as uploaded, no cfg(kani), no test code. For each property, report one of: proved; proved under named assumptions; refuted (with the counterexample); or unresolved (with what was done and what was expensive).
