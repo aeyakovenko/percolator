@@ -188,12 +188,12 @@ FEATURES=fuzz,closure KANI_Z="" LOG_DIR=kani_closure CARGO_TARGET_DIR=target/clo
 <!-- proofs:begin (generated from proofs/README_SECTION.md and the ledger; edit that file, not this block) -->
 ## Proof Status And How To Reproduce It
 
-As of 2026-11-22, for engine `4e77481b` and program `eb9807c5`: **264 of 709 pieces of the deployed build are done (200 proved by Aristotle, 64 verified by Kani); 0 of 89 charter invariants are closed.**
+As of 2026-11-22, for engine `4e77481b` and program `cd8a446a`: **264 of 807 pieces of the deployed build are done (200 proved by Aristotle, 64 verified by Kani); 0 of 89 charter invariants are closed.**
 
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
-| 2 | The engine cannot panic and keeps the header | 9 of 95 |
+| 2 | The engine cannot panic or overflow and keeps the header | 9 of 193 |
 | 3 | The engine keeps the whole market state | 7 of 205 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
@@ -227,6 +227,12 @@ What the numbers do not say:
   9,419-byte account and the borrow bookkeeping of large bodies, not the logic.
   `proofs/ROADMAP.md` lists the ways forward.
 - Nothing proves termination or compute bounds; those are measured.
+- Every proof was made with overflow checks on. The deployed program checks its own arithmetic
+  but builds the engine without overflow checks (with them, the 14-leg atomic exit exceeds the
+  compute limit), so an overflow in the engine would continue with a wrapped value. A no-panic proof
+  rules that out; an "if it returns" statement holds on-chain only together with the `PO.*` pieces,
+  one per engine function with unchecked arithmetic
+  (`proofs/specs/engine_wrapping_arithmetic_4e77481b.md`).
 
 ### Expected Kani Results
 

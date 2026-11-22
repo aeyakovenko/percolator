@@ -3,8 +3,10 @@
 The arithmetic layer established the exact panic condition of every function of `src/wide_math.rs`
 (labels A1 to G5 of `aristotle/wide_math_spec.md`). `src/v16.rs` calls five of those functions, at
 22 call sites. This layer closes the gap between the two: at each call site, the callee's panic
-condition cannot hold. The crate is built with `overflow-checks = true` and the program aborts the
-transaction on a panic, so a reachable panic is a path on which an operation can never complete.
+condition cannot hold. The panic conditions were proved with overflow checks on. The deployed program
+builds the engine without them (its release profile checks only the program's own code), so where such a
+condition holds, a division by zero still aborts the transaction but an overflowing `+`, `-`, `*`, shift or
+negation continues with a wrapped value. Either way the call site must not meet the condition.
 
 ## What `src/v16.rs` can reach in `wide_math.rs` (checked by the compiler)
 

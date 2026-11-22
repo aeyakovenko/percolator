@@ -30,6 +30,12 @@ What the numbers do not say:
   9,419-byte account and the borrow bookkeeping of large bodies, not the logic.
   `proofs/ROADMAP.md` lists the ways forward.
 - Nothing proves termination or compute bounds; those are measured.
+- Every proof was made with overflow checks on. The deployed program checks its own arithmetic
+  but builds the engine without overflow checks (with them, the 14-leg atomic exit exceeds the
+  compute limit), so an overflow in the engine would continue with a wrapped value. A no-panic proof
+  rules that out; an "if it returns" statement holds on-chain only together with the `PO.*` pieces,
+  one per engine function with unchecked arithmetic
+  (`proofs/specs/engine_wrapping_arithmetic_{{REV}}.md`).
 
 ### Expected Kani Results
 

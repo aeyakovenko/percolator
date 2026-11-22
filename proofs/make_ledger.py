@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _here = os.path.dirname(os.path.abspath(__file__))
 _frozen = os.path.join(_here, "src_4e77481b/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_eb9807c5/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_cd8a446a/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -305,6 +305,23 @@ piece("P.surface", "P panic sites", "src/v16.rs",
       evidence=(f"specs/wide_surface_census_{LANDED_REV}.txt (cargo check --lib, default features) with A1-A4, B1-B4; the comparison "
                 "operators are the core library's provided methods over the proved `partial_cmp`") if _census_ok else "")
 
+# PO: the engine's unchecked arithmetic (wrap_census.py). The program's release profile checks the program's own
+# arithmetic and builds the engine without overflow checks; every proof was made with them on, so an "if it returns"
+# statement holds on-chain only where the operations it runs cannot overflow. One piece per engine function whose
+# unchecked operations no proved no-panic piece of its own covers.
+# Every engine roll must regenerate the census for its revision (wrap_census.py; the clippy sites are per revision).
+_wrap = f"specs/engine_wrapping_arithmetic_{LANDED_REV}.tsv"
+assert os.path.exists(os.path.join(HERE, _wrap)), f"missing {_wrap}: run wrap_census.py for {LANDED_REV}"
+for _row in read(_wrap).splitlines()[1:]:
+    _fn, _line, _n, _lines, _ops, _cov = _row.split("\t")
+    if _cov != "-":
+        continue
+    piece(f"PO.{_fn}", "P panic sites", _fn,
+          f"no unchecked `+`, `-`, `*`, shift or negation in `{_fn}` overflows on an input its deployed callers can "
+          f"pass ({_n} at line{'s' if _n != '1' else ''} {_lines.replace(',', ', ')}): the deployed build does not "
+          "check the engine's arithmetic, so an overflow there would continue with a wrapped value",
+          "Kani or Aristotle (a no-panic proof, overflow checks on), or checked arithmetic that returns an error")
+
 # TR: the real class of layer T, split into statements local to the header and one account
 for pid, text in (
     ("TR.a", "H2, H3: every flag write is 0, 1 or `encode_bool(..)`; `recovery_reason` is written only by `from_runtime(Some(reason))`"),
@@ -512,7 +529,7 @@ start = wsrc.index("pub enum Instruction")
 body = wsrc[start:wsrc.index("\n    }\n", start)]
 variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # what the instruction census found per instruction (wrapper_census.py -> specs/wrapper_shape_census_<rev>.md)
-WRAPPER_REV = "eb9807c5"
+WRAPPER_REV = "cd8a446a"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -748,7 +765,9 @@ BOUNDED_ROWS = {
 }
 FUNDING_ROWS = {  # task k3: the funding snapshot carried between settlements (settlement glue, not a listed kernel)
     "Spec.KF.scaled_adl_delta_fast_delta": ("KF.delta", "scaled_adl_delta_fast",
-        "the fast funding delta is the exact floor of abs_basis * (now - then) / (a_basis * POS_SCALE)"),
+        "the fast funding delta is the exact floor of abs_basis * (now - then) / (a_basis * POS_SCALE); on-chain it also "
+        "needs P20 and P21 (its calls into `floor_div_signed_conservative_i128`), since the deployed engine does not check "
+        "overflow"),
     "Spec.KF.f_snap_after_settlement_nopanic": ("KF.nopanic", "f_snap_after_settlement", "no execution panics"),
     "Spec.KF.f_snap_after_settlement_carry_of_pos": ("KF.carry", "f_snap_after_settlement",
         "with the exact delta, the unpaid remainder is worth less than one atom and is never a debt"),
@@ -986,13 +1005,15 @@ extra = {  # pieces the coverage matrix names only in words
     "INV-048": ["K59.contract", "K59.nopanic"], "INV-051": ["K59.contract", "K59.nopanic", "K60.contract", "K60.nopanic"],
 }
 for _inv, _ids in {"INV-045": ["K76.contract", "K76.nopanic", "K93.contract", "K93.nopanic", "K93.envelope", "K93.reaches"],
-                   "INV-052": ["KF.cadence", "KF.carry", "KF.delta"],
+                   "INV-052": ["KF.cadence", "KF.carry", "KF.delta", "P20", "P21"],
                    "INV-071": ["K88.contract", "K88.zero", "K88.books"],
                    "INV-073": ["K88.books", "K91.refusals", "K91.admission"]}.items():
     extra[_inv] = extra.get(_inv, []) + [i for i in _ids if i in pieces]
 extra["INV-045"] = extra.get("INV-045", []) + [i for i in ("AC.unexposed", "AC.exposed", "AC.nofunding", "AC.residue",
                                                          "AC.clamp", "AC.price_range", "AC.writers",
                                                          "AC.trade_routes") if i in pieces]
+# INV-085 (proven arithmetic equals deployed arithmetic): the engine's unchecked arithmetic is where they can differ
+extra["INV-085"] = extra.get("INV-085", []) + sorted(i for i in pieces if i.startswith("PO."))
 if "kernel_accrual_index_update" in _k_of:
     extra["INV-045"] += [i for i in (f"{_k_of['kernel_accrual_index_update']}.contract",
                                      f"{_k_of['kernel_accrual_index_update']}.path") if i in pieces]
@@ -1009,7 +1030,7 @@ for line in read("coverage_matrix.md").splitlines():
     ids += extra.get(inv, [])
     stages = [s.strip() for s in stage.split(",")]
     if "D" in stages:
-        ids.append("T*")
+        ids += ["T*"] + (["PO*"] if "PO*" not in ids else [])
     if "C" in stages:
         ids.append("W*")
     if inv in liveness:
@@ -1037,6 +1058,31 @@ for v in invariants:
           f"{v['inv']} ({v['kind']}) holds for the deployed program, as a formal statement that an independent reader has checked "
           f"against the charter text. Rests on: {needs}",
           close_how(v["kind"]))
+
+# Overflow: which proved statements carry to the deployed build, where the engine wraps on overflow (every proof was
+# made with overflow checks on). No-panic pieces, the arithmetic layer, the P pieces and Kani's verdicts carry by
+# themselves. Any other proved piece carries when the no-panic pieces it needs are done: a kernel piece needs its
+# kernel's; every other one is listed in NOPANIC_BASIS, and a proved piece in neither group stops the script.
+NOPANIC_BASIS = {
+    "KF.cadence": ("KF.nopanic",), "KF.carry": ("KF.nopanic",), "KF.ok": ("KF.nopanic",),
+    # scaled_adl_delta_fast: its own operations are divisions by a nonzero constant; its calls into wide_math are P20, P21
+    "KF.delta": ("P20", "P21"),
+    "TC8": ("K17.nopanic",),     # kernel_trade_side_oi_cap_gate is K17
+    "AC.clamp": (),              # program code, which the deployed program checks; Spec.Clamp.clamp_nopanic is part of it
+}
+carry_exceptions = []
+for _p in pieces.values():
+    if _p["status"] != "proved" or _p["id"].endswith(".nopanic") or _p["layer"].startswith(("A ", "P ")):
+        continue
+    _m = re.match(r"(K\d+)\.", _p["id"])
+    if _m:
+        _need = (f"{_m.group(1)}.nopanic",)
+    else:
+        assert _p["id"] in NOPANIC_BASIS, f"proved piece {_p['id']}: record in NOPANIC_BASIS what rules out overflow for it"
+        _need = NOPANIC_BASIS[_p["id"]]
+    _open = [n for n in _need if pieces.get(n, {}).get("status") not in ("proved", "verified by Kani")]
+    if _open:
+        carry_exceptions.append((_p["id"], _open))
 
 def counts(ids):
     concrete = [i for i in ids if not i.endswith("*")]
@@ -1099,7 +1145,23 @@ leaves the piece open, and its row says what was checked. Two kinds of piece are
 on other evidence, and say so in their row: a call site whose callee Aristotle proved never to panic
 (nothing is left to prove at the site), and `P.surface`, which the Rust compiler establishes (the
 engine builds against a stand-in module that exposes only the listed items).
+
+**Overflow.** Every proof here was made with overflow checks on: Kani always checks, and the Aristotle
+specs said so. With checks on, an overflowing operation stops the call. The deployed program checks
+its own arithmetic but builds the engine without overflow checks (its release profile: with the engine
+checked, the 14-leg atomic exit of INV-073 exceeds the compute limit), so there an overflow continues
+with a wrapped value. A no-panic piece therefore also rules out wrapping and carries to the deployed
+build; a piece of the form "if the call returns, then ..." carries where the operations it runs cannot
+overflow. The `PO.*` pieces are those obligations, one per engine function
+(`specs/engine_wrapping_arithmetic_<rev>.md`). Which proved pieces carry is checked at every
+generation, in the next paragraph.
 """ % (len(entries), len(entries)))
+md.append("**Which proved pieces carry to the deployed build.** Checked at this generation: no-panic pieces, the "
+          "arithmetic layer, the P pieces and Kani's verdicts carry by themselves; a kernel's other proved pieces carry "
+          "with its no-panic piece; every other proved piece carries with the no-panic pieces recorded for it in "
+          "`make_ledger.py` (`NOPANIC_BASIS`). " + ("Every proved piece carries." if not carry_exceptions else
+          "These do not yet; each names the open pieces it also needs: "
+          + "; ".join(f"`{i}` ({', '.join(n)})" for i, n in carry_exceptions) + ".") + "\n")
 # The revisions the proofs were made on, each step checked by changed_fns.py; listed up to LANDED_REV.
 _ROLLS = [
     ("add1d027", "c030aa40", "the #449 change: nine kernels do not pass the check (two are new, four changed, three take "
@@ -1147,7 +1209,8 @@ md.append("Layer T has two pieces per entry point. `.header`: the production sha
           "so for those two instructions the header half also holds by a runtime check. `.scan`: the per-asset scan "
           "that only audit builds run; every entry point carries a real proof for it.\n")
 md.append("## Each invariant and its pieces\n")
-md.append("`T*`, `W*` and `L*` mean every piece of that layer applies (frame obligations included).\n")
+md.append("`T*`, `W*` and `L*` mean every piece of that layer applies (frame obligations included); `PO*` means every "
+          "piece of the engine's unchecked arithmetic (see \"Overflow\" above).\n")
 md.append("| Invariant | Kind | Pieces | Pieces done (proved, or verified by Kani) | Closed |\n|---|---|---|---|---|")
 for v in invariants:
     done, n = counts(v["ids"])

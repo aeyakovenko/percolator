@@ -24,7 +24,7 @@ live = {i for i, k in kind_of.items() if "liveness" in k or "termination" in k}
 evid = {i for i, k in kind_of.items() if k in ("process", "compute")}
 PH = [
     ("1", "Arithmetic and kernels", lambda i: re.match(r"[A-G]\d", i) is not None and not i.startswith("G.") or i.startswith("K")),
-    ("2", "The engine cannot panic and keeps the header", lambda i: i.startswith("P") or re.match(r"T\d+\.header$", i) is not None or i.startswith("TR.") or i.startswith("X")),
+    ("2", "The engine cannot panic or overflow and keeps the header", lambda i: i.startswith("P") or re.match(r"T\d+\.header$", i) is not None or i.startswith("TR.") or i.startswith("X")),
     ("3", "The engine keeps the whole market state", lambda i: re.match(r"T\d+\.(scan|account|mirror)$", i) is not None or re.match(r"S\d+\.", i) is not None or re.match(r"T[FAB]\.|TC\d+$", i) is not None or i.startswith("AC.") or i in ("G.M", "G.other")),
     ("4", "The program's instructions", lambda i: re.match(r"W\d", i) is not None or i in ("G.C", "G.init", "G.reach", "Y.runtime", "Y.spl", "Y.oracle")),
     ("5", "Each safety and history invariant closed", lambda i: i in kind_of and i not in live and i not in evid),
@@ -135,7 +135,7 @@ print(f"""
 
 **Phase 1. Arithmetic and kernels ({frac(PH[0][2])}).** {PHASE1_NOTE}
 
-**Phase 2. The engine cannot panic and keeps the header ({frac(PH[1][2])}).**
+**Phase 2. The engine cannot panic or overflow and keeps the header ({frac(PH[1][2])}).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
 - Every entry point preserves the header checks: 33 that end in the runtime check, 9 small ones
@@ -143,7 +143,15 @@ print(f"""
   and the four places where state is kept after an error. The first batch on the small ones proved
   two before its spending cap stopped it; those two have to be established again on the new engine
   revision, whose market view and asset slot gained fields.
-- Exit: no engine call can panic, and no successful engine call can leave a header that fails.
+- The engine's unchecked arithmetic, `PO.*` ({sum(1 for r in dep if r['id'].startswith('PO.'))} pieces): the
+  deployed program checks its own arithmetic but builds the engine without overflow checks (with
+  them, the 14-leg atomic exit exceeds the compute limit). Every proof was made with checks on, so a
+  statement of the form "if the call returns" holds on-chain only where the operations it runs
+  cannot overflow. One piece per engine function whose unchecked `+`, `-`, `*`, shift or negation no
+  proved no-panic piece covers (`specs/engine_wrapping_arithmetic_<rev>.md`). Many are loop counters
+  and differences guarded just above them; a piece can also close by turning the operation into
+  checked arithmetic.
+- Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
 **Phase 3. The engine keeps the whole market state ({frac(PH[2][2])}).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of

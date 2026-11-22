@@ -1,6 +1,6 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-22 from `proof_ledger.tsv`. **264 of 709 pieces of the deployed build are done
+Generated 2026-11-22 from `proof_ledger.tsv`. **264 of 807 pieces of the deployed build are done
 (200 proved by Aristotle, 64 verified by Kani); 0 of 89 charter invariants are closed.**
 
 ## The end goal
@@ -38,7 +38,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
-| 2 | The engine cannot panic and keeps the header | 9 of 95 |
+| 2 | The engine cannot panic or overflow and keeps the header | 9 of 193 |
 | 3 | The engine keeps the whole market state | 7 of 205 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
@@ -66,7 +66,7 @@ fixed yet. These come first; most are decisions.
 
 **Phase 1. Arithmetic and kernels (248 of 248).** Done for the deployed build: 189 proved by Aristotle, 59 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
 
-**Phase 2. The engine cannot panic and keeps the header (9 of 95).**
+**Phase 2. The engine cannot panic or overflow and keeps the header (9 of 193).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
 - Every entry point preserves the header checks: 33 that end in the runtime check, 9 small ones
@@ -74,7 +74,15 @@ fixed yet. These come first; most are decisions.
   and the four places where state is kept after an error. The first batch on the small ones proved
   two before its spending cap stopped it; those two have to be established again on the new engine
   revision, whose market view and asset slot gained fields.
-- Exit: no engine call can panic, and no successful engine call can leave a header that fails.
+- The engine's unchecked arithmetic, `PO.*` (98 pieces): the
+  deployed program checks its own arithmetic but builds the engine without overflow checks (with
+  them, the 14-leg atomic exit exceeds the compute limit). Every proof was made with checks on, so a
+  statement of the form "if the call returns" holds on-chain only where the operations it runs
+  cannot overflow. One piece per engine function whose unchecked `+`, `-`, `*`, shift or negation no
+  proved no-panic piece covers (`specs/engine_wrapping_arithmetic_<rev>.md`). Many are loop counters
+  and differences guarded just above them; a piece can also close by turning the operation into
+  checked arithmetic.
+- Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
 **Phase 3. The engine keeps the whole market state (7 of 205).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
@@ -179,7 +187,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-445 left are mostly whole entry points and instructions, and the two attempts at that kind
+543 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.
