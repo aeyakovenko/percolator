@@ -1181,6 +1181,79 @@ fn proof_v16_public_raw_oracle_target_update_is_value_neutral() {
     assert_eq!(market.kani_residual(), residual_before);
 }
 
+// INV-045 (clause C0 of the closure map): neither accrual entry point accepts a price of 0 or above
+// MAX_ORACLE_PRICE, whatever the slot, funding rate or steps, and the refusal leaves the market as it
+// was. The program's clamp passes a zero target through, so this refusal is what keeps a raw target
+// of 0 from becoming a mark. (The check is the first one after the config and the mode are read; no
+// write precedes it in either function.) The prices are the boundary values 0, MAX_ORACLE_PRICE + 1
+// and u64::MAX, each concrete: with a symbolic price the guard stays undecided and the whole accrual
+// body is encoded, which ran out of memory at 24 GB. Everything else is symbolic.
+#[kani::proof]
+#[kani::unwind(64)]
+#[kani::solver(cadical)]
+fn proof_v16_public_accrual_refuses_a_price_outside_the_oracle_range_and_writes_nothing() {
+    let now_slot: u64 = kani::any();
+    let funding_rate_e9: i128 = kani::any();
+    let protective_progress_committed: bool = kani::any();
+    let path: bool = kani::any();
+    let step = AccrualStepV16 {
+        effective_price: kani::any(),
+        funding_rate_e9: kani::any(),
+        price_move_remainder_before_bps_num: kani::any(),
+        price_move_remainder_after_bps_num: kani::any(),
+    };
+    let steps = [step];
+    let step_count: usize = kani::any();
+    kani::assume(step_count <= 1);
+
+    let (mut header, mut markets, _) = one_market_view_fixture();
+    let header_before = header;
+    let slot_before = markets[0].engine;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    for price in [0, MAX_ORACLE_PRICE + 1, u64::MAX] {
+        let refused = if path {
+            matches!(
+                market.accrue_asset_path_to_not_atomic(
+                    0,
+                    now_slot,
+                    price,
+                    &steps[..step_count],
+                    protective_progress_committed,
+                ),
+                Err(V16Error::InvalidConfig)
+            )
+        } else {
+            matches!(
+                market.accrue_asset_to_not_atomic(
+                    0,
+                    now_slot,
+                    price,
+                    funding_rate_e9,
+                    protective_progress_committed,
+                ),
+                Err(V16Error::InvalidConfig)
+            )
+        };
+        assert!(refused);
+        assert!(kani_eq_market_group_v16_header_account(
+            &header_before,
+            market.header
+        ));
+        assert!(kani_eq_engine_asset_slot_v16_account(
+            &slot_before,
+            &market.markets[0].engine
+        ));
+    }
+    kani::cover!(
+        path && step_count == 1,
+        "path accrual with one step refused"
+    );
+    kani::cover!(
+        !path && funding_rate_e9 != 0,
+        "single-segment accrual with funding refused"
+    );
+}
+
 #[kani::proof]
 #[kani::unwind(64)]
 #[kani::solver(cadical)]
