@@ -222,8 +222,8 @@ the account side of a new lien, the stranded loser backing, one B-settlement ste
 bankruptcy-residual step and the accrual's price cap, funding and K/F index update is in kernels
 K64 to K93; the methods only read fields, call them and write the results. Kani verifies fourteen
 of the twenty batch 3-9 kernels for every input; the other six it checks for bounded inputs, and the
-prover proves them at full width (K91, K93 done; K88 done, final check pending; K76 to K78 written,
-not yet run). Each batch lands only when the engine's suites pass, its differential oracles are
+prover has proved all six at full width (K76 to K78 in task k4, where K78's contract as written
+turned out false in a corner the code handles right and was restated). Each batch lands only when the engine's suites pass, its differential oracles are
 byte-identical to the previous revision, the Kani harnesses that can reach the changed code verify,
 and the program's full gate passes against it. The work also found and fixed one admission hole:
 a market could be created with a public B chunk large enough that every B-settlement step on a side

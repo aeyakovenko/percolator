@@ -717,6 +717,21 @@ BOUNDED_ROWS = {
         "the step is 0 exactly when booking one atom would overflow the B index"),
     "Spec.KR.kernel_bankruptcy_residual_step_capacity_books": ("kernel_bankruptcy_residual_step_capacity", "books", "k3", "bfd4d0c4",
         "under the shape facts and the chunk bound, a nonzero step is always booked (no Recovery while the index has room)"),
+    # task k4 (engine 80f8f0b4): the accrual kernels
+    "Spec.Seg.kernel_accrual_price_move_within_cap_contract": ("kernel_accrual_price_move_within_cap", "contract", "k4", "80f8f0b4", None),
+    "Spec.Seg.kernel_accrual_price_move_within_cap_nopanic": ("kernel_accrual_price_move_within_cap", "nopanic", "k4", "80f8f0b4", None),
+    "Spec.Seg.kernel_accrual_funding_num_contract": ("kernel_accrual_funding_num", "contract", "k4", "80f8f0b4", None),
+    "Spec.Seg.kernel_accrual_funding_num_nopanic": ("kernel_accrual_funding_num", "nopanic", "k4", "80f8f0b4", None),
+    "Spec.Seg.kernel_accrual_index_update_contract_exact": ("kernel_accrual_index_update", "contract", "k4", "80f8f0b4", None),
+    "Spec.Seg.kernel_accrual_index_update_nopanic": ("kernel_accrual_index_update", "nopanic", "k4", "80f8f0b4", None),
+    "Spec.Seg.kernel_accrual_index_update_floors": ("kernel_accrual_index_update", "floors", "k4", "80f8f0b4",
+        "on Ok each side's funding delta is the exact floor of -funding_num * a_long / FUNDING_DEN, resp. "
+        "funding_num * a_short / FUNDING_DEN, in both branches"),
+    "Spec.Seg.kernel_accrual_index_update_funding_conserves": ("kernel_accrual_index_update", "funding_conserves", "k4", "80f8f0b4",
+        "per unit of effective position funding moves value from the paying side to the receiving side and creates "
+        "none; the difference is under one index unit per side, and nothing when FUNDING_DEN divides the amount"),
+    "Spec.Seg.kernel_accrual_index_update_mark_to_market": ("kernel_accrual_index_update", "mark_to_market", "k4", "80f8f0b4",
+        "with equal A indices the two K deltas sum to zero (mark to market moves value between the sides and creates none)"),
 }
 FUNDING_ROWS = {  # task k3: the funding snapshot carried between settlements (settlement glue, not a listed kernel)
     "Spec.KF.scaled_adl_delta_fast_delta": ("KF.delta", "scaled_adl_delta_fast",
@@ -756,6 +771,13 @@ for _pid, _src in confirmed.items():
     if _pid in pieces and pieces[_pid]["status"] == "proved, final check pending":
         pieces[_pid]["status"] = "proved"
         pieces[_pid]["evidence"] += f"; final check confirmed in {_src}"
+_k78c = f"{_k_of.get('kernel_accrual_index_update', 'K78')}.contract"
+if _k78c in pieces and pieces[_k78c]["status"] == "proved" and any(
+        p["name"] == "Spec.Seg.kernel_accrual_index_update_contract" and p["status"].startswith("REFUTED") for p in props):
+    pieces[_k78c]["evidence"] += ("; this is the corrected contract: the clause as written at 80f8f0b4 is refuted "
+                                  "(Spec.Seg.kernel_accrual_index_update_contract: its check `dfl * FUNDING_DEN` "
+                                  "overflows at funding_num = +-i128::MAX although the kernel's result is the right "
+                                  "floor), and engine batch 12 writes the corrected clause")
 # Config admission keeps every B-settlement step clear of its overflow refusal (Kani, every chunk and budget),
 # which with K91.refusals means no admitted market can freeze positions that way.
 if "kernel_b_settlement_chunk" in _k_of:
@@ -797,6 +819,15 @@ piece("AC.clamp", "W wrapper", "oracle_v16::clamp_toward_engine_dt",
 pieces["AC.clamp"]["evidence"] = ("queued: Aristotle task k4 Part 4 (KC.nopanic, KC.envelope, KC.reaches, KC.select) on the "
                                   f"verbatim functions of program {WRAPPER_REV}; model checking gave no verdict, even for "
                                   "16-bit caps and segment lengths")
+_kc = {_p["name"]: _p["status"] for _p in props if _p["name"].startswith("Spec.Clamp.")}
+_kc_names = ("Spec.Clamp.clamp_nopanic", "Spec.Clamp.clamp_envelope", "Spec.Clamp.clamp_reaches",
+             "Spec.Clamp.effective_price_select")
+if all(_kc.get(_n, "").startswith("PROVED") for _n in _kc_names):
+    pieces["AC.clamp"]["status"] = ("proved" if not any("unchecked" in _kc[_n] for _n in _kc_names)
+                                    else "proved, final check pending")
+    pieces["AC.clamp"]["evidence"] = (", ".join(_kc_names) + f" (task k4, every input; the verbatim functions of "
+                                      f"program {WRAPPER_REV}, built as their own crate with overflow checks; nothing "
+                                      "assumed about library functions)")
 # C7 of the closure map: one jump and any chain of steps to the same price move the K indices alike
 _k78 = _k_of.get("kernel_accrual_index_update")
 if _k78 is not None:
@@ -805,6 +836,11 @@ if _k78 is not None:
           "-(price_delta * a_short), and two successive updates with the same A indices move them by the sum of the "
           "price deltas, so a jump and any chain of steps to the same price leave the same K, for every input", "Aristotle")
     pieces[f"{_k78}.path"]["evidence"] = "queued: Aristotle task k4 (KI.path)"
+    for _p in props:
+        if _p["name"] == "Spec.Seg.kernel_accrual_index_update_path" and _p["status"].startswith("PROVED"):
+            pieces[f"{_k78}.path"]["status"] = "proved" if "unchecked" not in _p["status"] else "proved, final check pending"
+            pieces[f"{_k78}.path"]["evidence"] = (f"{_p['name']} (engine 80f8f0b4, task k4, including the two-step "
+                                                  f"statement; the function is unchanged in {LANDED_REV})")
 # C0 of the closure map: the price range both accrual entry points accept
 piece("AC.price_range", "S settlement glue", "accrue_asset_to_not_atomic",
       "`accrue_asset_to_not_atomic` and `accrue_asset_path_to_not_atomic` refuse the prices 0, MAX_ORACLE_PRICE + 1 and "

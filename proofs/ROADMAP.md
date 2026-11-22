@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-22 from `proof_ledger.tsv`. **252 of 704 pieces of the deployed build are done
-(189 proved by Aristotle, 63 verified by Kani); 0 of 89 charter invariants are closed.**
+Generated 2026-11-22 from `proof_ledger.tsv`. **263 of 707 pieces of the deployed build are done
+(200 proved by Aristotle, 63 verified by Kani); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -37,9 +37,9 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 
 | Phase | What | Proved |
 |---|---|---|
-| 1 | Arithmetic and kernels | 238 of 245 |
+| 1 | Arithmetic and kernels | 248 of 248 |
 | 2 | The engine cannot panic and keeps the header | 9 of 95 |
-| 3 | The engine keeps the whole market state | 5 of 203 |
+| 3 | The engine keeps the whole market state | 6 of 203 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -64,7 +64,7 @@ fixed yet. These come first; most are decisions.
 
 ## The phases
 
-**Phase 1. Arithmetic and kernels (238 of 245).** 7 pieces open.
+**Phase 1. Arithmetic and kernels (248 of 248).** Done for the deployed build: 189 proved by Aristotle, 59 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
 
 **Phase 2. The engine cannot panic and keeps the header (9 of 95).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
@@ -76,7 +76,7 @@ fixed yet. These come first; most are decisions.
   revision, whose market view and asset slot gained fields.
 - Exit: no engine call can panic, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (5 of 203).**
+**Phase 3. The engine keeps the whole market state (6 of 203).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -153,8 +153,8 @@ the account side of a new lien, the stranded loser backing, one B-settlement ste
 bankruptcy-residual step and the accrual's price cap, funding and K/F index update is in kernels
 K64 to K93; the methods only read fields, call them and write the results. Kani verifies fourteen
 of the twenty batch 3-9 kernels for every input; the other six it checks for bounded inputs, and the
-prover proves them at full width (K91, K93 done; K88 done, final check pending; K76 to K78 written,
-not yet run). Each batch lands only when the engine's suites pass, its differential oracles are
+prover has proved all six at full width (K76 to K78 in task k4, where K78's contract as written
+turned out false in a corner the code handles right and was restated). Each batch lands only when the engine's suites pass, its differential oracles are
 byte-identical to the previous revision, the Kani harnesses that can reach the changed code verify,
 and the program's full gate passes against it. The work also found and fixed one admission hole:
 a market could be created with a public B chunk large enough that every B-settlement step on a side
@@ -174,7 +174,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-452 left are mostly whole entry points and instructions, and the two attempts at that kind
+444 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.
