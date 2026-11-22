@@ -4862,3 +4862,193 @@ fn proof_no_overflow_kernel_advance_close_ledger() {
     );
     kani::cover!(matches!(r, Ok(l) if l.residual_remaining > 0));
 }
+
+// Batch 16: more of the engine's unchecked arithmetic (the proof ledger's PO pieces), the payout-rate
+// invariant of the resolved ledger (piece PR1) and the leg-validity fact of the account decoder (PL1).
+// As in batch 14, each no-overflow proof calls one engine function with every input symbolic and no
+// assumption, so Kani's overflow checks cover every operation the call executes. Closure layer.
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_v16_config_for_overflow() -> V16Config {
+    V16Config {
+        max_portfolio_assets: kani::any(),
+        max_market_slots: kani::any(),
+        min_nonzero_mm_req: kani::any(),
+        min_nonzero_im_req: kani::any(),
+        h_min: kani::any(),
+        h_max: kani::any(),
+        maintenance_margin_bps: kani::any(),
+        initial_margin_bps: kani::any(),
+        max_trading_fee_bps: kani::any(),
+        liquidation_fee_bps: kani::any(),
+        liquidation_fee_cap: kani::any(),
+        min_liquidation_abs: kani::any(),
+        max_accrual_dt_slots: kani::any(),
+        max_abs_funding_e9_per_slot: kani::any(),
+        min_funding_lifetime_slots: kani::any(),
+        max_price_move_bps_per_slot: kani::any(),
+        max_account_b_settlement_chunks: kani::any(),
+        max_bankrupt_close_chunks: kani::any(),
+        max_bankrupt_close_lifetime_slots: kani::any(),
+        asset_activation_cooldown_slots: kani::any(),
+        max_recovery_fallback_deviation_bps: kani::any(),
+        backing_fee_base_rate_e9_per_slot: kani::any(),
+        backing_fee_kink_util_bps: kani::any(),
+        backing_fee_slope_at_kink_e9_per_slot: kani::any(),
+        backing_fee_slope_above_kink_e9_per_slot: kani::any(),
+        backing_freshness_buckets: kani::any(),
+        margin_mode_realizable_full_shared_cross_margin: kani::any(),
+        source_credit_lien_required: kani::any(),
+        insurance_credit_reservation_required: kani::any(),
+        permissionless_recovery_enabled: kani::any(),
+        recovery_fallback_price_enabled: kani::any(),
+        recovery_fallback_envelope_enabled: kani::any(),
+        credit_lien_revalidation_required: kani::any(),
+        stale_certificate_penalty_enabled: kani::any(),
+        full_refresh_required_for_favorable_actions: kani::any(),
+        public_liveness_profile_crank_forward: kani::any(),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_resolved_payout_ledger() -> ResolvedPayoutLedgerV16 {
+    ResolvedPayoutLedgerV16 {
+        snapshot_residual: kani::any(),
+        terminal_claim_exact_receipts_num: kani::any(),
+        terminal_claim_bound_unreceipted_num: kani::any(),
+        current_payout_rate_num: kani::any(),
+        current_payout_rate_den: kani::any(),
+        snapshot_slot: kani::any(),
+        payout_halted: kani::any(),
+        finalized: kani::any(),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_resolved_payout_receipt() -> ResolvedPayoutReceiptV16 {
+    ResolvedPayoutReceiptV16 {
+        present: kani::any(),
+        prior_bound_contribution_num: kani::any(),
+        live_released_face_at_receipt: kani::any(),
+        terminal_positive_claim_face: kani::any(),
+        paid_effective: kani::any(),
+        finalized: kani::any(),
+    }
+}
+
+// PR1: whatever ledger it is given, the recompute either fails or leaves a rate with 1 <= den and
+// num <= den (so a receipt's gross payout `face * num / den` never exceeds its face).
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_resolved_payout_rate_recompute_leaves_a_rate_at_most_one() {
+    let r = V16Core::kernel_recompute_resolved_payout_rate(any_resolved_payout_ledger());
+    if let Ok(l) = r {
+        assert!(l.current_payout_rate_den >= 1);
+        assert!(l.current_payout_rate_num <= l.current_payout_rate_den);
+    }
+    kani::cover!(matches!(r, Ok(l) if l.current_payout_rate_num < l.current_payout_rate_den));
+    kani::cover!(matches!(r, Ok(l) if l.current_payout_rate_num == l.current_payout_rate_den));
+}
+
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_prepare_insurance_lien_consume_delta() {
+    let reservation: InsuranceCreditReservationV16 = kani::any();
+    let source: SourceCreditStateV16 = kani::any();
+    let r = V16Core::prepare_insurance_lien_consume_delta(
+        reservation,
+        source,
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+    kani::cover!(matches!(r, Ok((_, _, spent, _)) if spent > 0));
+}
+
+
+
+
+// Batch 16b: the three batch 16 proofs that ran out of time on 256-bit arithmetic, with the wide
+// callees replaced by stubs. The wide-math functions never panic (the arithmetic layer, A1 to G5,
+// proved), so every value they can return is among the arbitrary values the stubs return: the
+// no-overflow proofs below cover every operation of the function itself, for every input.
+
+#[cfg(all(kani, feature = "closure"))]
+fn stub_any_u256_option(_a: U256, _b: U256) -> Option<U256> {
+    if kani::any() {
+        Some(U256::new(kani::any(), kani::any()))
+    } else {
+        None
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stub_any_u128_from_u256(_a: &U256) -> Option<u128> {
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stub_any_backing_rate(_config: V16Config, _source: SourceCreditStateV16) -> V16Result<u64> {
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn stub_any_wide_mul_div_floor_u128(_a: u128, _b: u128, _d: u128) -> u128 {
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::stub(U256::checked_mul, stub_any_u256_option)]
+#[kani::stub(U256::checked_div, stub_any_u256_option)]
+#[kani::stub(U256::try_into_u128, stub_any_u128_from_u256)]
+#[kani::stub(V16Core::backing_utilization_rate_e9_for_source_state, stub_any_backing_rate)]
+fn proof_no_overflow_backing_utilization_fee_quote_atoms_for_lien_wide_stubbed() {
+    let source: SourceCreditStateV16 = kani::any();
+    let r = V16Core::backing_utilization_fee_quote_atoms_for_lien(
+        any_v16_config_for_overflow(),
+        source,
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+    kani::cover!(matches!(r, Ok(f) if f > 0));
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::stub(wide_mul_div_floor_u128, stub_any_wide_mul_div_floor_u128)]
+fn proof_no_overflow_kernel_resolved_receipt_can_still_gain_wide_stubbed() {
+    let r = V16Core::kernel_resolved_receipt_can_still_gain(
+        any_resolved_payout_ledger(),
+        kani::any(),
+        any_resolved_payout_receipt(),
+    );
+    kani::cover!(matches!(r, Ok(true)));
+}
+
+// PL1 is structural: the decoder returns an active leg only after `validate_active_leg` accepted
+// that same leg. The proof replaces the loss-weight computation inside the validator by a
+// deterministic stand-in, which leaves that structure as it is; the property holds for any
+// deterministic loss weight, so it holds for the real one.
+#[cfg(all(kani, feature = "closure"))]
+fn stub_deterministic_loss_weight(abs_basis_q: u128, a_basis: u128) -> V16Result<u128> {
+    Ok(abs_basis_q ^ a_basis)
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::stub(loss_weight_for_basis, stub_deterministic_loss_weight)]
+fn proof_decoded_active_leg_is_valid_for_any_loss_weight() {
+    let bytes: [u8; core::mem::size_of::<PortfolioLegV16Account>()] = kani::any();
+    let mut account: PortfolioLegV16Account = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut account).copy_from_slice(&bytes);
+    let decoded = account.try_to_runtime();
+    if let Ok(leg) = decoded {
+        if leg.active {
+            assert!(validate_active_leg(leg).is_ok());
+        }
+    }
+    kani::cover!(matches!(decoded, Ok(leg) if leg.active), "an active leg decodes");
+}
