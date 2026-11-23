@@ -76,13 +76,19 @@ PHASE0 = [
      "engine refuses for a Recovery asset); `BatchTradeNoCpi` dropped the oracle-profile write-back of legs whose print does "
      "not move the mark, after their zero-move funding segment. The statement is restated (specs/inv046_closure_71076137.md) "
      "and needs a second read."),
-    ("open, the owner's decision", "INV-045: catch-up after idle slots (third read, finding 3)", "A target pushed after g idle "
-     "slots is applied to the whole backlog: g times the cap in one real slot (measured: +48% after 200 idle slots at 24 bps). "
-     "(a) a target change applies only to the slots after it, (b) the catch-up after a change is capped at one window, or (c) "
-     "it stays and the charter says elapsed means since the last accrual."),
-    ("open, the owner's decision", "INV-064 wording", "The charter names a proportional withdrawal cap and a cooldown; their "
-     "config fields are reserved and must be zero. The code's rule is the asset's domain budget, with no Live withdrawal while "
-     "any loss is active, stale or lagging. Reword the charter to that rule, or reinstate a cooldown."),
+    ("done", "INV-045: catch-up after idle slots (third read, finding 3)", "The owner chose (b) on 2026-11-23, program "
+     "f6d0bc57: a target change that nobody pays for reaches back at most one window (`max_accrual_dt_slots`). PushAuthMark and "
+     "PushEwmaMark refuse a changed target on an exposed asset further behind, and the crank holds such a reading back; trade "
+     "prints are unchanged and pay the mark-movement fee. Measured before: +48% after 200 idle slots at 24 bps. New clause "
+     "C11 of the INV-045 statement, pieces AC.catchup_push and AC.catchup_crank (test evidence)."),
+    ("done", "INV-064 wording", "Reworded to the code on 2026-11-23 (the owner's decision, program 609e557b): one budget per "
+     "asset, the asset's two loss-domain budgets, never more than the unreserved insurance or the vault, debited by every "
+     "withdrawal; no Live withdrawal while any loss is active, stale or lagging; no proportional cap and no cooldown."),
+    ("open, being fixed", "INV-077: a fill at the full source shape with a maintenance fee", "Found while landing (b): on a "
+     "market with a maintenance fee, once the assets are current, the CPI fill that opens the source-claim LP's tenth leg "
+     "exceeds the 1,400,000 CU limit (the same on the previous program once its assets are current). The fee sync settles "
+     "every leg and resets the health certificate, so the trade recomputes it in full. The program's full-shape maintenance "
+     "test is ignored until the fix; Y.compute records it."),
 ]
 now = datetime.datetime.utcnow().strftime("%Y-%m-%d")  # the date only: a publish with no change leaves no diff
 _p1_done, _p1_all = sel(PH[0][2])

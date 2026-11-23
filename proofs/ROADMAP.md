@@ -1,6 +1,6 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-23 from `proof_ledger.tsv`. **342 of 813 pieces of the deployed build are done
+Generated 2026-11-23 from `proof_ledger.tsv`. **342 of 815 pieces of the deployed build are done
 (215 proved by Aristotle, 86 verified by Kani, 41 proved by a local rule checked on the source; 301 without the rule); 0 of 89 charter invariants are closed.**
 
 ## The end goal
@@ -39,7 +39,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
 | 2 | The engine cannot panic or overflow and keeps the header | 86 of 194 |
-| 3 | The engine keeps the whole market state | 8 of 210 |
+| 3 | The engine keeps the whole market state | 8 of 212 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -62,8 +62,9 @@ fixed yet. These come first; most are decisions.
 | done | #449, #448, keeper reward during catch-up, #477, #453 | Landed 2026-11-19 and 2026-11-20. |
 | done | Charter consistency | No two charter statements contradict each other (audit of 2026-11-19; the one real conflict it found, two base-unit mints against a single quote unit, was resolved by program #480 and #481). |
 | done | INV-046 first independent read (2026-11-23) | Two program defects fixed in program aac89b9e: a reduction on a Recovery asset whose mark follows trades reverted on any print off the frozen mark (the trade staged a target the engine refuses for a Recovery asset); `BatchTradeNoCpi` dropped the oracle-profile write-back of legs whose print does not move the mark, after their zero-move funding segment. The statement is restated (specs/inv046_closure_71076137.md) and needs a second read. |
-| open, the owner's decision | INV-045: catch-up after idle slots (third read, finding 3) | A target pushed after g idle slots is applied to the whole backlog: g times the cap in one real slot (measured: +48% after 200 idle slots at 24 bps). (a) a target change applies only to the slots after it, (b) the catch-up after a change is capped at one window, or (c) it stays and the charter says elapsed means since the last accrual. |
-| open, the owner's decision | INV-064 wording | The charter names a proportional withdrawal cap and a cooldown; their config fields are reserved and must be zero. The code's rule is the asset's domain budget, with no Live withdrawal while any loss is active, stale or lagging. Reword the charter to that rule, or reinstate a cooldown. |
+| done | INV-045: catch-up after idle slots (third read, finding 3) | The owner chose (b) on 2026-11-23, program f6d0bc57: a target change that nobody pays for reaches back at most one window (`max_accrual_dt_slots`). PushAuthMark and PushEwmaMark refuse a changed target on an exposed asset further behind, and the crank holds such a reading back; trade prints are unchanged and pay the mark-movement fee. Measured before: +48% after 200 idle slots at 24 bps. New clause C11 of the INV-045 statement, pieces AC.catchup_push and AC.catchup_crank (test evidence). |
+| done | INV-064 wording | Reworded to the code on 2026-11-23 (the owner's decision, program 609e557b): one budget per asset, the asset's two loss-domain budgets, never more than the unreserved insurance or the vault, debited by every withdrawal; no Live withdrawal while any loss is active, stale or lagging; no proportional cap and no cooldown. |
+| open, being fixed | INV-077: a fill at the full source shape with a maintenance fee | Found while landing (b): on a market with a maintenance fee, once the assets are current, the CPI fill that opens the source-claim LP's tenth leg exceeds the 1,400,000 CU limit (the same on the previous program once its assets are current). The fee sync settles every leg and resets the health certificate, so the trade recomputes it in full. The program's full-shape maintenance test is ignored until the fix; Y.compute records it. |
 
 ## The phases
 
@@ -87,7 +88,7 @@ fixed yet. These come first; most are decisions.
   checked arithmetic.
 - Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (8 of 210).**
+**Phase 3. The engine keeps the whole market state (8 of 212).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -190,7 +191,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-471 left are mostly whole entry points and instructions, and the two attempts at that kind
+473 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.

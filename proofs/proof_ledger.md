@@ -1,6 +1,6 @@
 # Proof ledger: the charter's invariants as provable pieces
 
-Generated 2026-11-23 by `make_ledger.py` from the live Aristotle property list. **215 of 875 pieces are proved and checked; 0 more are proved with the final check pending** (their task was stopped before its closing check).
+Generated 2026-11-23 by `make_ledger.py` from the live Aristotle property list. **215 of 877 pieces are proved and checked; 0 more are proved with the final check pending** (their task was stopped before its closing check).
 
 ## The end goal
 
@@ -61,7 +61,7 @@ generation, in the next paragraph.
 
 **Which proved pieces carry to the deployed build.** Checked at this generation: no-panic pieces, the arithmetic layer, the P pieces and Kani's verdicts carry by themselves; a kernel's other proved pieces carry with its no-panic piece; every other proved piece carries with the no-panic pieces recorded for it in `make_ledger.py` (`NOPANIC_BASIS`). Every proved piece carries.
 
-**Revisions.** The ledger describes engine 71076137 and program aac89b9e, which pins it. Proofs were made against the engine revisions below, each when it was current. A proof holds for a later revision wherever the function, everything it calls and every type it names are textually identical; `changed_fns.py` checks that function by function at each step, and `src/wide_math.rs` is identical in all of them (`specs/wide_surface_census_<rev>.txt`).
+**Revisions.** The ledger describes engine 71076137 and program f6d0bc57, which pins it. Proofs were made against the engine revisions below, each when it was current. A proof holds for a later revision wherever the function, everything it calls and every type it names are textually identical; `changed_fns.py` checks that function by function at each step, and `src/wide_math.rs` is identical in all of them (`specs/wide_surface_census_<rev>.txt`).
 
 - From add1d027 to c030aa40 (`specs/changed_since_add1d027_at_c030aa40.md`): the #449 change: nine kernels do not pass the check (two are new, four changed, three take the asset record, which grew) and are counted as proved only once Aristotle proved them again on c030aa40.
 - From c030aa40 to d1fa39f6 (`specs/changed_since_c030aa40_at_d1fa39f6.md`): the provider-protection floor (percolator#271): every kernel passes, and K61 to K63 are new. The two entry-point pieces proved on c030aa40 (T09.header and T38.header) do not pass, because the market view and the per-asset slot gained fields; they are listed as proved for c030aa40 and to be established again.
@@ -83,7 +83,7 @@ generation, in the next paragraph.
 | P panic sites | 128 | 0 | 24 | 0 | 68 | 36 |
 | S settlement glue | 61 | 0 | 6 | 0 | 26 | 29 |
 | T transition | 262 | 56 | 0 | 0 | 5 | 201 |
-| W wrapper | 52 | 0 | 1 | 0 | 0 | 51 |
+| W wrapper | 54 | 0 | 1 | 0 | 0 | 53 |
 | X committed after an error | 10 | 0 | 0 | 0 | 0 | 10 |
 | Y assumptions and evidence | 7 | 0 | 0 | 0 | 0 | 7 |
 
@@ -139,7 +139,7 @@ Layer T has two pieces per entry point. `.header`: the production shape check (h
 | INV-042 recovery fallback | n/a | none yet: reserved, no consumer on the public surface | 0 of 0 | no |
 | INV-043 hedge credit | n/a | none yet: disabled in the deployed profile | 0 of 0 | no |
 | INV-044 no phantom value | safety | K30, K31, PO*, T* | 4 of 4 | no |
-| INV-045 mark movement | safety | AC, K59, K76, K78, K93 | 16 of 22 | no |
+| INV-045 mark movement | safety | AC, K59, K76, K78, K93 | 16 of 24 | no |
 | INV-046 exit under unsafe prices | liveness | L* | 0 of 0 | no |
 | INV-047 equivalent routes | history | none yet: metamorphic across routes | 0 of 0 | no |
 | INV-048 OI coherence | safety | K16, K17, K18, K58, K59, PO*, T* | 10 of 10 | no |
@@ -1085,8 +1085,10 @@ Layer T has two pieces per entry point. `.header`: the production shape check (h
 | W48 | `SyncMaintenanceFee` | `SyncMaintenanceFee`: accounts, signers and bindings are checked before any state change; token movement equals the engine's booked delta; if the global invariant (H, S, V, M, C) held before and the instruction succeeds, it holds after; an engine error aborts the instruction, except `LockActive` from the portfolio deregistration (X4). Engine entry points its handler can reach: T21 (final), T23 (delegates), T29 (frame), T59 (final) | open |  |
 | W49 | `UpdateBaseUnitMints` | `UpdateBaseUnitMints`: accounts, signers and bindings are checked before any state change; token movement equals the engine's booked delta; if the global invariant (H, S, V, M, C) held before and the instruction succeeds, it holds after; an engine error aborts the instruction. Engine entry points its handler can reach: none | open |  |
 | W50 | `SwapSecondaryForPrimary` | `SwapSecondaryForPrimary`: accounts, signers and bindings are checked before any state change; token movement equals the engine's booked delta; if the global invariant (H, S, V, M, C) held before and the instruction succeeds, it holds after; an engine error aborts the instruction. Engine entry points its handler can reach: none | open |  |
-| AC.clamp | `oracle_v16::clamp_toward_engine_dt` | `oracle_v16::effective_price_from_target` / `clamp_toward_engine_dt` (program): the crank's price is the clamp when the asset has effective open interest and the target when it has none; with a nonzero anchor and target the clamp lies between them and moves at most anchor * cap * dt / 10000, the bound the engine's price-move cap enforces; a trade-reported price goes through the same clamp | proved | Spec.Clamp.clamp_nopanic, Spec.Clamp.clamp_envelope, Spec.Clamp.clamp_reaches, Spec.Clamp.effective_price_select (task k4, every input; the verbatim functions of program ebcded58, unchanged in aac89b9e, built as their own crate with overflow checks; nothing assumed about library functions) |
+| AC.clamp | `oracle_v16::clamp_toward_engine_dt` | `oracle_v16::effective_price_from_target` / `clamp_toward_engine_dt` (program): the crank's price is the clamp when the asset has effective open interest and the target when it has none; with a nonzero anchor and target the clamp lies between them and moves at most anchor * cap * dt / 10000, the bound the engine's price-move cap enforces; a trade-reported price goes through the same clamp | proved | Spec.Clamp.clamp_nopanic, Spec.Clamp.clamp_envelope, Spec.Clamp.clamp_reaches, Spec.Clamp.effective_price_select (task k4, every input; the verbatim functions of program ebcded58, unchanged in f6d0bc57, built as their own crate with overflow checks; nothing assumed about library functions) |
 | AC.trade_routes | `accepted_reported_trade_price_view` | every trade route accepts a reported price only through `accepted_reported_trade_price_view`, which, on an asset whose mark follows trades and can still move (`trade_updates_mark_view`: an EWMA mark or a soft-stale hybrid, Active or DrainOnly), clamps it with `clamp_toward_engine_dt` from the program's price average (`mark_ewma_e6`) over the slots since that average last moved, whatever the open interest, and otherwise accepts the engine's effective price (INV-045 clause C4, INV-046 clauses C2 and C3; the clamp itself is AC.clamp) | open | test evidence, not proved: the program's composition test v16_program_mark_writer_and_trade_exit_composition_is_source_complete and a reading of both trade routes |
+| AC.catchup_push | `handle_push_managed_mark` | while the market is live and the asset has effective open interest, PushAuthMark and PushEwmaMark refuse (EngineStale, no write) a mark that changes the asset's raw target when `now - slot_last > max_accrual_dt_slots` (`asset_accrual_within_one_window_view`); so such a target is applied to at most one window of the slots before it arrived (INV-045 clause C11, the charter's paragraph on a price that arrives after idle slots) | open | test evidence, not proved: the program's test v16_attack_authority_target_after_idle_slots_catches_up_at_most_one_window |
+| AC.catchup_crank | `the permissionless crank's live branch (hybrid_target_for_crank_view and the hold-back)` | while the market is live and not resolve-matured and the asset has effective open interest, a crank whose reading or EWMA mark would change the staged raw target of an asset with `now - slot_last > max_accrual_dt_slots` accrues toward the staged target instead and records the staged target in the oracle profile, keeping the reading's publish time and leg caches; so the reading is applied to at most one window of the slots before it arrived (INV-045 clause C11) | open | test evidence, not proved: the program's test v16_attack_fresh_reading_after_idle_slots_catches_up_at_most_one_window |
 
 ## Layer X committed after an error
 
@@ -1111,7 +1113,7 @@ Layer T has two pieces per entry point. `.header`: the production shape check (h
 | Y.spl | `SPL Token program` | assumed: a transfer moves exactly the amount between the named accounts or fails; mint and owner fields are as the token program wrote them | open |  |
 | Y.oracle | `oracle accounts` | assumed: the layouts the program parses (Pyth, Switchboard, Chainlink) are the publishers' layouts. Nothing is assumed about the values: what an oracle reports and what any authority signs are adversarial inputs. The charter already bounds what they can do to a user (INV-005 with its role matrix, INV-014, INV-045, INV-046, INV-064, INV-018, the isolation invariants and the exit rule), and those invariants are proved with the oracle and the authorities quantified over | open |  |
 | Y.tool | `Aristotle` | trusted: its model of Rust and of the core library, with the library behaviours each run summary lists as assumed, and the bound on object sizes (2^56 bytes) | open |  |
-| Y.compute | `compute budget (INV-077)` | evidence, not proof: every instruction fits the compute limit at the maximum shape (measured by the program's max-shape tests) | open |  |
+| Y.compute | `compute budget (INV-077)` | evidence, not proof: every instruction fits the compute limit at the maximum shape (measured by the program's max-shape tests) | open | open item (2026-11-23): on a market with a maintenance fee, once the assets are current, the CPI fill that opens the source-claim LP's tenth leg exceeds the 1,400,000 CU limit; the program's test v16_program_public_full_shape_maintenance_has_bounded_continuation is ignored until the fix (the program's tests/invariants/README.md, INV-077 open item) |
 | Y.terminates | `loops` | evidence, not proof: every loop is bounded by a compile-time constant or by an input length that the compute meter bounds (Aristotle proves no termination) | open |  |
 | Y.statements | `the formal statements` | an independent reader has checked that each formal statement says what the charter invariant means; a proof of the wrong statement proves nothing | open |  |
 

@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _here = os.path.dirname(os.path.abspath(__file__))
 _frozen = os.path.join(_here, "src_71076137/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_aac89b9e/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_f6d0bc57/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -705,7 +705,12 @@ variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # BatchTradeNoCpi writes back every leg's oracle profile after the leg's zero-move funding segment. Checked by
 # roll_prog_inv046.py: the instruction census and the effective-price writer scan are unchanged, and so are the two
 # clamp functions AC.clamp is about.
-WRAPPER_REV = "aac89b9e"
+# Rolled 2026-11-23 to program f6d0bc57 (engine pin unchanged): INV-045's catch-up rule (finding 3 of the third read,
+# option (b)). A target change that nobody pays for reaches back at most one window (`max_accrual_dt_slots`):
+# PushAuthMark/PushEwmaMark refuse it on an exposed asset further behind, and the crank holds such a reading back.
+# Checked by roll_prog_f3.py: the instruction census and the effective-price writer scan are unchanged, and so are
+# the two clamp functions AC.clamp is about. New open pieces AC.catchup_push and AC.catchup_crank (clause C11).
+WRAPPER_REV = "f6d0bc57"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -1129,6 +1134,29 @@ piece("AC.anchor_writes", "S settlement glue", "the price-cap anchor (`fund_px_l
       "current target took effect (AC.anchor proves the setter's case for every input)",
       "a writer scan like AC.writers, then Kani or Aristotle per writer")
 pieces["AC.anchor_writes"]["evidence"] = "AC.anchor (Kani) covers the staging setter; the other writers are a reading"
+# INV-045 clause C11 (program, 2026-11-23): a price that arrives after idle slots reaches back at most one window
+piece("AC.catchup_push", "W wrapper", "handle_push_managed_mark",
+      "while the market is live and the asset has effective open interest, PushAuthMark and PushEwmaMark refuse "
+      "(EngineStale, no write) a mark that changes the asset's raw target when `now - slot_last > max_accrual_dt_slots` "
+      "(`asset_accrual_within_one_window_view`); so such a target is applied to at most one window of the slots before "
+      "it arrived (INV-045 clause C11, the charter's paragraph on a price that arrives after idle slots)",
+      "Kani (the handler's guard, every input)")
+pieces["AC.catchup_push"]["evidence"] = ("test evidence, not proved: the program's test "
+                                         "v16_attack_authority_target_after_idle_slots_catches_up_at_most_one_window")
+piece("AC.catchup_crank", "W wrapper", "the permissionless crank's live branch (hybrid_target_for_crank_view and the hold-back)",
+      "while the market is live and not resolve-matured and the asset has effective open interest, a crank whose "
+      "reading or EWMA mark would change the staged raw target of an asset with `now - slot_last > "
+      "max_accrual_dt_slots` accrues toward the staged target instead and records the staged target in the oracle "
+      "profile, keeping the reading's publish time and leg caches; so the reading is applied to at most one window of "
+      "the slots before it arrived (INV-045 clause C11)", "Kani (the hold-back, every input)")
+pieces["AC.catchup_crank"]["evidence"] = ("test evidence, not proved: the program's test "
+                                          "v16_attack_fresh_reading_after_idle_slots_catches_up_at_most_one_window")
+# INV-077 open item found while landing C11 (2026-11-23): one maximum-shape measurement no longer fits
+pieces["Y.compute"]["evidence"] = ("open item (2026-11-23): on a market with a maintenance fee, once the assets are "
+                                   "current, the CPI fill that opens the source-claim LP's tenth leg exceeds the "
+                                   "1,400,000 CU limit; the program's test "
+                                   "v16_program_public_full_shape_maintenance_has_bounded_continuation is ignored until "
+                                   "the fix (the program's tests/invariants/README.md, INV-077 open item)")
 # INV-045: the anchor of the path accrual is the mark when the current target took effect; a staged target that changes
 # restarts it (engine 71076137, batch 15)
 piece("AC.anchor", "S settlement glue", "set_asset_raw_oracle_targets_not_atomic",
@@ -1318,6 +1346,7 @@ extra["INV-045"] = extra.get("INV-045", []) + [i for i in ("AC.unexposed", "AC.e
                                                          "AC.clamp", "AC.price_range", "AC.writers",
                                                          "AC.trade_routes", "AC.anchor", "AC.path_link",
                                                          "AC.cadence", "AC.walk_margin", "AC.anchor_writes",
+                                                         "AC.catchup_push", "AC.catchup_crank",
                                                          "K59.contract")
                                                          if i in pieces]
 # INV-085 (proven arithmetic equals deployed arithmetic): the engine's unchecked arithmetic is where they can differ
