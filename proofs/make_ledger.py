@@ -1156,8 +1156,23 @@ for p in props:
         pieces[pid]["status"] = "REFUTED"; pieces[pid]["evidence"] = name
     elif st.startswith("IN_PROGRESS") or st.startswith("IN PROGRESS"):
         pieces[pid]["status"] = "in progress"
+    elif st:
+        # c0 ended on 2026-11-23 (COMPLETE_WITH_ERRORS, about 400 credits, 14 of 20 proved). Its one failed row,
+        # `...p13_p14_no_e5_panic`, covers both sites: the two closures are proved, the borrow of the leg's fields,
+        # the two `unwrap_or_else` calls and the tail are not (aristotle/summaries/c0.md).
+        for _pid in (("P13", "P14") if "p13_p14" in name else (pid,)):
+            pieces[_pid]["status"] = "attempted, open"
+            pieces[_pid]["evidence"] = (f"{name}: partly proved in task c0 (the closures are safe; the rest of the "
+                                        "body is not proved); aristotle/summaries/c0.md")
 if _c0_unmapped:
     print("c0 rows without a ledger piece:", ", ".join(sorted(_c0_unmapped)), file=sys.stderr)
+# PL2 and PR2-PR4 were not attempted: on the budget note of 2026-11-23 the task returned, instead of proofs, the
+# enumeration each needs (callers of the leg function; writers of the payout ledger, of the snapshot flag and of a
+# present receipt). The enumerations are in aristotle/summaries/c0.md, to be checked against the source.
+for _pid in ("PL2", "PR2", "PR3", "PR4"):
+    if pieces[_pid]["status"] == "open":
+        pieces[_pid]["evidence"] = ("not attempted; task c0 returned the enumeration this piece needs "
+                                    "(aristotle/summaries/c0.md), not yet checked against the source")
 
 # The three provider-protection kernels are small scalar functions that Kani verifies for all inputs.
 # They are not queued for Aristotle (the owner's priority: Aristotle goes where Kani has gaps).
