@@ -451,6 +451,43 @@ for _pid, _h in B18_KANI.items():
                                 + ("; stubbed: " + "; ".join(f"{x}: {B18_STUB_WHY[x]}" for x in _st) if _st else "")
                                 + f"), engine {B18_KANI_REV}")
 
+# Batch 19 (engine 96e9b6d2, whose src/v16.rs is 71076137's): Kani proofs in the closure layer, every input symbolic,
+# no assumption except where B19_ASSUMES names one a deployed caller guarantees. The PO harnesses call one function
+# each, so Kani's overflow checks cover every operation it runs.
+B19_KANI_REV = "96e9b6d2"
+B19_KANI = {
+    "PO.signed_position": "proof_no_overflow_signed_position_of_a_decoded_leg",
+}
+B19_WHAT = {
+}
+B19_STUBS = {
+    "proof_no_overflow_signed_position_of_a_decoded_leg": [],
+}
+B19_STUB_WHY = {
+    "U256::checked_mul": "arbitrary result (wide math never panics: A1-G5)",
+    "U256::checked_div": "arbitrary result (wide math never panics: A1-G5)",
+    "U256::try_into_u128": "arbitrary result (wide math never panics: A1-G5)",
+    "wide_mul_div_floor_u128": "arbitrary result (wide math never panics: A1-G5)",
+    "V16Core::backing_utilization_rate_e9_for_source_state": "arbitrary result (its own operations are its own piece)",
+    "loss_weight_for_basis": "a deterministic stand-in (PL1 is structural: it holds for any deterministic loss weight)",
+    "liquidation_leg_maintenance_requirement": "arbitrary result (its own operations are its own piece)",
+    "liquidation_risk_notional_ceil": "arbitrary result (its own no-overflow piece is proved, batch 14)",
+    "liquidation_fee_for_close": "arbitrary result (its own no-overflow piece is proved, batch 14)",
+    "liquidation_projected_health_deficit_from_parts": "arbitrary result (its own operations are its own piece)",
+}
+B19_ASSUMES = {
+    "proof_no_overflow_signed_position_of_a_decoded_leg": "one assumption, that an active leg's basis_pos_q is not i128::MIN: each of the six deployed callers passes PortfolioLegV16::EMPTY or a leg decoded with try_to_runtime, whose active legs pass validate_active_leg (PL1), and validate_basis refuses i128::MIN; without it the proof fails",
+}
+for _pid, _h in B19_KANI.items():
+    assert _pid in pieces, f"{_pid}: no such piece (the census or the ledger changed?)"
+    pieces[_pid]["status"] = "verified by Kani"
+    _st = B19_STUBS.get(_h) or []
+    pieces[_pid]["evidence"] = (f"{_h} (Kani, closure layer, every input symbolic, "
+                                + (B19_ASSUMES[_h] if _h in B19_ASSUMES else "no assumption")
+                                + (f"; {B19_WHAT[_pid]}" if _pid in B19_WHAT else "")
+                                + ("; stubbed: " + "; ".join(f"{x}: {B19_STUB_WHY[x]}" for x in _st) if _st else "")
+                                + f"), engine {B19_KANI_REV}")
+
 # TR: the real class of layer T, split into statements local to the header and one account
 for pid, text in (
     ("TR.a", "H2, H3: every flag write is 0, 1 or `encode_bool(..)`; `recovery_reason` is written only by `from_runtime(Some(reason))`"),
@@ -1166,6 +1203,32 @@ for p in props:
                                         "body is not proved); aristotle/summaries/c0.md")
 if _c0_unmapped:
     print("c0 rows without a ledger piece:", ", ".join(sorted(_c0_unmapped)), file=sys.stderr)
+# Task c1 (engine 71076137, engine/aristotle/engine_wrapping_arithmetic_c1_spec.md, submitted 2026-11-23): no-overflow
+# of five functions the Kani batches could not finish or did not reach. Rows are named `<function>.c1_<n>_<what>`.
+C1_PIECES = {
+    "c1_1": "PO.liquidation_engine_close_request_q",
+    "c1_2": "PO.V16Config::validate_solvency_envelope_range",
+    "c1_3": "PO.V16Config::validate_exact_solvency_envelope",
+    "c1_4": "PO.PositionSlotMapV16::from_account",
+    "c1_5": "PO.PortfolioV16ViewMut::compact_source_domains",
+}
+for p in props:
+    name, st = p["name"], p["status"]
+    _m = re.search(r"\.(c1_\d)_[a-z0-9_]+$", name)
+    if _m is None or _m.group(1) not in C1_PIECES:
+        continue
+    pid = C1_PIECES[_m.group(1)]
+    if st.startswith("PROVED"):
+        pieces[pid]["status"] = "proved, final check pending" if "unchecked" in st else "proved"
+        pieces[pid]["evidence"] = f"{name} (engine 71076137, task c1)"
+    elif st.startswith("REFUTED"):
+        pieces[pid]["status"] = "REFUTED"; pieces[pid]["evidence"] = name
+    elif st.startswith("IN_PROGRESS") or st.startswith("IN PROGRESS"):
+        pieces[pid]["status"] = "in progress"
+    elif st:
+        pieces[pid]["status"] = "attempted, open"
+        pieces[pid]["evidence"] = f"{name}: stated, not proved in task c1 (aristotle/summaries/c1.md)"
+
 # PL2 and PR2-PR4 were not attempted: on the budget note of 2026-11-23 the task returned, instead of proofs, the
 # enumeration each needs (callers of the leg function; writers of the payout ledger, of the snapshot flag and of a
 # present receipt). The enumerations are in aristotle/summaries/c0.md, to be checked against the source.

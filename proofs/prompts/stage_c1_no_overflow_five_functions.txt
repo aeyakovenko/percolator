@@ -1,0 +1,11 @@
+New task on the same project, a new layer. The project holds the engine at revision 71076137 (unchanged since the last task). The file aristotle/engine_wrapping_arithmetic_c1_spec.md is uploaded with this task. It lists five functions of src/v16.rs (C1.1 to C1.5) and, for each, the lines of its unchecked +, -, *, shift and negation operations, a precondition, and the reason I expect each operation cannot overflow.
+
+Why this matters: the program that deploys the engine compiles it without overflow checks, so an operation that overflows wraps silently on chain. Each property says that, for every input satisfying the stated precondition, no execution of the function evaluates one of the listed operations on operands for which it overflows; equivalently, with this crate's release profile (overflow checks on) none of the listed operations panics.
+
+Please prove the five properties in the order C1.1, C1.2, C1.3, C1.4, C1.5, and record each finished property before starting the next, so finished results are kept if the task stops early. Name each property by its label and function, for example `liquidation_engine_close_request_q.c1_1_no_overflow`.
+
+Budget: the account has a limited balance that has to cover other work. Please keep this task to about 200 credits. If a property is not close to done when its share is spent, leave it unresolved with one or two sentences on what blocked it, and keep enough budget for the final check and the summary.
+
+Check each reason in the spec file against the source and say so if the real reason is different. A reachable overflow is the result to report: give the input. Do not add a precondition silently; if a function needs one beyond what the spec states, say exactly what and why.
+
+Verify the deployed function bodies: no cfg(kani) (in particular PORTFOLIO_SOURCE_DOMAIN_CAP is 32 and V16_MAX_PORTFOLIO_ASSETS_N is 16 in the deployed build), default features, this crate's release profile (overflow checks on). List every library function whose documented behaviour a proof assumes instead of covering by proof.
