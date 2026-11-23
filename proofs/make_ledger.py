@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _here = os.path.dirname(os.path.abspath(__file__))
 _frozen = os.path.join(_here, "src_71076137/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_f6d0bc57/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_257db166/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -710,7 +710,12 @@ variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # PushAuthMark/PushEwmaMark refuse it on an exposed asset further behind, and the crank holds such a reading back.
 # Checked by roll_prog_f3.py: the instruction census and the effective-price writer scan are unchanged, and so are
 # the two clamp functions AC.clamp is about. New open pieces AC.catchup_push and AC.catchup_crank (clause C11).
-WRAPPER_REV = "f6d0bc57"
+# Rolled 2026-11-23 to program 257db166 (engine pin unchanged): the second INV-046 read's fixes. Past a hybrid's
+# soft-stale window the trade average owns the target for every writer until the feed publishes a newer reading (the
+# owner's rule A; the crank no longer re-stages a reading it has already observed); a Recovery asset's own staleness
+# timer no longer refuses its reductions (trade_resolve_matured_at_slot). Checked by roll_prog_inv046b.py: the
+# instruction census and the effective-price writer scan are unchanged, and so are the two clamp functions.
+WRAPPER_REV = "257db166"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -1151,6 +1156,22 @@ piece("AC.catchup_crank", "W wrapper", "the permissionless crank's live branch (
       "the slots before it arrived (INV-045 clause C11)", "Kani (the hold-back, every input)")
 pieces["AC.catchup_crank"]["evidence"] = ("test evidence, not proved: the program's test "
                                           "v16_attack_fresh_reading_after_idle_slots_catches_up_at_most_one_window")
+# INV-046, second read (2026-11-23): one owner for a soft-stale hybrid's target, and Recovery reductions stay open
+piece("AC.hybrid_owner", "W wrapper", "hybrid_target_for_crank_view and prepare_trade_driven_mark_target_view",
+      "past a hybrid's soft-stale window (slots since the feed last published a newer reading), every writer of its "
+      "target stages the trade average (`mark_ewma_e6`): the crank, whether or not its reading is within "
+      "`max_staleness_secs`, and a trade; a newer reading restores the feed price and restarts the window; so no caller "
+      "chooses the target, and with it the side that carries the target-lag penalty, by choosing which writer acts "
+      "last (INV-046 clause C5, the owner's rule A)", "Kani (the writers' agreement, every profile and reading)")
+pieces["AC.hybrid_owner"]["evidence"] = ("test evidence, not proved: the program's test "
+                                         "v16_attack_soft_stale_hybrid_target_does_not_depend_on_the_writer")
+piece("AC.recovery_reduction", "W wrapper", "trade_resolve_matured_at_slot (the four trade routes)",
+      "a trade on a Recovery asset is refused for staleness only when the whole market is stale "
+      "(`permissionless_stale_matured`), never for the asset's own frozen timer; with the engine's rule that a Recovery "
+      "asset admits no risk increase, its owners can reduce at the frozen price until the force close (INV-046 clause "
+      "C6(6))", "Kani (the gate, every lifecycle and timer)")
+pieces["AC.recovery_reduction"]["evidence"] = ("test evidence, not proved: the program's test "
+                                               "v16_program_recovery_reduction_stays_open_after_the_stale_window")
 # INV-077 open item found while landing C11 (2026-11-23): one maximum-shape measurement no longer fits
 pieces["Y.compute"]["evidence"] = ("open item (2026-11-23): on a market with a maintenance fee, once the assets are "
                                    "current, the CPI fill that opens the source-claim LP's tenth leg exceeds the "
@@ -1350,6 +1371,7 @@ extra["INV-045"] = extra.get("INV-045", []) + [i for i in ("AC.unexposed", "AC.e
                                                          "K59.contract")
                                                          if i in pieces]
 # INV-085 (proven arithmetic equals deployed arithmetic): the engine's unchecked arithmetic is where they can differ
+extra["INV-046"] = extra.get("INV-046", []) + [i for i in ("AC.hybrid_owner", "AC.recovery_reduction") if i in pieces]
 extra["INV-085"] = extra.get("INV-085", []) + sorted(i for i in pieces if i.startswith("PO."))
 if "kernel_accrual_index_update" in _k_of:
     extra["INV-045"] += [i for i in (f"{_k_of['kernel_accrual_index_update']}.contract",

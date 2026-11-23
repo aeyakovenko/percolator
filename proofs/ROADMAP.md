@@ -1,6 +1,6 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-23 from `proof_ledger.tsv`. **342 of 815 pieces of the deployed build are done
+Generated 2026-11-23 from `proof_ledger.tsv`. **342 of 817 pieces of the deployed build are done
 (215 proved by Aristotle, 86 verified by Kani, 41 proved by a local rule checked on the source; 301 without the rule); 0 of 89 charter invariants are closed.**
 
 ## The end goal
@@ -39,7 +39,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
 | 2 | The engine cannot panic or overflow and keeps the header | 86 of 194 |
-| 3 | The engine keeps the whole market state | 8 of 212 |
+| 3 | The engine keeps the whole market state | 8 of 214 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -88,7 +88,7 @@ fixed yet. These come first; most are decisions.
   checked arithmetic.
 - Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (8 of 212).**
+**Phase 3. The engine keeps the whole market state (8 of 214).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -191,7 +191,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-473 left are mostly whole entry points and instructions, and the two attempts at that kind
+475 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.
