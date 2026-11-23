@@ -291,6 +291,9 @@ if os.path.exists(os.path.join(HERE, P_SPEC)):
     for pid, target, text in (
         ("PL1", "PortfolioLegV16Account::try_to_runtime", "an active leg decoded from account data passed `validate_active_leg`"),
         ("PL2", "leg_kf_delta_components_for_settlement_from_asset", "every caller in a default build passes an active leg it decoded with `try_to_runtime`"),
+        # Added 2026-11-23 with batch 19: PO.signed_position is verified under the assumption that an active leg's
+        # basis_pos_q is not i128::MIN; that every caller passes such a leg is this piece (a reading, like PL2).
+        ("PL3", "signed_position", "every deployed caller passes `PortfolioLegV16::EMPTY` or a leg decoded with `try_to_runtime` (six call sites), so an active leg's `basis_pos_q` is not `i128::MIN` (PL1 and `validate_basis`)"),
         ("PR1", "kernel_recompute_resolved_payout_rate", "the recomputed payout rate has `1 <= den` and `num <= den`"),
         ("PR2", "writers of header.resolved_payout_ledger", "every writer of the payout ledger leaves the rate unchanged or ends with a recompute"),
         ("PR3", "payout_snapshot_captured", "the snapshot flag is set only by the function that initializes the ledger and recomputes the rate"),
@@ -476,7 +479,7 @@ B19_STUB_WHY = {
     "liquidation_projected_health_deficit_from_parts": "arbitrary result (its own operations are its own piece)",
 }
 B19_ASSUMES = {
-    "proof_no_overflow_signed_position_of_a_decoded_leg": "one assumption, that an active leg's basis_pos_q is not i128::MIN: each of the six deployed callers passes PortfolioLegV16::EMPTY or a leg decoded with try_to_runtime, whose active legs pass validate_active_leg (PL1), and validate_basis refuses i128::MIN; without it the proof fails",
+    "proof_no_overflow_signed_position_of_a_decoded_leg": "one assumption, that an active leg's basis_pos_q is not i128::MIN; that every deployed caller guarantees it is piece PL3 (open: six call sites read, not proved); without the assumption the proof fails",
 }
 for _pid, _h in B19_KANI.items():
     assert _pid in pieces, f"{_pid}: no such piece (the census or the ledger changed?)"
@@ -1232,10 +1235,25 @@ for p in props:
 # PL2 and PR2-PR4 were not attempted: on the budget note of 2026-11-23 the task returned, instead of proofs, the
 # enumeration each needs (callers of the leg function; writers of the payout ledger, of the snapshot flag and of a
 # present receipt). The enumerations are in aristotle/summaries/c0.md, to be checked against the source.
+# A direct-assignment scan of src_71076137/v16.rs (2026-11-23) finds the same sites: PL2, the two default-build
+# callers (prepare_account_kf_settlement_entry, settle_forfeited_leg_kf_effects) and one cfg(kani) caller; PR2, six
+# writes of header.resolved_payout_ledger in five functions; PR3, one write of payout_snapshot_captured (= 1, in
+# initialize_resolved_payout_ledger_if_needed); PR4, one write of `present: true` (create_resolved_payout_receipt_if_
+# needed). The scan does not see writes through other paths (a raw byte view), and the per-site arguments are read,
+# not proved, so the pieces stay open.
+C0_SCAN = {
+    "PL2": "callers: prepare_account_kf_settlement_entry, settle_forfeited_leg_kf_effects (+ one cfg(kani))",
+    "PR2": "writers: credit_post_snapshot_residual_not_atomic, recompute_resolved_payout_rate, "
+           "initialize_resolved_payout_ledger_if_needed, create_resolved_payout_receipt_if_needed (2), "
+           "refine_resolved_unreceipted_bound_not_atomic",
+    "PR3": "one write: initialize_resolved_payout_ledger_if_needed",
+    "PR4": "one write of present: true: create_resolved_payout_receipt_if_needed",
+}
 for _pid in ("PL2", "PR2", "PR3", "PR4"):
     if pieces[_pid]["status"] == "open":
         pieces[_pid]["evidence"] = ("not attempted; task c0 returned the enumeration this piece needs "
-                                    "(aristotle/summaries/c0.md), not yet checked against the source")
+                                    "(aristotle/summaries/c0.md) and a direct-assignment scan of the source agrees ("
+                                    + C0_SCAN[_pid] + "); the per-site arguments are not proved")
 
 # The three provider-protection kernels are small scalar functions that Kani verifies for all inputs.
 # They are not queued for Aristotle (the owner's priority: Aristotle goes where Kani has gaps).

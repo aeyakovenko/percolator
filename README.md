@@ -188,12 +188,12 @@ FEATURES=fuzz,closure KANI_Z="" LOG_DIR=kani_closure CARGO_TARGET_DIR=target/clo
 <!-- proofs:begin (generated from proofs/README_SECTION.md and the ledger; edit that file, not this block) -->
 ## Proof Status And How To Reproduce It
 
-As of 2026-11-23, for engine `71076137` and program `aac89b9e`: **341 of 812 pieces of the deployed build are done (214 proved by Aristotle, 86 verified by Kani, 41 proved by a local rule checked on the source; 300 without the rule); 0 of 89 charter invariants are closed.**
+As of 2026-11-23, for engine `71076137` and program `aac89b9e`: **341 of 813 pieces of the deployed build are done (214 proved by Aristotle, 86 verified by Kani, 41 proved by a local rule checked on the source; 300 without the rule); 0 of 89 charter invariants are closed.**
 
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
-| 2 | The engine cannot panic or overflow and keeps the header | 85 of 193 |
+| 2 | The engine cannot panic or overflow and keeps the header | 85 of 194 |
 | 3 | The engine keeps the whole market state | 8 of 210 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
