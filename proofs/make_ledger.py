@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _here = os.path.dirname(os.path.abspath(__file__))
 _frozen = os.path.join(_here, "src_71076137/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_e1295564/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_aac89b9e/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -660,7 +660,12 @@ start = wsrc.index("pub enum Instruction")
 body = wsrc[start:wsrc.index("\n    }\n", start)]
 variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # what the instruction census found per instruction (wrapper_census.py -> specs/wrapper_shape_census_<rev>.md)
-WRAPPER_REV = "e1295564"
+# Rolled 2026-11-23 to program aac89b9e (engine pin unchanged): the INV-046 fix. On an asset whose mark cannot move
+# (Recovery) a trade print is ignored like an authenticated mark's, instead of reverting the reduction that carries it;
+# BatchTradeNoCpi writes back every leg's oracle profile after the leg's zero-move funding segment. Checked by
+# roll_prog_inv046.py: the instruction census and the effective-price writer scan are unchanged, and so are the two
+# clamp functions AC.clamp is about.
+WRAPPER_REV = "aac89b9e"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -1041,9 +1046,12 @@ pieces["AC.writers"]["evidence"] = (
     "write-backs); it does not follow raw byte writes. A proof is the effective-price frame of every entry point and "
     "instruction (layers T and W)")
 piece("AC.trade_routes", "W wrapper", "accepted_reported_trade_price_view",
-      "every trade route accepts a reported price only through `accepted_reported_trade_price_view`, which clamps it "
-      "with `clamp_toward_engine_dt` from the program's price average (`mark_ewma_e6`) over the slots since that "
-      "average last moved, whatever the open interest (INV-045 clause C4; the clamp itself is AC.clamp)", "Aristotle")
+      "every trade route accepts a reported price only through `accepted_reported_trade_price_view`, which, on an "
+      "asset whose mark follows trades and can still move (`trade_updates_mark_view`: an EWMA mark or a soft-stale "
+      "hybrid, Active or DrainOnly), clamps it with `clamp_toward_engine_dt` from the program's price average "
+      "(`mark_ewma_e6`) over the slots since that average last moved, whatever the open interest, and otherwise "
+      "accepts the engine's effective price (INV-045 clause C4, INV-046 clauses C2 and C3; the clamp itself is "
+      "AC.clamp)", "Aristotle")
 pieces["AC.trade_routes"]["evidence"] = (
     "test evidence, not proved: the program's composition test "
     "v16_program_mark_writer_and_trade_exit_composition_is_source_complete and a reading of both trade routes")
@@ -1127,6 +1135,29 @@ for p in props:
         pieces[pid]["evidence"] = f"{name}: stated, not proved in task s2 (aristotle/summaries/s2.md says how far each got)"
 if _trade_unmapped:
     print("trade rows without a ledger piece:", ", ".join(sorted(_trade_unmapped)), file=sys.stderr)
+
+# Task c0 (engine 71076137, specs/wide_math_callsites_spec_71076137.md): the wide-math call sites of class local and
+# chained, and the six supporting pieces PL1, PL2, PR1-PR4. Its rows are named `<function>.<piece>_<what>`, e.g.
+# `scaled_adl_delta_fast.p20_no_e3_panic` -> P20, `V16Core::kernel_recompute_resolved_payout_rate.pr1_...` -> PR1.
+_c0_unmapped = []
+for p in props:
+    name, st = p["name"], p["status"]
+    _m = re.search(r"\.(p\d\d|pl\d|pr\d)_[a-z0-9_]+$", name)
+    if _m is None:
+        continue
+    pid = _m.group(1).upper()
+    if pid not in pieces:
+        _c0_unmapped.append(name)
+        continue
+    if st.startswith("PROVED"):
+        pieces[pid]["status"] = "proved, final check pending" if "unchecked" in st else "proved"
+        pieces[pid]["evidence"] = f"{name} (engine 71076137, task c0)"
+    elif st.startswith("REFUTED"):
+        pieces[pid]["status"] = "REFUTED"; pieces[pid]["evidence"] = name
+    elif st.startswith("IN_PROGRESS") or st.startswith("IN PROGRESS"):
+        pieces[pid]["status"] = "in progress"
+if _c0_unmapped:
+    print("c0 rows without a ledger piece:", ", ".join(sorted(_c0_unmapped)), file=sys.stderr)
 
 # The three provider-protection kernels are small scalar functions that Kani verifies for all inputs.
 # They are not queued for Aristotle (the owner's priority: Aristotle goes where Kani has gaps).

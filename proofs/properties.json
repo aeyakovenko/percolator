@@ -1,5 +1,12 @@
 [
  {
+  "name": "PortfolioLegV16Account::try_to_runtime.pl1_active_leg_validated",
+  "status_name": "PROVED",
+  "unchecked": false,
+  "description": "PL1, `PortfolioLegV16Account::try_to_runtime(&self)`: for every account (arbitrary field bytes), the function has no undefined behaviour, and it returns `Ok(leg)` with `leg.active` only if `validate_active_leg(leg)` returns `Ok(())` (proved for every behaviour of `validate_active_leg`: whatever leg set it accepts, an active returned leg lies in it). With the actual `validate_active_leg`, an active returned leg satisfies `a_basis == ADL_ONE`, (`basis_pos_q == 0` or `|basis_pos_q| <= MAX_POSITION_ABS_Q`), `k_snap`, `f_snap`, `basis_pos_q != i128::MIN`, `0 < loss_weight <= SOCIAL_LOSS_DEN`, `b_rem < SOCIAL_LOSS_DEN`, `b_epoch_snap == epoch_snap`.",
+  "last_updated": "2026-11-23T00:01:19.596593+00:00"
+ },
+ {
   "name": "scaled_adl_delta_fast.p21_no_e3_panic",
   "status_name": "PROVED",
   "unchecked": false,

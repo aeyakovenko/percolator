@@ -71,6 +71,18 @@ PHASE0 = [
      "2026-11-21 and both timed out)."),
     ("done", "#449, #448, keeper reward during catch-up, #477, #453", "Landed 2026-11-19 and 2026-11-20."),
     ("done", "Charter consistency", "No two charter statements contradict each other (audit of 2026-11-19; the one real conflict it found, two base-unit mints against a single quote unit, was resolved by program #480 and #481)."),
+    ("done", "INV-046 first independent read (2026-11-23)", "Two program defects fixed in program aac89b9e: a reduction on a "
+     "Recovery asset whose mark follows trades reverted on any print off the frozen mark (the trade staged a target the "
+     "engine refuses for a Recovery asset); `BatchTradeNoCpi` dropped the oracle-profile write-back of legs whose print does "
+     "not move the mark, after their zero-move funding segment. The statement is restated (specs/inv046_closure_71076137.md) "
+     "and needs a second read."),
+    ("open, the owner's decision", "INV-045: catch-up after idle slots (third read, finding 3)", "A target pushed after g idle "
+     "slots is applied to the whole backlog: g times the cap in one real slot (measured: +48% after 200 idle slots at 24 bps). "
+     "(a) a target change applies only to the slots after it, (b) the catch-up after a change is capped at one window, or (c) "
+     "it stays and the charter says elapsed means since the last accrual."),
+    ("open, the owner's decision", "INV-064 wording", "The charter names a proportional withdrawal cap and a cooldown; their "
+     "config fields are reserved and must be zero. The code's rule is the asset's domain budget, with no Live withdrawal while "
+     "any loss is active, stale or lagging. Reword the charter to that rule, or reinstate a cooldown."),
 ]
 now = datetime.datetime.utcnow().strftime("%Y-%m-%d")  # the date only: a publish with no change leaves no diff
 _p1_done, _p1_all = sel(PH[0][2])

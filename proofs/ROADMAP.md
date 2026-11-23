@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-22 from `proof_ledger.tsv`. **328 of 812 pieces of the deployed build are done
-(200 proved by Aristotle, 87 verified by Kani, 41 proved by a local rule checked on the source; 287 without the rule); 0 of 89 charter invariants are closed.**
+Generated 2026-11-23 from `proof_ledger.tsv`. **340 of 812 pieces of the deployed build are done
+(214 proved by Aristotle, 85 verified by Kani, 41 proved by a local rule checked on the source; 299 without the rule); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -38,7 +38,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 248 of 248 |
-| 2 | The engine cannot panic or overflow and keeps the header | 72 of 193 |
+| 2 | The engine cannot panic or overflow and keeps the header | 84 of 193 |
 | 3 | The engine keeps the whole market state | 8 of 210 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
@@ -61,12 +61,15 @@ fixed yet. These come first; most are decisions.
 | done | Clean baselines | Program: no failing test since #485. Engine (percolator#271): the audit-scan fixtures are repaired and the plain proofs that cannot verify in the contracts run are compiled out of it; every Kani layer is now as on master except the two harnesses that have no verdict there either (one per layer; each was run alone with a four-hour limit on 2026-11-21 and both timed out). |
 | done | #449, #448, keeper reward during catch-up, #477, #453 | Landed 2026-11-19 and 2026-11-20. |
 | done | Charter consistency | No two charter statements contradict each other (audit of 2026-11-19; the one real conflict it found, two base-unit mints against a single quote unit, was resolved by program #480 and #481). |
+| done | INV-046 first independent read (2026-11-23) | Two program defects fixed in program aac89b9e: a reduction on a Recovery asset whose mark follows trades reverted on any print off the frozen mark (the trade staged a target the engine refuses for a Recovery asset); `BatchTradeNoCpi` dropped the oracle-profile write-back of legs whose print does not move the mark, after their zero-move funding segment. The statement is restated (specs/inv046_closure_71076137.md) and needs a second read. |
+| open, the owner's decision | INV-045: catch-up after idle slots (third read, finding 3) | A target pushed after g idle slots is applied to the whole backlog: g times the cap in one real slot (measured: +48% after 200 idle slots at 24 bps). (a) a target change applies only to the slots after it, (b) the catch-up after a change is capped at one window, or (c) it stays and the charter says elapsed means since the last accrual. |
+| open, the owner's decision | INV-064 wording | The charter names a proportional withdrawal cap and a cooldown; their config fields are reserved and must be zero. The code's rule is the asset's domain budget, with no Live withdrawal while any loss is active, stale or lagging. Reword the charter to that rule, or reinstate a cooldown. |
 
 ## The phases
 
 **Phase 1. Arithmetic and kernels (248 of 248).** Done for the deployed build: 189 proved by Aristotle, 59 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
 
-**Phase 2. The engine cannot panic or overflow and keeps the header (72 of 193).**
+**Phase 2. The engine cannot panic or overflow and keeps the header (84 of 193).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
 - Every entry point preserves the header checks: 33 that end in the runtime check, 9 small ones
@@ -187,7 +190,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-484 left are mostly whole entry points and instructions, and the two attempts at that kind
+472 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.
