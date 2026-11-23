@@ -5126,3 +5126,17 @@ fn proof_no_overflow_min_abs_q_for_risk_notional_at_least_wide_stubbed() {
     let r = min_abs_q_for_risk_notional_at_least(kani::any(), kani::any());
     kani::cover!(matches!(r, Ok(q) if q > 1));
 }
+
+/// PO.signed_position: the negation of a short leg's size cannot overflow for any leg the
+/// deployed callers pass. Each of the six passes `PortfolioLegV16::EMPTY` or a leg decoded with
+/// `try_to_runtime`, whose active legs passed `validate_active_leg` (ledger piece PL1), and
+/// `validate_basis` refuses `i128::MIN`; the callers change only `f_snap` before the call.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+fn proof_no_overflow_signed_position_of_a_decoded_leg() {
+    let leg: PortfolioLegV16 = kani::any();
+    kani::assume(!leg.active || leg.basis_pos_q != i128::MIN);
+    let q = signed_position(leg);
+    kani::cover!(q < 0);
+    kani::cover!(q > 0);
+}
