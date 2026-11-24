@@ -1645,6 +1645,21 @@ source-domain order, then settles nonnegative deltas. This rule MUST NOT
 aggregate losses across source domains or assign backing to a last-touched
 domain.
 
+Every step that settles a leg's B loss first settles the account's pending K/F
+deltas, so `B_loss` is applied after `KF_pnl_delta` as `net_pnl_delta` defines:
+the full refresh, the side-effect settlement, the Recovery forfeit, and the
+permissionless crank's B chunk (`SettleBChunk`), which settles K/F at the
+committed indices exactly as the side-effect settlement does (it accrues nothing
+and needs no observation). A B share applied ahead of the gain it offsets would
+land as negative PnL that the gain then cures from its source domain's backing,
+so the order in which cranks reach a bankrupt loser and its winners would decide
+what the domain's backing provider and the winners keep (issue #274; entry 145).
+Open: an account that is already insolvent when a gain arrives is still valued
+against the support its gain's source domain holds at that moment, so whether
+its refresh comes before or after its loser pays into that domain can still
+change its terminal value (with a provider's bucket there lapsed, a winner
+refreshed first lost its whole gain in the issue #274 review).
+
 Same-leg reversal netting (Live). Before the support-and-burn rule above, a
 newly observed negative K/F delta on a leg whose loss books into domain
 `L = (asset, side)` MUST first cancel, one for one, the account's unliened
@@ -2228,6 +2243,7 @@ resolved-claim, and rebalance-on-touch routes required for user exits.
 142. Kani, two more functions free of unchecked overflow (closure layer, every input symbolic, no assumption): `proof_no_overflow_liquidation_projected_healthy_after_close_stubbed` (its subtraction `old_abs_q - close_q` follows the refusal of `close_q > old_abs_q`) and `proof_no_overflow_min_abs_q_for_risk_notional_at_least_wide_stubbed` (`risk_notional - 1` follows the return for zero). The callees each returns arbitrary values: `liquidation_leg_maintenance_requirement`, `liquidation_risk_notional_ceil`, `liquidation_fee_for_close` and `liquidation_projected_health_deficit_from_parts` (each is its own piece; the second and third are proved free of overflow in entry 139), and the `U256` operations (they never panic); so the proofs cover every operation of the functions themselves. The same proof of `min_abs_q_for_risk_notional_at_least` with the 256-bit fallback in the formula did not finish in 30 minutes (entry 139).
 143. Kani, one more function free of unchecked overflow (closure layer, every input symbolic): `proof_no_overflow_signed_position_of_a_decoded_leg`. The one assumption is the fact every deployed caller guarantees: an active leg's `basis_pos_q` is not `i128::MIN`. Each of the six callers passes `PortfolioLegV16::EMPTY` or a leg decoded with `PortfolioLegV16Account::try_to_runtime`, whose active legs pass `validate_active_leg` (entry 141, `proof_decoded_active_leg_is_valid_for_any_loss_weight`), and `validate_basis` refuses `i128::MIN`; the callers change only `f_snap` before the call. Without the assumption the proof fails (attempt to negate with overflow).
 144. Kani, for all inputs: `contract_check_kernel_cert_equity_after_capital_charge` (the certificate of an account whose capital fell by a charge and nothing else changed: the certified equity falls by exactly the charge, the liquidation deficit is `kernel_certified_liq_deficit` of the new equity and the maintenance requirement, and the call fails exactly when the charge or the new equity does not fit in `i128`). The maintenance-fee sync calls it when it keeps a current certificate.
+145. Tests: `tests/v16_settle_b_crank_settles_kf_first.rs` (issue #274). One asset; a loser short against one winner long (or two); the mark rises at the cap until the loser's loss exceeds its deposit, then the accounts are cranked to a fixpoint in each order and the market is wound down. With a solvent loser, a default, a default whose domain a provider backed, and a small default, both orders end alike, nothing is unowned once both accounts are current, nothing is retired, and the provider takes its principal back; with two winners, four crank orders end alike; a provider's backing that lapses during the rise and the loser's paid-in backing that lapses after the liquidation also end alike in both orders, and in the second the winner receives exactly its deposit plus what the loser paid. Before the crank's B chunk settled K/F first, the loser-first order left 528,721 atoms unowned while Live, returned 1 of a provider's 300,000 atoms (299,998 retired), and in the lapse case paid the winner 9,471,279 instead of 11,000,000.
 
 
 [FIXED] Recovery fallback envelope.

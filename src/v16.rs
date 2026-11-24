@@ -18936,6 +18936,14 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Ok(PermissionlessProgressOutcomeV16::AccountCurrent);
             }
             PermissionlessCrankActionV16::SettleB { asset_index } => {
+                // A leg settles its K/F before its B loss (spec, K/F settlement: the net
+                // delta is the K/F delta minus the B loss), as the refresh, the side-effect
+                // settlement and the Recovery forfeit already do; this is the side-effect
+                // settlement's K/F step. Booked first, a winner's B share is a debt that its
+                // later K/F gain cures from the source domain's backing, so the order in
+                // which cranks reach a bankrupt loser and its winners would decide what the
+                // domain's provider and the winners keep.
+                self.settle_account_kf_effects_not_atomic(account, false)?;
                 let out =
                     self.settle_account_b_chunk(account, asset_index, PUBLIC_B_CHUNK_ATOMS)?;
                 return Ok(PermissionlessProgressOutcomeV16::AccountBChunk(out));
