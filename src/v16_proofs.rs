@@ -5160,3 +5160,1655 @@ fn proof_no_overflow_signed_position_of_a_decoded_leg() {
     kani::cover!(q < 0);
     kani::cover!(q > 0);
 }
+
+// Header pieces of class "final" (T*.header): the path structure, with every callee replaced.
+//
+// The ledger states each such piece as: if the header predicate (`validate_shape` of a default
+// build) held before the entry point and it returns Ok, it holds of the state it leaves; the
+// obligation is the path structure, "every Ok path ends in `validate_shape()` after its last
+// market write". Each harness below checks that structure of the entry point's own body:
+// - every method it calls on the market view is replaced by a stand-in: one that takes the view
+//   by shared reference returns any value; one that takes it mutably may first write any bytes to
+//   the header, the asset slots and the view's scratch, and any values to the fields of each
+//   account it is given that these entry points read, then returns any value. Every behaviour of
+//   the real callee, as far as the entry point can observe it, is among them;
+// - its own `validate_shape()` calls are replaced by a recorder that returns either outcome and
+//   remembers the header it was asked about and its answer, so the proof holds whatever the
+//   predicate is, and so for a default build's predicate and any number of asset slots;
+// - the account's own check `validate_with_market` (shared references only, so it writes nothing)
+//   returns either outcome; pure helpers (the deltas, the token-flow records, the kernels, the
+//   decoders) run as written, except a pure function a harness names in its stubs (`any_pure_*`):
+//   it takes its inputs by value and writes nothing, and its stand-in returns any result;
+// - the header and the slot are arbitrary bytes; of an account, the fields the entry point reads
+//   itself are arbitrary (`arbitrary_read_fields`; the generator checks the list), the others are
+//   read only by callees, which are replaced. Nothing is assumed of any of them.
+// The assertion: an Ok return leaves the header bytes unchanged, or the last shape check passed on
+// exactly the header the entry point leaves. Either way the predicate holds after if it held
+// before. A callee that has no early Ok and ends in its own check is proved the stronger way (every
+// Ok follows a passed check on the header it leaves) and is replaced in its callers by a stand-in
+// with that property: any writes and any result, and a passed check recorded on every Ok. The
+// generator checks that the entry points read no slot themselves, use an account only through the
+// fields listed in `arbitrary_read_fields`, its own check and the replaced callees, and give `self`
+// to nothing but the replaced callees.
+#[cfg(all(kani, feature = "closure"))]
+static mut LAST_SHAPE_CHECK: Option<(MarketGroupV16HeaderAccount, bool)> = None;
+
+/// Stand-in for the view's `validate_shape`: either outcome, recorded with the header it was given.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn recorded_shape_check<'a, T>(market: &MarketGroupV16ViewMut<'a, T>) -> V16Result<()>
+where
+    'a: 'a,
+{
+    let passed: bool = kani::any();
+    // SAFETY: Kani runs one harness on one thread.
+    unsafe {
+        LAST_SHAPE_CHECK = Some((*market.header, passed));
+    }
+    if passed {
+        Ok(())
+    } else {
+        Err(kani::any())
+    }
+}
+
+/// Records a passed check on the header the market view holds now.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn record_passed_shape_check<'a, T>(market: &MarketGroupV16ViewMut<'a, T>)
+where
+    'a: 'a,
+{
+    // SAFETY: Kani runs one harness on one thread.
+    unsafe {
+        LAST_SHAPE_CHECK = Some((*market.header, true));
+    }
+}
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_market_view<'a, T>(market: &mut MarketGroupV16ViewMut<'a, T>)
+where
+    'a: 'a,
+{
+    let header: [u8; core::mem::size_of::<MarketGroupV16HeaderAccount>()] = kani::any();
+    bytemuck::bytes_of_mut(&mut *market.header).copy_from_slice(&header);
+    for slot in market.markets.iter_mut() {
+        let engine: [u8; core::mem::size_of::<EngineAssetSlotV16Account>()] = kani::any();
+        bytemuck::bytes_of_mut(&mut slot.engine).copy_from_slice(&engine);
+    }
+    market.protection_observed = kani::any();
+}
+
+/// Stand-in for an account's own check against the market: it takes both by shared reference, so
+/// it writes nothing; either outcome.
+#[cfg(all(kani, feature = "closure"))]
+fn stand_in_account_check_any_outcome<'a, T>(
+    _account: &PortfolioV16ViewMut<'a>,
+    _market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    if kani::any() {
+        Ok(())
+    } else {
+        Err(kani::any())
+    }
+}
+
+/// Any values for the account fields that the entry points of this section read themselves.
+#[cfg(all(kani, feature = "closure"))]
+fn arbitrary_read_fields(account: &mut PortfolioAccountV16Account) {
+    account.capital = V16PodU128::new(kani::any());
+    account.pnl = V16PodI128::new(kani::any());
+    account.fee_credits = V16PodI128::new(kani::any());
+    account.cancel_deposit_escrow = V16PodU128::new(kani::any());
+    account.last_fee_slot = V16PodU64::new(kani::any());
+    let words: [u64; V16_ACTIVE_BITMAP_WORDS] = kani::any();
+    account.active_bitmap = words.map(V16PodU64::new);
+    let cert: [u8; core::mem::size_of::<HealthCertV16Account>()] = kani::any();
+    bytemuck::bytes_of_mut(&mut account.health_cert).copy_from_slice(&cert);
+    let close: [u8; core::mem::size_of::<CloseProgressLedgerV16Account>()] = kani::any();
+    bytemuck::bytes_of_mut(&mut account.close_progress).copy_from_slice(&close);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_account(account: &mut PortfolioV16ViewMut<'_>) {
+    arbitrary_read_fields(account.header);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn arbitrary_header_and_slot() -> (MarketGroupV16HeaderAccount, [Market<u64>; 1]) {
+    let bytes: [u8; core::mem::size_of::<MarketGroupV16HeaderAccount>()] = kani::any();
+    let mut header: MarketGroupV16HeaderAccount = bytemuck::Zeroable::zeroed();
+    bytemuck::bytes_of_mut(&mut header).copy_from_slice(&bytes);
+    let engine: [u8; core::mem::size_of::<EngineAssetSlotV16Account>()] = kani::any();
+    let mut slot = EngineAssetSlotV16Account::default();
+    bytemuck::bytes_of_mut(&mut slot).copy_from_slice(&engine);
+    (header, [Market::new(kani::any(), slot)])
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn arbitrary_account() -> PortfolioAccountV16Account {
+    let mut account = PortfolioAccountV16Account::default();
+    arbitrary_read_fields(&mut account);
+    account
+}
+
+/// Ok leaves the header bytes unchanged, or the last shape check passed on exactly the header left.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn assert_ok_keeps_the_header_predicate<'a, T>(
+    ok: bool,
+    before: &MarketGroupV16HeaderAccount,
+    market: &MarketGroupV16ViewMut<'a, T>,
+) where
+    'a: 'a,
+{
+    if ok {
+        let now = bytemuck::bytes_of(&*market.header);
+        let unchanged = now == bytemuck::bytes_of(before);
+        // SAFETY: Kani runs one harness on one thread.
+        let checked = match unsafe { LAST_SHAPE_CHECK } {
+            Some((checked_header, passed)) => passed && bytemuck::bytes_of(&checked_header) == now,
+            None => false,
+        };
+        assert!(unchanged || checked);
+    }
+}
+
+/// Every Ok follows a passed check on exactly the header left (for a callee with no early Ok, whose
+/// stand-in then records a passed check on every Ok).
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn assert_ok_follows_a_passed_check<'a, T>(ok: bool, market: &MarketGroupV16ViewMut<'a, T>)
+where
+    'a: 'a,
+{
+    if ok {
+        // SAFETY: Kani runs one harness on one thread.
+        let checked = match unsafe { LAST_SHAPE_CHECK } {
+            Some((checked_header, passed)) => {
+                passed && bytemuck::bytes_of(&checked_header) == bytemuck::bytes_of(&*market.header)
+            }
+            None => false,
+        };
+        assert!(checked);
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_reservation_encumbrance_proof() -> ReservationEncumbranceProofV16 {
+    ReservationEncumbranceProofV16 {
+        domain: kani::any(),
+        exact_positive_claim_num: kani::any(),
+        positive_claim_bound_num: kani::any(),
+        source_fresh_reserved_backing_num: kani::any(),
+        source_spent_backing_num: kani::any(),
+        source_provider_receivable_num: kani::any(),
+        bucket_fresh_unliened_backing_num: kani::any(),
+        bucket_valid_liened_backing_num: kani::any(),
+        bucket_consumed_liened_backing_num: kani::any(),
+        source_valid_liened_backing_num: kani::any(),
+        source_impaired_liened_backing_num: kani::any(),
+        bucket_impaired_liened_backing_num: kani::any(),
+        source_insurance_credit_reserved_num: kani::any(),
+        reservation_insurance_credit_reserved_num: kani::any(),
+        source_valid_liened_insurance_num: kani::any(),
+        reservation_valid_liened_insurance_num: kani::any(),
+        source_impaired_liened_insurance_num: kani::any(),
+        reservation_impaired_liened_insurance_num: kani::any(),
+        source_credit_rate_num: kani::any(),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_progress_outcome() -> PermissionlessProgressOutcomeV16 {
+    match kani::any::<u8>() {
+        0 => PermissionlessProgressOutcomeV16::AccountCurrent,
+        1 => PermissionlessProgressOutcomeV16::AccountBChunk(AccountBSettlementChunkV16 {
+            delta_b: kani::any(),
+            loss: kani::any(),
+            new_remainder: kani::any(),
+            remaining_after: kani::any(),
+        }),
+        2 => PermissionlessProgressOutcomeV16::SourceBackingExpired {
+            domain: kani::any(),
+        },
+        3 => PermissionlessProgressOutcomeV16::ResidualBooked(BResidualBookingOutcomeV16 {
+            booked_loss: kani::any(),
+            explicit_loss: kani::any(),
+            delta_b: kani::any(),
+            remaining_after: kani::any(),
+        }),
+        _ => PermissionlessProgressOutcomeV16::RecoveryDeclared(kani::any()),
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_account_fee_anchor_for_loss_currentness<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _account: &PortfolioV16View<'_>,
+    _now_slot: u64,
+) -> V16Result<u64>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_asset_has_unsettled_kf_position<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<bool>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_asset_state<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+) -> V16Result<AssetStateV16>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_backing_bucket_for_domain<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<BackingBucketV16>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_checked_asset_set_epoch_bump<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<(u64, u64)>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_domain_asset_side<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<(usize, SideV16)>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_domain_insurance_budget_spent<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<(u128, u128)>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_ensure_favorable_action_current_certificate<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _account: &PortfolioV16View<'_>,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_fee_sync_settlement_noop_last_asset<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _account: &PortfolioV16View<'_>,
+) -> V16Result<Option<usize>>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_first_terminal_claim_free_recredit_asset<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<Option<usize>>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_group_has_position_or_loss_state_for_oracle_reset<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<bool>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_insurance_domain_index<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _side: SideV16,
+) -> V16Result<usize>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_insurance_reservation_for_domain<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<InsuranceCreditReservationV16>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_pending_domain_loss_barrier_count<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _side: SideV16,
+) -> V16Result<u64>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_preflight_claim_resolved_payout_topup<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _account: &PortfolioV16View<'_>,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_preflight_cure_and_cancel_close<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _account: &PortfolioV16View<'_>,
+    _optional_deposit: u128,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_provider_principal_num<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<u128>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+// Stand-in for `V16Core::expected_source_credit_rate_num_for_state`, which takes its inputs by
+// value and writes nothing: any result, so every result of the real function is among its own.
+#[cfg(all(kani, feature = "closure"))]
+fn any_pure_expected_source_credit_rate_num_for_state(
+    _state: SourceCreditStateV16,
+) -> V16Result<u128> {
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_require_empty_asset_lifecycle_state_with_policy<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _allow_terminal_spent_budget: bool,
+    _allow_terminal_social_loss_audit: bool,
+    _allow_terminal_source_spent_audit: bool,
+    _allow_terminal_price_funding_history: bool,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_require_terminal_claim_free_state<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_reservation_encumbrance_proof_for_domain_parts<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+    _source: SourceCreditStateV16,
+    _bucket: BackingBucketV16,
+    _reservation: InsuranceCreditReservationV16,
+) -> V16Result<ReservationEncumbranceProofV16>
+where
+    'a: 'a,
+{
+    if kani::any() {
+        Ok(any_reservation_encumbrance_proof())
+    } else {
+        Err(kani::any())
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_resolved_counterparty_backing_surplus<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<u128>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_source_credit_for_domain<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<SourceCreditStateV16>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_source_credit_for_domain_shape<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<SourceCreditStateV16>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_stranded_loser_backing_owed_to_twin_num<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<u128>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_validate_configured_asset_index<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn any_validate_source_domain_ledger<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_add_fresh_counterparty_backing_unchecked<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+    _amount: u128,
+    _expiry_slot: u64,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_adjust_provider_principal_num<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+    _amount: u128,
+    _add: bool,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_begin_legless_asset_resets<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_charge_account_fee_current_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    _requested_fee: u128,
+) -> V16Result<u128>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_account(account);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_claim_resolved_payout_topup_core_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<u128>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_account(account);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_commit_asset_set_epoch_bump<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _next_asset_set_epoch: u64,
+    _next_risk_epoch: u64,
+) where
+    'a: 'a,
+{
+    havoc_market_view(market);
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_expire_lapsed_source_backing_for_asset_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _now_slot: u64,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_full_account_refresh_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<HealthCertV16>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_account(account);
+    if kani::any() {
+        Ok(any_health_cert())
+    } else {
+        Err(kani::any())
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_normalize_terminal_empty_asset_history_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_recredit_terminal_claim_free_residual_for_asset_core_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+) -> V16Result<u128>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_release_provider_principal_after<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+    _reserved_before: u128,
+    _reserved_after: u128,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_retire_terminal_unbudgeted_insurance_core_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<u128>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_set_account_pnl_with_source<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    _new_pnl: i128,
+    _source_domain: usize,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_account(account);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_set_asset_state<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _asset: AssetStateV16,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_set_backing_bucket_for_domain<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+    _bucket: BackingBucketV16,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_set_domain_insurance_budget_core<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+    _budget: u128,
+    _insurance_limit: u128,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_set_pending_domain_loss_barrier_count<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _side: SideV16,
+    _value: u64,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_set_source_credit_for_domain<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+    _source: SourceCreditStateV16,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_settle_account_kf_effects_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    _normalize_exhausted_sides: bool,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_account(account);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_settle_account_side_effects_after_kf_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    _b_loss_atom_budget: u128,
+) -> V16Result<PermissionlessProgressOutcomeV16>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_account(account);
+    if kani::any() {
+        Ok(any_progress_outcome())
+    } else {
+        Err(kani::any())
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_settle_negative_pnl_from_principal_core_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+) -> V16Result<u128>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_account(account);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn havoc_shift_provider_protection_floor_num<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+    _amount_num: u128,
+    _add: bool,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+// The stand-in of `cure_and_cancel_close_with_cert_not_atomic` has the property that
+// `proof_v16_cure_and_cancel_close_with_cert_ok_keeps_the_header_predicate` proves of it: any
+// writes and any result, and every Ok follows a passed shape check on the header it leaves.
+#[cfg(all(kani, feature = "closure"))]
+fn verified_cure_and_cancel_close_with_cert_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    _optional_deposit: u128,
+    _cert: HealthCertV16,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_account(account);
+    let result: V16Result<()> = kani::any();
+    if result.is_ok() {
+        record_passed_shape_check(market);
+    }
+    result
+}
+
+// The stand-in of `withdraw_fresh_counterparty_backing_not_atomic` has the property that
+// `proof_v16_withdraw_fresh_counterparty_backing_ok_keeps_the_header_predicate` proves of it: any
+// writes and any result, and every Ok follows a passed shape check on the header it leaves.
+#[cfg(all(kani, feature = "closure"))]
+fn verified_withdraw_fresh_counterparty_backing_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+    _amount: u128,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    let result: V16Result<()> = kani::any();
+    if result.is_ok() {
+        record_passed_shape_check(market);
+    }
+    result
+}
+
+// T06.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    stand_in_account_check_any_outcome
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_account_pnl_with_source,
+    havoc_set_account_pnl_with_source
+)]
+fn proof_v16_add_account_source_positive_pnl_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.add_account_source_positive_pnl_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut account_header),
+        kani::any(),
+        kani::any(),
+    );
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T12.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::backing_bucket_for_domain,
+    any_backing_bucket_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::insurance_domain_index,
+    any_insurance_domain_index
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::insurance_reservation_for_domain,
+    any_insurance_reservation_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::require_empty_asset_lifecycle_state_with_policy,
+    any_require_empty_asset_lifecycle_state_with_policy
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_backing_bucket_for_domain,
+    havoc_set_backing_bucket_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_source_credit_for_domain,
+    havoc_set_source_credit_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_credit_for_domain_shape,
+    any_source_credit_for_domain_shape
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_configured_asset_index,
+    any_validate_configured_asset_index
+)]
+fn proof_v16_canonicalize_spent_backing_history_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.canonicalize_spent_backing_history_not_atomic(kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T13.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    stand_in_account_check_any_outcome
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::backing_bucket_for_domain,
+    any_backing_bucket_for_domain
+)]
+#[kani::stub(MarketGroupV16ViewMut::domain_asset_side, any_domain_asset_side)]
+#[kani::stub(
+    MarketGroupV16ViewMut::domain_insurance_budget_spent,
+    any_domain_insurance_budget_spent
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::ensure_favorable_action_current_certificate,
+    any_ensure_favorable_action_current_certificate
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_backing_bucket_for_domain,
+    havoc_set_backing_bucket_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_domain_insurance_budget_core,
+    havoc_set_domain_insurance_budget_core
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    any_validate_source_domain_ledger
+)]
+fn proof_v16_charge_account_backing_fee_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.charge_account_backing_fee_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut account_header),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T14.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    stand_in_account_check_any_outcome
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::claim_resolved_payout_topup_core_not_atomic,
+    havoc_claim_resolved_payout_topup_core_not_atomic
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::preflight_claim_resolved_payout_topup,
+    any_preflight_claim_resolved_payout_topup
+)]
+fn proof_v16_claim_resolved_payout_topup_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market
+        .claim_resolved_payout_topup_not_atomic(&mut PortfolioV16ViewMut::new(&mut account_header));
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T21.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    stand_in_account_check_any_outcome
+)]
+fn proof_v16_credit_account_from_insurance_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.credit_account_from_insurance_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut account_header),
+        kani::any(),
+    );
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T22.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::backing_bucket_for_domain,
+    any_backing_bucket_for_domain
+)]
+#[kani::stub(MarketGroupV16ViewMut::domain_asset_side, any_domain_asset_side)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_backing_bucket_for_domain,
+    havoc_set_backing_bucket_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    any_validate_source_domain_ledger
+)]
+fn proof_v16_credit_backing_provider_earnings_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.credit_backing_provider_earnings_not_atomic(kani::any(), kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T25.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::cure_and_cancel_close_with_cert_not_atomic,
+    verified_cure_and_cancel_close_with_cert_not_atomic
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::full_account_refresh_not_atomic,
+    havoc_full_account_refresh_not_atomic
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::preflight_cure_and_cancel_close,
+    any_preflight_cure_and_cancel_close
+)]
+fn proof_v16_cure_and_cancel_close_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.cure_and_cancel_close_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut account_header),
+        kani::any(),
+    );
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T26.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(MarketGroupV16ViewMut::domain_asset_side, any_domain_asset_side)]
+#[kani::stub(
+    MarketGroupV16ViewMut::domain_insurance_budget_spent,
+    any_domain_insurance_budget_spent
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_domain_insurance_budget_core,
+    havoc_set_domain_insurance_budget_core
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    any_validate_source_domain_ledger
+)]
+fn proof_v16_deposit_domain_insurance_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.deposit_domain_insurance_not_atomic(kani::any(), kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T27.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::add_fresh_counterparty_backing_unchecked,
+    havoc_add_fresh_counterparty_backing_unchecked
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::adjust_provider_principal_num,
+    havoc_adjust_provider_principal_num
+)]
+#[kani::stub(MarketGroupV16ViewMut::domain_asset_side, any_domain_asset_side)]
+#[kani::stub(
+    MarketGroupV16ViewMut::shift_provider_protection_floor_num,
+    havoc_shift_provider_protection_floor_num
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    any_validate_source_domain_ledger
+)]
+fn proof_v16_deposit_fresh_counterparty_backing_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result =
+        market.deposit_fresh_counterparty_backing_not_atomic(kani::any(), kani::any(), kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T28.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    stand_in_account_check_any_outcome
+)]
+fn proof_v16_deposit_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.deposit_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut account_header),
+        kani::any(),
+    );
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T34.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::commit_asset_set_epoch_bump,
+    havoc_commit_asset_set_epoch_bump
+)]
+#[kani::stub(MarketGroupV16ViewMut::set_asset_state, havoc_set_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_configured_asset_index,
+    any_validate_configured_asset_index
+)]
+fn proof_v16_force_asset_recovery_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.force_asset_recovery_not_atomic(kani::any(), kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T43.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::checked_asset_set_epoch_bump,
+    any_checked_asset_set_epoch_bump
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::commit_asset_set_epoch_bump,
+    havoc_commit_asset_set_epoch_bump
+)]
+#[kani::stub(MarketGroupV16ViewMut::set_asset_state, havoc_set_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_configured_asset_index,
+    any_validate_configured_asset_index
+)]
+fn proof_v16_mark_asset_drain_only_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.mark_asset_drain_only_not_atomic(kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T46.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::recredit_terminal_claim_free_residual_for_asset_core_not_atomic,
+    havoc_recredit_terminal_claim_free_residual_for_asset_core_not_atomic
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::require_terminal_claim_free_state,
+    any_require_terminal_claim_free_state
+)]
+fn proof_v16_recredit_terminal_claim_free_residual_for_asset_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.recredit_terminal_claim_free_residual_for_asset_not_atomic(kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T52.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::group_has_position_or_loss_state_for_oracle_reset,
+    any_group_has_position_or_loss_state_for_oracle_reset
+)]
+#[kani::stub(MarketGroupV16ViewMut::set_asset_state, havoc_set_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_configured_asset_index,
+    any_validate_configured_asset_index
+)]
+fn proof_v16_reset_empty_asset_oracle_anchor_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result =
+        market.reset_empty_asset_oracle_anchor_not_atomic(kani::any(), kani::any(), kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T53.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+fn proof_v16_resolve_market_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.resolve_market_not_atomic(kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T55.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::checked_asset_set_epoch_bump,
+    any_checked_asset_set_epoch_bump
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::commit_asset_set_epoch_bump,
+    havoc_commit_asset_set_epoch_bump
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::expire_lapsed_source_backing_for_asset_not_atomic,
+    havoc_expire_lapsed_source_backing_for_asset_not_atomic
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::normalize_terminal_empty_asset_history_not_atomic,
+    havoc_normalize_terminal_empty_asset_history_not_atomic
+)]
+#[kani::stub(MarketGroupV16ViewMut::set_asset_state, havoc_set_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_configured_asset_index,
+    any_validate_configured_asset_index
+)]
+fn proof_v16_retire_empty_asset_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.retire_empty_asset_not_atomic(kani::any(), kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T56.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::first_terminal_claim_free_recredit_asset,
+    any_first_terminal_claim_free_recredit_asset
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::require_terminal_claim_free_state,
+    any_require_terminal_claim_free_state
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::retire_terminal_unbudgeted_insurance_core_not_atomic,
+    havoc_retire_terminal_unbudgeted_insurance_core_not_atomic
+)]
+fn proof_v16_retire_terminal_unbudgeted_insurance_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.retire_terminal_unbudgeted_insurance_not_atomic();
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T59.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    stand_in_account_check_any_outcome
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_fee_anchor_for_loss_currentness,
+    any_account_fee_anchor_for_loss_currentness
+)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::charge_account_fee_current_not_atomic,
+    havoc_charge_account_fee_current_not_atomic
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::fee_sync_settlement_noop_last_asset,
+    any_fee_sync_settlement_noop_last_asset
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_kf_effects_not_atomic,
+    havoc_settle_account_kf_effects_not_atomic
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_after_kf_not_atomic,
+    havoc_settle_account_side_effects_after_kf_not_atomic
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_core_not_atomic,
+    havoc_settle_negative_pnl_from_principal_core_not_atomic
+)]
+fn proof_v16_sync_account_fee_to_slot_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.sync_account_fee_to_slot_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut account_header),
+        kani::any(),
+        kani::any(),
+    );
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T60.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::backing_bucket_for_domain,
+    any_backing_bucket_for_domain
+)]
+#[kani::stub(MarketGroupV16ViewMut::domain_asset_side, any_domain_asset_side)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_backing_bucket_for_domain,
+    havoc_set_backing_bucket_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    any_validate_source_domain_ledger
+)]
+fn proof_v16_withdraw_backing_provider_earnings_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.withdraw_backing_provider_earnings_not_atomic(kani::any(), kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T61.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(MarketGroupV16ViewMut::domain_asset_side, any_domain_asset_side)]
+#[kani::stub(
+    MarketGroupV16ViewMut::domain_insurance_budget_spent,
+    any_domain_insurance_budget_spent
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::insurance_reservation_for_domain,
+    any_insurance_reservation_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_domain_insurance_budget_core,
+    havoc_set_domain_insurance_budget_core
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    any_validate_source_domain_ledger
+)]
+fn proof_v16_withdraw_domain_insurance_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.withdraw_domain_insurance_not_atomic(kani::any(), kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T62.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::asset_has_unsettled_kf_position,
+    any_asset_has_unsettled_kf_position
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::backing_bucket_for_domain,
+    any_backing_bucket_for_domain
+)]
+#[kani::stub(MarketGroupV16ViewMut::domain_asset_side, any_domain_asset_side)]
+#[kani::stub(
+    MarketGroupV16ViewMut::insurance_reservation_for_domain,
+    any_insurance_reservation_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::provider_principal_num,
+    any_provider_principal_num
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::release_provider_principal_after,
+    havoc_release_provider_principal_after
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reservation_encumbrance_proof_for_domain_parts,
+    any_reservation_encumbrance_proof_for_domain_parts
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::resolved_counterparty_backing_surplus,
+    any_resolved_counterparty_backing_surplus
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_backing_bucket_for_domain,
+    havoc_set_backing_bucket_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_source_credit_for_domain,
+    havoc_set_source_credit_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::shift_provider_protection_floor_num,
+    havoc_shift_provider_protection_floor_num
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_credit_for_domain,
+    any_source_credit_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_credit_for_domain_shape,
+    any_source_credit_for_domain_shape
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::stranded_loser_backing_owed_to_twin_num,
+    any_stranded_loser_backing_owed_to_twin_num
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    any_validate_source_domain_ledger
+)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    any_pure_expected_source_credit_rate_num_for_state
+)]
+fn proof_v16_withdraw_fresh_counterparty_backing_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.withdraw_fresh_counterparty_backing_not_atomic(kani::any(), kani::any());
+    assert_ok_follows_a_passed_check(result.is_ok(), &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T63.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    stand_in_account_check_any_outcome
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_negative_pnl_from_principal_core_not_atomic,
+    havoc_settle_negative_pnl_from_principal_core_not_atomic
+)]
+fn proof_v16_withdraw_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.withdraw_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut account_header),
+        kani::any(),
+    );
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T64.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::resolved_counterparty_backing_surplus,
+    any_resolved_counterparty_backing_surplus
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::withdraw_fresh_counterparty_backing_not_atomic,
+    verified_withdraw_fresh_counterparty_backing_not_atomic
+)]
+fn proof_v16_withdraw_resolved_counterparty_backing_surplus_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result =
+        market.withdraw_resolved_counterparty_backing_surplus_not_atomic(kani::any(), kani::any());
+    assert_ok_keeps_the_header_predicate(result.is_ok(), &before, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T25.header (its core)
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    PortfolioV16ViewMut::validate_with_market,
+    stand_in_account_check_any_outcome
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::begin_legless_asset_resets,
+    havoc_begin_legless_asset_resets
+)]
+#[kani::stub(MarketGroupV16ViewMut::domain_asset_side, any_domain_asset_side)]
+#[kani::stub(
+    MarketGroupV16ViewMut::insurance_domain_index,
+    any_insurance_domain_index
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::pending_domain_loss_barrier_count,
+    any_pending_domain_loss_barrier_count
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::preflight_cure_and_cancel_close,
+    any_preflight_cure_and_cancel_close
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_pending_domain_loss_barrier_count,
+    havoc_set_pending_domain_loss_barrier_count
+)]
+fn proof_v16_cure_and_cancel_close_with_cert_ok_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.cure_and_cancel_close_with_cert_not_atomic(
+        &mut PortfolioV16ViewMut::new(&mut account_header),
+        kani::any(),
+        any_health_cert(),
+    );
+    assert_ok_follows_a_passed_check(result.is_ok(), &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}

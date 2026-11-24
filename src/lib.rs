@@ -6,6 +6,9 @@
 
 #![no_std]
 #![deny(unsafe_code)]
+// Kani builds only: a proof that replaces many callees carries one `#[kani::stub]` attribute each,
+// and their expansion nests past the default limit of 128 (src/v16_proofs.rs, the T*.header proofs).
+#![cfg_attr(kani, recursion_limit = "256")]
 
 extern crate alloc;
 
