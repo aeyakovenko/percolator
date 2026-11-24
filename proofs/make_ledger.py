@@ -20,9 +20,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # and the engine source is the checkout itself (which must be at LANDED_REV); the program source comes
 # from a checkout of percolator-prog at WRAPPER_REV, named by LEDGER_WRAPPER_SRC.
 _here = os.path.dirname(os.path.abspath(__file__))
-_frozen = os.path.join(_here, "src_263c34d4/v16.rs")
+_frozen = os.path.join(_here, "src_7a712baa/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_0cb5794e/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_121d73ae/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -79,7 +79,12 @@ B39_REV = "80f8f0b4"            # refactor batches 3-9: K74-K93
 # order decided what providers and winners kept. specs/changed_since_06b7e5be_at_263c34d4.md: one function changed
 # (permissionless_crank_not_atomic, pub(crate), no entry point of its own), no type, no kernel; the same arithmetic.
 # Kani: the 5 harnesses that reach the change were run again in every layer that builds them; every other verdict carries.
-LANDED_REV = "263c34d4"
+# Rolled 2026-11-24 to 7a712baa: the dead threshold-stress flag is removed. The header's `threshold_stress_active`
+# was read as a market-wide lock but nothing ever set it (INV-087's default-only control); the owner had it removed.
+# specs/changed_since_263c34d4_at_7a712baa.md: the header type lost the field; four functions changed (its builder, the
+# shape check, the oracle-anchor reset gate, the h-lock lane), no new function; kernel K92 names the header type and
+# keeps its text. Kani: the full three-layer run on the commit (a type changed); every verdict carries.
+LANDED_REV = "7a712baa"
 REESTABLISH = {"T09.header", "T38.header"}
 # Kernels whose proof has to be made again for NEW_REV: specs/changed_since_add1d027_at_c030aa40.md
 # (changed_fns.py: own text, callees by name, changed types). Every other kernel, its callees and its
@@ -166,7 +171,7 @@ kernels["K63"] = "kernel_provider_protection_floor_shift"    # new in d1fa39f6
 REFACTOR_KERNELS = {}
 # Kani checks these only for bounded inputs (specs/kernel_contracts_spec_80f8f0b4.md); the prover proves them at full width
 BOUNDED_KERNELS = {"K76", "K77", "K78", "K88", "K91", "K93"}
-for _line in read("specs/kernel_contracts_list_263c34d4.tsv").splitlines():
+for _line in read("specs/kernel_contracts_list_7a712baa.tsv").splitlines():
     _f = _line.split("\t")
     if len(_f) >= 2 and int(_f[0][1:]) >= 64:
         REFACTOR_KERNELS[_f[0]] = _f[1]
@@ -735,7 +740,12 @@ variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # Rolled 2026-11-24 to program 0cb5794e: the pin of engine 263c34d4 (issue #274). The program source is unchanged
 # (checked by roll_to_263c34d4.py, with the instruction census); two owner tests that asserted the old order were
 # rewritten with the owner's approval, and the short-side B compute pin moved (556,221 -> 697,757 CU).
-WRAPPER_REV = "0cb5794e"
+# Rolled 2026-11-24 to program 121d73ae: the pin of engine 7a712baa with the flag dropped from the header mirror and
+# from the domain-withdrawal gate; INV-046 second read, findings 6 and 7 (fees on the effective price, at most the
+# signed rate; a soft-stale hybrid's switch to its average is not held back); the test helper that signs matcher
+# contexts. The instruction census is unchanged apart from revisions and line numbers (checked by
+# roll_to_7a712baa.py).
+WRAPPER_REV = "121d73ae"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -1173,9 +1183,12 @@ piece("AC.catchup_crank", "W wrapper", "the permissionless crank's live branch (
       "reading or EWMA mark would change the staged raw target of an asset with `now - slot_last > "
       "max_accrual_dt_slots` accrues toward the staged target instead and records the staged target in the oracle "
       "profile, keeping the reading's publish time and leg caches; so the reading is applied to at most one window of "
-      "the slots before it arrived (INV-045 clause C11)", "Kani (the hold-back, every input)")
-pieces["AC.catchup_crank"]["evidence"] = ("test evidence, not proved: the program's test "
-                                          "v16_attack_fresh_reading_after_idle_slots_catches_up_at_most_one_window")
+      "the slots before it arrived (INV-045 clause C11); except a hybrid past its soft-stale window, whose switch to "
+      "its trade average every writer stages at once (INV-046 second read, finding 7, the owner's choice of "
+      "2026-11-24)", "Kani (the hold-back, every input)")
+pieces["AC.catchup_crank"]["evidence"] = ("test evidence, not proved: the program's tests "
+                                          "v16_attack_fresh_reading_after_idle_slots_catches_up_at_most_one_window and "
+                                          "v16_attack_lagging_soft_stale_hybrid_mark_does_not_depend_on_the_first_writer")
 # INV-046, second read (2026-11-23): one owner for a soft-stale hybrid's target, and Recovery reductions stay open
 piece("AC.hybrid_owner", "W wrapper", "hybrid_target_for_crank_view and prepare_trade_driven_mark_target_view",
       "past a hybrid's soft-stale window (slots since the feed last published a newer reading), every writer of its "
@@ -1192,6 +1205,26 @@ piece("AC.recovery_reduction", "W wrapper", "trade_resolve_matured_at_slot (the 
       "C6(6))", "Kani (the gate, every lifecycle and timer)")
 pieces["AC.recovery_reduction"]["evidence"] = ("test evidence, not proved: the program's test "
                                                "v16_program_recovery_reduction_stays_open_after_the_stale_window")
+# INV-046, second read, findings 6 and 7 (program 121d73ae): what a trade costs, and a quiet hybrid's switch
+piece("AC.fee_basis", "W wrapper", "hybrid_trade_fee_quote_view and the four trade routes",
+      "every trade route values its fee at the engine's effective price in force when the trade lands; the print's "
+      "accepted price only decides how far the average moves and that move's mark fee; the fee charged is the market's "
+      "base fee plus any mark fee, at most the signed `fee_bps` (no-CPI) or the smaller of the taker's signed rate and "
+      "the LP's configured matcher cap (CPI), a signed rate above the market's maximum is refused, and a print whose "
+      "mark fee would exceed the rate moves the average only as far as the collected fee pays for; so neither an "
+      "oracle authority's average nor a matcher's print sets what a trade costs (INV-046 clause C4, the owner's choices "
+      "of 2026-11-24)", "Kani (the quote and the routes' arguments, every profile and print)")
+pieces["AC.fee_basis"]["evidence"] = ("test evidence, not proved: the program's test "
+                                      "v16_attack_authority_average_push_does_not_set_the_trade_fee_notional and the "
+                                      "owner tests rewritten for the rule (INV-014, 024, 036, 038, 045, 047, 052, 058, "
+                                      "085)")
+piece("AC.quiet_hybrid_switch", "W wrapper", "the permissionless crank's live branch (the hold-back)",
+      "the crank does not hold back the switch of a hybrid past its soft-stale window to its trade average; every "
+      "writer stages it at once, so on an asset more than one window behind, whether a trade or a crank reaches it "
+      "first does not change the mark's path, which ends where a regularly cranked market ends (INV-046 clause C5, "
+      "finding 7, the owner's choice of 2026-11-24)", "Kani (the hold-back's exception, every profile)")
+pieces["AC.quiet_hybrid_switch"]["evidence"] = ("test evidence, not proved: the program's test "
+                                                "v16_attack_lagging_soft_stale_hybrid_mark_does_not_depend_on_the_first_writer")
 # INV-077 open item found while landing C11 (2026-11-23): one maximum-shape measurement no longer fits
 pieces["Y.compute"]["evidence"] = ("open item (2026-11-23), narrowed by engine 06b7e5be: on a market with a maintenance "
                                    "fee and the assets current, the CPI fill that opens the source-claim LP's fourteenth "
@@ -1435,7 +1468,7 @@ extra["INV-045"] = extra.get("INV-045", []) + [i for i in ("AC.unexposed", "AC.e
                                                          "K59.contract")
                                                          if i in pieces]
 # INV-085 (proven arithmetic equals deployed arithmetic): the engine's unchecked arithmetic is where they can differ
-extra["INV-046"] = extra.get("INV-046", []) + [i for i in ("AC.hybrid_owner", "AC.recovery_reduction") if i in pieces]
+extra["INV-046"] = extra.get("INV-046", []) + [i for i in ("AC.hybrid_owner", "AC.recovery_reduction", "AC.fee_basis", "AC.quiet_hybrid_switch") if i in pieces]
 extra["INV-054"] = extra.get("INV-054", []) + [i for i in ("AC.fee_skip", "K94.contract") if i in pieces]
 extra["INV-071"] = extra.get("INV-071", []) + [i for i in ("AC.fee_crank",) if i in pieces]
 extra["INV-077"] = extra.get("INV-077", []) + [i for i in ("AC.fee_skip",) if i in pieces]
@@ -1611,6 +1644,8 @@ _ROLLS = [
      "reaches them"),
     ("06b7e5be", "263c34d4", "engine issue #274: the crank's B chunk settles pending K/F first; one function changed, no "
      "listed kernel changed or reaches it"),
+    ("263c34d4", "7a712baa", "the dead threshold-stress flag removed: the header type lost a field, four functions changed; "
+     "kernel K92 names the header type and keeps its text; full three-layer Kani run"),
 ]
 _steps = _ROLLS[:next(i for i, r in enumerate(_ROLLS) if r[1] == LANDED_REV) + 1]
 md.append(f"**Revisions.** The ledger describes engine {LANDED_REV} and program {WRAPPER_REV}, which pins it. "

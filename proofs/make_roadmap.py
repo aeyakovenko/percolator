@@ -98,6 +98,16 @@ PHASE0 = [
      "that domain lapsed, a winner refreshed first lost its whole 852,131 gain and the domain's backing went to its "
      "withdrawer. Needs a rule (for example: value the gain once its loser has paid, or never let the order decide), then "
      "a proof. Piece AC.insolvent_gain_order."),
+    ("done, third read open", "INV-046 second read (2026-11-23 and 2026-11-24)", "Findings 1 to 5 fixed in program "
+     "257db166. Findings 6 and 7 fixed in program 121d73ae as the owner decided: every trade route values its fee at the "
+     "engine's effective price, at most the signed rate (CPI: the smaller of the taker's rate and the LP's matcher cap), "
+     "so an oracle authority's average no longer sets what a trade costs (before: closing one unit took 965,500,035 atoms "
+     "from an unsigned LP); and a soft-stale hybrid's switch to its trade average is no longer held back, so the first "
+     "writer does not choose the mark's path. A third read of the corrected clauses remains. Pieces AC.fee_basis and "
+     "AC.quiet_hybrid_switch (test evidence)."),
+    ("done", "The dead threshold-stress flag", "Engine 7a712baa, program 121d73ae: `threshold_stress_active` was read as a "
+     "market-wide lock on withdrawals and conversions, but nothing ever set it (a default-only control, INV-087). The "
+     "owner had it removed from the engine header and the wrapper."),
 ]
 now = datetime.datetime.utcnow().strftime("%Y-%m-%d")  # the date only: a publish with no change leaves no diff
 _p1_done, _p1_all = sel(PH[0][2])
@@ -255,7 +265,7 @@ order of the margin checks from the source.
    differential tests. Cheaper and weaker: the link is tested, not proved.
 3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
 
-**The refactor so far.** Engine `263c34d4` (the INV-077 fee-sync fix and the issue #274 crank fix on top of `71076137`) carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
+**The refactor so far.** Engine `7a712baa` (the INV-077 fee-sync fix, the issue #274 crank fix and the removal of the dead threshold-stress flag on top of `71076137`) carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
 trade fee, a loss paid from capital, the initial-margin lien need, the liquidation deficit, the
 incremental certificate, the residual reward credit, the PnL totals and bounds, the start of a
 bankrupt-close ledger, the residual, both equity measures, the gain-against-loss rule, the

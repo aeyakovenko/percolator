@@ -1,6 +1,6 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-24 from `proof_ledger.tsv`. **345 of 824 pieces of the deployed build are done
+Generated 2026-11-24 from `proof_ledger.tsv`. **345 of 826 pieces of the deployed build are done
 (215 proved by Aristotle, 88 verified by Kani, 42 proved by a local rule checked on the source; 303 without the rule); 0 of 89 charter invariants are closed.**
 
 ## The end goal
@@ -39,7 +39,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 |---|---|---|
 | 1 | Arithmetic and kernels | 250 of 250 |
 | 2 | The engine cannot panic or overflow and keeps the header | 87 of 195 |
-| 3 | The engine keeps the whole market state | 8 of 218 |
+| 3 | The engine keeps the whole market state | 8 of 220 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -67,6 +67,8 @@ fixed yet. These come first; most are decisions.
 | done, one case open | INV-077: a fill at the full source shape with a maintenance fee | Engine 06b7e5be, program 81a8a8ec: a fee sync with nothing to settle keeps a current, healthy certificate; the fill that opens the LP's fourteenth leg costs 1,118,713 CU and the full-shape maintenance test runs again. Not measured: an account at the full shape whose fee leaves it liquidatable (Y.compute, AUDIT-077). |
 | done | Engine issue #274: crank order and the B share | An outside report, reproduced and fixed clean-room (engine 263c34d4, program 0cb5794e): the crank's B chunk now settles the account's pending K/F first, so crank order no longer decides what a backing provider or a winner keeps (before: a provider got back 1 of 300,000 atoms; a winner was paid 9,471,279 instead of 11,000,000; through the program two atoms ended owned by nobody). Piece AC.settle_b_kf_first. |
 | open, owner decision | Gain valuation of an account that is already insolvent (issue #274 residual) | An account insolvent when a gain arrives is valued against the support its gain's source domain holds at that moment, so whether its refresh comes before or after its loser pays in still changes its terminal value; with a provider's bucket on that domain lapsed, a winner refreshed first lost its whole 852,131 gain and the domain's backing went to its withdrawer. Needs a rule (for example: value the gain once its loser has paid, or never let the order decide), then a proof. Piece AC.insolvent_gain_order. |
+| done, third read open | INV-046 second read (2026-11-23 and 2026-11-24) | Findings 1 to 5 fixed in program 257db166. Findings 6 and 7 fixed in program 121d73ae as the owner decided: every trade route values its fee at the engine's effective price, at most the signed rate (CPI: the smaller of the taker's rate and the LP's matcher cap), so an oracle authority's average no longer sets what a trade costs (before: closing one unit took 965,500,035 atoms from an unsigned LP); and a soft-stale hybrid's switch to its trade average is no longer held back, so the first writer does not choose the mark's path. A third read of the corrected clauses remains. Pieces AC.fee_basis and AC.quiet_hybrid_switch (test evidence). |
+| done | The dead threshold-stress flag | Engine 7a712baa, program 121d73ae: `threshold_stress_active` was read as a market-wide lock on withdrawals and conversions, but nothing ever set it (a default-only control, INV-087). The owner had it removed from the engine header and the wrapper. |
 
 ## The phases
 
@@ -90,7 +92,7 @@ fixed yet. These come first; most are decisions.
   checked arithmetic.
 - Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (8 of 218).**
+**Phase 3. The engine keeps the whole market state (8 of 220).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -163,7 +165,7 @@ order of the margin checks from the source.
    differential tests. Cheaper and weaker: the link is tested, not proved.
 3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
 
-**The refactor so far.** Engine `263c34d4` (the INV-077 fee-sync fix and the issue #274 crank fix on top of `71076137`) carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
+**The refactor so far.** Engine `7a712baa` (the INV-077 fee-sync fix, the issue #274 crank fix and the removal of the dead threshold-stress flag on top of `71076137`) carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
 trade fee, a loss paid from capital, the initial-margin lien need, the liquidation deficit, the
 incremental certificate, the residual reward credit, the PnL totals and bounds, the start of a
 bankrupt-close ledger, the residual, both equity measures, the gain-against-loss rule, the
@@ -193,7 +195,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-479 left are mostly whole entry points and instructions, and the two attempts at that kind
+481 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.
