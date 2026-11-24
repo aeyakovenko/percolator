@@ -2784,6 +2784,130 @@ fn v16_fee_sync_voids_a_certificate_the_charge_leaves_liquidatable() {
 }
 
 #[test]
+fn v16_fee_sync_kept_certificate_leaves_utilization_fees_to_the_next_collection() {
+    // A refresh collects the backing utilization fee accrued on the account's liens before it
+    // certifies; the fee sync's skip does not. The kept certificate then differs from a refresh
+    // of the post-state by exactly that fee, as any current certificate does in a market
+    // without a maintenance fee, and the next refresh collects it.
+    const Q: u128 = 1_000 * POS_SCALE;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.initial_margin_bps = 5_000;
+    cfg.max_price_move_bps_per_slot = 500;
+    cfg.max_accrual_dt_slots = 1;
+    cfg.backing_fee_base_rate_e9_per_slot = 10_000_000;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    let mut long_header = account_fixture(1, 44);
+    let mut short_header = account_fixture(1, 45);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 1_000)
+            .unwrap();
+        market.deposit_not_atomic(&mut long, 52_501).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, 105)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        // The increase needs the long's backed gain: it liens the short side's fresh backing.
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 105,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        // The same price and no funding: no epoch moves while the lien's fee accrues.
+        for now_slot in 3..=12u64 {
+            market
+                .accrue_asset_to_not_atomic(0, now_slot, 105, 0, true)
+                .unwrap();
+        }
+    }
+    assert!(
+        long_header.source_domains[0]
+            .source_lien_counterparty_backing_num
+            .get()
+            > 0
+    );
+    let held = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(held.valid);
+    assert_eq!(held.cert_oracle_epoch, header.oracle_epoch.get());
+    assert_eq!(held.cert_funding_epoch, header.funding_epoch.get());
+
+    let now_slot = header.current_slot.get();
+    let charged = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        market
+            .sync_account_fee_to_slot_not_atomic(&mut long, now_slot, 7)
+            .unwrap()
+    };
+    assert!(charged > 0);
+    let kept = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(kept.valid, "the sync kept the current certificate");
+    assert_eq!(
+        kept.certified_equity,
+        held.certified_equity - charged as i128
+    );
+
+    let (mut probe_header, mut probe_markets) = (header.clone(), markets.clone());
+    let mut probe_long = long_header.clone();
+    let (refreshed, collected) = {
+        let mut market = MarketGroupV16ViewMut::new(&mut probe_header, &mut probe_markets);
+        let mut long = PortfolioV16ViewMut::new(&mut probe_long);
+        let capital_before = long.header.capital.get();
+        let refreshed = market.full_account_refresh_not_atomic(&mut long).unwrap();
+        (refreshed, capital_before - long.header.capital.get())
+    };
+    assert!(
+        collected > 0,
+        "the refresh collects the accrued utilization fee first"
+    );
+    let mut expected = kept;
+    expected.certified_equity = kept.certified_equity - collected as i128;
+    expected.certified_liq_deficit = if expected.certified_equity < 0 {
+        expected.certified_equity.unsigned_abs()
+    } else {
+        kept.certified_maintenance_req
+            .saturating_sub(expected.certified_equity as u128)
+    };
+    assert_eq!(
+        refreshed, expected,
+        "the kept certificate differs from the refresh by the utilization fee alone"
+    );
+}
+
+#[test]
 fn v16_fee_sync_keeps_a_current_certificate_when_its_settlement_changes_nothing() {
     let (mut header, mut markets) = market_fixture(1, 100);
     let mut long_header = account_fixture(1, 14);
