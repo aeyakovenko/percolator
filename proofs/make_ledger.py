@@ -1197,12 +1197,15 @@ piece("AC.fee_skip", "S settlement glue", "sync_account_fee_to_slot_not_atomic (
       "negative, no source domain on a lapsed Fresh or an Impaired bucket, every active leg settled to its asset's K, F, "
       "K/F epoch and B) leaves the market and every account byte for byte as the settlement would, except the "
       "certificate: it keeps it current with the charge taken from its equity when that leaves no liquidation deficit, "
-      "and that certificate is the one a full refresh of the post-state issues; otherwise it voids it as the settlement "
-      "would (INV-054: a writer issues a certificate for the post-state or invalidates; INV-077)",
+      "and that certificate is the one a full refresh of the post-state issues, except that a refresh first collects the "
+      "backing utilization fee accrued on the account's liens, which the skip leaves to the next collection as any "
+      "current certificate does in a market without a maintenance fee; otherwise it voids it as the settlement would "
+      "(INV-054: a writer issues a certificate for the post-state or invalidates; INV-077)",
       "Kani (the skip's conditions against the settlement's writes, every account and market state)")
 pieces["AC.fee_skip"]["evidence"] = ("test evidence, not proved: the engine's deterministic differentials against the "
                                      "settlement (v16_fee_sync_skip_writes_every_byte_the_settlement_writes_except_the_"
-                                     "certificate and six more v16_fee_sync_* tests), the randomized differential "
+                                     "certificate and seven more v16_fee_sync_* tests, one of them showing the utilization-fee difference, engine "
+                                     "95b6e9e1), the randomized differential "
                                      "v16_fuzz_fee_sync_skip_matches_the_settlement_except_the_certificate (256 cases) and "
                                      "seven mutation controls, each failing a deterministic test")
 piece("AC.fee_crank", "W wrapper", "handle_permissionless_crank_zero_copy (the maintenance collection)",
