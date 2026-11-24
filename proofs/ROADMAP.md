@@ -1,6 +1,6 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-24 from `proof_ledger.tsv`. **345 of 822 pieces of the deployed build are done
+Generated 2026-11-24 from `proof_ledger.tsv`. **345 of 824 pieces of the deployed build are done
 (215 proved by Aristotle, 88 verified by Kani, 42 proved by a local rule checked on the source; 303 without the rule); 0 of 89 charter invariants are closed.**
 
 ## The end goal
@@ -39,7 +39,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 |---|---|---|
 | 1 | Arithmetic and kernels | 250 of 250 |
 | 2 | The engine cannot panic or overflow and keeps the header | 87 of 195 |
-| 3 | The engine keeps the whole market state | 8 of 216 |
+| 3 | The engine keeps the whole market state | 8 of 218 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -64,7 +64,9 @@ fixed yet. These come first; most are decisions.
 | done | INV-046 first independent read (2026-11-23) | Two program defects fixed in program aac89b9e: a reduction on a Recovery asset whose mark follows trades reverted on any print off the frozen mark (the trade staged a target the engine refuses for a Recovery asset); `BatchTradeNoCpi` dropped the oracle-profile write-back of legs whose print does not move the mark, after their zero-move funding segment. The statement is restated (specs/inv046_closure_71076137.md) and needs a second read. |
 | done | INV-045: catch-up after idle slots (third read, finding 3) | The owner chose (b) on 2026-11-23, program f6d0bc57: a target change that nobody pays for reaches back at most one window (`max_accrual_dt_slots`). PushAuthMark and PushEwmaMark refuse a changed target on an exposed asset further behind, and the crank holds such a reading back; trade prints are unchanged and pay the mark-movement fee. Measured before: +48% after 200 idle slots at 24 bps. New clause C11 of the INV-045 statement, pieces AC.catchup_push and AC.catchup_crank (test evidence). |
 | done | INV-064 wording | Reworded to the code on 2026-11-23 (the owner's decision, program 609e557b): one budget per asset, the asset's two loss-domain budgets, never more than the unreserved insurance or the vault, debited by every withdrawal; no Live withdrawal while any loss is active, stale or lagging; no proportional cap and no cooldown. |
-| open, being fixed | INV-077: a fill at the full source shape with a maintenance fee | Found while landing (b): on a market with a maintenance fee, once the assets are current, the CPI fill that opens the source-claim LP's tenth leg exceeds the 1,400,000 CU limit (the same on the previous program once its assets are current). The fee sync settles every leg and resets the health certificate, so the trade recomputes it in full. The program's full-shape maintenance test is ignored until the fix; Y.compute records it. |
+| done, one case open | INV-077: a fill at the full source shape with a maintenance fee | Engine 06b7e5be, program 81a8a8ec: a fee sync with nothing to settle keeps a current, healthy certificate; the fill that opens the LP's fourteenth leg costs 1,118,713 CU and the full-shape maintenance test runs again. Not measured: an account at the full shape whose fee leaves it liquidatable (Y.compute, AUDIT-077). |
+| done | Engine issue #274: crank order and the B share | An outside report, reproduced and fixed clean-room (engine 263c34d4, program 0cb5794e): the crank's B chunk now settles the account's pending K/F first, so crank order no longer decides what a backing provider or a winner keeps (before: a provider got back 1 of 300,000 atoms; a winner was paid 9,471,279 instead of 11,000,000; through the program two atoms ended owned by nobody). Piece AC.settle_b_kf_first. |
+| open, owner decision | Gain valuation of an account that is already insolvent (issue #274 residual) | An account insolvent when a gain arrives is valued against the support its gain's source domain holds at that moment, so whether its refresh comes before or after its loser pays in still changes its terminal value; with a provider's bucket on that domain lapsed, a winner refreshed first lost its whole 852,131 gain and the domain's backing went to its withdrawer. Needs a rule (for example: value the gain once its loser has paid, or never let the order decide), then a proof. Piece AC.insolvent_gain_order. |
 
 ## The phases
 
@@ -88,7 +90,7 @@ fixed yet. These come first; most are decisions.
   checked arithmetic.
 - Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (8 of 216).**
+**Phase 3. The engine keeps the whole market state (8 of 218).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -161,7 +163,7 @@ order of the margin checks from the source.
    differential tests. Cheaper and weaker: the link is tested, not proved.
 3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
 
-**The refactor so far.** Engine `06b7e5be` (the INV-077 fee-sync fix on top of `71076137`) carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
+**The refactor so far.** Engine `263c34d4` (the INV-077 fee-sync fix and the issue #274 crank fix on top of `71076137`) carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
 trade fee, a loss paid from capital, the initial-margin lien need, the liquidation deficit, the
 incremental certificate, the residual reward credit, the PnL totals and bounds, the start of a
 bankrupt-close ledger, the residual, both equity measures, the gain-against-loss rule, the
@@ -191,7 +193,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-477 left are mostly whole entry points and instructions, and the two attempts at that kind
+479 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.

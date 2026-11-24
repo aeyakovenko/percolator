@@ -20,9 +20,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # and the engine source is the checkout itself (which must be at LANDED_REV); the program source comes
 # from a checkout of percolator-prog at WRAPPER_REV, named by LEDGER_WRAPPER_SRC.
 _here = os.path.dirname(os.path.abspath(__file__))
-_frozen = os.path.join(_here, "src_06b7e5be/v16.rs")
+_frozen = os.path.join(_here, "src_263c34d4/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_81a8a8ec/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_0cb5794e/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -73,7 +73,13 @@ B39_REV = "80f8f0b4"            # refactor batches 3-9: K74-K93
 # kernel changed or reaches them; transition_kinds.06b7e5be.py: the fee sync re-read, class final; two new loop counters,
 # both rule R1. Kani: the 5 harnesses that reach the change (the contract check among them) were run again in every
 # layer that builds them; every other verdict carries.
-LANDED_REV = "06b7e5be"
+# Rolled 2026-11-24 to 263c34d4: engine issue #274. The permissionless crank's B chunk (`SettleBChunk`) settles the
+# account's pending K/F first, as the refresh, the side-effect settlement and the Recovery forfeit do; before, a
+# winner's B share could land ahead of its gain and the gain cured it from loser-paid backing nobody was owed, so crank
+# order decided what providers and winners kept. specs/changed_since_06b7e5be_at_263c34d4.md: one function changed
+# (permissionless_crank_not_atomic, pub(crate), no entry point of its own), no type, no kernel; the same arithmetic.
+# Kani: the 5 harnesses that reach the change were run again in every layer that builds them; every other verdict carries.
+LANDED_REV = "263c34d4"
 REESTABLISH = {"T09.header", "T38.header"}
 # Kernels whose proof has to be made again for NEW_REV: specs/changed_since_add1d027_at_c030aa40.md
 # (changed_fns.py: own text, callees by name, changed types). Every other kernel, its callees and its
@@ -160,7 +166,7 @@ kernels["K63"] = "kernel_provider_protection_floor_shift"    # new in d1fa39f6
 REFACTOR_KERNELS = {}
 # Kani checks these only for bounded inputs (specs/kernel_contracts_spec_80f8f0b4.md); the prover proves them at full width
 BOUNDED_KERNELS = {"K76", "K77", "K78", "K88", "K91", "K93"}
-for _line in read("specs/kernel_contracts_list_06b7e5be.tsv").splitlines():
+for _line in read("specs/kernel_contracts_list_263c34d4.tsv").splitlines():
     _f = _line.split("\t")
     if len(_f) >= 2 and int(_f[0][1:]) >= 64:
         REFACTOR_KERNELS[_f[0]] = _f[1]
@@ -726,7 +732,10 @@ variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # collection of a due maintenance fee that advanced the portfolio's fee cursor counts as progress when the engine finds
 # nothing else to do). Checked by roll_to_06b7e5be.py: the program source changes only there, the instruction census and
 # the effective-price writer scan are unchanged, and so are the two clamp functions.
-WRAPPER_REV = "81a8a8ec"
+# Rolled 2026-11-24 to program 0cb5794e: the pin of engine 263c34d4 (issue #274). The program source is unchanged
+# (checked by roll_to_263c34d4.py, with the instruction census); two owner tests that asserted the old order were
+# rewritten with the owner's approval, and the short-side B compute pin moved (556,221 -> 697,757 CU).
+WRAPPER_REV = "0cb5794e"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -1202,6 +1211,25 @@ piece("AC.fee_skip", "S settlement glue", "sync_account_fee_to_slot_not_atomic (
       "current certificate does in a market without a maintenance fee; otherwise it voids it as the settlement would "
       "(INV-054: a writer issues a certificate for the post-state or invalidates; INV-077)",
       "Kani (the skip's conditions against the settlement's writes, every account and market state)")
+# Engine issue #274 (engine 263c34d4): the crank's B chunk after the account's K/F, with test evidence; the residual
+piece("AC.settle_b_kf_first", "S settlement glue", "permissionless_crank_not_atomic (SettleB)",
+      "the permissionless crank's B chunk settles the account's pending K/F first, at the committed indices, so a leg's B "
+      "loss is applied after its K/F delta on every path; the order in which cranks reach a bankrupt loser and its "
+      "winners does not change any account's terminal value, any provider's withdrawable backing or the junior residual "
+      "(INV-041: caller order independence; spec requirement 27)",
+      "Kani (the crank's B step against the side-effect settlement's composition, every account and market state)")
+pieces["AC.settle_b_kf_first"]["evidence"] = ("test evidence, not proved: the engine's "
+                                              "tests/v16_settle_b_crank_settles_kf_first.rs (one and two winners, a "
+                                              "provider-backed loser domain, backing lapsing during the rise or after the "
+                                              "liquidation; every crank order ends alike, nothing unowned or retired; the "
+                                              "loser-first orders failed on the previous engine) and the program's "
+                                              "reset-carry matrix ending with vault = C_tot + insurance")
+piece("AC.insolvent_gain_order", "S settlement glue", "apply_signed_kf_delta_to_pnl (the cure of an insolvent account)",
+      "OPEN (found in the issue #274 review): an account already insolvent when a gain arrives is valued against the "
+      "support its gain's source domain holds at that moment, so whether its refresh comes before or after its loser pays "
+      "into that domain changes its terminal value (measured: a winner refreshed first lost its whole 852,131 gain and "
+      "the domain's backing went to its withdrawer); a design decision of the owner precedes any proof (INV-041)",
+      "a statement the owner chooses, then a proof")
 pieces["AC.fee_skip"]["evidence"] = ("test evidence, not proved: the engine's deterministic differentials against the "
                                      "settlement (v16_fee_sync_skip_writes_every_byte_the_settlement_writes_except_the_"
                                      "certificate and seven more v16_fee_sync_* tests, one of them showing the utilization-fee difference, engine "
@@ -1411,6 +1439,7 @@ extra["INV-046"] = extra.get("INV-046", []) + [i for i in ("AC.hybrid_owner", "A
 extra["INV-054"] = extra.get("INV-054", []) + [i for i in ("AC.fee_skip", "K94.contract") if i in pieces]
 extra["INV-071"] = extra.get("INV-071", []) + [i for i in ("AC.fee_crank",) if i in pieces]
 extra["INV-077"] = extra.get("INV-077", []) + [i for i in ("AC.fee_skip",) if i in pieces]
+extra["INV-041"] = extra.get("INV-041", []) + [i for i in ("AC.settle_b_kf_first", "AC.insolvent_gain_order") if i in pieces]
 extra["INV-085"] = extra.get("INV-085", []) + sorted(i for i in pieces if i.startswith("PO."))
 if "kernel_accrual_index_update" in _k_of:
     extra["INV-045"] += [i for i in (f"{_k_of['kernel_accrual_index_update']}.contract",
@@ -1580,6 +1609,8 @@ _ROLLS = [
     ("71076137", "06b7e5be", "batches 16, 18 and 19 (no-overflow proofs, no code change) and the INV-077 fee-sync fix: the "
      "fee sync changed, three functions new (one of them kernel K94, contract-checked), no listed kernel changed or "
      "reaches them"),
+    ("06b7e5be", "263c34d4", "engine issue #274: the crank's B chunk settles pending K/F first; one function changed, no "
+     "listed kernel changed or reaches it"),
 ]
 _steps = _ROLLS[:next(i for i, r in enumerate(_ROLLS) if r[1] == LANDED_REV) + 1]
 md.append(f"**Revisions.** The ledger describes engine {LANDED_REV} and program {WRAPPER_REV}, which pins it. "

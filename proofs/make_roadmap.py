@@ -84,11 +84,20 @@ PHASE0 = [
     ("done", "INV-064 wording", "Reworded to the code on 2026-11-23 (the owner's decision, program 609e557b): one budget per "
      "asset, the asset's two loss-domain budgets, never more than the unreserved insurance or the vault, debited by every "
      "withdrawal; no Live withdrawal while any loss is active, stale or lagging; no proportional cap and no cooldown."),
-    ("open, being fixed", "INV-077: a fill at the full source shape with a maintenance fee", "Found while landing (b): on a "
-     "market with a maintenance fee, once the assets are current, the CPI fill that opens the source-claim LP's tenth leg "
-     "exceeds the 1,400,000 CU limit (the same on the previous program once its assets are current). The fee sync settles "
-     "every leg and resets the health certificate, so the trade recomputes it in full. The program's full-shape maintenance "
-     "test is ignored until the fix; Y.compute records it."),
+    ("done, one case open", "INV-077: a fill at the full source shape with a maintenance fee", "Engine 06b7e5be, program "
+     "81a8a8ec: a fee sync with nothing to settle keeps a current, healthy certificate; the fill that opens the LP's "
+     "fourteenth leg costs 1,118,713 CU and the full-shape maintenance test runs again. Not measured: an account at the full "
+     "shape whose fee leaves it liquidatable (Y.compute, AUDIT-077)."),
+    ("done", "Engine issue #274: crank order and the B share", "An outside report, reproduced and fixed clean-room (engine "
+     f"263c34d4, program 0cb5794e): the crank's B chunk now settles the account's pending K/F first, so crank order no longer "
+     "decides what a backing provider or a winner keeps (before: a provider got back 1 of 300,000 atoms; a winner was paid "
+     "9,471,279 instead of 11,000,000; through the program two atoms ended owned by nobody). Piece AC.settle_b_kf_first."),
+    ("open, owner decision", "Gain valuation of an account that is already insolvent (issue #274 residual)", "An account "
+     "insolvent when a gain arrives is valued against the support its gain's source domain holds at that moment, so whether "
+     "its refresh comes before or after its loser pays in still changes its terminal value; with a provider's bucket on "
+     "that domain lapsed, a winner refreshed first lost its whole 852,131 gain and the domain's backing went to its "
+     "withdrawer. Needs a rule (for example: value the gain once its loser has paid, or never let the order decide), then "
+     "a proof. Piece AC.insolvent_gain_order."),
 ]
 now = datetime.datetime.utcnow().strftime("%Y-%m-%d")  # the date only: a publish with no change leaves no diff
 _p1_done, _p1_all = sel(PH[0][2])
@@ -246,7 +255,7 @@ order of the margin checks from the source.
    differential tests. Cheaper and weaker: the link is tested, not proved.
 3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
 
-**The refactor so far.** Engine `06b7e5be` (the INV-077 fee-sync fix on top of `71076137`) carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
+**The refactor so far.** Engine `263c34d4` (the INV-077 fee-sync fix and the issue #274 crank fix on top of `71076137`) carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
 trade fee, a loss paid from capital, the initial-margin lien need, the liquidation deficit, the
 incremental certificate, the residual reward credit, the PnL totals and bounds, the start of a
 bankrupt-close ledger, the residual, both equity measures, the gain-against-loss rule, the

@@ -1,0 +1,6 @@
+OK 263c34d4
+src/v16.rs sha256 c784ba47a503c70a5d25e1e1a6f87708abf4fa7cf26a2f72ad0aa89d094eb017
+src/wide_math.rs sha256 5c3c47f5d99cb0dd986d8abb59fa16e2a2f03c0a26b80bca5c27242ef0281872
+shim sha256 6c4814be3b1c9345f88822a1b4a3922c32641341abee3ba065706f650890fbde
+build: cargo check --lib, default features, cargo 1.99.1 (5f94df478 2026-08-27)
+date: 2026-11-24T13:42:27Z
