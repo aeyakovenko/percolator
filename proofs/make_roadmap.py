@@ -13,6 +13,12 @@ DONE = ("proved", "verified by Kani", "proved by rule")   # by Aristotle, by a K
 def sel(pred):
     ps = [r for r in dep if pred(r["id"])]
     return sum(1 for r in ps if r["status"] in DONE), len(ps)
+# the header pieces of entry points whose Ok paths end in the runtime check (classes final and delegates)
+_HDR_TAIL = [r for r in dep if r["id"].endswith(".header") and r["statement"].startswith(("[final]", "[delegates]"))]
+_HDR_TAIL_N = len(_HDR_TAIL)
+_HDR_TAIL_DONE = sum(1 for r in _HDR_TAIL if r["status"] in DONE)
+
+
 def frac(pred):
     d, n = sel(pred)
     return f"{d} of {n}"
@@ -177,8 +183,9 @@ print(f"""
 **Phase 2. The engine cannot panic or overflow and keeps the header ({frac(PH[1][2])}).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
-- Every entry point preserves the header checks: 33 that end in the runtime check, 9 small ones
-  without a check, the four value-moving ones and the crank dispatcher as six local statements,
+- Every entry point preserves the header checks: {_HDR_TAIL_N} that end in the runtime check ({_HDR_TAIL_DONE} of
+  them verified by Kani: their path structure, with every callee replaced), 9 small ones without a check,
+  the four value-moving ones and the crank dispatcher as six local statements,
   and the four places where state is kept after an error. The first batch on the small ones proved
   two before its spending cap stopped it; those two have to be established again on the new engine
   revision, whose market view and asset slot gained fields.
