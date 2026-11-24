@@ -10301,7 +10301,6 @@ pub struct MarketGroupV16HeaderAccount {
     pub slot_last: V16PodU64,
     pub current_slot: V16PodU64,
     pub bankruptcy_hlock_active: u8,
-    pub threshold_stress_active: u8,
     pub loss_stale_active: u8,
     pub recovery_reason: V16OptionalRecoveryReasonAccount,
     pub mode: u8,
@@ -10414,7 +10413,6 @@ impl MarketGroupV16HeaderAccount {
             slot_last: V16PodU64::new(init_slot),
             current_slot: V16PodU64::new(init_slot),
             bankruptcy_hlock_active: 0,
-            threshold_stress_active: 0,
             loss_stale_active: 0,
             recovery_reason: V16OptionalRecoveryReasonAccount::default(),
             mode: encode_market_mode(MarketModeV16::Live),
@@ -10701,7 +10699,6 @@ impl<'a, T> MarketGroupV16View<'a, T> {
         )?;
         self.header.config.try_to_runtime_shape()?;
         decode_bool(self.header.bankruptcy_hlock_active)?;
-        decode_bool(self.header.threshold_stress_active)?;
         decode_bool(self.header.loss_stale_active)?;
         decode_bool(self.header.payout_snapshot_captured)?;
         self.header.recovery_reason.try_to_runtime()?;
@@ -18334,7 +18331,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             || self.header.b_stale_account_count.get() != 0
             || self.header.negative_pnl_account_count.get() != 0
             || decode_bool(self.header.bankruptcy_hlock_active)?
-            || decode_bool(self.header.threshold_stress_active)?
             || decode_bool(self.header.loss_stale_active)?
             || self.header.recovery_reason.try_to_runtime()?.is_some()
         {
@@ -20476,8 +20472,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                 return Ok(HLockLaneV16::HMax);
             }
         }
-        if decode_bool(self.header.threshold_stress_active)?
-            || (!account_scoped && bankruptcy_hlock_active)
+        if (!account_scoped && bankruptcy_hlock_active)
             || decode_market_mode(self.header.mode)? == MarketModeV16::Recovery
             || instruction_bankruptcy_candidate
         {

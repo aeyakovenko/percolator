@@ -4547,16 +4547,13 @@ fn proof_v16_flat_source_claim_lien_blocks_convert() {
 #[kani::solver(cadical)]
 fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
     let blocker: u8 = kani::any();
-    kani::assume(blocker <= 5);
+    kani::assume(blocker <= 4);
 
     let claim = 3u128;
     let (mut header, mut markets, mut account_header) = one_market_view_fixture();
 
     header.vault = V16PodU128::new(claim);
     header.c_tot = V16PodU128::new(claim);
-    if blocker == 4 {
-        header.threshold_stress_active = 1;
-    }
 
     account_header.capital = V16PodU128::new(claim);
     account_header.pnl = V16PodI128::new(claim as i128);
@@ -4595,17 +4592,17 @@ fn proof_v16_public_convert_preflight_requires_current_unlocked_account() {
         "stale health certificate blocks favorable conversion before mutation"
     );
     kani::cover!(
-        (blocker == 3 || blocker == 4) && claim > 1 && result == Err(V16Error::LockActive),
+        blocker == 3 && claim > 1 && result == Err(V16Error::LockActive),
         "h-lock lane blocks favorable conversion before mutation"
     );
     kani::cover!(
-        blocker == 5 && claim > 1 && result == Ok(()),
+        blocker == 4 && claim > 1 && result == Ok(()),
         "current unlocked account passes favorable conversion preflight"
     );
 
     let expected = if blocker <= 2 {
         Err(V16Error::Stale)
-    } else if blocker <= 4 {
+    } else if blocker == 3 {
         Err(V16Error::LockActive)
     } else {
         Ok(())
@@ -4708,13 +4705,11 @@ fn proof_v16_historical_bankruptcy_hlock_does_not_override_account_scope() {
 #[kani::proof]
 #[kani::unwind(8)]
 #[kani::solver(cadical)]
-fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate() {
-    let threshold_stress_active: bool = kani::any();
+fn proof_v16_global_hlock_lane_selects_hmax_only_for_bankruptcy_recovery_or_candidate() {
     let bankruptcy_hlock_active: bool = kani::any();
     let recovery_mode: bool = kani::any();
     let instruction_bankruptcy_candidate: bool = kani::any();
     let (mut header, mut markets) = one_market_only_fixture();
-    header.threshold_stress_active = threshold_stress_active as u8;
     header.bankruptcy_hlock_active = bankruptcy_hlock_active as u8;
     header.mode = if recovery_mode { 2 } else { 0 };
     let market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
@@ -4722,11 +4717,7 @@ fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate(
     let lane = market
         .kani_h_lock_lane(None, instruction_bankruptcy_candidate)
         .unwrap();
-    let expected = if threshold_stress_active
-        || bankruptcy_hlock_active
-        || recovery_mode
-        || instruction_bankruptcy_candidate
-    {
+    let expected = if bankruptcy_hlock_active || recovery_mode || instruction_bankruptcy_candidate {
         HLockLaneV16::HMax
     } else {
         HLockLaneV16::HMin
@@ -4735,10 +4726,6 @@ fn proof_v16_global_hlock_lane_selects_hmax_only_for_global_stress_or_candidate(
     kani::cover!(
         lane == HLockLaneV16::HMin,
         "global h-lock lane covers healthy h_min branch"
-    );
-    kani::cover!(
-        lane == HLockLaneV16::HMax && threshold_stress_active,
-        "global h-lock lane covers threshold stress h_max branch"
     );
     kani::cover!(
         lane == HLockLaneV16::HMax && bankruptcy_hlock_active,

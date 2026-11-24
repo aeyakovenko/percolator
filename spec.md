@@ -1524,7 +1524,7 @@ A PositiveCreditAction is any action whose approval, payout, withdrawal, release
 - use a valid source-credit lien; or
 - use `Eq_no_positive_credit_i`.
 
-Positive PnL use is forbidden or zero if the contributing leg is stale, B-stale, loss-stale, partial, locked, pending-loss-exposed without reserve, pending-obligation-exposed, recovery-mode, target/effective-lagged without dual-price pass, thin-market locked, or hmax/stress locked.
+Positive PnL use is forbidden or zero if the contributing leg is stale, B-stale, loss-stale, partial, locked, pending-loss-exposed without reserve, pending-obligation-exposed, recovery-mode, target/effective-lagged without dual-price pass, thin-market locked, or in the hmax lane.
 
 If a lien's source rate drops, backing expires, or source domain enters recovery, the lien is impaired. Impaired liens cannot support new risk and must be resolved by deleveraging, liquidation, ADL, backing replenishment, or recovery.
 
@@ -1553,7 +1553,7 @@ safety effect is represented by one of these mechanisms instead:
 
 - negative and unsettled account PnL is included on the equity side by refresh,
   settlement, and conservative haircut equity;
-- stale, B-stale, loss-stale, hmax/stress, recovery, target/effective-lagged
+- stale, B-stale, loss-stale, hmax lane, recovery, target/effective-lagged
   without the approved lane, active close barrier, pending-domain-loss barrier,
   pending obligation, and impaired-lien states are hard locks or
   progress-only/reduction-only states for favorable actions;

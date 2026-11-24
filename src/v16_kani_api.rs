@@ -1928,7 +1928,6 @@ pub fn kani_eq_market_group_v16_header_account(
         && a.slot_last.get() == b.slot_last.get()
         && a.current_slot.get() == b.current_slot.get()
         && a.bankruptcy_hlock_active == b.bankruptcy_hlock_active
-        && a.threshold_stress_active == b.threshold_stress_active
         && a.loss_stale_active == b.loss_stale_active
         && kani_eq_v16_optional_recovery_reason_account(&a.recovery_reason, &b.recovery_reason)
         && a.mode == b.mode
