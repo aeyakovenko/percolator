@@ -846,3 +846,259 @@ fn v16_source_domain_capacity_reserves_favorable_settlement_for_each_active_leg(
     }
     assert_eq!(reserved, reserved_before);
 }
+
+// INV-077 fee-sync skip (2026-11-23). A fee sync whose side-effect settlement has nothing to settle
+// does not run it, writes the settlement's one other effect (the market's loss-stale summary, from
+// the asset of its last entry) and keeps the current certificate with the charge taken from its
+// equity. Differential: at every fee sync of a random three-asset history, the same state with only
+// the target's certificate validity cleared runs the full settlement; every byte of the market and
+// both accounts must match except the target's certificate. A kept certificate must be current, equal
+// to the certificate held before the sync with the charge taken from its equity, and a full refresh
+// of the post-state must succeed and differ from a refresh of the state before by the charge alone.
+fn fee_skip_group() -> (MarketGroupV16HeaderAccount, Vec<Market<u64>>) {
+    let (market_id, _, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(3, 3, 0, 10);
+    cfg.max_trading_fee_bps = 10;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 3, 0).unwrap();
+    let mut markets = (0..3u64)
+        .map(|i| Market::new(i, EngineAssetSlotV16Account::default()))
+        .collect::<Vec<_>>();
+    for i in 0..3usize {
+        header
+            .activate_empty_asset_slot_not_atomic(
+                i as u32,
+                &mut markets[i].engine,
+                100,
+                (i + 1) as u64,
+            )
+            .unwrap();
+    }
+    (header, markets)
+}
+
+type FeeSkipState = (
+    MarketGroupV16HeaderAccount,
+    Vec<Market<u64>>,
+    PortfolioAccountV16Account,
+    PortfolioAccountV16Account,
+);
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn v16_fuzz_fee_sync_skip_matches_the_settlement_except_the_certificate(
+        actions in prop::collection::vec((0u8..6, 0usize..3, any::<bool>(), 0u16..1024), 1..60)
+    ) {
+        let (mut header, mut markets) = fee_skip_group();
+        let (_, a_id, b_id, _) = ids();
+        let mut account_a = fuzz_account(a_id);
+        let mut account_b = fuzz_account(b_id);
+        {
+            let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+            let mut a = PortfolioV16ViewMut::new(&mut account_a);
+            let mut b = PortfolioV16ViewMut::new(&mut account_b);
+            market.deposit_not_atomic(&mut a, 100_000).unwrap();
+            // B is thin, so fee charges can leave it below maintenance.
+            market.deposit_not_atomic(&mut b, 250).unwrap();
+        }
+        let mut skips = 0usize;
+        let mut syncs = 0usize;
+        let mut refreshable = 0usize;
+        let mut exact = 0usize;
+        let mut exact_positive = 0usize;
+        let mut deficit_voids = 0usize;
+        for (op, asset, target_a, seed) in actions {
+            let before: FeeSkipState = (header, markets.clone(), account_a, account_b);
+            let result: Result<(), V16Error> = match op {
+                // A trade of one or two units at the asset's effective price.
+                0 => {
+                    let price = markets[asset].engine.asset.effective_price.get();
+                    let size_q = (POS_SCALE as i128) * (1 + (seed % 2) as i128);
+                    let size_q = if target_a { size_q } else { -size_q };
+                    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+                    let mut a = PortfolioV16ViewMut::new(&mut account_a);
+                    let mut b = PortfolioV16ViewMut::new(&mut account_b);
+                    market
+                        .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                            &mut a,
+                            &mut b,
+                            TradeRequestV16 { asset_index: asset, size_q, exec_price: price, fee_bps: 0 },
+                        )
+                        .map(|_| ())
+                }
+                // An accrual that moves the price and pays funding: epochs move.
+                1 => {
+                    let price = 90 + (seed % 21) as u64;
+                    let funding = (seed % 7) as i128 - 3;
+                    let now = header.current_slot.get() + 1 + (seed % 3) as u64;
+                    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+                    market
+                        .accrue_asset_to_not_atomic(asset, now, price, funding, true)
+                        .map(|_| ())
+                }
+                // An accrual at the same price without funding: no epoch moves.
+                2 => {
+                    let price = markets[asset].engine.asset.effective_price.get();
+                    let now = header.current_slot.get() + 1 + (seed % 3) as u64;
+                    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+                    market
+                        .accrue_asset_to_not_atomic(asset, now, price, 0, true)
+                        .map(|_| ())
+                }
+                // A full refresh: a current certificate again.
+                3 => {
+                    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+                    let account = if target_a { &mut account_a } else { &mut account_b };
+                    let mut view = PortfolioV16ViewMut::new(account);
+                    market.full_account_refresh_not_atomic(&mut view).map(|_| ())
+                }
+                // A fee sync, compared with the settlement on the same state.
+                _ => {
+                    syncs += 1;
+                    let rate = (seed % 50) as u128;
+                    let now = header.current_slot.get();
+                    let last_fee_before = if target_a { account_a } else { account_b }.last_fee_slot.get();
+                    let mut control: FeeSkipState = (header, markets.clone(), account_a, account_b);
+                    if target_a {
+                        control.2.health_cert.valid = 0;
+                    } else {
+                        control.3.health_cert.valid = 0;
+                    }
+                    let sync = |state: &mut FeeSkipState| {
+                        let (h, m, a, b) = state;
+                        let mut market = MarketGroupV16ViewMut::new(h, m);
+                        let mut view = PortfolioV16ViewMut::new(if target_a { a } else { b });
+                        market.sync_account_fee_to_slot_not_atomic(&mut view, now, rate)
+                    };
+                    let mut main: FeeSkipState = (header, markets.clone(), account_a, account_b);
+                    let main_result = sync(&mut main);
+                    let control_result = sync(&mut control);
+                    prop_assert_eq!(main_result, control_result, "the same outcome");
+                    if main_result.is_ok() {
+                        let kept = if target_a { main.2 } else { main.3 }.health_cert.try_to_runtime().unwrap();
+                        prop_assert_eq!(bytemuck::bytes_of(&main.0), bytemuck::bytes_of(&control.0));
+                        prop_assert_eq!(&main.1, &control.1);
+                        let (mut main_a, mut main_b, mut control_a, mut control_b) = (main.2, main.3, control.2, control.3);
+                        // Only a valid certificate differs from the control's by design; a void one
+                        // must be the held certificate with its validity cleared, as the settlement
+                        // leaves it.
+                        if kept.valid {
+                            if target_a {
+                                main_a.health_cert = Default::default();
+                                control_a.health_cert = Default::default();
+                            } else {
+                                main_b.health_cert = Default::default();
+                                control_b.health_cert = Default::default();
+                            }
+                        }
+                        prop_assert_eq!(bytemuck::bytes_of(&main_a), bytemuck::bytes_of(&control_a));
+                        prop_assert_eq!(bytemuck::bytes_of(&main_b), bytemuck::bytes_of(&control_b));
+                        let control_cert = if target_a { control.2 } else { control.3 }.health_cert.try_to_runtime().unwrap();
+                        let target_after = if target_a { main.2 } else { main.3 };
+                        let advanced = target_after.last_fee_slot.get() > last_fee_before;
+                        let held = if target_a { before.2 } else { before.3 }.health_cert.try_to_runtime().unwrap();
+                        if advanced && kept.valid {
+                            prop_assert_eq!(kept.certified_liq_deficit, 0, "only a healthy certificate is kept");
+                        }
+                        let held_current = held.valid
+                            && held.cert_oracle_epoch == before.0.oracle_epoch.get()
+                            && held.cert_funding_epoch == before.0.funding_epoch.get()
+                            && held.cert_risk_epoch == before.0.risk_epoch.get()
+                            && held.cert_asset_set_epoch == before.0.asset_set_epoch.get();
+                        if advanced && !kept.valid && held_current {
+                            let charged = *main_result.as_ref().unwrap();
+                            let equity = held.certified_equity - charged as i128;
+                            let deficit = if equity < 0 {
+                                equity.unsigned_abs()
+                            } else {
+                                held.certified_maintenance_req.saturating_sub(equity as u128)
+                            };
+                            if deficit != 0 {
+                                deficit_voids += 1;
+                            }
+                        }
+                        // A sync whose anchor did not advance returns before touching the account;
+                        // one that did advance and left a valid certificate took the skip.
+                        if advanced && kept.valid {
+                            skips += 1;
+                            let charged = main_result.unwrap();
+                            prop_assert!(!control_cert.valid, "the settlement voids the certificate");
+                            // The kept certificate is current for the post-state...
+                            prop_assert_eq!(kept.cert_oracle_epoch, main.0.oracle_epoch.get());
+                            prop_assert_eq!(kept.cert_funding_epoch, main.0.funding_epoch.get());
+                            prop_assert_eq!(kept.cert_risk_epoch, main.0.risk_epoch.get());
+                            prop_assert_eq!(kept.cert_asset_set_epoch, main.0.asset_set_epoch.get());
+                            prop_assert_eq!(kept.active_bitmap_at_cert, target_after.active_bitmap.map(|w| w.get()));
+                            // ...and is the certificate held before the sync with the charge taken
+                            // from its equity (the capital charge is the sync's only write that
+                            // equity reads).
+                            let mut expected = held;
+                            expected.certified_equity = held.certified_equity - charged as i128;
+                            expected.certified_liq_deficit = if expected.certified_equity < 0 {
+                                expected.certified_equity.unsigned_abs()
+                            } else {
+                                held.certified_maintenance_req.saturating_sub(expected.certified_equity as u128)
+                            };
+                            prop_assert_eq!(kept, expected);
+                            // A full refresh of the post-state succeeds (a certificate that counts
+                            // lapsed backing, which a refresh refuses, is not kept), as does one of
+                            // the state before the sync, and the two differ by the charge alone; so
+                            // when the held certificate was exact, so is the kept one. (No backing
+                            // here: a refresh collects no utilization fee.)
+                            let refresh = |state: &mut FeeSkipState| {
+                                let (h, m, a, b) = state;
+                                let mut market = MarketGroupV16ViewMut::new(h, m);
+                                let mut view = PortfolioV16ViewMut::new(if target_a { a } else { b });
+                                market.full_account_refresh_not_atomic(&mut view)
+                            };
+                            let mut probe_before: FeeSkipState = (before.0, before.1.clone(), before.2, before.3);
+                            let mut probe_after: FeeSkipState = (main.0, main.1.clone(), main.2, main.3);
+                            let refreshed_before = refresh(&mut probe_before);
+                            let refreshed_after = refresh(&mut probe_after);
+                            prop_assert!(refreshed_after.is_ok(), "the kept certificate's post-state refreshes: {:?}", refreshed_after);
+                            match (refreshed_before, refreshed_after) {
+                                (Ok(cert_before), Ok(cert_after)) => {
+                                    let mut charged_before = cert_before;
+                                    charged_before.certified_equity = cert_before.certified_equity - charged as i128;
+                                    charged_before.certified_liq_deficit = if charged_before.certified_equity < 0 {
+                                        charged_before.certified_equity.unsigned_abs()
+                                    } else {
+                                        cert_before.certified_maintenance_req.saturating_sub(charged_before.certified_equity as u128)
+                                    };
+                                    prop_assert_eq!(cert_after, charged_before);
+                                    refreshable += 1;
+                                    if held == cert_before {
+                                        exact += 1;
+                                        // Equity's positive-PnL branch reads the source claims' support.
+                                        if target_after.pnl.get() > 0
+                                            && target_after.source_domains.iter().any(|d| d.source_claim_bound_num.get() != 0)
+                                        {
+                                            exact_positive += 1;
+                                        }
+                                        prop_assert_eq!(kept, cert_after);
+                                    }
+                                }
+                                (b, a) => prop_assert!(false, "refresh before {:?}, after {:?}", b, a),
+                            }
+                        }
+                        header = main.0;
+                        markets = main.1;
+                        account_a = main.2;
+                        account_b = main.3;
+                    }
+                    Ok(())
+                }
+            };
+            if result.is_err() {
+                header = before.0;
+                markets = before.1;
+                account_a = before.2;
+                account_b = before.3;
+            }
+        }
+        if syncs > 0 {
+            eprintln!("FEESKIP syncs={syncs} skips={skips} refreshable={refreshable} exact={exact} exact_positive={exact_positive} deficit_voids={deficit_voids}");
+        }
+    }
+}

@@ -2947,6 +2947,26 @@ fn contract_check_kernel_certified_liq_deficit() {
     let _ = V16Core::kernel_certified_liq_deficit(equity, maintenance_req);
 }
 
+// Full-domain contract check of the certificate after a capital charge: the
+// equity falls by exactly the charge and the liquidation deficit is recomputed by
+// kernel_certified_liq_deficit; the call fails exactly when the charge or the new
+// equity does not fit. Production (sync_account_fee_to_slot_not_atomic, when it
+// keeps a current certificate) calls this and keeps the other fields.
+#[cfg(all(kani, feature = "contracts"))]
+#[kani::proof_for_contract(V16Core::kernel_cert_equity_after_capital_charge)]
+#[kani::unwind(4)]
+#[kani::solver(cadical)]
+fn contract_check_kernel_cert_equity_after_capital_charge() {
+    let certified_equity: i128 = kani::any();
+    let maintenance_req: u128 = kani::any();
+    let charged: u128 = kani::any();
+    let _ = V16Core::kernel_cert_equity_after_capital_charge(
+        certified_equity,
+        maintenance_req,
+        charged,
+    );
+}
+
 // Full-domain contract check of the incremental-certificate kernel: each of the
 // three requirements is the old total less the changed leg's old contribution
 // plus its new one, and the call fails exactly when a contribution exceeds its

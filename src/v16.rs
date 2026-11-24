@@ -2305,6 +2305,42 @@ impl V16Core {
         }
     }
 
+    /// PRODUCTION KERNEL (margin, certificate after a capital charge): the equity
+    /// and the liquidation deficit of a certificate whose account's capital fell by
+    /// `charged` and nothing else changed, as a maintenance-fee charge leaves it.
+    /// Equity is linear in capital (`kernel_haircut_equity`), so it falls by exactly
+    /// `charged`; the deficit is recomputed by `kernel_certified_liq_deficit`. Pure
+    /// scalar; `sync_account_fee_to_slot_not_atomic` calls exactly this when it keeps
+    /// a current certificate, and keeps the certificate's other fields.
+    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &V16Result<(i128, u128)>| {
+        match result {
+            Ok((equity, deficit)) => {
+                charged <= i128::MAX as u128
+                    && certified_equity.checked_sub(charged as i128) == Some(*equity)
+                    && *deficit == V16Core::kernel_certified_liq_deficit(*equity, maintenance_req)
+            }
+            Err(error) => {
+                *error == V16Error::ArithmeticOverflow
+                    && (charged > i128::MAX as u128
+                        || certified_equity.checked_sub(charged as i128).is_none())
+            }
+        }
+    }))]
+    pub(crate) fn kernel_cert_equity_after_capital_charge(
+        certified_equity: i128,
+        maintenance_req: u128,
+        charged: u128,
+    ) -> V16Result<(i128, u128)> {
+        let charged_signed = i128::try_from(charged).map_err(|_| V16Error::ArithmeticOverflow)?;
+        let equity = certified_equity
+            .checked_sub(charged_signed)
+            .ok_or(V16Error::ArithmeticOverflow)?;
+        Ok((
+            equity,
+            Self::kernel_certified_liq_deficit(equity, maintenance_req),
+        ))
+    }
+
     /// PRODUCTION KERNEL (margin, incremental certificate): the requirements of a
     /// certificate after one leg changes size. Each total is the old total less
     /// the leg's old contribution plus its new one: the initial requirement, the
@@ -20132,6 +20168,100 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         }
     }
 
+    /// The condition under which a trade's pre-step keeps an account's certificate without a
+    /// refresh (`settle_account_for_position_action_and_refresh_not_atomic`): not stale, not
+    /// B-stale, no B-stale leg, and a current certificate.
+    fn account_settlement_skippable_with_current_certificate(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<bool> {
+        Ok(!decode_bool(account.header.stale_state)?
+            && !decode_bool(account.header.b_stale_state)?
+            && self
+                .ensure_favorable_action_current_certificate(account)
+                .is_ok()
+            && !Self::has_b_stale_leg(account)?)
+    }
+
+    /// Whether the side-effect settlement of a fee sync (`settle_account_kf_effects_not_atomic`
+    /// then `settle_account_side_effects_after_kf_not_atomic`) would change nothing but the
+    /// certificate's validity and the market's loss-stale summary, and if so the asset whose
+    /// staleness that summary would end on. It would, for a Live account whose certificate is
+    /// current (`account_settlement_skippable_with_current_certificate`) and whose PnL is not
+    /// negative, when none of its source domains is backed by a lapsed Fresh or an Impaired
+    /// bucket, and every active leg is settled to its asset: zero K/F delta, K and F snapshots
+    /// and K/F epoch as the settlement would write them, and B at or above its target. The
+    /// settlement applies its entries in ascending (insurance domain, leg slot) order, each
+    /// setting the summary from its own asset, so the summary ends on the asset of the largest
+    /// key. The bucket condition covers more than the settlement's own trigger (a counterparty
+    /// lien on such a bucket, which the reconciliation moves): a claim on lapsed backing also
+    /// makes a refresh refuse (`validate_source_domain_ledger_current`), and a certificate
+    /// that counts that backing is not kept, so the next position action refreshes as before.
+    fn fee_sync_settlement_noop_last_asset(
+        &self,
+        account: &PortfolioV16View<'_>,
+    ) -> V16Result<Option<usize>> {
+        if account.header.pnl.get() < 0
+            || !self.account_settlement_skippable_with_current_certificate(account)?
+        {
+            return Ok(None);
+        }
+        let now_slot = self.header.current_slot.get();
+        let mut slot = 0usize;
+        while slot < PORTFOLIO_SOURCE_DOMAIN_CAP {
+            let source = &account.header.source_domains[slot];
+            if source.has_default_sparse_tag() && !source.is_occupied() {
+                break;
+            }
+            if source.is_occupied() {
+                let (raw_status, raw_expiry) =
+                    self.backing_bucket_raw_status_expiry_for_domain(source.domain.get() as usize)?;
+                if (raw_status == encode_backing_bucket_status(BackingBucketStatusV16::Fresh)
+                    && raw_expiry <= now_slot)
+                    || raw_status == encode_backing_bucket_status(BackingBucketStatusV16::Impaired)
+                {
+                    return Ok(None);
+                }
+            }
+            slot += 1;
+        }
+        let mut last: Option<(usize, usize, usize)> = None;
+        let mut slot = 0usize;
+        while slot < V16_MAX_PORTFOLIO_ASSETS_N {
+            let leg = account.header.legs[slot].try_to_runtime()?;
+            if leg.active {
+                if leg.stale || leg.b_stale {
+                    return Ok(None);
+                }
+                let asset_index = leg.asset_index as usize;
+                let asset = self.asset_state(asset_index)?;
+                let (k_now, _, _, f_delta, net, f_snap_next) =
+                    Self::leg_kf_delta_components_for_settlement_from_asset(asset, leg)?;
+                let side_kf_epoch = match leg.side {
+                    SideV16::Long => asset.kf_epoch_long,
+                    SideV16::Short => asset.kf_epoch_short,
+                };
+                if net != 0
+                    || f_delta != 0
+                    || k_now != leg.k_snap
+                    || f_snap_next != leg.f_snap
+                    || leg.kf_epoch_snap != side_kf_epoch
+                    || Self::b_target_for_leg_from_asset(asset, leg)? > leg.b_snap
+                {
+                    return Ok(None);
+                }
+                let domain = self.insurance_domain_index(asset_index, leg.side)?;
+                if last.map_or(true, |(last_domain, last_slot, _)| {
+                    (domain, slot) > (last_domain, last_slot)
+                }) {
+                    last = Some((domain, slot, asset_index));
+                }
+            }
+            slot += 1;
+        }
+        Ok(last.map(|(_, _, asset_index)| asset_index))
+    }
+
     fn ensure_favorable_action_current_certificate(
         &self,
         account: &PortfolioV16View<'_>,
@@ -23458,17 +23588,78 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             .checked_mul(U256::from_u64(dt))
             .ok_or(V16Error::ArithmeticOverflow)?;
         let requested_fee = raw_fee.try_into_u128().unwrap_or(u128::MAX);
-        if decode_market_mode(self.header.mode)? == MarketModeV16::Live && nonflat {
-            if let PermissionlessProgressOutcomeV16::AccountBChunk(_) =
-                self.settle_account_side_effects_not_atomic(account, PUBLIC_B_CHUNK_ATOMS)?
-            {
-                return Err(V16Error::BStale);
+        let live_nonflat = decode_market_mode(self.header.mode)? == MarketModeV16::Live && nonflat;
+        // The side-effect settlement voids the certificate even when it settles nothing, and the
+        // trade that usually follows this sync then rebuilds it from every leg. When it has
+        // nothing to settle (`fee_sync_settlement_noop_last_asset`) it is not run: its one effect
+        // besides the certificate, the market's loss-stale summary of the last entry it applies,
+        // is written here, and the current certificate is kept with the charge taken from its
+        // equity (`kernel_cert_equity_after_capital_charge`) when that leaves no liquidation
+        // deficit; otherwise the certificate is voided as the settlement would have voided it.
+        let noop_last_asset = if live_nonflat {
+            self.fee_sync_settlement_noop_last_asset(&account.as_view())?
+        } else {
+            None
+        };
+        let kept_certificate = match noop_last_asset {
+            Some(asset_index) => {
+                let certificate = account.header.health_cert.try_to_runtime()?;
+                self.header.loss_stale_active = encode_bool(asset_is_loss_stale_at_slot(
+                    self.asset_state(asset_index)?,
+                    self.header.current_slot.get(),
+                ));
+                Some(certificate)
             }
-        }
+            None => {
+                if live_nonflat {
+                    // `settle_account_side_effects_not_atomic` without its opening validation:
+                    // this call validated the account against the market on entry and has
+                    // written nothing since.
+                    self.settle_account_kf_effects_not_atomic(account, false)?;
+                    if let PermissionlessProgressOutcomeV16::AccountBChunk(_) = self
+                        .settle_account_side_effects_after_kf_not_atomic(
+                            account,
+                            PUBLIC_B_CHUNK_ATOMS,
+                        )?
+                    {
+                        return Err(V16Error::BStale);
+                    }
+                }
+                None
+            }
+        };
         self.settle_negative_pnl_from_principal_core_not_atomic(account)?;
         let charged = self.charge_account_fee_current_not_atomic(account, requested_fee)?;
         account.header.last_fee_slot = V16PodU64::new(fee_anchor);
-        account.validate_with_market(&self.as_view())?;
+        match kept_certificate {
+            Some(mut certificate) => {
+                let (certified_equity, certified_liq_deficit) =
+                    V16Core::kernel_cert_equity_after_capital_charge(
+                        certificate.certified_equity,
+                        certificate.certified_maintenance_req,
+                        charged,
+                    )?;
+                if certified_liq_deficit == 0 {
+                    certificate.certified_equity = certified_equity;
+                    certificate.certified_liq_deficit = certified_liq_deficit;
+                    certificate.valid = true;
+                    account.header.health_cert = HealthCertV16Account::from_runtime(&certificate);
+                    // No second account validation: this call validated the account on entry and
+                    // has since written only the account's capital, last fee slot and certificate,
+                    // and the market's `c_tot`, `insurance` and loss-stale summary.
+                    // `validate_with_market` reads none of them; `validate_shape` below checks the
+                    // two totals.
+                } else {
+                    // Only a healthy certificate is kept. A charge that leaves a liquidation
+                    // deficit voids it as the settlement would have (the held certificate with
+                    // its validity cleared), so the account is refreshed before it can be
+                    // liquidated and no transaction carries both the charge and a liquidation.
+                    account.header.health_cert.valid = 0;
+                    account.validate_with_market(&self.as_view())?;
+                }
+            }
+            None => account.validate_with_market(&self.as_view())?,
+        }
         self.validate_shape()?;
         Ok(charged)
     }

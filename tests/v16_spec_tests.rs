@@ -2172,8 +2172,706 @@ fn v16_fee_sync_on_nonflat_account_settles_hidden_k_loss_before_fee() {
     assert_eq!(long.header.capital.get(), 0);
     assert_eq!(long.header.pnl.get(), 0);
     assert_eq!(market.header.insurance.get(), 50);
+    assert!(
+        !long.header.health_cert.try_to_runtime().unwrap().valid,
+        "a sync whose settlement moved PnL leaves the certificate void"
+    );
     market.validate_shape().unwrap();
     long.validate_with_market(&market.as_view()).unwrap();
+}
+
+#[test]
+fn v16_fee_sync_skip_writes_every_byte_the_settlement_writes_except_the_certificate() {
+    // Three legs on three assets. Asset 2, the asset of the settlement's last entry (a long's
+    // largest insurance domain), is current; asset 0 lags and was accrued last, so the market's
+    // loss-stale summary is set before the sync and the settlement would clear it.
+    let (mut header, mut markets) = market_fixture(3, 100);
+    let mut long_header = account_fixture(3, 14);
+    let mut short_header = account_fixture(3, 15);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 10_000).unwrap();
+        market.deposit_not_atomic(&mut short, 10_000).unwrap();
+        for asset_index in 0..3 {
+            market
+                .accrue_asset_to_not_atomic(asset_index, 3, 100, 0, true)
+                .unwrap();
+        }
+        for asset_index in 0..3 {
+            market
+                .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                    &mut long,
+                    &mut short,
+                    TradeRequestV16 {
+                        asset_index,
+                        size_q: signed_q(POS_SCALE),
+                        exec_price: 100,
+                        fee_bps: 0,
+                    },
+                )
+                .unwrap();
+        }
+        // The same price and no funding: no epoch moves and every leg stays settled. One call
+        // moves an asset by at most `max_accrual_dt_slots` (1 here), so assets 1 and 2 are
+        // accrued until they reach their slot, and asset 0 once, short of its slot.
+        for (asset_index, to_slot) in [(1usize, 5u64), (2, 6)] {
+            while market.markets[asset_index].engine.asset.slot_last.get() < to_slot {
+                market
+                    .accrue_asset_to_not_atomic(asset_index, to_slot, 100, 0, true)
+                    .unwrap();
+            }
+        }
+        market
+            .accrue_asset_to_not_atomic(0, 6, 100, 0, true)
+            .unwrap();
+    }
+    assert_eq!(header.current_slot.get(), 6);
+    assert_eq!(
+        markets[2].engine.asset.slot_last.get(),
+        6,
+        "asset 2 is current"
+    );
+    assert!(markets[0].engine.asset.slot_last.get() < 6, "asset 0 lags");
+    assert_eq!(
+        header.loss_stale_active, 1,
+        "the lagging asset was accrued last"
+    );
+    assert!(long_header.health_cert.try_to_runtime().unwrap().valid);
+
+    // The same state with only the certificate's validity cleared: the sync then settles.
+    let (mut settled_header, mut settled_markets) = (header.clone(), markets.clone());
+    let mut settled_long = long_header.clone();
+    settled_long.health_cert.valid = 0;
+
+    let sync = |header: &mut MarketGroupV16HeaderAccount,
+                markets: &mut Vec<Market<u64>>,
+                account: &mut PortfolioAccountV16Account| {
+        let mut market = MarketGroupV16ViewMut::new(header, markets);
+        let mut long = PortfolioV16ViewMut::new(account);
+        market
+            .sync_account_fee_to_slot_not_atomic(&mut long, 6, 7)
+            .unwrap()
+    };
+    let charged = sync(&mut header, &mut markets, &mut long_header);
+    let charged_settled = sync(&mut settled_header, &mut settled_markets, &mut settled_long);
+    assert!(charged > 0);
+    assert_eq!(charged, charged_settled);
+    assert!(
+        long_header.health_cert.try_to_runtime().unwrap().valid,
+        "the sync kept the current certificate"
+    );
+    assert!(
+        !settled_long.health_cert.try_to_runtime().unwrap().valid,
+        "the control settled and voided its certificate"
+    );
+    assert_eq!(
+        header.loss_stale_active, 0,
+        "the summary ends on asset 2, the settlement's last entry"
+    );
+    assert_eq!(
+        bytemuck::bytes_of(&header),
+        bytemuck::bytes_of(&settled_header)
+    );
+    assert_eq!(markets, settled_markets);
+    long_header.health_cert = HealthCertV16Account::default();
+    settled_long.health_cert = HealthCertV16Account::default();
+    assert_eq!(
+        bytemuck::bytes_of(&long_header),
+        bytemuck::bytes_of(&settled_long)
+    );
+}
+
+#[test]
+fn v16_fee_sync_settles_a_b_loss_booked_under_a_current_certificate() {
+    // Booking a social loss (B) moves no epoch, so the long's certificate stays current while its
+    // leg owes the loss. The fee sync must still settle it before charging: the skip requires every
+    // leg's B at or above its target. The control clears only the certificate's validity.
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 14);
+    let mut short_header = account_fixture(1, 15);
+    let loss_weight = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, 100, 0, true)
+            .unwrap();
+        long.header
+            .legs
+            .iter()
+            .find_map(|leg| {
+                let leg = leg.try_to_runtime().ok()?;
+                leg.active.then_some(leg.loss_weight)
+            })
+            .unwrap()
+    };
+    const LOSS: u128 = 50;
+    markets[0].engine.asset.b_long_num =
+        V16PodU128::new(LOSS.checked_mul(SOCIAL_LOSS_DEN).unwrap() / loss_weight);
+    assert!(long_header.health_cert.try_to_runtime().unwrap().valid);
+    let capital_before = long_header.capital.get();
+
+    let (mut control_header, mut control_markets) = (header.clone(), markets.clone());
+    let mut control_long = long_header.clone();
+    control_long.health_cert.valid = 0;
+    let sync = |header: &mut MarketGroupV16HeaderAccount,
+                markets: &mut Vec<Market<u64>>,
+                account: &mut PortfolioAccountV16Account| {
+        let mut market = MarketGroupV16ViewMut::new(header, markets);
+        let mut long = PortfolioV16ViewMut::new(account);
+        market.sync_account_fee_to_slot_not_atomic(&mut long, 2, 7)
+    };
+    let charged = sync(&mut header, &mut markets, &mut long_header).unwrap();
+    let control_charged =
+        sync(&mut control_header, &mut control_markets, &mut control_long).unwrap();
+    assert_eq!(charged, control_charged);
+    // The settled loss is paid from principal before the charge.
+    assert!(
+        long_header.capital.get() + charged < capital_before,
+        "the booked loss was settled before the charge"
+    );
+    assert!(
+        !long_header.health_cert.try_to_runtime().unwrap().valid,
+        "a sync that settled a loss leaves the certificate void"
+    );
+    assert_eq!(
+        bytemuck::bytes_of(&header),
+        bytemuck::bytes_of(&control_header)
+    );
+    assert_eq!(markets, control_markets);
+    assert_eq!(
+        bytemuck::bytes_of(&long_header),
+        bytemuck::bytes_of(&control_long)
+    );
+}
+
+#[test]
+fn v16_fee_sync_reconciles_a_lien_on_backing_that_lapsed_under_a_current_certificate() {
+    // A counterparty lien on Fresh backing whose expiry passes moves no epoch, so the
+    // certificate stays current. The fee sync must still run the reconciliation that moves the
+    // lapsed lien to the impaired lane: the skip requires no lien on a lapsed Fresh or an
+    // Impaired bucket. The control clears only the certificate's validity.
+    const Q: u128 = 1_000 * POS_SCALE;
+    let (market_id, _, _) = ids();
+    let mut cfg = V16Config::public_user_fund_with_market_slots(1, 1, 0, 10);
+    cfg.maintenance_margin_bps = 1_000;
+    cfg.initial_margin_bps = 5_000;
+    cfg.max_price_move_bps_per_slot = 500;
+    cfg.max_accrual_dt_slots = 1;
+    let mut header = MarketGroupV16HeaderAccount::new_dynamic(market_id, cfg, 1, 0).unwrap();
+    let mut markets = vec![Market::new(0, EngineAssetSlotV16Account::default())];
+    header
+        .activate_empty_asset_slot_not_atomic(0, &mut markets[0].engine, 100, 1)
+        .unwrap();
+    let mut long_header = account_fixture(1, 44);
+    let mut short_header = account_fixture(1, 45);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 3)
+            .unwrap();
+        market.deposit_not_atomic(&mut long, 52_501).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, 105)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, 2, 105, 0, true)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        // The increase needs the long's backed gain: it liens the short side's fresh backing.
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 105,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        // The same price and no funding, one slot per call, past the backing's expiry.
+        while market.markets[0].engine.asset.slot_last.get() < 4 {
+            market
+                .accrue_asset_to_not_atomic(0, 4, 105, 0, true)
+                .unwrap();
+        }
+    }
+    assert_eq!(header.current_slot.get(), 4);
+    assert!(
+        long_header.source_domains[0]
+            .source_lien_counterparty_backing_num
+            .get()
+            > 0
+    );
+    let fresh = markets[0].engine.backing_short.try_to_runtime().unwrap();
+    assert_eq!(fresh.status, BackingBucketStatusV16::Fresh);
+    assert!(
+        fresh.expiry_slot <= header.current_slot.get(),
+        "the backing lapsed"
+    );
+    let cert = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(cert.valid);
+    assert_eq!(cert.cert_oracle_epoch, header.oracle_epoch.get());
+    assert_eq!(cert.cert_funding_epoch, header.funding_epoch.get());
+    assert_eq!(cert.cert_risk_epoch, header.risk_epoch.get());
+    assert_eq!(cert.cert_asset_set_epoch, header.asset_set_epoch.get());
+
+    let (mut control_header, mut control_markets) = (header.clone(), markets.clone());
+    let mut control_long = long_header.clone();
+    control_long.health_cert.valid = 0;
+    let sync = |header: &mut MarketGroupV16HeaderAccount,
+                markets: &mut Vec<Market<u64>>,
+                account: &mut PortfolioAccountV16Account| {
+        let mut market = MarketGroupV16ViewMut::new(header, markets);
+        let mut long = PortfolioV16ViewMut::new(account);
+        market.sync_account_fee_to_slot_not_atomic(&mut long, 4, 7)
+    };
+    let charged = sync(&mut header, &mut markets, &mut long_header).unwrap();
+    let control_charged =
+        sync(&mut control_header, &mut control_markets, &mut control_long).unwrap();
+    assert!(charged > 0);
+    assert_eq!(charged, control_charged);
+    assert_ne!(
+        markets[0]
+            .engine
+            .backing_short
+            .try_to_runtime()
+            .unwrap()
+            .status,
+        BackingBucketStatusV16::Fresh,
+        "the sync reconciled the lapsed bucket"
+    );
+    assert_eq!(
+        long_header.source_domains[0]
+            .source_lien_counterparty_backing_num
+            .get(),
+        0,
+        "the lien moved to the impaired lane"
+    );
+    assert!(
+        !long_header.health_cert.try_to_runtime().unwrap().valid,
+        "a sync that reconciled a lien leaves the certificate void"
+    );
+    assert_eq!(
+        bytemuck::bytes_of(&header),
+        bytemuck::bytes_of(&control_header)
+    );
+    assert_eq!(markets, control_markets);
+    assert_eq!(
+        bytemuck::bytes_of(&long_header),
+        bytemuck::bytes_of(&control_long)
+    );
+}
+
+#[test]
+fn v16_fee_sync_voids_a_certificate_that_counts_lapsed_backing() {
+    // A source claim (no lien) on Fresh backing whose expiry passed: no epoch moves, so the
+    // certificate stays current, but a refresh refuses until the bucket is expired. The fee sync
+    // must not keep that certificate (the skip requires none of the account's source domains
+    // to sit on a lapsed Fresh or an Impaired bucket), so the next position action refreshes
+    // as before. The control clears only the certificate's validity.
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 23);
+    let mut short_header = account_fixture(1, 24);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 10_000).unwrap();
+        market.deposit_not_atomic(&mut short, 10_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 40, 5)
+            .unwrap();
+        market
+            .add_account_source_positive_pnl_not_atomic(&mut long, 1, 40)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        // The same price and no funding, one slot per call, past the backing's expiry.
+        while market.markets[0].engine.asset.slot_last.get() < 6 {
+            market
+                .accrue_asset_to_not_atomic(0, 6, 100, 0, true)
+                .unwrap();
+        }
+    }
+    assert!(long_header
+        .source_domains
+        .iter()
+        .any(|source| source.source_claim_bound_num.get() != 0));
+    assert!(long_header
+        .source_domains
+        .iter()
+        .all(|source| source.source_lien_counterparty_backing_num.get() == 0));
+    let cert = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(cert.valid);
+    assert_eq!(cert.cert_oracle_epoch, header.oracle_epoch.get());
+    assert_eq!(cert.cert_funding_epoch, header.funding_epoch.get());
+    assert_eq!(cert.cert_risk_epoch, header.risk_epoch.get());
+    assert_eq!(cert.cert_asset_set_epoch, header.asset_set_epoch.get());
+    {
+        let (mut probe_header, mut probe_markets) = (header.clone(), markets.clone());
+        let mut probe_long = long_header.clone();
+        let mut market = MarketGroupV16ViewMut::new(&mut probe_header, &mut probe_markets);
+        let mut long = PortfolioV16ViewMut::new(&mut probe_long);
+        assert_eq!(
+            market.full_account_refresh_not_atomic(&mut long),
+            Err(V16Error::Stale),
+            "a refresh refuses while the claim's backing has lapsed"
+        );
+    }
+
+    let (mut control_header, mut control_markets) = (header.clone(), markets.clone());
+    let mut control_long = long_header.clone();
+    control_long.health_cert.valid = 0;
+    let sync = |header: &mut MarketGroupV16HeaderAccount,
+                markets: &mut Vec<Market<u64>>,
+                account: &mut PortfolioAccountV16Account| {
+        let mut market = MarketGroupV16ViewMut::new(header, markets);
+        let mut long = PortfolioV16ViewMut::new(account);
+        market.sync_account_fee_to_slot_not_atomic(&mut long, 6, 7)
+    };
+    let charged = sync(&mut header, &mut markets, &mut long_header).unwrap();
+    let control_charged =
+        sync(&mut control_header, &mut control_markets, &mut control_long).unwrap();
+    assert!(charged > 0);
+    assert_eq!(charged, control_charged);
+    assert!(
+        !long_header.health_cert.try_to_runtime().unwrap().valid,
+        "a certificate that counts lapsed backing is not kept"
+    );
+    assert_eq!(
+        bytemuck::bytes_of(&header),
+        bytemuck::bytes_of(&control_header)
+    );
+    assert_eq!(markets, control_markets);
+    assert_eq!(
+        bytemuck::bytes_of(&long_header),
+        bytemuck::bytes_of(&control_long)
+    );
+}
+
+#[test]
+fn v16_fee_sync_keeps_the_refreshed_certificate_of_an_account_with_backed_gains() {
+    // Equity's positive-PnL branch counts the realizable support of the account's source
+    // claims, which reads only stored source-credit state; the charge moves capital to
+    // insurance and touches none of it. So the kept certificate is exactly what a refresh of
+    // the post-state issues, as on the capital-only branch.
+    const Q: u128 = 100 * POS_SCALE;
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 23);
+    let mut short_header = account_fixture(1, 24);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market
+            .deposit_fresh_counterparty_backing_not_atomic(1, 100_000, 1_000)
+            .unwrap();
+        market.deposit_not_atomic(&mut long, 100_000).unwrap();
+        market.deposit_not_atomic(&mut short, 100_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(Q),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        let slot = market.markets[0].engine.asset.slot_last.get();
+        market
+            .set_asset_raw_oracle_target_not_atomic(0, 101)
+            .unwrap();
+        market
+            .accrue_asset_to_not_atomic(0, slot + 1, 101, 0, true)
+            .unwrap();
+        market.full_account_refresh_not_atomic(&mut short).unwrap();
+        market.full_account_refresh_not_atomic(&mut long).unwrap();
+        // One more slot at the same price and no funding: the fee anchor advances, no epoch
+        // moves and the asset stays current.
+        market
+            .accrue_asset_to_not_atomic(0, slot + 2, 101, 0, true)
+            .unwrap();
+    }
+    assert_eq!(
+        header.current_slot.get(),
+        markets[0].engine.asset.slot_last.get()
+    );
+    assert!(long_header.pnl.get() > 0, "the long holds a gain");
+    assert!(long_header
+        .source_domains
+        .iter()
+        .any(|source| source.source_claim_bound_num.get() != 0));
+    let held = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(held.valid);
+    assert_eq!(held.cert_oracle_epoch, header.oracle_epoch.get());
+    assert_eq!(held.cert_funding_epoch, header.funding_epoch.get());
+    let refresh = |header: &MarketGroupV16HeaderAccount,
+                   markets: &Vec<Market<u64>>,
+                   account: &PortfolioAccountV16Account| {
+        let (mut probe_header, mut probe_markets) = (header.clone(), markets.clone());
+        let mut probe_long = account.clone();
+        let mut market = MarketGroupV16ViewMut::new(&mut probe_header, &mut probe_markets);
+        let mut long = PortfolioV16ViewMut::new(&mut probe_long);
+        market.full_account_refresh_not_atomic(&mut long).unwrap()
+    };
+    assert_eq!(
+        refresh(&header, &markets, &long_header),
+        held,
+        "the held certificate is exact"
+    );
+
+    let (mut control_header, mut control_markets) = (header.clone(), markets.clone());
+    let mut control_long = long_header.clone();
+    control_long.health_cert.valid = 0;
+    let now_slot = header.current_slot.get();
+    let sync = |header: &mut MarketGroupV16HeaderAccount,
+                markets: &mut Vec<Market<u64>>,
+                account: &mut PortfolioAccountV16Account| {
+        let mut market = MarketGroupV16ViewMut::new(header, markets);
+        let mut long = PortfolioV16ViewMut::new(account);
+        market.sync_account_fee_to_slot_not_atomic(&mut long, now_slot, 7)
+    };
+    let charged = sync(&mut header, &mut markets, &mut long_header).unwrap();
+    let control_charged =
+        sync(&mut control_header, &mut control_markets, &mut control_long).unwrap();
+    assert!(charged > 0);
+    assert_eq!(charged, control_charged);
+    let kept = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(kept.valid, "the sync kept the current certificate");
+    assert_eq!(
+        kept.certified_equity,
+        held.certified_equity - charged as i128
+    );
+    assert_eq!(
+        kept,
+        refresh(&header, &markets, &long_header),
+        "the kept certificate is the post-state's refresh"
+    );
+    assert_eq!(
+        bytemuck::bytes_of(&header),
+        bytemuck::bytes_of(&control_header)
+    );
+    assert_eq!(markets, control_markets);
+    long_header.health_cert = HealthCertV16Account::default();
+    control_long.health_cert = HealthCertV16Account::default();
+    assert_eq!(
+        bytemuck::bytes_of(&long_header),
+        bytemuck::bytes_of(&control_long)
+    );
+}
+
+#[test]
+fn v16_fee_sync_voids_a_certificate_the_charge_leaves_liquidatable() {
+    // Only a healthy certificate is kept. A charge that leaves a liquidation deficit voids the
+    // held certificate as the settlement would have, so the account is refreshed before it can
+    // be liquidated and no transaction carries both the charge and a liquidation. The control
+    // clears only the certificate's validity; every byte must match, the certificate included.
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 14);
+    let mut short_header = account_fixture(1, 15);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 150).unwrap();
+        market.deposit_not_atomic(&mut short, 10_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        let slot = market.markets[0].engine.asset.slot_last.get();
+        market
+            .accrue_asset_to_not_atomic(0, slot + 1, 100, 0, true)
+            .unwrap();
+    }
+    let held = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(held.valid);
+    assert_eq!(held.cert_oracle_epoch, header.oracle_epoch.get());
+    assert_eq!(held.cert_funding_epoch, header.funding_epoch.get());
+    assert_eq!(held.certified_liq_deficit, 0, "healthy before the charge");
+    const RATE: u128 = 60;
+
+    let now_slot = header.current_slot.get();
+    let (mut control_header, mut control_markets) = (header.clone(), markets.clone());
+    let mut control_long = long_header.clone();
+    control_long.health_cert.valid = 0;
+    let sync = |header: &mut MarketGroupV16HeaderAccount,
+                markets: &mut Vec<Market<u64>>,
+                account: &mut PortfolioAccountV16Account| {
+        let mut market = MarketGroupV16ViewMut::new(header, markets);
+        let mut long = PortfolioV16ViewMut::new(account);
+        market.sync_account_fee_to_slot_not_atomic(&mut long, now_slot, RATE)
+    };
+    let charged = sync(&mut header, &mut markets, &mut long_header).unwrap();
+    let control_charged =
+        sync(&mut control_header, &mut control_markets, &mut control_long).unwrap();
+    assert_eq!(charged, control_charged);
+    assert!(
+        held.certified_equity - (charged as i128) < held.certified_maintenance_req as i128,
+        "the charge leaves the account below maintenance"
+    );
+    assert!(
+        !long_header.health_cert.try_to_runtime().unwrap().valid,
+        "a charge that leaves a deficit voids the certificate"
+    );
+    assert_eq!(
+        bytemuck::bytes_of(&header),
+        bytemuck::bytes_of(&control_header)
+    );
+    assert_eq!(markets, control_markets);
+    assert_eq!(
+        bytemuck::bytes_of(&long_header),
+        bytemuck::bytes_of(&control_long),
+        "the voided certificate is the held one with its validity cleared"
+    );
+}
+
+#[test]
+fn v16_fee_sync_keeps_a_current_certificate_when_its_settlement_changes_nothing() {
+    let (mut header, mut markets) = market_fixture(1, 100);
+    let mut long_header = account_fixture(1, 14);
+    let mut short_header = account_fixture(1, 15);
+    {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let mut short = PortfolioV16ViewMut::new(&mut short_header);
+        market.deposit_not_atomic(&mut long, 1_000).unwrap();
+        market.deposit_not_atomic(&mut short, 1_000).unwrap();
+        market
+            .execute_trade_with_fee_loss_stale_scoped_not_atomic(
+                &mut long,
+                &mut short,
+                TradeRequestV16 {
+                    asset_index: 0,
+                    size_q: signed_q(POS_SCALE),
+                    exec_price: 100,
+                    fee_bps: 0,
+                },
+            )
+            .unwrap();
+        // Two slots at the same price and without funding: no epoch moves.
+        market
+            .accrue_asset_to_not_atomic(0, 2, 100, 0, true)
+            .unwrap();
+    }
+    let epochs = (
+        header.oracle_epoch.get(),
+        header.funding_epoch.get(),
+        header.risk_epoch.get(),
+        header.asset_set_epoch.get(),
+    );
+    let cert_epochs = |cert: HealthCertV16| {
+        (
+            cert.cert_oracle_epoch,
+            cert.cert_funding_epoch,
+            cert.cert_risk_epoch,
+            cert.cert_asset_set_epoch,
+        )
+    };
+    let before = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(before.valid);
+    assert_eq!(cert_epochs(before), epochs, "the certificate is current");
+    let capital_before = long_header.capital.get();
+
+    let charged = {
+        let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+        let mut long = PortfolioV16ViewMut::new(&mut long_header);
+        let charged = market
+            .sync_account_fee_to_slot_not_atomic(&mut long, 2, 7)
+            .unwrap();
+        market.validate_shape().unwrap();
+        long.validate_with_market(&market.as_view()).unwrap();
+        charged
+    };
+    assert!(charged > 0, "the fixture must charge a fee");
+    assert_eq!(long_header.capital.get(), capital_before - charged);
+    let kept = long_header.health_cert.try_to_runtime().unwrap();
+    assert!(
+        kept.valid,
+        "a fee sync that settled nothing keeps a current certificate"
+    );
+    assert_eq!(cert_epochs(kept), epochs);
+    assert_eq!(
+        kept.certified_equity,
+        before.certified_equity - charged as i128
+    );
+
+    // A full refresh of the same state computes the same certificate.
+    let (mut refresh_header, mut refresh_markets) = (header.clone(), markets.clone());
+    let mut refresh_long_header = long_header.clone();
+    let refreshed = {
+        let mut market = MarketGroupV16ViewMut::new(&mut refresh_header, &mut refresh_markets);
+        let mut long = PortfolioV16ViewMut::new(&mut refresh_long_header);
+        market.full_account_refresh_not_atomic(&mut long).unwrap()
+    };
+    assert_eq!(refreshed.certified_equity, kept.certified_equity);
+    assert_eq!(refreshed.certified_initial_req, kept.certified_initial_req);
+    assert_eq!(
+        refreshed.certified_maintenance_req,
+        kept.certified_maintenance_req
+    );
+    assert_eq!(refreshed.certified_liq_deficit, kept.certified_liq_deficit);
+    assert_eq!(
+        refreshed.certified_worst_case_loss,
+        kept.certified_worst_case_loss
+    );
 }
 
 #[test]
