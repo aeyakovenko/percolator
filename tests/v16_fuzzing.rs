@@ -998,7 +998,14 @@ proptest! {
                         let target_after = if target_a { main.2 } else { main.3 };
                         let advanced = target_after.last_fee_slot.get() > last_fee_before;
                         let held = if target_a { before.2 } else { before.3 }.health_cert.try_to_runtime().unwrap();
-                        if advanced && kept.valid {
+                        // The skip is taken only by an account with legs (a Live, non-flat sync). A
+                        // flat account settles nothing in either case, and a zero charge leaves its
+                        // certificate as it was, whatever its backing has done since.
+                        let nonflat_before = if target_a { before.2 } else { before.3 }
+                            .active_bitmap
+                            .iter()
+                            .any(|word| word.get() != 0);
+                        if advanced && kept.valid && nonflat_before {
                             prop_assert_eq!(kept.certified_liq_deficit, 0, "only a healthy certificate is kept");
                         }
                         let held_current = held.valid
@@ -1006,7 +1013,7 @@ proptest! {
                             && held.cert_funding_epoch == before.0.funding_epoch.get()
                             && held.cert_risk_epoch == before.0.risk_epoch.get()
                             && held.cert_asset_set_epoch == before.0.asset_set_epoch.get();
-                        if advanced && !kept.valid && held_current {
+                        if advanced && !kept.valid && held_current && nonflat_before {
                             let charged = *main_result.as_ref().unwrap();
                             let equity = held.certified_equity - charged as i128;
                             let deficit = if equity < 0 {
@@ -1019,8 +1026,8 @@ proptest! {
                             }
                         }
                         // A sync whose anchor did not advance returns before touching the account;
-                        // one that did advance and left a valid certificate took the skip.
-                        if advanced && kept.valid {
+                        // one with legs that did advance and left a valid certificate took the skip.
+                        if advanced && kept.valid && nonflat_before {
                             skips += 1;
                             let charged = main_result.unwrap();
                             prop_assert!(!control_cert.valid, "the settlement voids the certificate");
