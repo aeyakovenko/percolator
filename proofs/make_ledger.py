@@ -20,9 +20,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # and the engine source is the checkout itself (which must be at LANDED_REV); the program source comes
 # from a checkout of percolator-prog at WRAPPER_REV, named by LEDGER_WRAPPER_SRC.
 _here = os.path.dirname(os.path.abspath(__file__))
-_frozen = os.path.join(_here, "src_71076137/v16.rs")
+_frozen = os.path.join(_here, "src_06b7e5be/v16.rs")
 ENGINE_SRC = os.environ.get("LEDGER_ENGINE_SRC") or (_frozen if os.path.exists(_frozen) else os.path.join(_here, "..", "src", "v16.rs"))
-WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_257db166/v16_program.rs")
+WRAPPER_SRC = os.environ.get("LEDGER_WRAPPER_SRC") or os.path.join(_here, "wrapper_81a8a8ec/v16_program.rs")
 if not os.path.exists(WRAPPER_SRC):
     sys.exit("make_ledger.py: set LEDGER_WRAPPER_SRC to src/v16_program.rs of a percolator-prog checkout at the pinned revision")
 # The Aristotle project id is account data and is not kept in this file: set ARISTOTLE_PROJECT, or put
@@ -66,7 +66,14 @@ B39_REV = "80f8f0b4"            # refactor batches 3-9: K74-K93
 # price (INV-045). specs/changed_since_4e77481b_at_71076137.md: that setter is the one function changed; no listed
 # kernel changed or reaches it; transition_kinds.71076137.py: the setter re-read, class final. Kani: the 4 harnesses
 # that reach the setter (the new proof among them) were run again in all three layers; every other verdict carries.
-LANDED_REV = "71076137"
+# Rolled 2026-11-24 to 06b7e5be: the INV-077 fee-sync fix. A fee sync whose side-effect settlement has nothing to settle
+# skips it, writes the loss-stale summary itself and keeps a current certificate with the charge taken from its equity
+# (new kernel K94, contract-checked) when that leaves no liquidation deficit; otherwise it voids it as the settlement
+# would. specs/changed_since_71076137_at_06b7e5be.md: the fee sync is the one function changed, three are new, no listed
+# kernel changed or reaches them; transition_kinds.06b7e5be.py: the fee sync re-read, class final; two new loop counters,
+# both rule R1. Kani: the 5 harnesses that reach the change (the contract check among them) were run again in every
+# layer that builds them; every other verdict carries.
+LANDED_REV = "06b7e5be"
 REESTABLISH = {"T09.header", "T38.header"}
 # Kernels whose proof has to be made again for NEW_REV: specs/changed_since_add1d027_at_c030aa40.md
 # (changed_fns.py: own text, callees by name, changed types). Every other kernel, its callees and its
@@ -153,7 +160,7 @@ kernels["K63"] = "kernel_provider_protection_floor_shift"    # new in d1fa39f6
 REFACTOR_KERNELS = {}
 # Kani checks these only for bounded inputs (specs/kernel_contracts_spec_80f8f0b4.md); the prover proves them at full width
 BOUNDED_KERNELS = {"K76", "K77", "K78", "K88", "K91", "K93"}
-for _line in read("specs/kernel_contracts_list_71076137.tsv").splitlines():
+for _line in read("specs/kernel_contracts_list_06b7e5be.tsv").splitlines():
     _f = _line.split("\t")
     if len(_f) >= 2 and int(_f[0][1:]) >= 64:
         REFACTOR_KERNELS[_f[0]] = _f[1]
@@ -168,7 +175,7 @@ for k, fn in kernels.items():
     if k in ("K61", "K62", "K63"):
         note = f" (new in engine {PREV_LANDED_REV}; its Kani contract check verifies for all inputs)"
     if k in REFACTOR_KERNELS:
-        _rev = CB_REV if int(k[1:]) <= 73 else B39_REV
+        _rev = CB_REV if int(k[1:]) <= 73 else (B39_REV if int(k[1:]) <= 93 else "06b7e5be")
         if k in BOUNDED_KERNELS:
             note = f" (new in engine {_rev}; its Kani contract check covers bounded inputs only, the full-width proof is the prover's)"
         else:
@@ -715,7 +722,11 @@ variants = re.findall(r"(?m)^        ([A-Z][A-Za-z0-9]*)\s*[{,(]?", body)
 # owner's rule A; the crank no longer re-stages a reading it has already observed); a Recovery asset's own staleness
 # timer no longer refuses its reductions (trade_resolve_matured_at_slot). Checked by roll_prog_inv046b.py: the
 # instruction census and the effective-price writer scan are unchanged, and so are the two clamp functions.
-WRAPPER_REV = "257db166"
+# Rolled 2026-11-24 to program 81a8a8ec: the pin of engine 06b7e5be (INV-077) and the crank's progress rule (a
+# collection of a due maintenance fee that advanced the portfolio's fee cursor counts as progress when the engine finds
+# nothing else to do). Checked by roll_to_06b7e5be.py: the program source changes only there, the instruction census and
+# the effective-price writer scan are unchanged, and so are the two clamp functions.
+WRAPPER_REV = "81a8a8ec"
 _census_rows = {}
 _cpath = os.path.join(HERE, "specs", f"wrapper_shape_census_{WRAPPER_REV}.md")
 if os.path.exists(_cpath):
@@ -1173,11 +1184,33 @@ piece("AC.recovery_reduction", "W wrapper", "trade_resolve_matured_at_slot (the 
 pieces["AC.recovery_reduction"]["evidence"] = ("test evidence, not proved: the program's test "
                                                "v16_program_recovery_reduction_stays_open_after_the_stale_window")
 # INV-077 open item found while landing C11 (2026-11-23): one maximum-shape measurement no longer fits
-pieces["Y.compute"]["evidence"] = ("open item (2026-11-23): on a market with a maintenance fee, once the assets are "
-                                   "current, the CPI fill that opens the source-claim LP's tenth leg exceeds the "
-                                   "1,400,000 CU limit; the program's test "
-                                   "v16_program_public_full_shape_maintenance_has_bounded_continuation is ignored until "
-                                   "the fix (the program's tests/invariants/README.md, INV-077 open item)")
+pieces["Y.compute"]["evidence"] = ("open item (2026-11-23), narrowed by engine 06b7e5be: on a market with a maintenance "
+                                   "fee and the assets current, the CPI fill that opens the source-claim LP's fourteenth "
+                                   "leg costs 1,118,713 CU (the tenth leg's exceeded the 1,400,000 CU limit before), and "
+                                   "v16_program_public_full_shape_maintenance_has_bounded_continuation runs again; not "
+                                   "measured: a full-shape account whose fee leaves it liquidatable (the crank that "
+                                   "collects, voids and refreshes, then the owner's reducing fill), listed in AUDIT-077 "
+                                   "(the program's tests/invariants/README.md)")
+# INV-077 fee-sync fix (engine 06b7e5be): the skip and the crank's progress rule, with test evidence
+piece("AC.fee_skip", "S settlement glue", "sync_account_fee_to_slot_not_atomic (fee_sync_settlement_noop_last_asset)",
+      "a fee sync that does not run its side-effect settlement (a Live account whose certificate is current, PnL not "
+      "negative, no source domain on a lapsed Fresh or an Impaired bucket, every active leg settled to its asset's K, F, "
+      "K/F epoch and B) leaves the market and every account byte for byte as the settlement would, except the "
+      "certificate: it keeps it current with the charge taken from its equity when that leaves no liquidation deficit, "
+      "and that certificate is the one a full refresh of the post-state issues; otherwise it voids it as the settlement "
+      "would (INV-054: a writer issues a certificate for the post-state or invalidates; INV-077)",
+      "Kani (the skip's conditions against the settlement's writes, every account and market state)")
+pieces["AC.fee_skip"]["evidence"] = ("test evidence, not proved: the engine's deterministic differentials against the "
+                                     "settlement (v16_fee_sync_skip_writes_every_byte_the_settlement_writes_except_the_"
+                                     "certificate and six more v16_fee_sync_* tests), the randomized differential "
+                                     "v16_fuzz_fee_sync_skip_matches_the_settlement_except_the_certificate (256 cases) and "
+                                     "seven mutation controls, each failing a deterministic test")
+piece("AC.fee_crank", "W wrapper", "handle_permissionless_crank_zero_copy (the maintenance collection)",
+      "a permissionless crank whose collection of a due maintenance fee advanced the portfolio's fee cursor succeeds and "
+      "keeps the collection, also when the engine then finds nothing else to do; a crank with nothing left is refused "
+      "with every write rolled back (INV-071)", "Kani (the handler's progress rule, every input)")
+pieces["AC.fee_crank"]["evidence"] = ("test evidence, not proved: the program's test "
+                                      "v16_program_crank_whose_only_work_is_a_due_fee_collects_it (fails without the rule)")
 # INV-045: the anchor of the path accrual is the mark when the current target took effect; a staged target that changes
 # restarts it (engine 71076137, batch 15)
 piece("AC.anchor", "S settlement glue", "set_asset_raw_oracle_targets_not_atomic",
@@ -1372,6 +1405,9 @@ extra["INV-045"] = extra.get("INV-045", []) + [i for i in ("AC.unexposed", "AC.e
                                                          if i in pieces]
 # INV-085 (proven arithmetic equals deployed arithmetic): the engine's unchecked arithmetic is where they can differ
 extra["INV-046"] = extra.get("INV-046", []) + [i for i in ("AC.hybrid_owner", "AC.recovery_reduction") if i in pieces]
+extra["INV-054"] = extra.get("INV-054", []) + [i for i in ("AC.fee_skip", "K94.contract") if i in pieces]
+extra["INV-071"] = extra.get("INV-071", []) + [i for i in ("AC.fee_crank",) if i in pieces]
+extra["INV-077"] = extra.get("INV-077", []) + [i for i in ("AC.fee_skip",) if i in pieces]
 extra["INV-085"] = extra.get("INV-085", []) + sorted(i for i in pieces if i.startswith("PO."))
 if "kernel_accrual_index_update" in _k_of:
     extra["INV-045"] += [i for i in (f"{_k_of['kernel_accrual_index_update']}.contract",
@@ -1538,6 +1574,9 @@ _ROLLS = [
      "changed; the two accrual entry points call the rest of the accrual, moved verbatim, as a function of its own"),
     ("4e77481b", "71076137", "batch 14 (fifteen no-overflow proofs, no code change) and batch 15, a staged target restarts "
      "the path accrual's price-cap anchor: one setter changed, no listed kernel changed or reaches it"),
+    ("71076137", "06b7e5be", "batches 16, 18 and 19 (no-overflow proofs, no code change) and the INV-077 fee-sync fix: the "
+     "fee sync changed, three functions new (one of them kernel K94, contract-checked), no listed kernel changed or "
+     "reaches them"),
 ]
 _steps = _ROLLS[:next(i for i, r in enumerate(_ROLLS) if r[1] == LANDED_REV) + 1]
 md.append(f"**Revisions.** The ledger describes engine {LANDED_REV} and program {WRAPPER_REV}, which pins it. "

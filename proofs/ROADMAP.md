@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-23 from `proof_ledger.tsv`. **342 of 817 pieces of the deployed build are done
-(215 proved by Aristotle, 86 verified by Kani, 41 proved by a local rule checked on the source; 301 without the rule); 0 of 89 charter invariants are closed.**
+Generated 2026-11-24 from `proof_ledger.tsv`. **345 of 822 pieces of the deployed build are done
+(215 proved by Aristotle, 88 verified by Kani, 42 proved by a local rule checked on the source; 303 without the rule); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -37,9 +37,9 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 
 | Phase | What | Proved |
 |---|---|---|
-| 1 | Arithmetic and kernels | 248 of 248 |
-| 2 | The engine cannot panic or overflow and keeps the header | 86 of 194 |
-| 3 | The engine keeps the whole market state | 8 of 214 |
+| 1 | Arithmetic and kernels | 250 of 250 |
+| 2 | The engine cannot panic or overflow and keeps the header | 87 of 195 |
+| 3 | The engine keeps the whole market state | 8 of 216 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -68,9 +68,9 @@ fixed yet. These come first; most are decisions.
 
 ## The phases
 
-**Phase 1. Arithmetic and kernels (248 of 248).** Done for the deployed build: 189 proved by Aristotle, 59 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
+**Phase 1. Arithmetic and kernels (250 of 250).** Done for the deployed build: 189 proved by Aristotle, 61 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
 
-**Phase 2. The engine cannot panic or overflow and keeps the header (86 of 194).**
+**Phase 2. The engine cannot panic or overflow and keeps the header (87 of 195).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
 - Every entry point preserves the header checks: 33 that end in the runtime check, 9 small ones
@@ -78,7 +78,7 @@ fixed yet. These come first; most are decisions.
   and the four places where state is kept after an error. The first batch on the small ones proved
   two before its spending cap stopped it; those two have to be established again on the new engine
   revision, whose market view and asset slot gained fields.
-- The engine's unchecked arithmetic, `PO.*` (98 pieces): the
+- The engine's unchecked arithmetic, `PO.*` (99 pieces): the
   deployed program checks its own arithmetic but builds the engine without overflow checks (with
   them, the 14-leg atomic exit exceeds the compute limit). Every proof was made with checks on, so a
   statement of the form "if the call returns" holds on-chain only where the operations it runs
@@ -88,7 +88,7 @@ fixed yet. These come first; most are decisions.
   checked arithmetic.
 - Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (8 of 214).**
+**Phase 3. The engine keeps the whole market state (8 of 216).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -161,7 +161,7 @@ order of the margin checks from the source.
    differential tests. Cheaper and weaker: the link is tested, not proved.
 3. Keep paying for byte-level proofs of whole methods. On the numbers so far, not affordable.
 
-**The refactor so far.** Engine `71076137` carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
+**The refactor so far.** Engine `06b7e5be` (the INV-077 fee-sync fix on top of `71076137`) carries batches 1 to 13 (batches 10 and 11 add proofs only; batch 13 splits the accrual entry points so that their price check is proved for every price), batch 14 (no-overflow proofs) and batch 15 (a staged target restarts the price-cap anchor, INV-045): the arithmetic of the
 trade fee, a loss paid from capital, the initial-margin lien need, the liquidation deficit, the
 incremental certificate, the residual reward credit, the PnL totals and bounds, the start of a
 bankrupt-close ledger, the residual, both equity measures, the gain-against-loss rule, the
@@ -191,7 +191,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-475 left are mostly whole entry points and instructions, and the two attempts at that kind
+477 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.

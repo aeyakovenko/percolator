@@ -21,3 +21,4 @@ proof_decoded_active_leg_is_valid_for_any_loss_weight	-	verified	-
 proof_no_overflow_liquidation_projected_healthy_after_close_stubbed	-	verified	-
 proof_no_overflow_min_abs_q_for_risk_notional_at_least_wide_stubbed	-	verified	-
 proof_no_overflow_signed_position_of_a_decoded_leg	-	verified	-
+contract_check_kernel_cert_equity_after_capital_charge	-	-	verified

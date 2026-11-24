@@ -24,6 +24,11 @@ Classes:
   dispatch   chooses and calls other functions; each branch is listed
 """
 import re, hashlib
+# Re-read 2026-11-24 at engine 06b7e5be (INV-077): `sync_account_fee_to_slot_not_atomic` skips its side-effect
+# settlement when it has nothing to settle (it then writes the loss-stale summary itself) and keeps a current,
+# healthy certificate with the charge taken from its equity, or voids it and validates the account; every Ok path
+# after a write, kept or voided, still ends in `validate_shape()`, so the class stays `final` (7d6c6167c12e ->
+# 7da6dc17e219).
 # Re-read 2026-11-22 at engine 71076137 (batch 15): `set_asset_raw_oracle_targets_not_atomic` now sets the asset's
 # `fund_px_last` to its effective price when the staged target changes, in the same write as the target and before
 # the final `validate_shape()`; every Ok path still ends in that check, so the class stays `final` (44191266e35e ->
@@ -115,7 +120,8 @@ REVIEWED = {
     "set_asset_raw_oracle_target_not_atomic": ("delegates", "61e861e02c69", "a call to T58"),
     "set_asset_raw_oracle_targets_not_atomic": ("final", "29b4cbf1c78b",
         "a changed target also restarts the price-cap anchor (`fund_px_last`, an asset field) before the check"),
-    "sync_account_fee_to_slot_not_atomic": ("final", "7d6c6167c12e", "early `Ok(0)` when no fee is due, before any write"),
+    "sync_account_fee_to_slot_not_atomic": ("final", "7da6dc17e219",
+        "early `Ok(0)` when no fee is due, before any write; the skip of a settlement with nothing to settle ends in the same check"),
     "withdraw_backing_provider_earnings_not_atomic": ("final", "3276d1ee20fd", "early `Ok` for `amount == 0`"),
     "withdraw_domain_insurance_not_atomic": ("final", "55e4683b6b0a", ""),
     "withdraw_fresh_counterparty_backing_not_atomic": ("final", "707136688bfe",
