@@ -18,6 +18,10 @@ _HDR_TAIL = [r for r in dep if r["id"].endswith(".header") and r["statement"].st
 _HDR_TAIL_N = len(_HDR_TAIL)
 _HDR_TAIL_DONE = sum(1 for r in _HDR_TAIL if r["status"] in DONE)
 _HDR_TAIL_KANI = sum(1 for r in _HDR_TAIL if r["status"] == "verified by Kani")
+# the header pieces of entry points that end in no check (classes local and frame)
+_HDR_SMALL = [r for r in dep if r["id"].endswith(".header") and r["statement"].startswith(("[local]", "[frame]"))]
+_HDR_SMALL_N = len(_HDR_SMALL)
+_HDR_SMALL_DONE = sum(1 for r in _HDR_SMALL if r["status"] in DONE)
 _HDR_TAIL_RULE = sum(1 for r in _HDR_TAIL if r["status"] == "proved by rule")
 _HDR_TAIL_HOW = (f"{_HDR_TAIL_DONE} of them done: their path structure, "
                  + " and ".join(x for x in (f"{_HDR_TAIL_KANI} verified by Kani with every callee replaced" if _HDR_TAIL_KANI else "",
@@ -189,11 +193,10 @@ print(f"""
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
 - Every entry point preserves the header checks: {_HDR_TAIL_N} that end in the runtime check ({_HDR_TAIL_HOW}),
-  9 small ones without a check,
+  {_HDR_SMALL_N} small ones without a check ({_HDR_SMALL_DONE} of them verified by Kani: the predicate itself
+  before and after the call, with its costly pure parts memoized),
   the four value-moving ones and the crank dispatcher as six local statements,
-  and the four places where state is kept after an error. The first batch on the small ones proved
-  two before its spending cap stopped it; those two have to be established again on the new engine
-  revision, whose market view and asset slot gained fields.
+  and the four places where state is kept after an error.
 - The engine's unchecked arithmetic, `PO.*` ({sum(1 for r in dep if r['id'].startswith('PO.'))} pieces): the
   deployed program checks its own arithmetic but builds the engine without overflow checks (with
   them, the 14-leg atomic exit exceeds the compute limit). Every proof was made with checks on, so a

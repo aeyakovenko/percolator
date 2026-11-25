@@ -27,3 +27,6 @@ proof_v16_withdraw_fresh_counterparty_backing_ok_keeps_the_header_predicate	-	ve
 proof_v16_withdraw_ok_keeps_the_header_predicate	-	verified	-
 proof_v16_withdraw_resolved_counterparty_backing_surplus_ok_keeps_the_header_predicate	-	verified	-
 proof_v16_cure_and_cancel_close_with_cert_ok_keeps_the_header_predicate	-	verified	-
+proof_v16_advance_resolved_slot_keeps_the_header_predicate	-	verified	-
+proof_v16_activate_empty_market_slot_keeps_the_header_predicate	-	verified	-
+proof_v16_activate_empty_asset_slot_keeps_the_header_predicate	-	verified	-
