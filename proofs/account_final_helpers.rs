@@ -240,3 +240,73 @@ fn assert_ok_follows_a_passed_account_check<'a, T>(
         assert!(account_checked);
     }
 }
+
+// Entry points of the frame class write, after the last passed check of an account, only fields
+// that the check cannot read (account_read_set.py checks that on the source). Their harnesses take
+// the listed fields out of the comparison with the checked state: `(0, offset, length)` is a field
+// of the account, `(1, offset, length)` one of the header.
+
+/// Stand-in for the account check of a shared view: either outcome, recorded.
+#[cfg(all(kani, feature = "closure"))]
+fn recorded_view_account_check<'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    let passed: bool = kani::any();
+    record_account_check(account.header, market, passed);
+    if passed {
+        Ok(())
+    } else {
+        Err(kani::any())
+    }
+}
+
+/// Whether byte `k` of the state sequence lies in one of the fields.
+#[cfg(all(kani, feature = "closure"))]
+fn in_account_check_fields(k: usize, fields: &[(u8, usize, usize)]) -> bool {
+    let a = core::mem::size_of::<PortfolioAccountV16Account>();
+    let mut n = 0;
+    while n < fields.len() {
+        let (part, offset, length) = fields[n];
+        let start = if part == 0 { offset } else { a + offset };
+        if k >= start && k < start + length {
+            return true;
+        }
+        n += 1;
+    }
+    false
+}
+
+/// Ok leaves byte `i` of the account's state as it was, or the last check of the account passed
+/// and either kept byte `j` of the state left or `j` lies in one of the fields.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn assert_ok_keeps_the_account_check_outside<'a, T>(
+    ok: bool,
+    account: &PortfolioAccountV16Account,
+    i: usize,
+    before: u8,
+    market: &MarketGroupV16ViewMut<'a, T>,
+    fields: &[(u8, usize, usize)],
+) where
+    'a: 'a,
+{
+    if ok {
+        let account_unchanged =
+            account_check_state_byte(account, market.header, &market.markets[0].engine, i) == before;
+        // SAFETY: Kani runs one harness on one thread.
+        let j = unsafe { ACCOUNT_CHECK_PROBE };
+        // SAFETY: as above.
+        let checks = unsafe { ACCOUNT_CHECKS };
+        let passed = |r: Option<RecordedAccountCheck>| match r {
+            Some(r) => r.account == account as *const PortfolioAccountV16Account && r.passed,
+            None => false,
+        };
+        let account_checked = last_account_check_passed_on(account, market)
+            || (in_account_check_fields(j, fields) && (passed(checks[0]) || passed(checks[1])));
+        assert!(account_unchanged || account_checked);
+    }
+}

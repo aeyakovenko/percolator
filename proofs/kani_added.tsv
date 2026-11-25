@@ -47,3 +47,6 @@ proof_v16_execute_trade_with_fee_loss_stale_scoped_ok_keeps_the_account_check	-	
 proof_v16_force_close_recovery_pair_ok_keeps_the_account_check	-	verified	-
 proof_v16_withdraw_ok_keeps_the_account_check	-	verified	-
 proof_v16_cure_and_cancel_close_with_cert_ok_keeps_the_account_check	-	verified	-
+proof_v16_deregister_empty_materialized_portfolio_ok_keeps_the_account_check	-	verified	-
+proof_v16_register_empty_materialized_portfolio_ok_keeps_the_account_check	-	verified	-
+proof_v16_sync_account_fee_to_slot_ok_keeps_the_account_check	-	verified	-

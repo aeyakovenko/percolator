@@ -225,6 +225,55 @@ INLINE = {
 }
 
 
+# Entry points whose last passed account check is followed by writes to fields the check cannot read (frame class):
+# their harnesses assert that every Ok leaves the state as it was, or equal, outside the listed fields, to what the last
+# passed check was asked about; account_read_set.py checks on the source that the check cannot read those fields.
+# Per entry point: the fields ((part, struct field, type): part 0 the account, 1 the header), stubs of the account's own
+# reads (taken by shared reference), callees that run as written, associated functions that run as written although an
+# account is handed to them, and callees replaced by a stand-in with a contract that the generator checks on the source.
+FRAME = {
+    "deregister_empty_materialized_portfolio_not_atomic": {
+        "fields": [(1, "materialized_portfolio_count", "V16PodU64")],
+        "account_methods": {"is_empty_for_dematerialization": "stand_in_account_emptiness_any_result"},
+    },
+    "register_empty_materialized_portfolio_not_atomic": {
+        "fields": [(1, "materialized_portfolio_count", "V16PodU64")],
+        "account_methods": {"is_empty_for_dematerialization": "stand_in_account_emptiness_any_result"},
+    },
+    "sync_account_fee_to_slot_not_atomic": {
+        "fields": [(0, "capital", "V16PodU128"), (0, "last_fee_slot", "V16PodU64"), (0, "health_cert", "HealthCertV16Account"),
+                   (1, "c_tot", "V16PodU128"), (1, "insurance", "V16PodU128"), (1, "loss_stale_active", "u8")],
+        "inline": ["settle_negative_pnl_from_principal_core_not_atomic", "charge_account_fee_current_not_atomic"],
+        "assoc": ["record_account_residual_crystallized_loss"],
+        # Some(_) only when the account's PnL is not negative: its first statement returns Ok(None) when it is
+        "contract": {"fee_sync_settlement_noop_last_asset": (
+            r"^\s*\{\s*if account\.header\.pnl\.get\(\) < 0\s*\|\|[^{]*\{\s*return Ok\(None\);\s*\}",
+            "acct_contract_fee_sync_settlement_noop_last_asset")},
+    },
+}
+CONTRACT_TEXT = {
+    "acct_contract_fee_sync_settlement_noop_last_asset": """// Stand-in for `fee_sync_settlement_noop_last_asset` (a read: it takes the view and the account by
+// shared reference) with the contract the generator checks on its source: it returns `Some` only when
+// the account's PnL is not negative (its first statement returns `Ok(None)` when it is). Any result
+// besides.
+#[cfg(all(kani, feature = "closure"))]
+fn acct_contract_fee_sync_settlement_noop_last_asset<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<Option<usize>>
+where
+    'a: 'a,
+{
+    let result: V16Result<Option<usize>> = kani::any();
+    if let Ok(Some(_)) = result {
+        kani::assume(account.header.pnl.get() >= 0);
+    }
+    result
+}
+""",
+}
+
+
 def arg_spans(body, opener_re):
     """(start, end) of the argument list of every call matching opener_re (which ends at its open paren)."""
     spans = []
@@ -239,7 +288,7 @@ def arg_spans(body, opener_re):
     return spans
 
 
-def check_uses(f, body, params, pure_names=()):
+def check_uses(f, body, params, pure_names=(), account_methods=(), assoc=()):
     """An account parameter is used only through `.header.<field>`, its own `validate_with_market(`, `as_view()`, or
     inside the arguments of a replaced (or inlined) callee or of a pure function replaced in this harness; `self` only
     as `self.header.`, its own `validate_shape()`, a replaced or inlined callee, or `self.as_view()` inside the
@@ -250,13 +299,16 @@ def check_uses(f, body, params, pure_names=()):
     if pure_names:
         stubbed += arg_spans(body, r"\b(?:Self|V16Core|MarketGroupV16ViewMut)\s*::\s*(?:" + "|".join(pure_names)
                              + r")\s*\(")
+    if assoc:  # associated functions that run as written: an account handed to them is used by real code
+        stubbed += arg_spans(body, r"\bSelf\s*::\s*(?:" + "|".join(assoc) + r")\s*\(")
     inside = lambda p: any(a < p < b for a, b in stubbed)
     accounts = [p.split(":")[0].strip() for p in params[1:] if ACCOUNT_MUT in p or ACCOUNT_SHARED in p]
     for acc in accounts:
         for m in re.finditer(r"\b" + acc + r"\b", body):
             rest = body[m.end():]
             ok = re.match(r"\s*\.\s*header\s*\.\s*[a-z_0-9]+", rest) or re.match(r"\s*\.\s*validate_with_market\s*\(", rest) \
-                or re.match(r"\s*\.\s*as_view\s*\(\s*\)", rest) or inside(m.start())
+                or re.match(r"\s*\.\s*as_view\s*\(\s*\)", rest) or inside(m.start()) \
+                or any(re.match(r"\s*\.\s*" + am + r"\s*\(", rest) for am in account_methods)
             assert ok, f"{f}: `{acc}` used as `{body[m.start():m.start() + 60]!r}`"
     for m in re.finditer(r"(?<![A-Za-z_])self\b", body):
         rest = body[m.end():]
@@ -288,6 +340,10 @@ TARGETS = [  # entry points given accounts whose Ok paths end in their accounts'
     "force_close_recovery_pair_not_atomic",
     "withdraw_not_atomic",
     "cure_and_cancel_close_with_cert_not_atomic",
+    # frame class (FRAME above)
+    "deregister_empty_materialized_portfolio_not_atomic",
+    "register_empty_materialized_portfolio_not_atomic",
+    "sync_account_fee_to_slot_not_atomic",
 ]
 AUX = {"cure_and_cancel_close_with_cert_not_atomic": "T25.account (its core)"}
 only = os.environ.get("ONLY", "").split(",") if os.environ.get("ONLY") else None
@@ -303,15 +359,21 @@ for f in TARGETS:
     assert row["id"], f
     params, ret, _ = signature(f)
     assert params[0] == "&mut self"
-    inl = INLINE.get(f, [])
+    fr = FRAME.get(f, {})
+    inl = INLINE.get(f, []) + fr.get("inline", [])
     pure_names = [pf for _, pf in PURE.get(f, [])]
+    contracts = fr.get("contract", {})
+    for c, (pattern, _) in contracts.items():  # the contract of a callee, checked on its source
+        cparams, _, ctext = signature(c)
+        assert cparams[0] == "&self", (c, cparams[0])
+        assert re.search(pattern, ctext[ctext.index("{"):]), f"{c}: its contract does not hold on the source"
     callees = set()
     for g in [f] + inl:  # the entry point and the callees that run as written: every check applies to each
         body = entry_body(g)
         gparams = signature(g)[0]
         assert gparams[0] == "&mut self", g
         callees |= set(re.findall(r"self\s*\.\s*([a-z_0-9]+)\s*\(", body)) - {"validate_shape", "as_view"}
-        check_uses(g, body, gparams, pure_names)
+        check_uses(g, body, gparams, pure_names, list(fr.get("account_methods", {})), fr.get("assoc", []))
         assert not re.findall(r"self\s*\.\s*markets\b", body), f"{g} reads the slots directly"
         assert "as_view()." not in body.replace("self.as_view())", "").replace(".as_view(),", ""), \
             f"{g} calls a read view method"
@@ -322,7 +384,16 @@ for f in TARGETS:
     callees = sorted(callees - set(inl))
     stubs = ["#[kani::stub(PortfolioV16ViewMut::validate_with_market, recorded_account_check)]",
              "#[kani::stub(MarketGroupV16ViewMut::validate_shape, acct_any_shape_check)]"]
+    if any(ACCOUNT_SHARED in p for p in params[1:]):
+        stubs.append("#[kani::stub(PortfolioV16View::validate_with_market, recorded_view_account_check)]")
+    for am, standin in fr.get("account_methods", {}).items():
+        stubs.append(f"#[kani::stub(PortfolioV16View::{am}, {standin})]")
     for c in callees:
+        if c in contracts:
+            name = contracts[c][1]
+            stand_ins.setdefault(c, (name, CONTRACT_TEXT[name]))
+            stubs.append(f"#[kani::stub(MarketGroupV16ViewMut::{c}, {name})]")
+            continue
         if c not in stand_ins:
             stand_ins[c] = stand_in(c)
         stubs.append(f"#[kani::stub(MarketGroupV16ViewMut::{c}, {stand_ins[c][0]})]")
@@ -338,6 +409,10 @@ for f in TARGETS:
             setup.append(f"let mut {pn}_header = arbitrary_whole_account();")
             args.append(f"&mut PortfolioV16ViewMut {{ header: &mut {pn}_header }}")
             accounts.append(pn)
+        elif pt == ACCOUNT_SHARED:
+            setup.append(f"let {pn}_header = arbitrary_whole_account();")
+            args.append(f"&PortfolioV16View {{ header: &{pn}_header }}")
+            accounts.append(pn)
         elif pt in ARBITRARY:
             args.append("kani::any()")
         elif pt == "HealthCertV16":
@@ -352,6 +427,13 @@ for f in TARGETS:
     if f in VERIFIED:
         asserts = "".join(f"    assert_ok_follows_a_passed_account_check(result.is_ok(), &{a}_header, &market);\n"
                           for a in accounts)
+    elif fr:
+        structs = {0: "PortfolioAccountV16Account", 1: "MarketGroupV16HeaderAccount"}
+        fields = "".join(f"        ({part}, core::mem::offset_of!({structs[part]}, {fl}), core::mem::size_of::<{ty}>()),\n"
+                         for part, fl, ty in fr["fields"])
+        asserts = (f"    let fields = [\n{fields}    ];\n"
+                   + "".join(f"    assert_ok_keeps_the_account_check_outside(result.is_ok(), &{a}_header, probe, {a}_before, "
+                             f"&market, &fields);\n" for a in accounts))
     else:
         asserts = "".join(f"    assert_ok_keeps_the_account_check(result.is_ok(), &{a}_header, probe, {a}_before, &market);\n"
                           for a in accounts)
@@ -369,6 +451,8 @@ for f in TARGETS:
          + "    kani::cover!(result.is_err(), \"an error is reached\");\n"
          + "}\n")
     harnesses.append(h)
+    if fr:
+        report.append(f"{tid}\tframe: " + ", ".join(("account." if part == 0 else "header.") + fl for part, fl, _ in fr["fields"]))
     report.append(f"{tid}\t{f}\t{len(callees)} callees\t{','.join(callees)}"
                   + "".join(f"\truns as written: {g}" for g in inl)
                   + "".join(f"\tpure stand-in: {o}::{p}" for o, p in PURE.get(f, [])))
