@@ -83,3 +83,7 @@ proof_v16_accrue_asset_path_to_keeps_the_header_predicate_29_steps	-	verified	-
 proof_v16_accrue_asset_path_to_keeps_the_header_predicate_30_steps	-	verified	-
 proof_v16_accrue_asset_path_to_keeps_the_header_predicate_31_steps	-	verified	-
 proof_v16_accrue_asset_path_to_keeps_the_header_predicate_32_steps	-	verified	-
+proof_po_accrue_asset_to_admitted_not_atomic	-	verified	-
+proof_po_clamp_close_residual_to_account_loss	-	verified	-
+proof_po_reduce_matching_open_interest_for_unilateral_close	-	verified	-
+proof_po_remember_provider_protection_observed	-	verified	-
