@@ -5161,6 +5161,276 @@ fn proof_no_overflow_signed_position_of_a_decoded_leg() {
     kani::cover!(q > 0);
 }
 
+// Overflow pieces (PO.*) of methods of the mutable market view: each function runs as written on arbitrary
+// inputs with its callees replaced, and Kani checks its arithmetic (see proofs/gen_po.py).
+
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for ParNettingBatchV16 {
+    fn any() -> Self {
+        ParNettingBatchV16 {
+            face_left: kani::any(),
+            loss_left: kani::any(),
+            netted: kani::any(),
+            netted_num: kani::any(),
+            transfer_num: kani::any(),
+            expiry_slot: kani::any(),
+            whole_atoms: kani::any(),
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for KfLossDomainCreditV16 {
+    fn any() -> Self {
+        KfLossDomainCreditV16 {
+            amount_num: kani::any(),
+            expiry_slot: kani::any(),
+            payments: kani::any(),
+            resolved: kani::any(),
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for KfLossLienPaymentV16 {
+    fn any() -> Self {
+        KfLossLienPaymentV16 {
+            loss_domain: kani::any(),
+            loss_side_open: kani::any(),
+            consumed_atoms: kani::any(),
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for TradeApplyOutcomeV16 {
+    fn any() -> Self {
+        TradeApplyOutcomeV16 {
+            fee_a: kani::any(),
+            fee_b: kani::any(),
+            notional: kani::any(),
+            risk_increasing: kani::any(),
+            long_requires_initial_margin: kani::any(),
+            short_requires_initial_margin: kani::any(),
+            long_has_source_claims: kani::any(),
+            short_has_source_claims: kani::any(),
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for AccountBSettlementChunkV16 {
+    fn any() -> Self {
+        AccountBSettlementChunkV16 {
+            delta_b: kani::any(),
+            loss: kani::any(),
+            new_remainder: kani::any(),
+            remaining_after: kani::any(),
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn po_any_asset_state<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+) -> V16Result<AssetStateV16>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn po_any_pending_domain_loss_barrier_count<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _side: SideV16,
+) -> V16Result<u64>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+// Stand-in for `V16Core::kernel_accrual_index_update` (inputs by value or by shared reference, writes nothing): any result.
+#[cfg(all(kani, feature = "closure"))]
+fn po_any_pure_kernel_accrual_index_update(
+    _k_long: i128,
+    _k_short: i128,
+    _f_long: i128,
+    _f_short: i128,
+    _a_long: u128,
+    _a_short: u128,
+    _price_delta: i128,
+    _funding_num: i128,
+) -> V16Result<(i128, i128, i128, i128)> {
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn po_any_require_asset_accruable<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn po_any_validate_shape_audit_scan<'a, T>(_market: &MarketGroupV16ViewMut<'a, T>) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn po_havoc_begin_full_drain_reset_inner<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _side: SideV16,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn po_havoc_set_asset_state<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _asset: AssetStateV16,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn po_havoc_set_pending_domain_loss_barrier_count<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _side: SideV16,
+    _value: u64,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn po_havoc_sync_side_adl_index<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset: AssetStateV16,
+    _side: SideV16,
+    _acting_raw_after_q: u128,
+) -> V16Result<AssetStateV16>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    kani::any()
+}
+
+// PO.MarketGroupV16ViewMut::accrue_asset_to_admitted_not_atomic
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, po_any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::require_asset_accruable,
+    po_any_require_asset_accruable
+)]
+#[kani::stub(MarketGroupV16ViewMut::set_asset_state, po_havoc_set_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape_audit_scan,
+    po_any_validate_shape_audit_scan
+)]
+#[kani::stub(
+    V16Core::kernel_accrual_index_update,
+    po_any_pure_kernel_accrual_index_update
+)]
+fn proof_po_accrue_asset_to_admitted_not_atomic() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.protection_observed = kani::any(); // the view's scratch, as a view in use may hold it
+    let _ = market.accrue_asset_to_admitted_not_atomic(
+        any_v16_config_for_overflow(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+}
+
+// PO.MarketGroupV16ViewMut::clamp_close_residual_to_account_loss
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16ViewMut::pending_domain_loss_barrier_count,
+    po_any_pending_domain_loss_barrier_count
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_pending_domain_loss_barrier_count,
+    po_havoc_set_pending_domain_loss_barrier_count
+)]
+fn proof_po_clamp_close_residual_to_account_loss() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut account_header = arbitrary_whole_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.protection_observed = kani::any(); // the view's scratch, as a view in use may hold it
+    let _ = market.clamp_close_residual_to_account_loss(&mut PortfolioV16ViewMut {
+        header: &mut account_header,
+    });
+}
+
+// PO.MarketGroupV16ViewMut::reduce_matching_open_interest_for_unilateral_close
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, po_any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::begin_full_drain_reset_inner,
+    po_havoc_begin_full_drain_reset_inner
+)]
+#[kani::stub(MarketGroupV16ViewMut::set_asset_state, po_havoc_set_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::sync_side_adl_index,
+    po_havoc_sync_side_adl_index
+)]
+fn proof_po_reduce_matching_open_interest_for_unilateral_close() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.protection_observed = kani::any(); // the view's scratch, as a view in use may hold it
+    let _ = market.reduce_matching_open_interest_for_unilateral_close(
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+}
+
+// PO.MarketGroupV16ViewMut::remember_provider_protection_observed
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_po_remember_provider_protection_observed() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    market.protection_observed = kani::any(); // the view's scratch, as a view in use may hold it
+    let _ = market.remember_provider_protection_observed(kani::any(), kani::any());
+}
+
 // Account pieces of class "final" (T*.account): the path structure, with every callee replaced.
 //
 // The ledger states each such piece as: every portfolio account the entry point is given passes
