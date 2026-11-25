@@ -77,6 +77,8 @@ fn resolved_market_with_backing(
                 credit_rate_num: CREDIT_RATE_SCALE,
                 ..SourceCreditStateV16::EMPTY
             });
+        // A provider's deposit: all of it is provider principal.
+        markets[0].engine.provider_principal_long_num = V16PodU128::new(backing_num);
     }
     (header, markets)
 }
@@ -1132,6 +1134,7 @@ proptest! {
                 credit_rate_num: CREDIT_RATE_SCALE,
                 ..SourceCreditStateV16::EMPTY
             });
+        markets[0].engine.provider_principal_long_num = V16PodU128::new(backing * BOUND_SCALE);
         let header_before = header;
         let slot_before = markets[0].engine;
 

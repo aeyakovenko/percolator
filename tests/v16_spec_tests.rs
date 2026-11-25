@@ -7304,6 +7304,11 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
             market
                 .reserve_insurance_credit_not_atomic(1, 100_000 * BOUND_SCALE)
                 .unwrap();
+            // One atom of provider backing that lapses at slot 3: the short's payment
+            // joins this bucket at its expiry (below).
+            market
+                .deposit_fresh_counterparty_backing_not_atomic(1, 1, 3)
+                .unwrap();
         }
         #[cfg(not(feature = "fuzz"))]
         unreachable!("the insurance-backed variant requires the fuzz test API");
@@ -7336,6 +7341,10 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
     market.full_account_refresh_not_atomic(&mut short).unwrap();
     market.full_account_refresh_not_atomic(&mut long).unwrap();
     if insurance_backed {
+        // The short's payment backs the long's gain, and the provider exit cannot take it
+        // (it is capped at provider principal). For a gain backed by insurance alone the
+        // payment lapses with its bucket into the junior pool, and the reserved insurance
+        // backs the claim.
         let fresh_backing_atoms = market.markets[0]
             .engine
             .backing_short
@@ -7343,10 +7352,26 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
             .unwrap()
             .fresh_unliened_backing_num
             / BOUND_SCALE;
-        assert!(fresh_backing_atoms > 0);
+        assert!(fresh_backing_atoms > 1);
+        assert_eq!(
+            market.withdraw_fresh_counterparty_backing_not_atomic(1, fresh_backing_atoms),
+            Err(V16Error::LockActive)
+        );
         market
-            .withdraw_fresh_counterparty_backing_not_atomic(1, fresh_backing_atoms)
-            .expect("reserved insurance must fully replace withdrawn counterparty backing");
+            .accrue_asset_to_not_atomic(0, 3, 105, 0, true)
+            .unwrap();
+        market
+            .expire_source_backing_bucket_not_atomic(1, 3)
+            .expect("the short's payment lapses with its bucket");
+        assert_eq!(
+            market.markets[0]
+                .engine
+                .backing_short
+                .try_to_runtime()
+                .unwrap()
+                .fresh_unliened_backing_num,
+            0
+        );
     }
     assert_eq!(long.header.pnl.get(), 5_000);
     market
@@ -7396,8 +7421,9 @@ fn run_live_mark_reversal_unwinds_source_lien_before_claim_burn(insurance_backed
     market
         .set_asset_raw_oracle_target_not_atomic(0, 100)
         .unwrap();
+    let reversal_slot = if insurance_backed { 4 } else { 3 };
     market
-        .accrue_asset_to_not_atomic(0, 3, 100, 0, true)
+        .accrue_asset_to_not_atomic(0, reversal_slot, 100, 0, true)
         .unwrap();
     market.full_account_refresh_not_atomic(&mut short).unwrap();
     let cert = market

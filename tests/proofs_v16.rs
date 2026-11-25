@@ -9140,6 +9140,8 @@ fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
+    // The backing is a provider's deposit: all of it is provider principal.
+    markets[0].engine.provider_principal_long_num = V16PodU128::new(backing_num);
     let vault_before = header.vault.get();
     let c_tot_before = header.c_tot.get();
     let insurance_before = header.insurance.get();
@@ -9182,6 +9184,10 @@ fn proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source
     assert_eq!(source.provider_receivable_num, 0);
     assert_eq!(source.credit_rate_num, CREDIT_RATE_SCALE);
     assert_eq!(source.credit_epoch, 1);
+    assert_eq!(
+        market.markets[0].engine.provider_principal_long_num.get(),
+        remaining_num
+    );
     if remaining_num == 0 {
         assert_eq!(bucket.status, BackingBucketStatusV16::Empty);
         assert_eq!(bucket.expiry_slot, 0);
@@ -9229,6 +9235,8 @@ fn proof_v16_public_counterparty_backing_withdraw_rejects_underbacking_source_cl
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
+    // All of it provider principal, so the principal cap does not refuse.
+    markets[0].engine.provider_principal_long_num = V16PodU128::new(backing_num);
     let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
 
     let result = market.withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
@@ -9288,6 +9296,7 @@ fn public_counterparty_backing_withdraw_lapsed_is_rejected(now_slot: u64) {
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
+    markets[0].engine.provider_principal_long_num = V16PodU128::new(backing_num);
     let h0 = header;
     let s0 = markets[0].engine;
 
@@ -9474,7 +9483,8 @@ fn proof_v16_provider_flows_move_the_floor_with_the_principal() {
 // 1..=4 with exact claims 0..=backing at the full rate, any principal and any
 // stored floor 0..=6 (so also a stored floor above the protection, which is what
 // an earlier view leaves when its last write lowered protection), withdrawal
-// 1..=backing. A refused withdrawal touches nothing, the floor included.
+// 1..=backing. A refused withdrawal (past the claim watermark or past provider
+// principal) touches nothing, the floor included.
 #[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
@@ -9532,7 +9542,7 @@ fn proof_v16_public_backing_withdraw_brings_the_floor_up_to_date_once_then_lower
         .withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
 
     let protection_before = principal_num.min(backing_num - claim_num);
-    let covered_after = backing_raw - withdraw_raw >= claim_raw;
+    let covered_after = backing_raw - withdraw_raw >= claim_raw && withdraw_raw <= principal_raw;
     kani::cover!(
         covered_after && floor_num > protection_before,
         "a stored floor above the protection is lowered to it first"
@@ -9545,7 +9555,14 @@ fn proof_v16_public_backing_withdraw_brings_the_floor_up_to_date_once_then_lower
         covered_after && floor_num.min(protection_before) < withdraw_num,
         "a withdrawal beyond the floor leaves zero"
     );
-    kani::cover!(!covered_after, "the claim watermark refuses");
+    kani::cover!(
+        backing_raw - withdraw_raw < claim_raw && withdraw_raw <= principal_raw,
+        "the claim watermark refuses"
+    );
+    kani::cover!(
+        backing_raw - withdraw_raw >= claim_raw && withdraw_raw > principal_raw,
+        "the principal cap refuses"
+    );
     if covered_after {
         assert_eq!(result, Ok(()));
         let engine = &markets[0].engine;
@@ -9673,20 +9690,21 @@ fn proof_v16_public_backing_deposit_brings_the_floor_up_to_date_once_then_raises
 }
 
 // In Live with every position settled, a domain can still hold loser-paid backing
-// beyond its claims: a payment that a reversal stranded there. The payer's regain
-// is claimed on the twin domain, which nobody else funds, so as long as the twin's
-// claims are short of backing the payment is owed there and not to the withdrawer.
-// The provider exit past principal leaves min(stranded, what the twin is owed) in
-// the domain, and refuses before the route touches a byte when it would not.
-// Backing 1..=4 with no registered claim (so the claim watermark cannot refuse),
-// principal 0..=backing, withdrawal 1..=backing, and six twin states from fully
-// backed to nothing behind three atoms of claims. A withdrawal within principal
-// always succeeds and leaves the loser-paid backing as it was.
+// beyond its claims: a payment that a reversal stranded there (the payer's regain
+// is claimed on the twin domain, which nobody else funds), or a payment for a gain
+// that was burned against its winner's older loss before the payment arrived (the
+// issue #274 residual). None of it is the withdrawer's: the provider exit pays out
+// provider principal and nothing beyond it, whatever the twin is owed, and refuses
+// before the route touches a byte. Backing 1..=4 with no registered claim (so the
+// claim watermark cannot refuse), principal 0..=backing, withdrawal 1..=backing,
+// and six twin states from fully backed to nothing behind three atoms of claims. A
+// withdrawal within principal always succeeds and leaves the loser-paid backing as
+// it was.
 #[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v16_public_live_backing_withdraw_leaves_loser_payments_the_twin_is_owed() {
+fn proof_v16_public_live_settled_backing_withdraw_never_takes_loser_paid_backing() {
     let backing_raw: u8 = kani::any();
     let principal_raw: u8 = kani::any();
     let withdraw_raw: u8 = kani::any();
@@ -9764,28 +9782,23 @@ fn proof_v16_public_live_backing_withdraw_leaves_loser_payments_the_twin_is_owed
     let stranded_raw = backing_raw - principal_raw;
     let owed_raw = stranded_raw.min(twin_claim_raw - twin_backing_raw);
     let past_principal = withdraw_raw > principal_raw;
-    let leaves_what_is_owed = backing_raw - withdraw_raw >= owed_raw;
     kani::cover!(
-        past_principal && !leaves_what_is_owed && principal_raw == 0,
+        past_principal && principal_raw == 0 && owed_raw != 0,
         "a caller with no principal cannot take a stranded payment"
     );
     kani::cover!(
-        past_principal && !leaves_what_is_owed && principal_raw != 0,
+        past_principal && principal_raw != 0 && owed_raw != 0,
         "a provider cannot take a stranded payment on top of its principal"
     );
     kani::cover!(
-        past_principal && leaves_what_is_owed && owed_raw != 0,
-        "past principal, what the twin is owed stays"
-    );
-    kani::cover!(
         past_principal && owed_raw == 0,
-        "the twin is owed nothing: the exit past principal is as before"
+        "the twin is owed nothing: still nothing past principal leaves"
     );
     kani::cover!(
         !past_principal && owed_raw != 0,
         "principal leaves beside a stranded payment"
     );
-    if !past_principal || leaves_what_is_owed {
+    if !past_principal {
         assert_eq!(result, Ok(()));
         let reserved_after = markets[0]
             .engine
@@ -9794,16 +9807,12 @@ fn proof_v16_public_live_backing_withdraw_leaves_loser_payments_the_twin_is_owed
             .get();
         let principal_after = markets[0].engine.provider_principal_long_num.get();
         assert_eq!(reserved_after, backing_num - withdraw_num);
-        assert_eq!(principal_after, principal_num.saturating_sub(withdraw_num));
-        if past_principal {
-            assert!(reserved_after >= owed_raw as u128 * BOUND_SCALE);
-        } else {
-            // What the losers paid in is exactly what it was.
-            assert_eq!(
-                reserved_after - principal_after,
-                backing_num - principal_num
-            );
-        }
+        assert_eq!(principal_after, principal_num - withdraw_num);
+        // What the losers paid in is exactly what it was.
+        assert_eq!(
+            reserved_after - principal_after,
+            backing_num - principal_num
+        );
         // The twin domain is not touched.
         assert!(
             markets[0].engine.source_credit_short == s0.source_credit_short
@@ -9819,24 +9828,27 @@ fn proof_v16_public_live_backing_withdraw_leaves_loser_payments_the_twin_is_owed
     }
 }
 
-// In Live, while a stored position on the asset has not settled the latest K/F
-// change, a gain may exist that is not registered as a claim yet, so the claim
-// watermark cannot protect what the domain's losers paid in. The provider exit
-// then pays out provider principal and nothing above it, and refuses before the
-// route touches a byte. Backing 1..=8, principal 0..=backing, withdrawal
-// 1..=backing, no registered claim (so nothing but this rule can refuse), and
-// the unsettled position on either side. With every position settled the same
-// withdrawals succeed whatever the principal:
+// In Live, the provider exit pays out provider principal and nothing above it, and
+// refuses before the route touches a byte. While a stored position on the asset
+// has not settled the latest K/F change, a gain may exist that is not registered
+// as a claim yet, so the claim watermark cannot protect what the domain's losers
+// paid in; and with every position settled, what they paid in beyond the claims
+// still belongs to the gains it paid for (a gain burned against its winner's
+// older loss, a payment a reversal stranded). Backing 1..=8, principal
+// 0..=backing, withdrawal 1..=backing, no registered claim (so nothing but this
+// rule can refuse), and one stored position: unsettled on either side, or
+// settled. The same withdrawals within principal succeed:
 // proof_v16_public_counterparty_backing_withdraw_debits_vault_and_scaled_source_state.
 #[cfg(not(feature = "contracts"))] // not part of the contracts run: see the note at the top of this file
 #[kani::proof]
 #[kani::unwind(48)]
 #[kani::solver(cadical)]
-fn proof_v16_public_live_backing_withdraw_is_capped_at_principal_while_a_position_is_unsettled() {
+fn proof_v16_public_live_backing_withdraw_is_capped_at_principal() {
     let backing_raw: u8 = kani::any();
     let principal_raw: u8 = kani::any();
     let withdraw_raw: u8 = kani::any();
-    let unsettled_long: bool = kani::any();
+    let position_case: u8 = kani::any();
+    kani::assume(position_case < 3);
     kani::assume((1..=8).contains(&backing_raw));
     kani::assume(principal_raw <= backing_raw);
     kani::assume((1..=8).contains(&withdraw_raw));
@@ -9863,17 +9875,25 @@ fn proof_v16_public_live_backing_withdraw_is_capped_at_principal_while_a_positio
             ..SourceCreditStateV16::EMPTY
         });
     markets[0].engine.provider_principal_long_num = V16PodU128::new(principal_num);
-    // One stored position that has not settled the latest K/F change. The
-    // header counts it twice among the resolved-payout blockers: once as a
-    // stored position and once as an unsettled one.
-    if unsettled_long {
-        markets[0].engine.asset.stored_pos_count_long = V16PodU64::new(1);
-        markets[0].engine.asset.stale_account_count_long = V16PodU64::new(1);
-    } else {
-        markets[0].engine.asset.stored_pos_count_short = V16PodU64::new(1);
-        markets[0].engine.asset.stale_account_count_short = V16PodU64::new(1);
+    // One stored position: unsettled on the long side (0) or the short side (1),
+    // or settled (2). The header counts a stored position among the
+    // resolved-payout blockers, and an unsettled one a second time.
+    match position_case {
+        0 => {
+            markets[0].engine.asset.stored_pos_count_long = V16PodU64::new(1);
+            markets[0].engine.asset.stale_account_count_long = V16PodU64::new(1);
+            header.resolved_payout_blocker_count = V16PodU64::new(2);
+        }
+        1 => {
+            markets[0].engine.asset.stored_pos_count_short = V16PodU64::new(1);
+            markets[0].engine.asset.stale_account_count_short = V16PodU64::new(1);
+            header.resolved_payout_blocker_count = V16PodU64::new(2);
+        }
+        _ => {
+            markets[0].engine.asset.stored_pos_count_long = V16PodU64::new(1);
+            header.resolved_payout_blocker_count = V16PodU64::new(1);
+        }
     }
-    header.resolved_payout_blocker_count = V16PodU64::new(2);
     let h0 = header;
     let s0 = markets[0].engine;
     assert_eq!(
@@ -9885,16 +9905,24 @@ fn proof_v16_public_live_backing_withdraw_is_capped_at_principal_while_a_positio
         .withdraw_fresh_counterparty_backing_not_atomic(0, withdraw);
 
     kani::cover!(
-        principal_raw == 0,
+        principal_raw == 0 && position_case < 2,
         "nothing leaves loser-paid backing while a position is unsettled"
     );
     kani::cover!(
-        principal_raw != 0 && withdraw_raw > principal_raw && unsettled_long,
+        principal_raw == 0 && position_case == 2,
+        "nothing leaves loser-paid backing with every position settled"
+    );
+    kani::cover!(
+        principal_raw != 0 && withdraw_raw > principal_raw && position_case == 0,
         "a withdrawal past a nonzero principal is refused, unsettled long"
     );
     kani::cover!(
-        principal_raw != 0 && withdraw_raw > principal_raw && !unsettled_long,
+        principal_raw != 0 && withdraw_raw > principal_raw && position_case == 1,
         "a withdrawal past a nonzero principal is refused, unsettled short"
+    );
+    kani::cover!(
+        principal_raw != 0 && withdraw_raw > principal_raw && position_case == 2,
+        "a withdrawal past a nonzero principal is refused, settled"
     );
     kani::cover!(
         withdraw_raw <= principal_raw && principal_raw < backing_raw,
@@ -21063,6 +21091,8 @@ fn proof_v16_frame_backing_withdraw_touches_only_declared_state() {
             credit_rate_num: CREDIT_RATE_SCALE,
             ..SourceCreditStateV16::EMPTY
         });
+    // The backing is a provider's deposit: all of it is provider principal.
+    markets[0].engine.provider_principal_long_num = V16PodU128::new(fund * BOUND_SCALE);
     let h0 = header;
     let s0 = markets[0].engine;
     {
@@ -21096,6 +21126,7 @@ fn proof_v16_frame_backing_withdraw_touches_only_declared_state() {
         credit_epoch: 1,
         ..SourceCreditStateV16::EMPTY
     });
+    es.provider_principal_long_num = V16PodU128::new(rem * BOUND_SCALE);
     assert!(kani_eq_engine_asset_slot_v16_account(
         &es,
         &markets[0].engine

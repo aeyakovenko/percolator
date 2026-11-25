@@ -3362,32 +3362,6 @@ fn contract_check_add_open_interest_for_new_position() {
     let _ = add_open_interest_for_new_position(&mut asset, side, kani::any(), kani::any());
 }
 
-// Full-domain contract checks of the two stranded-loser-backing kernels: the
-// backing losers paid into a domain beyond its provider's principal and its
-// claims, and the part of it owed to the twin domain, at most what the twin's
-// claims and provider are still owed. Production
-// (stranded_loser_backing_owed_to_twin_num) calls both.
-#[cfg(all(kani, feature = "contracts"))]
-#[kani::proof_for_contract(V16Core::kernel_stranded_loser_backing_num)]
-#[kani::unwind(4)]
-#[kani::solver(cadical)]
-fn contract_check_kernel_stranded_loser_backing_num() {
-    let _ = V16Core::kernel_stranded_loser_backing_num(kani::any(), kani::any(), kani::any());
-}
-
-#[cfg(all(kani, feature = "contracts"))]
-#[kani::proof_for_contract(V16Core::kernel_stranded_backing_owed_to_twin)]
-#[kani::unwind(4)]
-#[kani::solver(cadical)]
-fn contract_check_kernel_stranded_backing_owed_to_twin() {
-    let _ = V16Core::kernel_stranded_backing_owed_to_twin(
-        kani::any(),
-        kani::any(),
-        kani::any(),
-        kani::any(),
-    );
-}
-
 // Contract check of the oracle price step: a step moves the
 // effective price toward the target, never past it, by at most
 // (anchor * cap + carried remainder) / MAX_MARGIN_BPS, and carries the exact
@@ -8204,17 +8178,6 @@ where
 }
 
 #[cfg(all(kani, feature = "closure"))]
-fn any_asset_has_unsettled_kf_position<'a, T>(
-    _market: &MarketGroupV16ViewMut<'a, T>,
-    _domain: usize,
-) -> V16Result<bool>
-where
-    'a: 'a,
-{
-    kani::any()
-}
-
-#[cfg(all(kani, feature = "closure"))]
 fn any_asset_state<'a, T>(
     _market: &MarketGroupV16ViewMut<'a, T>,
     _asset_index: usize,
@@ -8583,17 +8546,6 @@ fn any_source_credit_for_domain_shape<'a, T>(
     _market: &MarketGroupV16ViewMut<'a, T>,
     _domain: usize,
 ) -> V16Result<SourceCreditStateV16>
-where
-    'a: 'a,
-{
-    kani::any()
-}
-
-#[cfg(all(kani, feature = "closure"))]
-fn any_stranded_loser_backing_owed_to_twin_num<'a, T>(
-    _market: &MarketGroupV16ViewMut<'a, T>,
-    _domain: usize,
-) -> V16Result<u128>
 where
     'a: 'a,
 {
@@ -9867,10 +9819,6 @@ fn proof_v16_withdraw_domain_insurance_ok_keeps_the_header_predicate() {
 #[kani::solver(cadical)]
 #[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
 #[kani::stub(
-    MarketGroupV16ViewMut::asset_has_unsettled_kf_position,
-    any_asset_has_unsettled_kf_position
-)]
-#[kani::stub(
     MarketGroupV16ViewMut::backing_bucket_for_domain,
     any_backing_bucket_for_domain
 )]
@@ -9910,14 +9858,6 @@ fn proof_v16_withdraw_domain_insurance_ok_keeps_the_header_predicate() {
 #[kani::stub(
     MarketGroupV16ViewMut::source_credit_for_domain,
     any_source_credit_for_domain
-)]
-#[kani::stub(
-    MarketGroupV16ViewMut::source_credit_for_domain_shape,
-    any_source_credit_for_domain_shape
-)]
-#[kani::stub(
-    MarketGroupV16ViewMut::stranded_loser_backing_owed_to_twin_num,
-    any_stranded_loser_backing_owed_to_twin_num
 )]
 #[kani::stub(
     MarketGroupV16ViewMut::validate_source_domain_ledger,

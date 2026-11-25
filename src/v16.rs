@@ -3016,51 +3016,6 @@ impl V16Core {
         Ok(residual_remaining.min(max_chunk_by_b).min(chunk_atoms))
     }
 
-    /// PRODUCTION KERNEL (stranded loser backing, this domain's side): the backing
-    /// that losers paid into a domain beyond everything it owes: its fresh reserved
-    /// backing less the provider's principal less the claims on it. With no
-    /// position on the asset unsettled, every gain is a registered claim, so this
-    /// amount has no owner in the domain. Pure scalar and total;
-    /// `stranded_loser_backing_owed_to_twin_num` calls exactly this.
-    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &u128| {
-        let after_principal = if fresh_reserved_backing_num > provider_principal_num { fresh_reserved_backing_num - provider_principal_num } else { 0 };
-        *result == if after_principal > positive_claim_bound_num { after_principal - positive_claim_bound_num } else { 0 }
-    }))]
-    #[inline(always)]
-    pub(crate) fn kernel_stranded_loser_backing_num(
-        fresh_reserved_backing_num: u128,
-        provider_principal_num: u128,
-        positive_claim_bound_num: u128,
-    ) -> u128 {
-        fresh_reserved_backing_num
-            .saturating_sub(provider_principal_num)
-            .saturating_sub(positive_claim_bound_num)
-    }
-
-    /// PRODUCTION KERNEL (stranded loser backing, the twin's side): what of the
-    /// stranded backing goes to the twin domain: at most what the twin's claims and
-    /// its provider are still owed by losers (its claims plus its provider's
-    /// principal, less the backing it already holds). Pure scalar and total;
-    /// `stranded_loser_backing_owed_to_twin_num` calls exactly this.
-    #[cfg_attr(all(kani, feature = "contracts"), kani::ensures(|result: &u128| {
-        let owed_total = twin_positive_claim_bound_num.saturating_add(twin_provider_principal_num);
-        let twin_owed = if owed_total > twin_fresh_reserved_backing_num { owed_total - twin_fresh_reserved_backing_num } else { 0 };
-        *result == if stranded_num < twin_owed { stranded_num } else { twin_owed }
-            && *result <= stranded_num
-    }))]
-    #[inline(always)]
-    pub(crate) fn kernel_stranded_backing_owed_to_twin(
-        stranded_num: u128,
-        twin_positive_claim_bound_num: u128,
-        twin_provider_principal_num: u128,
-        twin_fresh_reserved_backing_num: u128,
-    ) -> u128 {
-        let twin_owed_num = twin_positive_claim_bound_num
-            .saturating_add(twin_provider_principal_num)
-            .saturating_sub(twin_fresh_reserved_backing_num);
-        stranded_num.min(twin_owed_num)
-    }
-
     /// PRODUCTION KERNEL (B settlement, one bounded step of a leg's share of a
     /// bankruptcy residual): the side's B index has moved from the leg's snapshot
     /// `b_snap` to `target`; the leg owes `loss_weight` times the move, in units of
@@ -11643,44 +11598,6 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         })
     }
 
-    /// Loser-paid backing of `domain` beyond the claims on it (fresh reserved backing
-    /// less provider principal less the claim bound), up to what the claims and the
-    /// provider of its twin domain are still owed by losers. Read when no position
-    /// on the asset is unsettled: every gain is then a registered claim, so the
-    /// first amount has no owner in `domain`, and it was paid by the side whose
-    /// claims are on the twin.
-    fn stranded_loser_backing_owed_to_twin_num(&self, domain: usize) -> V16Result<u128> {
-        let (asset_index, side) = self.domain_asset_side(domain)?;
-        let twin = self.insurance_domain_index(asset_index, opposite_side(side))?;
-        let source = self.source_credit_for_domain_shape(domain)?;
-        // PRODUCTION KERNEL: loser-paid backing beyond everything the domain owes.
-        let stranded_num = V16Core::kernel_stranded_loser_backing_num(
-            source.fresh_reserved_backing_num,
-            self.provider_principal_num(domain)?,
-            source.positive_claim_bound_num,
-        );
-        if stranded_num == 0 {
-            return Ok(0);
-        }
-        let twin_source = self.source_credit_for_domain_shape(twin)?;
-        // PRODUCTION KERNEL: up to what the twin's claims and provider are still owed.
-        Ok(V16Core::kernel_stranded_backing_owed_to_twin(
-            stranded_num,
-            twin_source.positive_claim_bound_num,
-            self.provider_principal_num(twin)?,
-            twin_source.fresh_reserved_backing_num,
-        ))
-    }
-
-    /// Whether a stored position on `domain`'s asset, on either side, has not
-    /// settled the asset's latest K/F change. Such a position can hold a gain
-    /// that is not registered as a claim yet.
-    fn asset_has_unsettled_kf_position(&self, domain: usize) -> V16Result<bool> {
-        let (asset_index, _) = self.domain_asset_side(domain)?;
-        let asset = &self.markets[asset_index].engine_slot().asset;
-        Ok(asset.stale_account_count_long.get() != 0 || asset.stale_account_count_short.get() != 0)
-    }
-
     /// Unconsumed loser-paid counterparty backing of `domain`: fresh reserved backing
     /// beyond provider principal (see
     /// `EngineAssetSlotV16Account::provider_principal_long_num`).
@@ -12157,32 +12074,16 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
             return Err(V16Error::Stale);
         }
         let mode = decode_market_mode(self.header.mode)?;
-        // In Live, fresh backing beyond provider principal was paid in by the
-        // domain's losers. While a position on this asset has not settled the
-        // latest K/F change, some of it may be owed to a gain that is not
-        // registered as a claim yet, which the claim watermark below cannot see:
-        // only provider principal may leave. Once every position is settled
-        // every gain is a registered claim and the watermark is exact.
-        if mode == MarketModeV16::Live && backing_num > self.provider_principal_num(domain)? {
-            if self.asset_has_unsettled_kf_position(domain)? {
-                return Err(V16Error::LockActive);
-            }
-            // Every position is settled, so every gain is a registered claim. What
-            // the losers paid in beyond the claims on this domain is then owed to
-            // nobody here, but it is not the provider's either while the claims
-            // on the twin domain are short of backing: it paid for a move that
-            // reversed, and the payer's regain is claimed there. That much stays.
-            let owed_to_twin_num = self.stranded_loser_backing_owed_to_twin_num(domain)?;
-            if owed_to_twin_num != 0 {
-                let source = self.source_credit_for_domain_shape(domain)?;
-                let left_beyond_claims_num = source
-                    .fresh_reserved_backing_num
-                    .saturating_sub(backing_num)
-                    .saturating_sub(source.positive_claim_bound_num);
-                if left_beyond_claims_num < owed_to_twin_num {
-                    return Err(V16Error::LockActive);
-                }
-            }
+        // Only provider principal may leave, in every mode. Fresh backing beyond
+        // it was paid in by the domain's losers for the gains on the other side,
+        // registered as claims or not: a gain becomes a claim only when its
+        // account is refreshed, and a gain that reaches an account already
+        // insolvent can be burned against its older loss before its losers pay
+        // (issue #274 residual), leaving their payment covered by no claim. It is
+        // never the provider's or the domain's backing authority's; it stays in
+        // the domain and lapses into the junior pool with the bucket.
+        if backing_num > self.provider_principal_num(domain)? {
+            return Err(V16Error::LockActive);
         }
         if mode == MarketModeV16::Resolved
             && amount > self.resolved_counterparty_backing_surplus(domain)?
@@ -12287,9 +12188,12 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
                         .positive_claim_bound_num,
                 )
                 .ok_or(V16Error::ArithmeticOverflow)?;
+        // Never more than provider principal: what the losers paid in beyond it is not
+        // the provider's (`withdraw_fresh_counterparty_backing_not_atomic`).
         Ok(bucket
             .fresh_unliened_backing_num
             .saturating_sub(reserve_num)
+            .min(self.provider_principal_num(domain)?)
             / BOUND_SCALE)
     }
 
