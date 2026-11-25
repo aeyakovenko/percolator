@@ -5247,23 +5247,28 @@ fn memo_config_shape(config: &V16ConfigAccount) -> V16Result<V16Config> {
 }
 
 #[cfg(all(kani, feature = "closure"))]
-static mut MEMO_CONFIG_FUND_SHAPE: Option<(V16Config, V16Result<()>)> = None;
+static mut MEMO_CONFIG_FUND_SHAPE: [Option<(V16Config, V16Result<()>)>; 3] = [None; 3];
 
-/// Memo stand-in for `V16Config::validate_public_user_fund_shape`.
+/// Memo stand-in for `V16Config::validate_public_user_fund_shape`. It remembers up to three inputs:
+/// the slot-capacity growth checks a changed config, which the predicate then checks again.
 #[cfg(all(kani, feature = "closure"))]
 #[allow(unsafe_code)]
 fn memo_config_fund_shape(config: &V16Config) -> V16Result<()> {
     // SAFETY: Kani runs one harness on one thread.
     unsafe {
-        match MEMO_CONFIG_FUND_SHAPE {
-            Some((k, r)) if k == *config => r,
-            Some(_) => kani::any(),
-            None => {
-                let r: V16Result<()> = kani::any();
-                MEMO_CONFIG_FUND_SHAPE = Some((*config, r));
-                r
+        let mut i = 0;
+        while i < 3 {
+            match MEMO_CONFIG_FUND_SHAPE[i] {
+                Some((k, r)) if k == *config => return r,
+                None => {
+                    let r: V16Result<()> = kani::any();
+                    MEMO_CONFIG_FUND_SHAPE[i] = Some((*config, r));
+                    return r;
+                }
+                Some(_) => i += 1,
             }
         }
+        kani::any()
     }
 }
 
@@ -5476,6 +5481,201 @@ fn proof_v16_activate_empty_asset_slot_keeps_the_header_predicate() {
         held && result.is_err(),
         "the predicate held and an error is reached"
     );
+}
+
+// Batch 2 of the local class: T29 and T47 (they write only the materialized-portfolio count), and
+// T38 (the slot-capacity growth), whose property is restated: a header-account method that grows
+// the capacity cannot leave a view of the old slice length valid, so it keeps every check but the
+// slot-count one (first harness), and the slot-count check holds for a view whose slice has the new
+// capacity's number of slots (second harness). The config check runs as written in both: T38
+// changes the config, and its fund-shape check (memoized by value) is the part of it that holds
+// the 256-bit arithmetic.
+
+/// The slot-count check left out: the property is about every other check of the predicate.
+#[cfg(all(kani, feature = "closure"))]
+fn slot_count_check_left_out(
+    _supplied_len: usize,
+    _capacity: usize,
+    _configured_market_slots: usize,
+) -> V16Result<()> {
+    Ok(())
+}
+
+/// The account's own check against the market: it takes both by shared reference, so it writes
+/// nothing; either outcome.
+#[cfg(all(kani, feature = "closure"))]
+fn stand_in_view_account_check_any_outcome<'a, T>(
+    _account: &PortfolioV16View<'a>,
+    _market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    if kani::any() {
+        Ok(())
+    } else {
+        Err(kani::any())
+    }
+}
+
+/// The account's emptiness test: it takes the account by shared reference, so it writes nothing;
+/// any result.
+#[cfg(all(kani, feature = "closure"))]
+fn stand_in_account_emptiness_any_result<'a>(_account: &PortfolioV16View<'a>) -> V16Result<bool>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+// T29.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16View::validate_shape_full_audit_scan,
+    default_build_has_no_audit_scan
+)]
+#[kani::stub(
+    MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static,
+    memo_slot_count_check
+)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, memo_config_shape)]
+#[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+#[kani::stub(V16Core::amount_from_bound_num, memo_amount_from_bound_num)]
+#[kani::stub(V16Core::bound_num_from_amount, memo_bound_num_from_amount)]
+#[kani::stub(
+    MarketGroupV16View::validate_header_aggregate_totals,
+    memo_header_aggregate_totals
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    stand_in_view_account_check_any_outcome
+)]
+#[kani::stub(
+    PortfolioV16View::is_empty_for_dematerialization,
+    stand_in_account_emptiness_any_result
+)]
+fn proof_v16_deregister_empty_materialized_portfolio_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let held = market.validate_shape().is_ok();
+    let result = market.deregister_empty_materialized_portfolio_not_atomic(&PortfolioV16View::new(
+        &account_header,
+    ));
+    assert_held_before_holds_after(held, result.is_ok(), &market);
+    kani::cover!(
+        held && result.is_ok(),
+        "the predicate held and Ok is reached"
+    );
+    kani::cover!(
+        held && result.is_err(),
+        "the predicate held and an error is reached"
+    );
+}
+
+// T47.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16View::validate_shape_full_audit_scan,
+    default_build_has_no_audit_scan
+)]
+#[kani::stub(
+    MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static,
+    memo_slot_count_check
+)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, memo_config_shape)]
+#[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+#[kani::stub(V16Core::amount_from_bound_num, memo_amount_from_bound_num)]
+#[kani::stub(V16Core::bound_num_from_amount, memo_bound_num_from_amount)]
+#[kani::stub(
+    MarketGroupV16View::validate_header_aggregate_totals,
+    memo_header_aggregate_totals
+)]
+#[kani::stub(
+    PortfolioV16View::validate_with_market,
+    stand_in_view_account_check_any_outcome
+)]
+#[kani::stub(
+    PortfolioV16View::is_empty_for_dematerialization,
+    stand_in_account_emptiness_any_result
+)]
+fn proof_v16_register_empty_materialized_portfolio_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let account_header = arbitrary_account();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let held = market.validate_shape().is_ok();
+    let result = market
+        .register_empty_materialized_portfolio_not_atomic(&PortfolioV16View::new(&account_header));
+    assert_held_before_holds_after(held, result.is_ok(), &market);
+    kani::cover!(
+        held && result.is_ok(),
+        "the predicate held and Ok is reached"
+    );
+    kani::cover!(
+        held && result.is_err(),
+        "the predicate held and an error is reached"
+    );
+}
+
+// T38.header (1 of 2): every check of the predicate but the slot-count one
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16View::validate_shape_full_audit_scan,
+    default_build_has_no_audit_scan
+)]
+#[kani::stub(
+    MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static,
+    slot_count_check_left_out
+)]
+#[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+#[kani::stub(V16Core::amount_from_bound_num, memo_amount_from_bound_num)]
+#[kani::stub(V16Core::bound_num_from_amount, memo_bound_num_from_amount)]
+#[kani::stub(
+    MarketGroupV16View::validate_header_aggregate_totals,
+    memo_header_aggregate_totals
+)]
+fn proof_v16_grow_asset_slot_capacity_keeps_the_other_header_checks() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let held = market.validate_shape().is_ok();
+    let result = market
+        .header
+        .grow_asset_slot_capacity_not_atomic(kani::any(), kani::any());
+    assert_held_before_holds_after(held, result.is_ok(), &market);
+    kani::cover!(held && result.is_ok(), "the checks held and Ok is reached");
+    kani::cover!(
+        held && result.is_err(),
+        "the checks held and an error is reached"
+    );
+}
+
+// T38.header (2 of 2): the slot-count check holds for a slice of the new capacity
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+fn proof_v16_grow_asset_slot_capacity_fits_a_slice_of_the_new_capacity() {
+    let (mut header, _markets) = arbitrary_header_and_slot();
+    let result = header.grow_asset_slot_capacity_not_atomic(kani::any(), kani::any());
+    if result.is_ok() {
+        let capacity = header.asset_slot_capacity.get() as usize;
+        assert!(
+            MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static(
+                capacity,
+                capacity,
+                header.config.max_market_slots.get() as usize,
+            )
+            .is_ok()
+        );
+    }
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
 }
 
 // Header pieces of class "final" (T*.header): the path structure, with every callee replaced.
