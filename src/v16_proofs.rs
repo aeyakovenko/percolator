@@ -5678,6 +5678,241 @@ fn proof_v16_grow_asset_slot_capacity_fits_a_slice_of_the_new_capacity() {
     kani::cover!(result.is_err(), "an error is reached");
 }
 
+// Batch 3 of the local class: the single-segment accrual T02, and T33 below. T02 runs as written
+// with its asset accessors and its index kernels replaced:
+// - the asset's state is read by a stand-in that returns any value, and written by one with the
+//   freedom the frame proof below gives `set_asset_state`: any bytes in the slots and any
+//   resolved-payout blocker count (a header field the default build's predicate does not read);
+// - the funding, index-update and price-cap functions take their inputs by value and write
+//   nothing; they are replaced by stand-ins that return any result. Their results go into the
+//   asset's slot and decide errors, never into a header field the predicate reads. The
+//   stale-cohort kernel runs as written: the slot_last it returns is written to the header;
+// - the entry point uses the slice of slots only to refuse an index beyond it, and passes the
+//   index only to the replaced accessors, so the one slot of the harness stands for every slot
+//   count.
+
+// The frame of `set_asset_state`, used by the harnesses of T02 and T33 below: it writes the asset's
+// slot and, of the header, only the resolved-payout blocker count, on an error as well. The harness
+// has one slot; header_local_check.py checks on the source that the function touches the slice
+// only at the index it was given and writes the header only through the blocker-count update, so
+// the frame holds for every slot count.
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+fn proof_v16_set_asset_state_writes_only_the_blocker_count_of_the_header() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let before = header;
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.set_asset_state(kani::any(), kani::any());
+    let mut after = *market.header;
+    after.resolved_payout_blocker_count = before.resolved_payout_blocker_count;
+    assert!(bytemuck::bytes_of(&after) == bytemuck::bytes_of(&before));
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+/// Stand-in for `set_asset_state` with the freedom its frame proof gives it: any bytes in the
+/// slots, any resolved-payout blocker count, any result.
+#[cfg(all(kani, feature = "closure"))]
+fn frame_set_asset_state<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _asset: AssetStateV16,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    for m in market.markets.iter_mut() {
+        let engine: [u8; core::mem::size_of::<EngineAssetSlotV16Account>()] = kani::any();
+        bytemuck::bytes_of_mut(&mut m.engine).copy_from_slice(&engine);
+    }
+    market.header.resolved_payout_blocker_count = V16PodU64::new(kani::any());
+    if kani::any() {
+        Ok(())
+    } else {
+        Err(kani::any())
+    }
+}
+
+/// Stand-in for `asset_state` (a read): any value.
+#[cfg(all(kani, feature = "closure"))]
+fn local_any_asset_state<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+) -> V16Result<AssetStateV16>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+/// Stand-in for `require_asset_accruable` (a read): either outcome.
+#[cfg(all(kani, feature = "closure"))]
+fn local_any_require_asset_accruable<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+/// Stand-in for `V16Core::kernel_accrual_funding_num` (inputs by value): any result.
+#[cfg(all(kani, feature = "closure"))]
+fn local_any_accrual_funding_num(
+    _funding_rate_e9: i128,
+    _segment_dt: u64,
+    _effective_price: u64,
+    _funding_active: bool,
+) -> V16Result<i128> {
+    kani::any()
+}
+
+/// Stand-in for `V16Core::kernel_accrual_index_update` (inputs by value): any result.
+#[cfg(all(kani, feature = "closure"))]
+fn local_any_accrual_index_update(
+    _k_long: i128,
+    _k_short: i128,
+    _f_long: i128,
+    _f_short: i128,
+    _a_long: u128,
+    _a_short: u128,
+    _price_delta: i128,
+    _funding_num: i128,
+) -> V16Result<(i128, i128, i128, i128)> {
+    kani::any()
+}
+
+/// Stand-in for `V16Core::kernel_accrual_price_move_within_cap` (inputs by value): either outcome.
+#[cfg(all(kani, feature = "closure"))]
+fn local_any_accrual_price_move_within_cap(
+    _old_price: u64,
+    _new_price: u64,
+    _max_price_move_bps_per_slot: u64,
+    _segment_dt: u64,
+) -> V16Result<()> {
+    kani::any()
+}
+
+// T02.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16View::validate_shape_full_audit_scan,
+    default_build_has_no_audit_scan
+)]
+#[kani::stub(
+    MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static,
+    memo_slot_count_check
+)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, memo_config_shape)]
+#[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+#[kani::stub(V16Core::amount_from_bound_num, memo_amount_from_bound_num)]
+#[kani::stub(V16Core::bound_num_from_amount, memo_bound_num_from_amount)]
+#[kani::stub(
+    MarketGroupV16View::validate_header_aggregate_totals,
+    memo_header_aggregate_totals
+)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, local_any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::require_asset_accruable,
+    local_any_require_asset_accruable
+)]
+#[kani::stub(MarketGroupV16ViewMut::set_asset_state, frame_set_asset_state)]
+#[kani::stub(V16Core::kernel_accrual_funding_num, local_any_accrual_funding_num)]
+#[kani::stub(V16Core::kernel_accrual_index_update, local_any_accrual_index_update)]
+#[kani::stub(
+    V16Core::kernel_accrual_price_move_within_cap,
+    local_any_accrual_price_move_within_cap
+)]
+fn proof_v16_accrue_asset_to_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let held = market.validate_shape().is_ok();
+    let result = market.accrue_asset_to_not_atomic(
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        kani::any(),
+    );
+    assert_held_before_holds_after(held, result.is_ok(), &market);
+    kani::cover!(
+        held && result.is_ok(),
+        "the predicate held and Ok is reached"
+    );
+    kani::cover!(
+        held && result.is_err(),
+        "the predicate held and an error is reached"
+    );
+}
+
+// T33, the side reset's finalization: it writes the asset's state through `set_asset_state` (the
+// stand-in with its proved frame above) and, of the header, `risk_epoch`, which the default build's
+// predicate does not read, then runs the aggregate-totals check (memoized) and the audit-only scan
+// (a no-op in a default build and in this one). Its pending-barrier read takes the view by shared
+// reference and is replaced by a stand-in with any result; the entry point passes the asset index
+// only to that read, to the asset accessors and to `validate_configured_asset_index`, which runs as
+// written and only refuses an index beyond the slice or the configured slots, so the one slot of
+// the harness stands for every slot count.
+
+/// Stand-in for `pending_domain_loss_barrier_count` (a read): any result.
+#[cfg(all(kani, feature = "closure"))]
+fn local_any_pending_domain_loss_barrier_count<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _asset_index: usize,
+    _side: SideV16,
+) -> V16Result<u64>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+// T33.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16View::validate_shape_full_audit_scan,
+    default_build_has_no_audit_scan
+)]
+#[kani::stub(
+    MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static,
+    memo_slot_count_check
+)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, memo_config_shape)]
+#[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+#[kani::stub(V16Core::amount_from_bound_num, memo_amount_from_bound_num)]
+#[kani::stub(V16Core::bound_num_from_amount, memo_bound_num_from_amount)]
+#[kani::stub(
+    MarketGroupV16View::validate_header_aggregate_totals,
+    memo_header_aggregate_totals
+)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, local_any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::pending_domain_loss_barrier_count,
+    local_any_pending_domain_loss_barrier_count
+)]
+#[kani::stub(MarketGroupV16ViewMut::set_asset_state, frame_set_asset_state)]
+fn proof_v16_finalize_side_reset_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let held = market.validate_shape().is_ok();
+    let result = market.finalize_side_reset_not_atomic(kani::any(), kani::any());
+    assert_held_before_holds_after(held, result.is_ok(), &market);
+    kani::cover!(
+        held && result.is_ok(),
+        "the predicate held and Ok is reached"
+    );
+    kani::cover!(
+        held && result.is_err(),
+        "the predicate held and an error is reached"
+    );
+}
+
 // Header pieces of class "final" (T*.header): the path structure, with every callee replaced.
 //
 // The ledger states each such piece as: if the header predicate (`validate_shape` of a default
