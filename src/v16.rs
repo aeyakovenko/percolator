@@ -25017,6 +25017,11 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
     /// source/social-loss history, and K/F indices are normalized inside this transition after
     /// proving all positions, claims, backing, receivables, liens, reservations, and barriers are
     /// empty, so stale legs from the old market_id fail closed after restart.
+    ///
+    /// A backing bucket of the asset that has lapsed is expired first, as retirement does:
+    /// backing the domain's losers paid in is not the provider's to withdraw (the provider exit
+    /// is capped at provider principal), so its bucket's lapse is how it leaves a domain, and
+    /// an asset that cannot be retired (asset 0) restarts only this way.
     pub fn restart_empty_asset_preserving_insurance_budget_not_atomic(
         &mut self,
         asset_index: usize,
@@ -25039,6 +25044,7 @@ impl<'a, T> MarketGroupV16ViewMut<'a, T> {
         {
             return Err(V16Error::LockActive);
         }
+        self.expire_lapsed_source_backing_for_asset_not_atomic(asset_index, now_slot)?;
         self.normalize_terminal_empty_asset_history_not_atomic(asset_index)?;
 
         let market_id = self.header.next_market_id.get();
