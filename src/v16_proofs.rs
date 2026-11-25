@@ -5161,6 +5161,323 @@ fn proof_no_overflow_signed_position_of_a_decoded_leg() {
     kani::cover!(q > 0);
 }
 
+// Header pieces of class "local" (T*.header): the real predicate before and after the call.
+//
+// The ledger states each such piece as: if the header predicate (`validate_shape` of a default
+// build) held before the entry point and it returns Ok, it holds of the state it leaves. These
+// entry points end in no check, so the proof evaluates the predicate itself, before and after the
+// call, with the entry point run as written:
+// - the predicate is the default build's: in Kani builds `validate_shape` also runs the audit-only
+//   slot scan, which `default_build_has_no_audit_scan` switches off, as a default build compiles it
+//   out;
+// - its costly pure parts are memoized. A memo stand-in abstracts a deterministic function: its
+//   first call returns any result and remembers it with its input, a later call with the same
+//   input returns that result, and a call with another input returns any result. Every behaviour
+//   of the real function is among the stand-in's, so a property proved with it holds of the real
+//   one. The key of each is its whole input (checked against the source by header_local_check.py):
+//   the slot-count check (its three arguments), the config check (the config's bytes), the
+//   config's fund-shape check (the config value), the two bound conversions (the amount), and the
+//   aggregate-totals check (the nine header fields it reads). The slot-count check is the only
+//   part of the predicate that reads the slice, and the entry points read no slot of the view, so
+//   the proof covers every number of slots;
+// - the header and the slot are arbitrary bytes, and so is every argument; nothing is assumed.
+#[cfg(all(kani, feature = "closure"))]
+fn default_build_has_no_audit_scan<'a, T>(_market: &MarketGroupV16View<'a, T>) -> V16Result<()>
+where
+    'a: 'a,
+{
+    Ok(())
+}
+
+#[cfg(all(kani, feature = "closure"))]
+static mut MEMO_SLOT_COUNT_CHECK: Option<((usize, usize, usize), V16Result<()>)> = None;
+
+/// Memo stand-in for `MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static`.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn memo_slot_count_check(
+    supplied_len: usize,
+    capacity: usize,
+    configured_market_slots: usize,
+) -> V16Result<()> {
+    let key = (supplied_len, capacity, configured_market_slots);
+    // SAFETY: Kani runs one harness on one thread.
+    unsafe {
+        match MEMO_SLOT_COUNT_CHECK {
+            Some((k, r)) if k == key => r,
+            Some(_) => kani::any(),
+            None => {
+                let r: V16Result<()> = kani::any();
+                MEMO_SLOT_COUNT_CHECK = Some((key, r));
+                r
+            }
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+static mut MEMO_CONFIG_SHAPE: Option<(
+    [u8; core::mem::size_of::<V16ConfigAccount>()],
+    V16Result<V16Config>,
+)> = None;
+
+/// Memo stand-in for `V16ConfigAccount::try_to_runtime_shape`.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn memo_config_shape(config: &V16ConfigAccount) -> V16Result<V16Config> {
+    let mut key = [0u8; core::mem::size_of::<V16ConfigAccount>()];
+    key.copy_from_slice(bytemuck::bytes_of(config));
+    // SAFETY: Kani runs one harness on one thread.
+    unsafe {
+        match MEMO_CONFIG_SHAPE {
+            Some((k, r)) if k == key => r,
+            _ => {
+                let r: V16Result<V16Config> = if kani::any() {
+                    Ok(any_v16_config_for_overflow())
+                } else {
+                    Err(kani::any())
+                };
+                if MEMO_CONFIG_SHAPE.is_none() {
+                    MEMO_CONFIG_SHAPE = Some((key, r));
+                }
+                r
+            }
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+static mut MEMO_CONFIG_FUND_SHAPE: Option<(V16Config, V16Result<()>)> = None;
+
+/// Memo stand-in for `V16Config::validate_public_user_fund_shape`.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn memo_config_fund_shape(config: &V16Config) -> V16Result<()> {
+    // SAFETY: Kani runs one harness on one thread.
+    unsafe {
+        match MEMO_CONFIG_FUND_SHAPE {
+            Some((k, r)) if k == *config => r,
+            Some(_) => kani::any(),
+            None => {
+                let r: V16Result<()> = kani::any();
+                MEMO_CONFIG_FUND_SHAPE = Some((*config, r));
+                r
+            }
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+static mut MEMO_AMOUNT_FROM_BOUND_NUM: Option<(u128, V16Result<u128>)> = None;
+
+/// Memo stand-in for `V16Core::amount_from_bound_num`.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn memo_amount_from_bound_num(bound_num: u128) -> V16Result<u128> {
+    // SAFETY: Kani runs one harness on one thread.
+    unsafe {
+        match MEMO_AMOUNT_FROM_BOUND_NUM {
+            Some((k, r)) if k == bound_num => r,
+            Some(_) => kani::any(),
+            None => {
+                let r: V16Result<u128> = kani::any();
+                MEMO_AMOUNT_FROM_BOUND_NUM = Some((bound_num, r));
+                r
+            }
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+static mut MEMO_BOUND_NUM_FROM_AMOUNT: Option<(u128, V16Result<u128>)> = None;
+
+/// Memo stand-in for `V16Core::bound_num_from_amount`.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn memo_bound_num_from_amount(amount: u128) -> V16Result<u128> {
+    // SAFETY: Kani runs one harness on one thread.
+    unsafe {
+        match MEMO_BOUND_NUM_FROM_AMOUNT {
+            Some((k, r)) if k == amount => r,
+            Some(_) => kani::any(),
+            None => {
+                let r: V16Result<u128> = kani::any();
+                MEMO_BOUND_NUM_FROM_AMOUNT = Some((amount, r));
+                r
+            }
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+static mut MEMO_HEADER_AGGREGATE_TOTALS: Option<([u128; 9], V16Result<()>)> = None;
+
+/// Memo stand-in for `MarketGroupV16View::validate_header_aggregate_totals`, keyed on the nine
+/// header fields it reads (header_local_check.py checks the list against its body).
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn memo_header_aggregate_totals<'a, T>(market: &MarketGroupV16View<'a, T>) -> V16Result<()>
+where
+    'a: 'a,
+{
+    let h = market.header;
+    let key = [
+        h.c_tot.get(),
+        h.insurance.get(),
+        h.backing_provider_earnings_total.get(),
+        h.vault.get(),
+        h.source_fresh_backing_total_num.get(),
+        h.source_insurance_credit_reserved_total_atoms.get(),
+        h.insurance_domain_budget_remaining_total.get(),
+        h.pnl_pos_bound_tot_num.get(),
+        h.source_claim_bound_total_num.get(),
+    ];
+    // SAFETY: Kani runs one harness on one thread.
+    unsafe {
+        match MEMO_HEADER_AGGREGATE_TOTALS {
+            Some((k, r)) if k == key => r,
+            Some(_) => kani::any(),
+            None => {
+                let r: V16Result<()> = kani::any();
+                MEMO_HEADER_AGGREGATE_TOTALS = Some((key, r));
+                r
+            }
+        }
+    }
+}
+
+/// If the predicate held before the call and the call returned Ok, it holds now.
+#[cfg(all(kani, feature = "closure"))]
+fn assert_held_before_holds_after<'a, T>(
+    held: bool,
+    ok: bool,
+    market: &MarketGroupV16ViewMut<'a, T>,
+) where
+    'a: 'a,
+{
+    if held && ok {
+        assert!(market.validate_shape().is_ok());
+    }
+}
+
+// T09.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16View::validate_shape_full_audit_scan,
+    default_build_has_no_audit_scan
+)]
+#[kani::stub(
+    MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static,
+    memo_slot_count_check
+)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, memo_config_shape)]
+#[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+#[kani::stub(V16Core::amount_from_bound_num, memo_amount_from_bound_num)]
+#[kani::stub(V16Core::bound_num_from_amount, memo_bound_num_from_amount)]
+#[kani::stub(
+    MarketGroupV16View::validate_header_aggregate_totals,
+    memo_header_aggregate_totals
+)]
+fn proof_v16_advance_resolved_slot_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let held = market.validate_shape().is_ok();
+    let result = market.advance_resolved_slot_not_atomic(kani::any());
+    assert_held_before_holds_after(held, result.is_ok(), &market);
+    kani::cover!(
+        held && result.is_ok(),
+        "the predicate held and Ok is reached"
+    );
+    kani::cover!(
+        held && result.is_err(),
+        "the predicate held and an error is reached"
+    );
+}
+
+// T05.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16View::validate_shape_full_audit_scan,
+    default_build_has_no_audit_scan
+)]
+#[kani::stub(
+    MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static,
+    memo_slot_count_check
+)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, memo_config_shape)]
+#[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+#[kani::stub(V16Core::amount_from_bound_num, memo_amount_from_bound_num)]
+#[kani::stub(V16Core::bound_num_from_amount, memo_bound_num_from_amount)]
+#[kani::stub(
+    MarketGroupV16View::validate_header_aggregate_totals,
+    memo_header_aggregate_totals
+)]
+fn proof_v16_activate_empty_market_slot_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let held = market.validate_shape().is_ok();
+    let result = market.header.activate_empty_market_slot_not_atomic(
+        kani::any(),
+        &mut market.markets[0],
+        kani::any(),
+        kani::any(),
+    );
+    assert_held_before_holds_after(held, result.is_ok(), &market);
+    kani::cover!(
+        held && result.is_ok(),
+        "the predicate held and Ok is reached"
+    );
+    kani::cover!(
+        held && result.is_err(),
+        "the predicate held and an error is reached"
+    );
+}
+
+// T03.header
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(
+    MarketGroupV16View::validate_shape_full_audit_scan,
+    default_build_has_no_audit_scan
+)]
+#[kani::stub(
+    MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static,
+    memo_slot_count_check
+)]
+#[kani::stub(V16ConfigAccount::try_to_runtime_shape, memo_config_shape)]
+#[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+#[kani::stub(V16Core::amount_from_bound_num, memo_amount_from_bound_num)]
+#[kani::stub(V16Core::bound_num_from_amount, memo_bound_num_from_amount)]
+#[kani::stub(
+    MarketGroupV16View::validate_header_aggregate_totals,
+    memo_header_aggregate_totals
+)]
+fn proof_v16_activate_empty_asset_slot_keeps_the_header_predicate() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let held = market.validate_shape().is_ok();
+    let result = market.header.activate_empty_asset_slot_not_atomic(
+        kani::any(),
+        &mut market.markets[0].engine,
+        kani::any(),
+        kani::any(),
+    );
+    assert_held_before_holds_after(held, result.is_ok(), &market);
+    kani::cover!(
+        held && result.is_ok(),
+        "the predicate held and Ok is reached"
+    );
+    kani::cover!(
+        held && result.is_err(),
+        "the predicate held and an error is reached"
+    );
+}
+
 // Header pieces of class "final" (T*.header): the path structure, with every callee replaced.
 //
 // The ledger states each such piece as: if the header predicate (`validate_shape` of a default
