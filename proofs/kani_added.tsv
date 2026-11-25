@@ -34,3 +34,6 @@ proof_v16_deregister_empty_materialized_portfolio_keeps_the_header_predicate	-	v
 proof_v16_register_empty_materialized_portfolio_keeps_the_header_predicate	-	verified	-
 proof_v16_grow_asset_slot_capacity_keeps_the_other_header_checks	-	verified	-
 proof_v16_grow_asset_slot_capacity_fits_a_slice_of_the_new_capacity	-	verified	-
+proof_v16_set_asset_state_writes_only_the_blocker_count_of_the_header	-	verified	-
+proof_v16_accrue_asset_to_keeps_the_header_predicate	-	verified	-
+proof_v16_finalize_side_reset_keeps_the_header_predicate	-	verified	-

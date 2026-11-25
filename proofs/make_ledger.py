@@ -534,9 +534,13 @@ for pid, target, text, how in (
      "one line per mirrored total", "formal statement, then reviewed"),
     ("G.C", "vault token accounts and market header", "part C: custody. The program's vault token accounts hold exactly what the header's "
      "`vault` says, in the configured mints, under the program's authority. To be written as a formal statement", "formal statement, then reviewed"),
-    ("G.other", "portfolio accounts an instruction does not name",
-     "frame: an instruction leaves every account it does not name valid against the market it writes (a market write such as an asset "
-     "retirement or a new market id must not invalidate a leg of an account that is not present)", "Aristotle, per kind of market write"),
+    ("G.other", "portfolio accounts an engine entry point is not given",
+     "frame: every engine entry point leaves each portfolio account it is not given valid against the market it leaves, if it was "
+     "valid before (a market write such as an accrual, an asset retirement or a new market id must not invalidate a leg of an "
+     "account that is not given). Stated per entry point, not per instruction: an instruction can name an account and still "
+     "call an entry point that is not given it (an accrual before the account's refresh), and the account must stay valid "
+     "across that call too. Restated 2026-11-25; it was stated per instruction, which left that case to no piece",
+     "Aristotle, per kind of market write"),
     ("G.init", "InitMarket", "the initial state satisfies H, S, V, M and C", "Aristotle"),
     ("G.reach", "every instruction", "induction: H, S, V, M and C hold in every state reachable from InitMarket by successful instructions; "
      "the conjunction of the instruction pieces of layer W", "Aristotle, composition of layer W"),
@@ -1530,6 +1534,13 @@ import account_rules as _account_rules
 _AR_SELFTEST = _account_rules.selftest(ENGINE_SRC)
 _ar_open = {p["target"]: _pid for _pid, p in pieces.items() if re.fullmatch(r"T\d+\.account", _pid)
             and p["status"] == "open"}
+_AR_WHAT = {
+    "A1": ("its final expression is `self.validate_shape()`, after a run of `validate_with_market` checks that names "
+           "every account it is given; no `Ok` occurs and every `return` is `return Err(`"),
+    "A2": ("its top-level statements end with a run of `validate_with_market` checks that names every account it is "
+           "given (and the shape check), then `Ok` of a local; no other `Ok` occurs and every `return` is "
+           "`return Err(`"),
+}
 for _fn, _rule, _why in _account_rules.classify(ENGINE_SRC, sorted(_ar_open)):
     if _rule == "A0":
         _pid = _ar_open[_fn]
@@ -1539,6 +1550,14 @@ for _fn, _rule, _why in _account_rules.classify(ENGINE_SRC, sorted(_ar_open)):
                                     "receiver is the market view or the market header), so the statement holds of "
                                     "every account it is given, there being none. What it can do to the accounts it "
                                     "is not given is piece G.other's, still open")
+    elif _rule in _AR_WHAT:
+        _pid = _ar_open[_fn]
+        pieces[_pid]["status"] = "proved by rule"
+        pieces[_pid]["evidence"] = (f"rule {_rule} (account_rules.py on engine {LANDED_REV}, after its {_AR_SELFTEST} "
+                                    f"self-test cases): {_AR_WHAT[_rule]} ({_why}). Those checks take the account and "
+                                    "the market by shared reference and the shape check takes `&self`, so on every Ok "
+                                    "each account it is given passed its check on exactly the account and the market "
+                                    "it leaves, whatever ran before (loops over lists of any length included)")
 
 # Header pieces of class local, verified by Kani with the predicate itself evaluated before and after the
 # call and its costly pure parts memoized (engine ac3227ea; review/header-final-2026-11-24/local_b1). T09 was
@@ -1566,6 +1585,18 @@ _HEADER_LOCAL2_KANI = {
 for _pid, _ev in _HEADER_LOCAL2_KANI.items():
     assert pieces[_pid]["status"] in ("open", "proved for c030aa40; to be established again for 7a712baa"), \
         (_pid, pieces[_pid]["status"])
+    pieces[_pid]["status"] = "verified by Kani"
+    pieces[_pid]["evidence"] = _ev
+
+# Header pieces of class local, batch 3 (engine 94f6a513; review/header-final-2026-11-24/local_b3): the
+# single-segment accrual and the side reset's finalization, with the asset accessors replaced (the write by a
+# stand-in with set_asset_state's proved frame).
+_HEADER_LOCAL3_KANI = {
+    'T02.header': "proof_v16_accrue_asset_to_keeps_the_header_predicate (Kani, closure layer, engine 94f6a513): the entry point and its accrual core run as written, and the predicate itself (`validate_shape` of a default build: the audit-only slot scan replaced by `Ok(())`) is evaluated before and after them; if it held before and the call returns Ok, it holds after. The asset's state is read by a stand-in that returns any value and written by one with the freedom proof_v16_set_asset_state_writes_only_the_blocker_count_of_the_header proves of `set_asset_state` (any slot bytes, and of the header only the resolved-payout blocker count, which the predicate does not read; header_local_check.py also checks on the source that `set_asset_state` touches the slice only at the index it was given, after refusing an index beyond it, and writes the header only through the blocker-count update, so the frame its harness proves on one slot holds for every slot count); the funding, index-update and price-cap kernels take their inputs by value and are replaced by stand-ins that return any result (their results go into the slot and decide errors); the stale-cohort kernel, whose slot_last reaches the header, runs as written. The predicate's costly pure parts are memo stand-ins (the first call returns any result and remembers it with its input, a later call with the same input returns it, another input gets any result), each keyed on its function's whole input: the slot-count check (its three arguments), the config check (the config's bytes), the config's fund-shape check (the config value), the two bound conversions (the amount), the aggregate-totals check (the nine header fields it reads). header_local_check.py checks on the source that each key is its function's whole input, that the deployed sources declare no static, that the entry point reads no slot of the view, and, with cfg_reach.py, that nothing the harness runs as written differs between a Kani and a deployed build. The entry point uses the slice of slots only to refuse an index beyond it and passes the index only to the replaced accessors and its core (checked), so the harness's one slot stands for any admitted index of any slot count. The header and the slot are arbitrary bytes and every argument arbitrary; the predicate holding with Ok, and with an error, are both reached. Controls: the clock set to now when it is behind the header's, and `set_asset_state` also writing a field the predicate reads (against its frame proof), fail",
+    'T33.header': "proof_v16_finalize_side_reset_keeps_the_header_predicate (Kani, closure layer, engine 94f6a513): the entry point runs as written, and the predicate itself (`validate_shape` of a default build: the audit-only slot scan replaced by `Ok(())`) is evaluated before and after it; if it held before and the call returns Ok, it holds after. The asset's state is read by a stand-in that returns any value and written by one with the freedom proof_v16_set_asset_state_writes_only_the_blocker_count_of_the_header proves of `set_asset_state` (any slot bytes, and of the header only the resolved-payout blocker count, which the predicate does not read; header_local_check.py also checks on the source that `set_asset_state` touches the slice only at the index it was given, after refusing an index beyond it, and writes the header only through the blocker-count update, so the frame its harness proves on one slot holds for every slot count); the pending-barrier read takes the view by shared reference and is replaced by a stand-in with any result. The predicate's costly pure parts are memo stand-ins (the first call returns any result and remembers it with its input, a later call with the same input returns it, another input gets any result), each keyed on its function's whole input: the slot-count check (its three arguments), the config check (the config's bytes), the config's fund-shape check (the config value), the two bound conversions (the amount), the aggregate-totals check (the nine header fields it reads). header_local_check.py checks on the source that each key is its function's whole input, that the deployed sources declare no static, that the entry point reads no slot of the view, and, with cfg_reach.py, that nothing the harness runs as written differs between a Kani and a deployed build. The entry point reads no slot and passes the asset index only to `validate_configured_asset_index` (run as written: it refuses an index beyond the slice or the configured slots), to the pending-barrier read and to the asset accessors (checked), so the harness's one slot stands for any admitted index of any slot count. The header and the slot are arbitrary bytes and both arguments arbitrary; the predicate holding with Ok, and with an error, are both reached. Control: the function also writing a slot_last one past the clock fails",
+}
+for _pid, _ev in _HEADER_LOCAL3_KANI.items():
+    assert pieces[_pid]["status"] in ("open", "attempted, open"), (_pid, pieces[_pid]["status"])
     pieces[_pid]["status"] = "verified by Kani"
     pieces[_pid]["evidence"] = _ev
 

@@ -188,13 +188,13 @@ FEATURES=fuzz,closure KANI_Z="" LOG_DIR=kani_closure CARGO_TARGET_DIR=target/clo
 <!-- proofs:begin (generated from proofs/README_SECTION.md and the ledger; edit that file, not this block) -->
 ## Proof Status And How To Reproduce It
 
-As of 2026-11-25, for engine `7a712baa` and program `121d73ae`: **414 of 826 pieces of the deployed build are done (215 proved by Aristotle, 122 verified by Kani, 77 proved by a local rule checked on the source; 337 without the rule); 0 of 89 charter invariants are closed.**
+As of 2026-11-25, for engine `7a712baa` and program `121d73ae`: **418 of 826 pieces of the deployed build are done (215 proved by Aristotle, 124 verified by Kani, 79 proved by a local rule checked on the source; 339 without the rule); 0 of 89 charter invariants are closed.**
 
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 250 of 250 |
-| 2 | The engine cannot panic or overflow and keeps the header | 126 of 195 |
-| 3 | The engine keeps the whole market state | 38 of 220 |
+| 2 | The engine cannot panic or overflow and keeps the header | 128 of 195 |
+| 3 | The engine keeps the whole market state | 40 of 220 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -244,7 +244,7 @@ On engine `7a712baa`, Kani 0.66.0, with the three commands of "Run Kani":
 | `--features fuzz,closure` | 425 | `composition_positive_to_negative_pnl_consumes_complete_source_lien_under_rate_axiom` |
 | `--features fuzz,contracts -Z function-contracts` | 454 | `composition_clear_leg_value_conservation` |
 
-How the table was obtained for this revision. Engine `7a712baa` removed a field from the market header type, so all three runs were made again in full on its source (every harness then in the source, the proofs added one by one since `71076137` included): 377, 426 and 455 harnesses. The full runs were made at `-j 12` in a container capped at 160 GB, which is less than the heaviest proofs need when twelve run at once: 18 of them ran out of memory there (7 in the main run, 9 in the closure run, 2 in the contracts run; no check failed) and were run again four at a time under a 240 GB cap, where every one verified. Every harness has a verdict except the two named in the table, which have none on earlier revisions either. A harness named `proof_v16_adjust_u128_applies_exact_delta_or_fails_closed` exists in two modules and is counted twice. Since then 36 proofs were added and verified one by one: 0 with `--features fuzz`, 36 in the closure run, 0 in the contracts run. `proofs/kani_added.tsv` lists them with their verdict in each run; add the ones marked verified to the numbers above.
+How the table was obtained for this revision. Engine `7a712baa` removed a field from the market header type, so all three runs were made again in full on its source (every harness then in the source, the proofs added one by one since `71076137` included): 377, 426 and 455 harnesses. The full runs were made at `-j 12` in a container capped at 160 GB, which is less than the heaviest proofs need when twelve run at once: 18 of them ran out of memory there (7 in the main run, 9 in the closure run, 2 in the contracts run; no check failed) and were run again four at a time under a 240 GB cap, where every one verified. Every harness has a verdict except the two named in the table, which have none on earlier revisions either. A harness named `proof_v16_adjust_u128_applies_exact_delta_or_fails_closed` exists in two modules and is counted twice. Since then 39 proofs were added and verified one by one: 0 with `--features fuzz`, 39 in the closure run, 0 in the contracts run. `proofs/kani_added.tsv` lists them with their verdict in each run; add the ones marked verified to the numbers above.
 
 A whole run takes one and a half to two hours on a 64-core machine at
 `-j 12 --output-format terse`. Run them one after the other: the two harnesses without a verdict

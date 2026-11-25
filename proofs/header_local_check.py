@@ -24,7 +24,25 @@ marker "Header pieces of class \"local\""), checked on the source. Stops at the 
    functions that take the account and the market by shared reference (no interior mutability in
    the crate), so they write nothing.
 4. The entry points read no slot of the view (no `.markets`), so the slot count enters the proof
-   only through the memoized slot-count check.
+   only through the memoized slot-count check. The two accruals use the slice only in their entry
+   guard (`asset_index >= self.markets.len()`) and pass the index only to the replaced accessors
+   and to their core, so the harness's one slot stands for any admitted index of any slot count.
+   The path accrual (T01; these facts are checked when its harness is in the section) refuses,
+   before any write, a slice of steps whose length is not the expected one, which is at most
+   `V16_MAX_ACCRUAL_PATH_STEPS` (32): the harness's slices of every length up to 32 cover every
+   Ok. The replaced accrual kernels and the price step take their inputs by value. T33 (the side reset's finalization) reads no slot either, and passes the asset index only
+   to `validate_configured_asset_index`, which runs as written and only refuses an index beyond the
+   slice or the configured slots, to its pending-barrier read and to the asset accessors (both
+   replaced), so the one slot stands for every slot count there too. The reads replaced by stand-ins
+   with any result (`asset_state`, `require_asset_accruable`, `pending_domain_loss_barrier_count`)
+   take the view by shared reference, so they write nothing.
+5. The frame of `set_asset_state`, which the stand-in `frame_set_asset_state` gives the accruals and
+   T33 (any bytes in every slot, any resolved-payout blocker count, any result), holds for every
+   slot count, not only the one slot of its harness: after refusing an index beyond the configured
+   slots or the slice, the function touches the slice only at `self.markets[asset_index]`, reads
+   the header nowhere else, and writes it only through `update_resolved_payout_blocker_total`,
+   which writes `resolved_payout_blocker_count` alone, from an associated function of the old
+   count and its two arguments.
 """
 import os, re, subprocess, sys
 
@@ -36,7 +54,21 @@ ENTRY = {"T09.header": ("advance_resolved_slot_not_atomic", VIEWMUT),
          "T03.header": ("activate_empty_asset_slot_not_atomic", HEADER),
          "T29.header": ("deregister_empty_materialized_portfolio_not_atomic", VIEWMUT),
          "T47.header": ("register_empty_materialized_portfolio_not_atomic", VIEWMUT),
-         "T38.header": ("grow_asset_slot_capacity_not_atomic", HEADER)}
+         "T38.header": ("grow_asset_slot_capacity_not_atomic", HEADER),
+         "T02.header": ("accrue_asset_to_not_atomic", VIEWMUT),
+         "T01.header": ("accrue_asset_path_to_not_atomic", VIEWMUT),
+         "T33.header": ("finalize_side_reset_not_atomic", VIEWMUT)}
+# the accruals use the slice of slots in their entry guard only, and run a core as written
+ACCRUAL = {"accrue_asset_to_not_atomic": "accrue_asset_to_admitted_not_atomic",
+           "accrue_asset_path_to_not_atomic": "accrue_asset_path_to_admitted_not_atomic"}
+ACCRUAL_STUBS = ["asset_state", "require_asset_accruable", "set_asset_state"]
+PURE_STUBS = {"kernel_accrual_funding_num": "impl V16Core {", "kernel_accrual_index_update": "impl V16Core {",
+              "kernel_accrual_price_move_within_cap": "impl V16Core {", "canonical_accrual_price_step_v16": None}
+# T33 passes the asset index only to its index check (run as written) and to replaced callees
+T33_INDEX_CALLEES = ["validate_configured_asset_index", "pending_domain_loss_barrier_count", "asset_state",
+                     "set_asset_state"]
+# reads replaced by stand-ins with any result
+READ_STUBS = ["asset_state", "require_asset_accruable", "pending_domain_loss_barrier_count"]
 MEMOS = ["validate_shape_full_audit_scan", "validate_dynamic_market_slots_len_static", "amount_from_bound_num",
          "bound_num_from_amount", "validate_header_aggregate_totals", "validate_public_user_fund_shape"]
 # (roots, stubbed, the build differences allowed) of each group of harnesses
@@ -50,8 +82,13 @@ GROUPS = {
     "T38 (1)": (["validate_shape", "grow_asset_slot_capacity_not_atomic"], MEMOS, 1),
     "T38 (2)": (["grow_asset_slot_capacity_not_atomic", "validate_dynamic_market_slots_len_static"],
                 ["validate_public_user_fund_shape"], 0),
+    "T02, T01": (["validate_shape", *ACCRUAL], MEMOS + ["try_to_runtime_shape", *ACCRUAL_STUBS, *PURE_STUBS], 1),
+    "the frame of set_asset_state": (["set_asset_state"], [], 0),
+    "T33": (["validate_shape", "finalize_side_reset_not_atomic"],
+            MEMOS + ["try_to_runtime_shape", "asset_state", "set_asset_state", "pending_domain_loss_barrier_count"], 1),
 }
 MARKER = "\n// Header pieces of class \"local\" (T*.header): the real predicate before and after the call.\n"
+T01_HARNESS = "fn proof_v16_accrue_asset_path_to_keeps_the_header_predicate()"
 
 
 def fn_text(lines, name, impl_line):
@@ -81,6 +118,8 @@ def main(d):
     proofs = open(os.path.join(d, "v16_proofs.rs")).read()
     assert proofs.count(MARKER) == 1, "the local section"
     sec = proofs[proofs.index(MARKER):]
+    t01 = T01_HARNESS in sec  # the path accrual's facts are checked when its harness is present
+    path = "accrue_asset_path_to_not_atomic"
     # 1. keys
     sig = signature(fn_text(lines, "validate_dynamic_market_slots_len_static", "impl MarketGroupV16HeaderAccount {"))
     assert sig == ("fn validate_dynamic_market_slots_len_static( supplied_len: usize, capacity: usize, "
@@ -137,15 +176,93 @@ def main(d):
              'between the builds: any(test, kani, feature = "audit-scan")')
     unresolved = []
     for g, (roots, stubbed, n_audit) in GROUPS.items():
+        if not t01:
+            roots = [r for r in roots if r != ACCRUAL[path]]
+            stubbed = [x for x in stubbed if x != "canonical_accrual_price_step_v16"]
         r = subprocess.run([sys.executable, os.path.join(HERE, "cfg_reach.py"), d, *roots, "--stubbed", *stubbed],
                            capture_output=True, text=True)
         rep = [l for l in r.stdout.splitlines() if l.strip().startswith("REPORT")]
         assert rep == [audit] * n_audit, (g, rep)
         unresolved += [l for l in r.stdout.splitlines() if l.startswith("unresolved calls:")]
-    # 4. the entry points read no slot of the view
+    # 4. the entry points read no slot of the view; the accruals use the slice only to refuse an index beyond it, and
+    # pass the index only to the replaced accessors and to their core
     for pid, (fn, impl) in ENTRY.items():
-        assert ".markets" not in fn_text(lines, fn, impl), f"{fn} reads a slot of the view"
+        if fn == path and not t01:
+            continue
+        text = re.sub(r"//[^\n]*", "", fn_text(lines, fn, impl))
+        if fn in ACCRUAL:
+            core = re.sub(r"//[^\n]*", "", fn_text(lines, ACCRUAL[fn], VIEWMUT))
+            assert text.count(".markets") == 1 and re.search(r"\|\|\s*asset_index >= self\.markets\.len\(\)", text), fn
+            assert ".markets" not in core, ACCRUAL[fn]
+            body = text[text.index("{") + 1:] + core[core.index("{") + 1:]
+            uses = [body[max(0, m.start() - 50):m.end() + 45] for m in re.finditer(r"\basset_index\b", body)]
+            for u in uses:
+                assert re.search(r"asset_index >= (?:config\.max_market_slots as usize|self\.markets\.len\(\))", u) \
+                    or re.search(r"self\.(?:" + "|".join(ACCRUAL_STUBS) + r")\(\s*asset_index\b", u) \
+                    or re.search(r"(?:" + ACCRUAL[fn] + r"\(|config,)\s*asset_index,", u) \
+                    or re.search(r"\basset_index: usize,", u), (fn, u)
+        else:
+            assert ".markets" not in text, f"{fn} reads a slot of the view"
+        if fn == "finalize_side_reset_not_atomic":
+            body = text[text.index("{") + 1:]
+            ms = list(re.finditer(r"\basset_index\b", body))
+            assert len(ms) == 4, (fn, len(ms))
+            for m in ms:
+                assert re.search(r"self\.(?:" + "|".join(T33_INDEX_CALLEES) + r")\(\s*$", body[:m.start()]), \
+                    (fn, body[max(0, m.start() - 60):m.end()])
+    vc = re.sub(r"//[^\n]*", "", fn_text(lines, "validate_configured_asset_index", VIEWMUT))
+    assert re.sub(r"\s+", " ", vc).strip() == (
+        "fn validate_configured_asset_index(&self, asset_index: usize) -> V16Result<()> { if asset_index >= "
+        "self.header.config.max_market_slots.get() as usize || asset_index >= self.markets.len() { return "
+        "Err(V16Error::InvalidLeg); } Ok(()) }"), vc
+    for name in READ_STUBS:
+        sig = signature(fn_text(lines, name, VIEWMUT))
+        assert re.match(r"fn " + name + r"\(\s*&self,", sig), sig
+    # the path accrual refuses a slice of any other length than the expected one, which is at most
+    # V16_MAX_ACCRUAL_PATH_STEPS, before anything is written
+    if t01:
+        check_path_accrual(lines, v16)
+    # the replaced kernels and the price step take their inputs by value and write nothing
+    for name, impl in PURE_STUBS.items():
+        if impl:
+            t = fn_text(lines, name, impl)
+        elif t01:
+            m = re.search(r"\npub fn " + name + r"\(", v16)
+            t = v16[m.start():v16.index("\n}\n", m.start())]
+        else:
+            continue
+        sig = signature(t)
+        assert "self" not in sig and "&" not in sig, sig
+    # 5. the frame of set_asset_state holds for every slot count
+    sas = re.sub(r"//[^\n]*", "", fn_text(lines, "set_asset_state", VIEWMUT))
+    assert signature(sas) == "fn set_asset_state(&mut self, asset_index: usize, asset: AssetStateV16) -> V16Result<()>", \
+        signature(sas)
+    body = sas[sas.index("{") + 1:]
+    g = re.match(r"\s*if asset_index >= self\.header\.config\.max_market_slots\.get\(\) as usize\s*\|\|\s*"
+                 r"asset_index >= self\.markets\.len\(\)\s*\{\s*return Err\(V16Error::InvalidLeg\);\s*\}", body)
+    assert g, "set_asset_state: its guard"
+    rest = body[g.end():]
+    assert len(re.findall(r"\bself\b", rest)) == 3, "set_asset_state: another use of self"
+    assert len(re.findall(r"\bself\.markets\[asset_index\]", rest)) == 2, "set_asset_state: the slice"
+    assert re.findall(r"\bself\.([a-z_0-9]+)\s*\(", rest) == ["update_resolved_payout_blocker_total"], \
+        "set_asset_state: a call on self"
+    upd = re.sub(r"\s+", " ", re.sub(r"//[^\n]*", "", fn_text(lines, "update_resolved_payout_blocker_total", VIEWMUT)))
+    assert upd.strip() == (
+        "fn update_resolved_payout_blocker_total(&mut self, old: u64, new: u64) -> V16Result<()> { "
+        "self.header.resolved_payout_blocker_count = V16PodU64::new(Self::apply_total_delta_u64( "
+        "self.header.resolved_payout_blocker_count.get(), old, new, )?); Ok(()) }"), upd
+    sig = signature(fn_text(lines, "apply_total_delta_u64", VIEWMUT))
+    assert sig == "fn apply_total_delta_u64(total: u64, old: u64, new: u64) -> V16Result<u64>", sig
     return "\n".join(unresolved)
+
+
+def check_path_accrual(lines, v16):
+    core = re.sub(r"//[^\n]*", "", fn_text(lines, "accrue_asset_path_to_admitted_not_atomic", VIEWMUT))
+    i = core.index("if steps.len() != expected_steps {")
+    assert re.search(r"\.min\(V16_MAX_ACCRUAL_PATH_STEPS as u64\)", core[:i])
+    assert not re.search(r"self\.(?:set_[a-z_]+|header\.[a-z_]+\s*=)", core[:i]), "a write before the length check"
+    assert re.match(r"if steps\.len\(\) != expected_steps \{\s*return Err\(", core[i:])
+    assert "pub const V16_MAX_ACCRUAL_PATH_STEPS: usize = 32;" in v16
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-25 from `proof_ledger.tsv`. **414 of 826 pieces of the deployed build are done
-(215 proved by Aristotle, 122 verified by Kani, 77 proved by a local rule checked on the source; 337 without the rule); 0 of 89 charter invariants are closed.**
+Generated 2026-11-25 from `proof_ledger.tsv`. **418 of 826 pieces of the deployed build are done
+(215 proved by Aristotle, 124 verified by Kani, 79 proved by a local rule checked on the source; 339 without the rule); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -38,8 +38,8 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 250 of 250 |
-| 2 | The engine cannot panic or overflow and keeps the header | 126 of 195 |
-| 3 | The engine keeps the whole market state | 38 of 220 |
+| 2 | The engine cannot panic or overflow and keeps the header | 128 of 195 |
+| 3 | The engine keeps the whole market state | 40 of 220 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -74,11 +74,11 @@ fixed yet. These come first; most are decisions.
 
 **Phase 1. Arithmetic and kernels (250 of 250).** Done for the deployed build: 189 proved by Aristotle, 61 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
 
-**Phase 2. The engine cannot panic or overflow and keeps the header (126 of 195).**
+**Phase 2. The engine cannot panic or overflow and keeps the header (128 of 195).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
 - Every entry point preserves the header checks: 33 that end in the runtime check (33 of them done: their path structure, 28 verified by Kani with every callee replaced and 5 proved by a rule checked on the source),
-  9 small ones without a check (6 of them verified by Kani: the predicate itself
+  9 small ones without a check (8 of them verified by Kani: the predicate itself
   before and after the call, with its costly pure parts memoized),
   the four value-moving ones and the crank dispatcher as six local statements,
   and the four places where state is kept after an error.
@@ -92,7 +92,7 @@ fixed yet. These come first; most are decisions.
   checked arithmetic.
 - Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (38 of 220).**
+**Phase 3. The engine keeps the whole market state (40 of 220).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
@@ -198,7 +198,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-412 left are mostly whole entry points and instructions, and the two attempts at that kind
+408 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.
