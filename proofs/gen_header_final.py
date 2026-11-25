@@ -76,7 +76,9 @@ def split_params(s):
 
 ARBITRARY = {"()", "u8", "u16", "u32", "u64", "u128", "i128", "usize", "bool", "SideV16", "AssetStateV16",
              "SourceCreditStateV16", "BackingBucketV16", "InsuranceCreditReservationV16", "PermissionlessRecoveryReasonV16",
-             "AssetLifecycleV16", "SideModeV16", "BackingBucketStatusV16"}
+             "AssetLifecycleV16", "SideModeV16", "BackingBucketStatusV16", "PortfolioLegV16",
+             # kani::Arbitrary implemented in header_final_helpers.rs (every field any value)
+             "TradeRequestV16", "TradeOutcomeV16", "BatchTradeOutcomeV16", "SourceCreditConsumptionV16"}
 CUSTOM = {"HealthCertV16": "any_health_cert()",
           "ReservationEncumbranceProofV16": "any_reservation_encumbrance_proof()",
           "PermissionlessProgressOutcomeV16": "any_progress_outcome()"}
@@ -115,6 +117,8 @@ def check_arbitrary(ty):
 VERIFIED = {
     "cure_and_cancel_close_with_cert_not_atomic": "proof_v16_cure_and_cancel_close_with_cert_ok_keeps_the_header_predicate",
     "withdraw_fresh_counterparty_backing_not_atomic": "proof_v16_withdraw_fresh_counterparty_backing_ok_keeps_the_header_predicate",
+    "execute_trade_with_fee_loss_stale_scoped_not_atomic":
+        "proof_v16_execute_trade_with_fee_loss_stale_scoped_ok_keeps_the_header_predicate",
 }
 
 
@@ -156,11 +160,20 @@ def stand_in(name):
     return f"{prefix}_{name}", text
 
 
-# Pure functions replaced in one harness as well. Each is an associated function that takes its inputs by value and
-# only returns a value, so it writes nothing, and a stand-in that returns any result has every behaviour of the real
-# one. Used where the real one is too slow for the verifier on arbitrary inputs: the credit rate is a 256-bit
-# multiply-divide, which the fresh-backing withdrawal runs twice (its recompute and its encumbrance check).
-PURE = {"withdraw_fresh_counterparty_backing_not_atomic": [("V16Core", "expected_source_credit_rate_num_for_state")]}
+# Pure functions replaced in one harness as well. Each is an associated function (no `self`) that takes its inputs by
+# value or by shared reference and only returns a value, so it writes nothing (the crate has no interior mutability in
+# these types and forbids unsafe code), and a stand-in that returns any result has every behaviour of the real one.
+# Used where the real one is too slow for the verifier on arbitrary inputs (the credit rate is a 256-bit
+# multiply-divide, which the fresh-backing withdrawal runs twice), or where it reads account fields the harness does
+# not make arbitrary (the legs and the source-domain table).
+PURE = {
+    "withdraw_fresh_counterparty_backing_not_atomic": [("V16Core", "expected_source_credit_rate_num_for_state")],
+    "force_close_recovery_pair_not_atomic": [("MarketGroupV16ViewMut", "active_leg_for_asset"),
+                                             ("V16Core", "effective_abs_quantity_for_leg")],
+    "convert_released_pnl_to_capital_not_atomic": [("MarketGroupV16ViewMut", "account_has_source_claims"),
+                                                   ("MarketGroupV16ViewMut", "account_has_source_liens")],
+}
+IMPL_LINE = {"V16Core": "impl V16Core {", "MarketGroupV16ViewMut": "impl<'a, T> MarketGroupV16ViewMut<'a, T> {"}
 
 
 def pure_stand_in(owner, name):
@@ -169,7 +182,7 @@ def pure_stand_in(owner, name):
     k = hits[0]
     while not lines[k].startswith("impl"):
         k -= 1
-    assert lines[k] == f"impl {owner} {{", (name, lines[k])
+    assert lines[k] == IMPL_LINE[owner], (name, lines[k])
     head, j = [], hits[0]
     while True:
         head.append(lines[j])
@@ -183,17 +196,35 @@ def pure_stand_in(owner, name):
     for p in (p.strip() for p in split_params(m.group(2)) if p.strip()):
         assert ":" in p, f"{name}: takes {p}, not an associated function"
         pn, pt = [x.strip() for x in p.split(":", 1)]
-        assert "&" not in pt and pn.isidentifier() and pn != "self", f"{name}: parameter {p} is not taken by value"
+        assert "mut" not in pt.split() and "&mut" not in pt and pn.isidentifier() and pn != "self", \
+            f"{name}: parameter {p} is not taken by value or by shared reference"
+        assert "Cell" not in pt, f"{name}: parameter {p} could be written through a shared reference"
         ps.append(f"_{pn}: {pt}")
     ret = (m.group(3) or "()").strip()
     r = arbitrary_expr(ret)
     assert r, f"{name}: returns nothing"
     comment = "".join("// " + l + "\n" for l in textwrap.wrap(
-        f"Stand-in for `{owner}::{name}`, which takes its inputs by value and writes nothing: any result, so every "
-        "result of the real function is among its own.", 97))
+        f"Stand-in for `{owner}::{name}`, which takes its inputs by value or by shared reference and writes nothing: "
+        "any result, so every result of the real function is among its own.", 97))
+    generic = owner == "MarketGroupV16ViewMut"
     text = (comment + "#[cfg(all(kani, feature = \"closure\"))]\n"
-            f"fn any_pure_{name}(" + ", ".join(ps) + f") -> {ret} {{\n    {r}\n}}\n")
+            f"fn any_pure_{name}{'<' + chr(39) + 'a, T>' if generic else ''}(" + ", ".join(ps) + f") -> {ret}"
+            + ("\nwhere\n    'a: 'a,\n" if generic else " ") + f"{{\n    {r}\n}}\n")
     return f"any_pure_{name}", text
+
+
+# Callees that run as written inside one harness (a delegate's whole body is a call to them; the conversion of
+# released PnL runs its core): the methods they call are replaced in turn, and the generator checks their bodies as it
+# checks the entry point's. Each slice they are given is built by the caller with one element, so their loops run
+# once and Kani unwinds them completely.
+INLINE = {
+    "credit_domain_insurance_budget_not_atomic": ["credit_domain_insurance_budgets_not_atomic"],
+    "set_asset_raw_oracle_target_not_atomic": ["set_asset_raw_oracle_targets_not_atomic"],
+    "execute_trade_with_fee_loss_stale_scoped_not_atomic": ["execute_batch_with_fee_loss_stale_scoped_not_atomic"],
+    "convert_released_pnl_to_capital_not_atomic": ["convert_released_pnl_to_capital_core_not_atomic",
+                                                   "apply_released_pnl_conversion_core_not_atomic",
+                                                   "apply_released_pnl_conversion_with_consumption_core_not_atomic"],
+}
 
 
 def arg_spans(body, opener_re):
@@ -210,13 +241,17 @@ def arg_spans(body, opener_re):
     return spans
 
 
-def check_uses(f, body, params):
+def check_uses(f, body, params, pure_names=()):
     """An account parameter is used only as `.header.<field>` with the field in READ_FIELDS, through its own
-    `validate_with_market(`, or inside the arguments of a replaced callee; `self` only as `self.header.`, its own
-    `validate_shape()`, a replaced callee, or `self.as_view()` inside the arguments of a replaced call."""
+    `validate_with_market(`, or inside the arguments of a replaced (or inlined) callee or of a pure function replaced
+    in this harness; `self` only as `self.header.`, its own `validate_shape()`, a replaced or inlined callee, or
+    `self.as_view()` inside the arguments of such a call."""
     body = re.sub(r"//[^\n]*", "", body[body.index("{"):])  # comments are not uses
     stubbed = arg_spans(body, r"\bself\s*\.\s*(?!validate_shape\b|as_view\b|header\b)[a-z_0-9]+\s*\(") + \
         arg_spans(body, r"\.\s*validate_with_market\s*\(")
+    if pure_names:
+        stubbed += arg_spans(body, r"\b(?:Self|V16Core|MarketGroupV16ViewMut)\s*::\s*(?:" + "|".join(pure_names)
+                             + r")\s*\(")
     inside = lambda p: any(a < p < b for a, b in stubbed)
     accounts = [p.split(":")[0].strip() for p in params[1:] if "PortfolioV16ViewMut" in p]
     for acc in accounts:
@@ -241,8 +276,8 @@ def entry_body(name):
 
 
 # the account fields `arbitrary_read_fields` (header_final_helpers.rs) makes arbitrary
-READ_FIELDS = {"capital", "pnl", "fee_credits", "cancel_deposit_escrow", "last_fee_slot", "active_bitmap",
-               "health_cert", "close_progress"}
+READ_FIELDS = {"capital", "pnl", "reserved_pnl", "fee_credits", "cancel_deposit_escrow", "last_fee_slot",
+               "active_bitmap", "health_cert", "close_progress"}
 _helpers = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "header_final_helpers.rs")).read()
 assert all(f"account.{x} =" in _helpers or f"account.{x})" in _helpers for x in READ_FIELDS), "helper and list differ"
 
@@ -253,14 +288,18 @@ TARGETS = [  # (entry point, cover labels): straight-line entry points of class 
     "canonicalize_spent_backing_history_not_atomic",
     "charge_account_backing_fee_not_atomic",
     "claim_resolved_payout_topup_not_atomic",
-    # not here: convert_released_pnl_to_capital_not_atomic (T18) returns Ok without a check when nothing was
-    # converted, after its core ran; that needs the core's frame on a zero conversion, a property of its own.
+    # its core, and the two functions under it, run as written (INLINE): the only Ok of zero is the core's early
+    # return before any write, and the conversion returns the amount it was given, which is not zero
+    "convert_released_pnl_to_capital_not_atomic",
     "credit_account_from_insurance_not_atomic",
     "credit_backing_provider_earnings_not_atomic",
+    "credit_domain_insurance_budget_not_atomic",
     "cure_and_cancel_close_not_atomic",
     "deposit_domain_insurance_not_atomic",
     "deposit_fresh_counterparty_backing_not_atomic",
     "deposit_not_atomic",
+    "execute_trade_with_fee_loss_stale_scoped_not_atomic",
+    "force_close_recovery_pair_not_atomic",
     "force_asset_recovery_not_atomic",
     "mark_asset_drain_only_not_atomic",
     "recredit_terminal_claim_free_residual_for_asset_not_atomic",
@@ -268,6 +307,7 @@ TARGETS = [  # (entry point, cover labels): straight-line entry points of class 
     "resolve_market_not_atomic",
     "retire_empty_asset_not_atomic",
     "retire_terminal_unbudgeted_insurance_not_atomic",
+    "set_asset_raw_oracle_target_not_atomic",
     "sync_account_fee_to_slot_not_atomic",
     "withdraw_backing_provider_earnings_not_atomic",
     "withdraw_domain_insurance_not_atomic",
@@ -286,18 +326,27 @@ for f in TARGETS:
     row = rows.get(f, {"id": AUX.get(f), "statement": "[aux]"})
     assert row["id"], f
     assert row["statement"].startswith(("[final]", "[delegates]", "[aux]")), (f, row["statement"][:20])
-    body = entry_body(f)
     params, ret, _ = signature(f)
     assert params[0] == "&mut self"
-    callees = sorted(set(re.findall(r"self\s*\.\s*([a-z_0-9]+)\s*\(", body)) - {"validate_shape", "as_view"})
-    read = set(re.findall(r"\b\w*account\w*\s*\.\s*header\s*\.\s*([a-z_0-9]+)", body))
-    assert read <= READ_FIELDS, f"{f} reads account fields arbitrary_read_fields does not set: {read - READ_FIELDS}"
-    check_uses(f, body, params)
-    direct_slot = re.findall(r"self\s*\.\s*markets\b", body)
-    assert not direct_slot, f"{f} reads the slots directly"
-    assert "as_view()." not in body.replace("self.as_view())", ""), f"{f} calls a read view method"
+    inl = INLINE.get(f, [])
+    pure_names = [pf for _, pf in PURE.get(f, [])]
+    callees = set()
+    for g in [f] + inl:  # the entry point and the callees that run as written: every check applies to each
+        body = entry_body(g)
+        gparams = signature(g)[0]
+        assert gparams[0] == "&mut self", g
+        callees |= set(re.findall(r"self\s*\.\s*([a-z_0-9]+)\s*\(", body)) - {"validate_shape", "as_view"}
+        read = set(re.findall(r"\b\w*account\w*\s*\.\s*header\s*\.\s*([a-z_0-9]+)", body))
+        assert read <= READ_FIELDS, f"{g} reads account fields arbitrary_read_fields does not set: {read - READ_FIELDS}"
+        check_uses(g, body, gparams, pure_names)
+        direct_slot = re.findall(r"self\s*\.\s*markets\b", body)
+        assert not direct_slot, f"{g} reads the slots directly"
+        assert "as_view()." not in body.replace("self.as_view())", ""), f"{g} calls a read view method"
+    assert set(inl) <= callees, (f, inl)
+    callees = sorted(callees - set(inl))
+    bodies = "\n".join(entry_body(g) for g in [f] + inl)
     stubs = ["#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]"]
-    if re.search(r"\baccount\w*\s*\.\s*validate_with_market\s*\(", body):
+    if re.search(r"\.\s*validate_with_market\s*\(", bodies):
         stubs.append("#[kani::stub(\n    PortfolioV16ViewMut::validate_with_market,\n    stand_in_account_check_any_outcome\n)]")
     for c in callees:
         if c not in stand_ins:
@@ -314,7 +363,7 @@ for f in TARGETS:
         if pt == "&mut PortfolioV16ViewMut<'_>":
             setup.append(f"let mut {pn}_header = arbitrary_account();")
             args.append(f"&mut PortfolioV16ViewMut::new(&mut {pn}_header)")
-        elif pt in ("usize", "u64", "u128", "i128", "bool"):
+        elif pt in ARBITRARY:
             args.append("kani::any()")
         elif pt == "HealthCertV16":
             args.append("any_health_cert()")
@@ -337,11 +386,11 @@ for f in TARGETS:
          + "}\n")
     harnesses.append(h)
     report.append(f"{tid}\t{f}\t{len(callees)} callees\t{','.join(callees)}"
+                  + "".join(f"\truns as written: {g}" for g in inl)
                   + "".join(f"\tpure stand-in: {o}::{p}" for o, p in PURE.get(f, [])))
-    if f not in AUX:
-        hmap.append(f"{tid}\t{f}\tproof_v16_{short}_ok_keeps_the_header_predicate\t{','.join(callees)}")
-    else:
-        hmap.append(f"aux\t{f}\tproof_v16_{short}_ok_keeps_the_header_predicate\t{','.join(callees)}")
+    # map: piece, entry point, harness, replaced callees, callees run as written, pure functions replaced
+    hmap.append(f"{tid if f not in AUX else 'aux'}\t{f}\tproof_v16_{short}_ok_keeps_the_header_predicate\t"
+                f"{','.join(callees)}\t{','.join(inl)}\t{','.join(o + '::' + p for o, p in PURE.get(f, []))}")
 
 HELPERS = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "header_final_helpers.rs")).read()
 text = HELPERS + "\n" + "\n".join(t for _, t in sorted(stand_ins.values())) + "\n" + "\n".join(harnesses)

@@ -17,6 +17,11 @@ def sel(pred):
 _HDR_TAIL = [r for r in dep if r["id"].endswith(".header") and r["statement"].startswith(("[final]", "[delegates]"))]
 _HDR_TAIL_N = len(_HDR_TAIL)
 _HDR_TAIL_DONE = sum(1 for r in _HDR_TAIL if r["status"] in DONE)
+_HDR_TAIL_KANI = sum(1 for r in _HDR_TAIL if r["status"] == "verified by Kani")
+_HDR_TAIL_RULE = sum(1 for r in _HDR_TAIL if r["status"] == "proved by rule")
+_HDR_TAIL_HOW = (f"{_HDR_TAIL_DONE} of them done: their path structure, "
+                 + " and ".join(x for x in (f"{_HDR_TAIL_KANI} verified by Kani with every callee replaced" if _HDR_TAIL_KANI else "",
+                                            f"{_HDR_TAIL_RULE} proved by a rule checked on the source" if _HDR_TAIL_RULE else "") if x))
 
 
 def frac(pred):
@@ -183,8 +188,8 @@ print(f"""
 **Phase 2. The engine cannot panic or overflow and keeps the header ({frac(PH[1][2])}).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
-- Every entry point preserves the header checks: {_HDR_TAIL_N} that end in the runtime check ({_HDR_TAIL_DONE} of
-  them verified by Kani: their path structure, with every callee replaced), 9 small ones without a check,
+- Every entry point preserves the header checks: {_HDR_TAIL_N} that end in the runtime check ({_HDR_TAIL_HOW}),
+  9 small ones without a check,
   the four value-moving ones and the crank dispatcher as six local statements,
   and the four places where state is kept after an error. The first batch on the small ones proved
   two before its spending cap stopped it; those two have to be established again on the new engine

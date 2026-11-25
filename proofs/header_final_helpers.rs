@@ -98,6 +98,7 @@ where
 fn arbitrary_read_fields(account: &mut PortfolioAccountV16Account) {
     account.capital = V16PodU128::new(kani::any());
     account.pnl = V16PodI128::new(kani::any());
+    account.reserved_pnl = V16PodU128::new(kani::any());
     account.fee_credits = V16PodI128::new(kani::any());
     account.cancel_deposit_escrow = V16PodU128::new(kani::any());
     account.last_fee_slot = V16PodU64::new(kani::any());
@@ -196,6 +197,53 @@ fn any_reservation_encumbrance_proof() -> ReservationEncumbranceProofV16 {
         source_impaired_liened_insurance_num: kani::any(),
         reservation_impaired_liened_insurance_num: kani::any(),
         source_credit_rate_num: kani::any(),
+    }
+}
+
+// Values of the engine's plain records that the stand-ins return or the harnesses pass: every field any value.
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for TradeRequestV16 {
+    fn any() -> Self {
+        TradeRequestV16 {
+            asset_index: kani::any(),
+            size_q: kani::any(),
+            exec_price: kani::any(),
+            fee_bps: kani::any(),
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for TradeOutcomeV16 {
+    fn any() -> Self {
+        TradeOutcomeV16 {
+            fee_a: kani::any(),
+            fee_b: kani::any(),
+            notional: kani::any(),
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for BatchTradeOutcomeV16 {
+    fn any() -> Self {
+        BatchTradeOutcomeV16 {
+            fill_count: kani::any(),
+            fee_a: kani::any(),
+            fee_b: kani::any(),
+            notional: kani::any(),
+        }
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for SourceCreditConsumptionV16 {
+    fn any() -> Self {
+        SourceCreditConsumptionV16 {
+            face_burn: kani::any(),
+            counterparty_credit_consumed: kani::any(),
+            insurance_credit_consumed: kani::any(),
+        }
     }
 }
 
