@@ -27,10 +27,10 @@ marker "Header pieces of class \"local\""), checked on the source. Stops at the 
    only through the memoized slot-count check. The two accruals use the slice only in their entry
    guard (`asset_index >= self.markets.len()`) and pass the index only to the replaced accessors
    and to their core, so the harness's one slot stands for any admitted index of any slot count.
-   The path accrual (T01; these facts are checked when its harness is in the section) refuses,
+   The path accrual (T01; these facts are checked when its harnesses are in the section) refuses,
    before any write, a slice of steps whose length is not the expected one, which is at most
-   `V16_MAX_ACCRUAL_PATH_STEPS` (32): the harness's slices of every length up to 32 cover every
-   Ok. The replaced accrual kernels and the price step take their inputs by value. T33 (the side reset's finalization) reads no slot either, and passes the asset index only
+   `V16_MAX_ACCRUAL_PATH_STEPS` (32): its harnesses, one per length from 0 to 32 (each length
+   exactly once, with a slice of exactly that many arbitrary steps), cover every Ok. The replaced accrual kernels and the price step take their inputs by value. T33 (the side reset's finalization) reads no slot either, and passes the asset index only
    to `validate_configured_asset_index`, which runs as written and only refuses an index beyond the
    slice or the configured slots, to its pending-barrier read and to the asset accessors (both
    replaced), so the one slot stands for every slot count there too. The reads replaced by stand-ins
@@ -88,7 +88,7 @@ GROUPS = {
             MEMOS + ["try_to_runtime_shape", "asset_state", "set_asset_state", "pending_domain_loss_barrier_count"], 1),
 }
 MARKER = "\n// Header pieces of class \"local\" (T*.header): the real predicate before and after the call.\n"
-T01_HARNESS = "fn proof_v16_accrue_asset_path_to_keeps_the_header_predicate()"
+T01_HARNESS = "fn t01_keeps_the_header_predicate_with<const N: usize>()"
 
 
 def fn_text(lines, name, impl_line):
@@ -222,6 +222,18 @@ def main(d):
     # V16_MAX_ACCRUAL_PATH_STEPS, before anything is written
     if t01:
         check_path_accrual(lines, v16)
+        # one harness per length 0..=V16_MAX_ACCRUAL_PATH_STEPS, each calling the helper with that length
+        inv = re.findall(r"t01_header_harness!\(\s*proof_v16_accrue_asset_path_to_keeps_the_header_predicate_(\d+)_steps,"
+                         r"\s*(\d+)\s*\);", sec)
+        assert sorted(int(n) for _, n in inv) == list(range(33)) and all(int(a) == int(n) for a, n in inv), inv
+        assert sec.count("t01_header_harness!(") == 33 and sec.count("macro_rules! t01_header_harness {") == 1, \
+            "the macro's definition and its 33 uses"
+        helper = sec[sec.index(T01_HARNESS):]
+        helper = helper[:helper.index("\n}\n")]
+        assert "let steps: [AccrualStepV16; V16_MAX_ACCRUAL_PATH_STEPS] = kani::any();" in helper \
+            and "&steps[..N]," in helper, helper
+        assert re.search(r"\(\$name:ident, \$n:literal\) => \{[^}]*fn \$name\(\) \{\s*"
+                         r"t01_keeps_the_header_predicate_with::<\$n>\(\);", sec, re.S), "the macro's body"
     # the replaced kernels and the price step take their inputs by value and write nothing
     for name, impl in PURE_STUBS.items():
         if impl:
