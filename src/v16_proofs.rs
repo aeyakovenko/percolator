@@ -9970,3 +9970,102 @@ fn proof_v16_cure_and_cancel_close_with_cert_ok_keeps_the_header_predicate() {
     kani::cover!(result.is_ok(), "Ok is reached");
     kani::cover!(result.is_err(), "an error is reached");
 }
+
+// ------------------------------------------------------------------------------------------------
+// AC.provider_exit_principal (issue #274 residual, fix C): the provider exit pays out provider
+// principal and nothing beyond it, from every market state. The exit runs as written; every method
+// it calls on the market view is replaced as in the T62 header proof (a read returns any value; a
+// write may change any header, slot and scratch bytes), except the read of the domain's provider
+// principal, which is a recorder: it returns any value and remembers it. The exit reads it exactly
+// once, so an Ok return must follow a read at least as large as the amount, in BOUND_SCALE units.
+// What the read returns is the slot's `provider_principal_{long,short}_num`, which only the
+// deposit raises (proofs/specs, census of its writers).
+#[cfg(all(kani, feature = "closure"))]
+static mut LAST_PROVIDER_PRINCIPAL_READ: Option<u128> = None;
+
+/// Stand-in for the view's `provider_principal_num`: any result, the value recorded.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn recorded_provider_principal_num<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _domain: usize,
+) -> V16Result<u128>
+where
+    'a: 'a,
+{
+    let read: V16Result<u128> = kani::any();
+    // SAFETY: Kani runs one harness on one thread.
+    unsafe {
+        LAST_PROVIDER_PRINCIPAL_READ = read.ok();
+    }
+    read
+}
+
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, recorded_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::backing_bucket_for_domain,
+    any_backing_bucket_for_domain
+)]
+#[kani::stub(MarketGroupV16ViewMut::domain_asset_side, any_domain_asset_side)]
+#[kani::stub(
+    MarketGroupV16ViewMut::insurance_reservation_for_domain,
+    any_insurance_reservation_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::provider_principal_num,
+    recorded_provider_principal_num
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::release_provider_principal_after,
+    havoc_release_provider_principal_after
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::reservation_encumbrance_proof_for_domain_parts,
+    any_reservation_encumbrance_proof_for_domain_parts
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::resolved_counterparty_backing_surplus,
+    any_resolved_counterparty_backing_surplus
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_backing_bucket_for_domain,
+    havoc_set_backing_bucket_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_source_credit_for_domain,
+    havoc_set_source_credit_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::shift_provider_protection_floor_num,
+    havoc_shift_provider_protection_floor_num
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::source_credit_for_domain,
+    any_source_credit_for_domain
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_source_domain_ledger,
+    any_validate_source_domain_ledger
+)]
+#[kani::stub(
+    V16Core::expected_source_credit_rate_num_for_state,
+    any_pure_expected_source_credit_rate_num_for_state
+)]
+#[allow(unsafe_code)]
+fn proof_v16_provider_exit_never_pays_out_more_than_provider_principal() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let amount: u128 = kani::any();
+    let result = market.withdraw_fresh_counterparty_backing_not_atomic(kani::any(), amount);
+    if result.is_ok() {
+        // SAFETY: Kani runs one harness on one thread.
+        let principal = unsafe { LAST_PROVIDER_PRINCIPAL_READ };
+        let paid_num = V16Core::bound_num_from_amount(amount);
+        assert!(matches!((principal, paid_num), (Some(p), Ok(n)) if n <= p));
+    }
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
