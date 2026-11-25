@@ -5405,6 +5405,89 @@ fn assert_ok_follows_a_passed_account_check<'a, T>(
     }
 }
 
+// Entry points of the frame class write, after the last passed check of an account, only fields
+// that the check cannot read (account_read_set.py checks that on the source). Their harnesses take
+// the listed fields out of the comparison with the checked state: `(0, offset, length)` is a field
+// of the account, `(1, offset, length)` one of the header.
+
+/// Stand-in for the account check of a shared view: either outcome, recorded.
+#[cfg(all(kani, feature = "closure"))]
+fn recorded_view_account_check<'a, T>(
+    account: &PortfolioV16View<'a>,
+    market: &MarketGroupV16View<'_, T>,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    let passed: bool = kani::any();
+    record_account_check(account.header, market, passed);
+    if passed {
+        Ok(())
+    } else {
+        Err(kani::any())
+    }
+}
+
+/// Whether byte `k` of the state sequence lies in one of the fields.
+#[cfg(all(kani, feature = "closure"))]
+fn in_account_check_fields(k: usize, fields: &[(u8, usize, usize)]) -> bool {
+    let a = core::mem::size_of::<PortfolioAccountV16Account>();
+    let mut n = 0;
+    while n < fields.len() {
+        let (part, offset, length) = fields[n];
+        let start = if part == 0 { offset } else { a + offset };
+        if k >= start && k < start + length {
+            return true;
+        }
+        n += 1;
+    }
+    false
+}
+
+/// Ok leaves byte `i` of the account's state as it was, or the last check of the account passed
+/// and either kept byte `j` of the state left or `j` lies in one of the fields.
+#[cfg(all(kani, feature = "closure"))]
+#[allow(unsafe_code)]
+fn assert_ok_keeps_the_account_check_outside<'a, T>(
+    ok: bool,
+    account: &PortfolioAccountV16Account,
+    i: usize,
+    before: u8,
+    market: &MarketGroupV16ViewMut<'a, T>,
+    fields: &[(u8, usize, usize)],
+) where
+    'a: 'a,
+{
+    if ok {
+        let account_unchanged =
+            account_check_state_byte(account, market.header, &market.markets[0].engine, i)
+                == before;
+        // SAFETY: Kani runs one harness on one thread.
+        let j = unsafe { ACCOUNT_CHECK_PROBE };
+        // SAFETY: as above.
+        let checks = unsafe { ACCOUNT_CHECKS };
+        let passed = |r: Option<RecordedAccountCheck>| match r {
+            Some(r) => r.account == account as *const PortfolioAccountV16Account && r.passed,
+            None => false,
+        };
+        let account_checked = last_account_check_passed_on(account, market)
+            || (in_account_check_fields(j, fields) && (passed(checks[0]) || passed(checks[1])));
+        assert!(account_unchanged || account_checked);
+    }
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn acct_any_account_fee_anchor_for_loss_currentness<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    _account: &PortfolioV16View<'_>,
+    _now_slot: u64,
+) -> V16Result<u64>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
 #[cfg(all(kani, feature = "closure"))]
 fn acct_any_account_has_active_source_claim_exposure<'a, T>(
     _market: &MarketGroupV16ViewMut<'a, T>,
@@ -5646,6 +5729,16 @@ where
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn acct_any_validate_shape_audit_scan<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn acct_any_validate_source_domain_ledger<'a, T>(
     _market: &MarketGroupV16ViewMut<'a, T>,
     _domain: usize,
@@ -5664,6 +5757,25 @@ where
     'a: 'a,
 {
     kani::any()
+}
+
+// Stand-in for `fee_sync_settlement_noop_last_asset` (a read: it takes the view and the account by
+// shared reference) with the contract the generator checks on its source: it returns `Some` only when
+// the account's PnL is not negative (its first statement returns `Ok(None)` when it is). Any result
+// besides.
+#[cfg(all(kani, feature = "closure"))]
+fn acct_contract_fee_sync_settlement_noop_last_asset<'a, T>(
+    _market: &MarketGroupV16ViewMut<'a, T>,
+    account: &PortfolioV16View<'_>,
+) -> V16Result<Option<usize>>
+where
+    'a: 'a,
+{
+    let result: V16Result<Option<usize>> = kani::any();
+    if let Ok(Some(_)) = result {
+        kani::assume(account.header.pnl.get() >= 0);
+    }
+    result
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -5743,6 +5855,20 @@ where
 }
 
 #[cfg(all(kani, feature = "closure"))]
+fn acct_havoc_set_account_pnl_after_principal_settlement<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    _new_pnl: i128,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_whole_account(account);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
 fn acct_havoc_set_account_pnl_after_source_claim_burn<'a, T>(
     market: &mut MarketGroupV16ViewMut<'a, T>,
     account: &mut PortfolioV16ViewMut<'_>,
@@ -5811,6 +5937,38 @@ where
 {
     havoc_market_view(market);
     kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn acct_havoc_settle_account_kf_effects_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    _normalize_exhausted_sides: bool,
+) -> V16Result<()>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_whole_account(account);
+    kani::any()
+}
+
+#[cfg(all(kani, feature = "closure"))]
+fn acct_havoc_settle_account_side_effects_after_kf_not_atomic<'a, T>(
+    market: &mut MarketGroupV16ViewMut<'a, T>,
+    account: &mut PortfolioV16ViewMut<'_>,
+    _b_loss_atom_budget: u128,
+) -> V16Result<PermissionlessProgressOutcomeV16>
+where
+    'a: 'a,
+{
+    havoc_market_view(market);
+    havoc_whole_account(account);
+    if kani::any() {
+        Ok(any_progress_outcome())
+    } else {
+        Err(kani::any())
+    }
 }
 
 #[cfg(all(kani, feature = "closure"))]
@@ -6312,6 +6470,175 @@ fn proof_v16_cure_and_cancel_close_with_cert_ok_keeps_the_account_check() {
         any_health_cert(),
     );
     assert_ok_follows_a_passed_account_check(result.is_ok(), &account_header, &market);
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T29.account
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(PortfolioV16ViewMut::validate_with_market, recorded_account_check)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, acct_any_shape_check)]
+#[kani::stub(PortfolioV16View::validate_with_market, recorded_view_account_check)]
+#[kani::stub(
+    PortfolioV16View::is_empty_for_dematerialization,
+    stand_in_account_emptiness_any_result
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape_audit_scan,
+    acct_any_validate_shape_audit_scan
+)]
+fn proof_v16_deregister_empty_materialized_portfolio_ok_keeps_the_account_check() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let account_header = arbitrary_whole_account();
+    let probe = choose_account_check_probes();
+    let account_before =
+        account_check_state_byte(&account_header, &header, &markets[0].engine, probe);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.deregister_empty_materialized_portfolio_not_atomic(&PortfolioV16View {
+        header: &account_header,
+    });
+    let fields = [(
+        1,
+        core::mem::offset_of!(MarketGroupV16HeaderAccount, materialized_portfolio_count),
+        core::mem::size_of::<V16PodU64>(),
+    )];
+    assert_ok_keeps_the_account_check_outside(
+        result.is_ok(),
+        &account_header,
+        probe,
+        account_before,
+        &market,
+        &fields,
+    );
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T47.account
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(PortfolioV16ViewMut::validate_with_market, recorded_account_check)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, acct_any_shape_check)]
+#[kani::stub(PortfolioV16View::validate_with_market, recorded_view_account_check)]
+#[kani::stub(
+    PortfolioV16View::is_empty_for_dematerialization,
+    stand_in_account_emptiness_any_result
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::validate_shape_audit_scan,
+    acct_any_validate_shape_audit_scan
+)]
+fn proof_v16_register_empty_materialized_portfolio_ok_keeps_the_account_check() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let account_header = arbitrary_whole_account();
+    let probe = choose_account_check_probes();
+    let account_before =
+        account_check_state_byte(&account_header, &header, &markets[0].engine, probe);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.register_empty_materialized_portfolio_not_atomic(&PortfolioV16View {
+        header: &account_header,
+    });
+    let fields = [(
+        1,
+        core::mem::offset_of!(MarketGroupV16HeaderAccount, materialized_portfolio_count),
+        core::mem::size_of::<V16PodU64>(),
+    )];
+    assert_ok_keeps_the_account_check_outside(
+        result.is_ok(),
+        &account_header,
+        probe,
+        account_before,
+        &market,
+        &fields,
+    );
+    kani::cover!(result.is_ok(), "Ok is reached");
+    kani::cover!(result.is_err(), "an error is reached");
+}
+
+// T59.account
+#[cfg(all(kani, feature = "closure"))]
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(PortfolioV16ViewMut::validate_with_market, recorded_account_check)]
+#[kani::stub(MarketGroupV16ViewMut::validate_shape, acct_any_shape_check)]
+#[kani::stub(
+    MarketGroupV16ViewMut::account_fee_anchor_for_loss_currentness,
+    acct_any_account_fee_anchor_for_loss_currentness
+)]
+#[kani::stub(MarketGroupV16ViewMut::asset_state, acct_any_asset_state)]
+#[kani::stub(
+    MarketGroupV16ViewMut::fee_sync_settlement_noop_last_asset,
+    acct_contract_fee_sync_settlement_noop_last_asset
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::set_account_pnl_after_principal_settlement,
+    acct_havoc_set_account_pnl_after_principal_settlement
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_kf_effects_not_atomic,
+    acct_havoc_settle_account_kf_effects_not_atomic
+)]
+#[kani::stub(
+    MarketGroupV16ViewMut::settle_account_side_effects_after_kf_not_atomic,
+    acct_havoc_settle_account_side_effects_after_kf_not_atomic
+)]
+fn proof_v16_sync_account_fee_to_slot_ok_keeps_the_account_check() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let mut account_header = arbitrary_whole_account();
+    let probe = choose_account_check_probes();
+    let account_before =
+        account_check_state_byte(&account_header, &header, &markets[0].engine, probe);
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let result = market.sync_account_fee_to_slot_not_atomic(
+        &mut PortfolioV16ViewMut {
+            header: &mut account_header,
+        },
+        kani::any(),
+        kani::any(),
+    );
+    let fields = [
+        (
+            0,
+            core::mem::offset_of!(PortfolioAccountV16Account, capital),
+            core::mem::size_of::<V16PodU128>(),
+        ),
+        (
+            0,
+            core::mem::offset_of!(PortfolioAccountV16Account, last_fee_slot),
+            core::mem::size_of::<V16PodU64>(),
+        ),
+        (
+            0,
+            core::mem::offset_of!(PortfolioAccountV16Account, health_cert),
+            core::mem::size_of::<HealthCertV16Account>(),
+        ),
+        (
+            1,
+            core::mem::offset_of!(MarketGroupV16HeaderAccount, c_tot),
+            core::mem::size_of::<V16PodU128>(),
+        ),
+        (
+            1,
+            core::mem::offset_of!(MarketGroupV16HeaderAccount, insurance),
+            core::mem::size_of::<V16PodU128>(),
+        ),
+        (
+            1,
+            core::mem::offset_of!(MarketGroupV16HeaderAccount, loss_stale_active),
+            core::mem::size_of::<u8>(),
+        ),
+    ];
+    assert_ok_keeps_the_account_check_outside(
+        result.is_ok(),
+        &account_header,
+        probe,
+        account_before,
+        &market,
+        &fields,
+    );
     kani::cover!(result.is_ok(), "Ok is reached");
     kani::cover!(result.is_err(), "an error is reached");
 }
