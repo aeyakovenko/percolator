@@ -7395,6 +7395,238 @@ fn proof_v16_finalize_side_reset_keeps_the_header_predicate() {
     );
 }
 
+// Batch 4 of the local class: the path accrual T01, with the stand-ins of T02 above, and the
+// canonical price step replaced as well (it takes its inputs by value and writes nothing). The
+// slice of steps has any length up to `V16_MAX_ACCRUAL_PATH_STEPS`. A longer one is refused before
+// anything is written, as the path must have exactly the expected number of steps and that number
+// is at most `V16_MAX_ACCRUAL_PATH_STEPS`. One harness per length, from 0 to
+// `V16_MAX_ACCRUAL_PATH_STEPS`, each with a slice of exactly that many arbitrary steps: together
+// they cover every Ok. (A single harness with a symbolic length did not finish: the verifier merges
+// the loop's exits at every length.)
+
+#[cfg(all(kani, feature = "closure"))]
+impl kani::Arbitrary for AccrualStepV16 {
+    fn any() -> Self {
+        AccrualStepV16 {
+            effective_price: kani::any(),
+            funding_rate_e9: kani::any(),
+            price_move_remainder_before_bps_num: kani::any(),
+            price_move_remainder_after_bps_num: kani::any(),
+        }
+    }
+}
+
+/// Stand-in for `canonical_accrual_price_step_v16` (inputs by value): any result.
+#[cfg(all(kani, feature = "closure"))]
+fn local_any_canonical_accrual_price_step(
+    _current: u64,
+    _target: u64,
+    _cap_anchor: u64,
+    _max_change_bps: u64,
+    _exposed: bool,
+    _remainder_before_bps_num: u16,
+) -> V16Result<(u64, u16)> {
+    kani::any()
+}
+
+/// T01 with a path of exactly `N` steps (a slice of the first `N` of `V16_MAX_ACCRUAL_PATH_STEPS`
+/// arbitrary steps): the predicate before and after the call.
+#[cfg(all(kani, feature = "closure"))]
+fn t01_keeps_the_header_predicate_with<const N: usize>() {
+    let (mut header, mut markets) = arbitrary_header_and_slot();
+    let steps: [AccrualStepV16; V16_MAX_ACCRUAL_PATH_STEPS] = kani::any();
+    let mut market = MarketGroupV16ViewMut::new(&mut header, &mut markets);
+    let held = market.validate_shape().is_ok();
+    let result = market.accrue_asset_path_to_not_atomic(
+        kani::any(),
+        kani::any(),
+        kani::any(),
+        &steps[..N],
+        kani::any(),
+    );
+    assert_held_before_holds_after(held, result.is_ok(), &market);
+    kani::cover!(
+        held && result.is_ok(),
+        "the predicate held and Ok is reached"
+    );
+    kani::cover!(
+        held && result.is_err(),
+        "the predicate held and an error is reached"
+    );
+}
+
+// T01.header: one harness per length of the path.
+macro_rules! t01_header_harness {
+    ($name:ident, $n:literal) => {
+        #[cfg(all(kani, feature = "closure"))]
+        #[kani::proof]
+        #[kani::solver(cadical)]
+        #[kani::stub(
+            MarketGroupV16View::validate_shape_full_audit_scan,
+            default_build_has_no_audit_scan
+        )]
+        #[kani::stub(
+            MarketGroupV16HeaderAccount::validate_dynamic_market_slots_len_static,
+            memo_slot_count_check
+        )]
+        #[kani::stub(V16ConfigAccount::try_to_runtime_shape, memo_config_shape)]
+        #[kani::stub(V16Config::validate_public_user_fund_shape, memo_config_fund_shape)]
+        #[kani::stub(V16Core::amount_from_bound_num, memo_amount_from_bound_num)]
+        #[kani::stub(V16Core::bound_num_from_amount, memo_bound_num_from_amount)]
+        #[kani::stub(
+            MarketGroupV16View::validate_header_aggregate_totals,
+            memo_header_aggregate_totals
+        )]
+        #[kani::stub(MarketGroupV16ViewMut::asset_state, local_any_asset_state)]
+        #[kani::stub(
+            MarketGroupV16ViewMut::require_asset_accruable,
+            local_any_require_asset_accruable
+        )]
+        #[kani::stub(MarketGroupV16ViewMut::set_asset_state, frame_set_asset_state)]
+        #[kani::stub(V16Core::kernel_accrual_funding_num, local_any_accrual_funding_num)]
+        #[kani::stub(V16Core::kernel_accrual_index_update, local_any_accrual_index_update)]
+        #[kani::stub(
+            canonical_accrual_price_step_v16,
+            local_any_canonical_accrual_price_step
+        )]
+        fn $name() {
+            t01_keeps_the_header_predicate_with::<$n>();
+        }
+    };
+}
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_00_steps,
+    0
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_01_steps,
+    1
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_02_steps,
+    2
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_03_steps,
+    3
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_04_steps,
+    4
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_05_steps,
+    5
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_06_steps,
+    6
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_07_steps,
+    7
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_08_steps,
+    8
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_09_steps,
+    9
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_10_steps,
+    10
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_11_steps,
+    11
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_12_steps,
+    12
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_13_steps,
+    13
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_14_steps,
+    14
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_15_steps,
+    15
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_16_steps,
+    16
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_17_steps,
+    17
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_18_steps,
+    18
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_19_steps,
+    19
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_20_steps,
+    20
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_21_steps,
+    21
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_22_steps,
+    22
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_23_steps,
+    23
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_24_steps,
+    24
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_25_steps,
+    25
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_26_steps,
+    26
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_27_steps,
+    27
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_28_steps,
+    28
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_29_steps,
+    29
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_30_steps,
+    30
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_31_steps,
+    31
+);
+t01_header_harness!(
+    proof_v16_accrue_asset_path_to_keeps_the_header_predicate_32_steps,
+    32
+);
+
 // Header pieces of class "final" (T*.header): the path structure, with every callee replaced.
 //
 // The ledger states each such piece as: if the header predicate (`validate_shape` of a default
