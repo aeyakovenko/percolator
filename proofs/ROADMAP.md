@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-25 from `proof_ledger.tsv`. **384 of 826 pieces of the deployed build are done
-(215 proved by Aristotle, 122 verified by Kani, 47 proved by a local rule checked on the source; 337 without the rule); 0 of 89 charter invariants are closed.**
+Generated 2026-11-25 from `proof_ledger.tsv`. **414 of 826 pieces of the deployed build are done
+(215 proved by Aristotle, 122 verified by Kani, 77 proved by a local rule checked on the source; 337 without the rule); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -39,7 +39,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 |---|---|---|
 | 1 | Arithmetic and kernels | 250 of 250 |
 | 2 | The engine cannot panic or overflow and keeps the header | 126 of 195 |
-| 3 | The engine keeps the whole market state | 8 of 220 |
+| 3 | The engine keeps the whole market state | 38 of 220 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
 | 6 | Liveness | 0 of 23 |
@@ -92,13 +92,16 @@ fixed yet. These come first; most are decisions.
   checked arithmetic.
 - Exit: no engine call can panic or overflow, and no successful engine call can leave a header that fails.
 
-**Phase 3. The engine keeps the whole market state (8 of 220).**
+**Phase 3. The engine keeps the whole market state (38 of 220).**
 - Write part M of the global invariant, one line per mirrored total. H, S and V are functions of
   the code already.
 - Prove for each of the 50 deployed entry points the other three halves: the per-asset scan, the
   validity of the accounts it is given, and the mirrored totals in their local form (the total
   minus the given accounts' contribution is unchanged).
 - Prove the frame: an entry point cannot invalidate an account it is not given.
+- 30 of the account pieces hold because their entry point is given no account (rule A0,
+  checked on the signatures): they count as done but carry nothing; the frame above carries what
+  those entry points can do to accounts.
 - Exit: every successful engine call preserves H, S, V and M.
 
 **Phase 4. The program's instructions (0 of 56).**
@@ -195,7 +198,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-442 left are mostly whole entry points and instructions, and the two attempts at that kind
+412 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.

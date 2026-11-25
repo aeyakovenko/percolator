@@ -22,6 +22,9 @@ _HDR_TAIL_KANI = sum(1 for r in _HDR_TAIL if r["status"] == "verified by Kani")
 _HDR_SMALL = [r for r in dep if r["id"].endswith(".header") and r["statement"].startswith(("[local]", "[frame]"))]
 _HDR_SMALL_N = len(_HDR_SMALL)
 _HDR_SMALL_DONE = sum(1 for r in _HDR_SMALL if r["status"] in DONE)
+# the account pieces closed because the entry point is given no account (rule A0)
+_ACC_VACUOUS = sum(1 for r in dep if r["id"].endswith(".account") and r["status"] == "proved by rule"
+                   and r["evidence"].startswith("rule A0 "))
 _HDR_TAIL_RULE = sum(1 for r in _HDR_TAIL if r["status"] == "proved by rule")
 _HDR_TAIL_HOW = (f"{_HDR_TAIL_DONE} of them done: their path structure, "
                  + " and ".join(x for x in (f"{_HDR_TAIL_KANI} verified by Kani with every callee replaced" if _HDR_TAIL_KANI else "",
@@ -214,6 +217,9 @@ print(f"""
   validity of the accounts it is given, and the mirrored totals in their local form (the total
   minus the given accounts' contribution is unchanged).
 - Prove the frame: an entry point cannot invalidate an account it is not given.
+- {_ACC_VACUOUS} of the account pieces hold because their entry point is given no account (rule A0,
+  checked on the signatures): they count as done but carry nothing; the frame above carries what
+  those entry points can do to accounts.
 - Exit: every successful engine call preserves H, S, V and M.
 
 **Phase 4. The program's instructions ({frac(PH[3][2])}).**

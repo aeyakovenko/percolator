@@ -1522,6 +1522,24 @@ for _fn, _rule, _why in _header_rules.classify(ENGINE_SRC, sorted(_hr_open)):
                                     "state it leaves, whatever ran before it (loops over lists of any length, "
                                     "direct slot writes)")
 
+# T*.account pieces of entry points that are given no portfolio account, closed by rule A0 (account_rules.py, re-checked
+# here on the landed source at every regen, after its self-test of real signatures and their mutations): every
+# parameter besides the receiver (the market view or the market header) has a type that holds no account, so the
+# statement quantifies over no account. What such an entry point can do to the accounts it is not given is G.other's.
+import account_rules as _account_rules
+_AR_SELFTEST = _account_rules.selftest(ENGINE_SRC)
+_ar_open = {p["target"]: _pid for _pid, p in pieces.items() if re.fullmatch(r"T\d+\.account", _pid)
+            and p["status"] == "open"}
+for _fn, _rule, _why in _account_rules.classify(ENGINE_SRC, sorted(_ar_open)):
+    if _rule == "A0":
+        _pid = _ar_open[_fn]
+        pieces[_pid]["status"] = "proved by rule"
+        pieces[_pid]["evidence"] = (f"rule A0 (account_rules.py on engine {LANDED_REV}, after its {_AR_SELFTEST} "
+                                    f"self-test cases): the entry point is given no portfolio account ({_why}; the "
+                                    "receiver is the market view or the market header), so the statement holds of "
+                                    "every account it is given, there being none. What it can do to the accounts it "
+                                    "is not given is piece G.other's, still open")
+
 # Header pieces of class local, verified by Kani with the predicate itself evaluated before and after the
 # call and its costly pure parts memoized (engine ac3227ea; review/header-final-2026-11-24/local_b1). T09 was
 # proved by Aristotle for c030aa40 and is established again here.
