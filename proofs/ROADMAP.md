@@ -1,7 +1,7 @@
 # Roadmap to a fully proved program
 
-Generated 2026-11-25 from `proof_ledger.tsv`. **381 of 826 pieces of the deployed build are done
-(215 proved by Aristotle, 119 verified by Kani, 47 proved by a local rule checked on the source; 334 without the rule); 0 of 89 charter invariants are closed.**
+Generated 2026-11-25 from `proof_ledger.tsv`. **384 of 826 pieces of the deployed build are done
+(215 proved by Aristotle, 122 verified by Kani, 47 proved by a local rule checked on the source; 337 without the rule); 0 of 89 charter invariants are closed.**
 
 ## The end goal
 
@@ -38,7 +38,7 @@ INV-073 and INV-078), so proving those invariants is proving those bounds.
 | Phase | What | Proved |
 |---|---|---|
 | 1 | Arithmetic and kernels | 250 of 250 |
-| 2 | The engine cannot panic or overflow and keeps the header | 123 of 195 |
+| 2 | The engine cannot panic or overflow and keeps the header | 126 of 195 |
 | 3 | The engine keeps the whole market state | 8 of 220 |
 | 4 | The program's instructions | 0 of 56 |
 | 5 | Each safety and history invariant closed | 0 of 71 |
@@ -74,11 +74,11 @@ fixed yet. These come first; most are decisions.
 
 **Phase 1. Arithmetic and kernels (250 of 250).** Done for the deployed build: 189 proved by Aristotle, 61 (the provider-protection kernels) verified by Kani for all inputs, one of the ten at 64-bit width. No more prover work goes here: Kani and the differential tests already check this layer.
 
-**Phase 2. The engine cannot panic or overflow and keeps the header (123 of 195).**
+**Phase 2. The engine cannot panic or overflow and keeps the header (126 of 195).**
 - Every call into the wide-math module is outside its callee's panic condition (20 pieces; spec and
   prompt ready).
 - Every entry point preserves the header checks: 33 that end in the runtime check (33 of them done: their path structure, 28 verified by Kani with every callee replaced and 5 proved by a rule checked on the source),
-  9 small ones without a check (3 of them verified by Kani: the predicate itself
+  9 small ones without a check (6 of them verified by Kani: the predicate itself
   before and after the call, with its costly pure parts memoized),
   the four value-moving ones and the crank dispatcher as six local statements,
   and the four places where state is kept after an error.
@@ -195,7 +195,7 @@ touches; the comparison tool keeps that to the changed functions.
 ## Cost and time
 
 The pieces about pure functions took about 2,300 prover credits, roughly 14 a piece. The
-445 left are mostly whole entry points and instructions, and the two attempts at that kind
+442 left are mostly whole entry points and instructions, and the two attempts at that kind
 proved 3 of 32 properties for about 1,970 credits. At that price the rest is out of reach, so
 there is no estimate until the way forward above is chosen: under the first one the work is the
 refactor plus kernels at the known price; under the second it is models and differential tests.

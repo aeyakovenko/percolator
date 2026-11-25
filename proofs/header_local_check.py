@@ -18,19 +18,39 @@ marker "Header pieces of class \"local\""), checked on the source. Stops at the 
 2. The audit-only scan: its `cfg(any(test, kani, feature = "audit-scan"))` block in
    `MarketGroupV16View::validate_shape` holds exactly `self.validate_shape_full_audit_scan()?;`, so
    a stand-in that returns `Ok(())` gives the default build's predicate; the stand-in does.
-3. What runs as written differs in no way between a Kani build and a deployed build: cfg_reach.py
-   over the predicate and the entry points, with the stand-ins, reports only the block of 2.
+3. What runs as written differs in no way between a Kani build and a deployed build: cfg_reach.py,
+   over each group of harnesses (its roots and its stand-ins), reports only the block of 2 where the
+   group evaluates the predicate, and nothing else. The account stand-ins of T29 and T47 replace two
+   functions that take the account and the market by shared reference (no interior mutability in
+   the crate), so they write nothing.
 4. The entry points read no slot of the view (no `.markets`), so the slot count enters the proof
    only through the memoized slot-count check.
 """
 import os, re, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENTRY = {"T09.header": "advance_resolved_slot_not_atomic", "T05.header": "activate_empty_market_slot_not_atomic",
-         "T03.header": "activate_empty_asset_slot_not_atomic"}
-STUBBED = ["validate_shape_full_audit_scan", "validate_dynamic_market_slots_len_static", "amount_from_bound_num",
-           "bound_num_from_amount", "validate_header_aggregate_totals", "try_to_runtime_shape",
-           "validate_public_user_fund_shape"]
+VIEWMUT = "impl<'a, T> MarketGroupV16ViewMut<'a, T> {"
+HEADER = "impl MarketGroupV16HeaderAccount {"
+ENTRY = {"T09.header": ("advance_resolved_slot_not_atomic", VIEWMUT),
+         "T05.header": ("activate_empty_market_slot_not_atomic", HEADER),
+         "T03.header": ("activate_empty_asset_slot_not_atomic", HEADER),
+         "T29.header": ("deregister_empty_materialized_portfolio_not_atomic", VIEWMUT),
+         "T47.header": ("register_empty_materialized_portfolio_not_atomic", VIEWMUT),
+         "T38.header": ("grow_asset_slot_capacity_not_atomic", HEADER)}
+MEMOS = ["validate_shape_full_audit_scan", "validate_dynamic_market_slots_len_static", "amount_from_bound_num",
+         "bound_num_from_amount", "validate_header_aggregate_totals", "validate_public_user_fund_shape"]
+# (roots, stubbed, the build differences allowed) of each group of harnesses
+GROUPS = {
+    "T09, T05, T03, T29, T47": (["validate_shape", "advance_resolved_slot_not_atomic",
+                                 "activate_empty_market_slot_not_atomic", "activate_empty_asset_slot_not_atomic",
+                                 "deregister_empty_materialized_portfolio_not_atomic",
+                                 "register_empty_materialized_portfolio_not_atomic"],
+                                MEMOS + ["try_to_runtime_shape", "validate_with_market",
+                                         "is_empty_for_dematerialization"], 1),
+    "T38 (1)": (["validate_shape", "grow_asset_slot_capacity_not_atomic"], MEMOS, 1),
+    "T38 (2)": (["grow_asset_slot_capacity_not_atomic", "validate_dynamic_market_slots_len_static"],
+                ["validate_public_user_fund_shape"], 0),
+}
 MARKER = "\n// Header pieces of class \"local\" (T*.header): the real predicate before and after the call.\n"
 
 
@@ -79,7 +99,16 @@ def main(d):
     assert sig == "fn validate_public_user_fund_shape(&self) -> V16Result<()>", sig
     i = v16.index("pub struct V16Config {")
     assert "PartialEq" in v16[v16.rindex("#[derive(", 0, i):i] and "PartialEq for V16Config" not in v16
-    assert "Some((k, r)) if k == *config => r," in sec
+    assert "Some((k, r)) if k == *config => return r," in sec
+    # the account stand-ins of T29 and T47: both functions take the account (and the market) by shared reference
+    pv = "impl<'a> PortfolioV16View<'a> {"
+    sig = signature(fn_text(lines, "validate_with_market", pv))
+    assert sig == "pub fn validate_with_market<T>(&self, market: &MarketGroupV16View<'_, T>) -> V16Result<()>", sig
+    sig = signature(fn_text(lines, "is_empty_for_dematerialization", pv))
+    assert sig == "fn is_empty_for_dematerialization(&self) -> V16Result<bool>", sig
+    for f in ("v16.rs", "lib.rs", "wide_math.rs"):
+        t = re.sub(r"//[^\n]*", "", open(os.path.join(d, f)).read())
+        assert not re.search(r"\b(?:Cell|RefCell|UnsafeCell)\b", t), f"interior mutability in {f}"
     agg = fn_text(lines, "validate_header_aggregate_totals", "impl<'a, T> MarketGroupV16View<'a, T> {")
     assert signature(agg) == "fn validate_header_aggregate_totals(&self) -> V16Result<()>", signature(agg)
     body = re.sub(r"//[^\n]*", "", agg[agg.index("{") + 1:])
@@ -103,19 +132,20 @@ def main(d):
     st = st[st.index("{", st.index("where")) + 1:st.index("\n}\n")]
     assert re.sub(r"\s+", "", st) == "Ok(())", st
     # 3. build differences in what runs as written
-    r = subprocess.run([sys.executable, os.path.join(HERE, "cfg_reach.py"), d, "validate_shape", *ENTRY.values(),
-                        "--stubbed", *STUBBED], capture_output=True, text=True)
-    rep = [l for l in r.stdout.splitlines() if l.strip().startswith("REPORT")]
     vs_line = lines.index(next(l for l in lines if l.startswith("    pub fn validate_shape(&self)"))) + 1
-    assert rep == [f"  REPORT v16.rs:{vs_line} MarketGroupV16View::validate_shape: a cfg inside the body that differs "
-                   'between the builds: any(test, kani, feature = "audit-scan")'], rep
+    audit = (f"  REPORT v16.rs:{vs_line} MarketGroupV16View::validate_shape: a cfg inside the body that differs "
+             'between the builds: any(test, kani, feature = "audit-scan")')
+    unresolved = []
+    for g, (roots, stubbed, n_audit) in GROUPS.items():
+        r = subprocess.run([sys.executable, os.path.join(HERE, "cfg_reach.py"), d, *roots, "--stubbed", *stubbed],
+                           capture_output=True, text=True)
+        rep = [l for l in r.stdout.splitlines() if l.strip().startswith("REPORT")]
+        assert rep == [audit] * n_audit, (g, rep)
+        unresolved += [l for l in r.stdout.splitlines() if l.startswith("unresolved calls:")]
     # 4. the entry points read no slot of the view
-    for pid, fn in ENTRY.items():
-        impl = "impl MarketGroupV16HeaderAccount {" if fn != "advance_resolved_slot_not_atomic" else \
-            "impl<'a, T> MarketGroupV16ViewMut<'a, T> {"
+    for pid, (fn, impl) in ENTRY.items():
         assert ".markets" not in fn_text(lines, fn, impl), f"{fn} reads a slot of the view"
-    reach = [l for l in r.stdout.splitlines() if l.startswith("unresolved calls:")]
-    return reach[0] if reach else ""
+    return "\n".join(unresolved)
 
 
 if __name__ == "__main__":
